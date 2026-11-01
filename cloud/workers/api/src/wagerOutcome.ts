@@ -12,8 +12,6 @@ import {
   MAX_MATCH_FEN_BYTES,
   MAX_MATCH_HISTORY_BYTES,
   MAX_MATCH_HISTORY_ENTRIES,
-  isMatchFenWithinLimit,
-  isMatchHistoryWithinLimits,
   movesFromFlatString,
 } from "@mons/shared/match-protocol";
 import { parseInviteMatchIndex } from "@mons/shared/rematches";
@@ -21,7 +19,8 @@ import type {
   WagerOutcomeResolveRequest,
   WagerOutcomeResolveResponse,
 } from "@mons/shared/wagers";
-import { MATCH_TIMER_TERMINAL } from "@mons/shared/timers";
+import type { GameSessionMatch } from "@mons/shared/game-sessions";
+import { readMatchDocument } from "./matchRecordCodec.ts";
 import { resolveMatch } from "mons-rules";
 import { AuthApiFailure } from "./authErrors.ts";
 import { enforceRateLimit } from "./rateLimit.ts";
@@ -40,13 +39,10 @@ import {
 export { WAGER_SETTLEMENT_INSUFFICIENT_MATERIALS_REASON } from "./wagerStateCommands.ts";
 export const WAGER_SETTLEMENT_INITIAL_RETRY_DELAY_SECONDS = 60;
 
-type MatchRecord = {
-  color: "black" | "white" | null;
-  fen: string;
-  flatMovesString: string;
-  status: string;
-  timer: string;
-};
+type MatchRecord = Pick<
+  GameSessionMatch,
+  "color" | "fen" | "flatMovesString" | "status" | "timer"
+>;
 
 export type WagerOutcomeDependencies = {
   assertMutationAllowed?: () => Promise<void>;
@@ -72,59 +68,26 @@ export type WagerSettlementRetryTask = {
 export type WagerSettlementRetryState =
   "completed" | "pending" | "stale" | "unclaimed";
 
-function toRecord(value: unknown): Record<string, unknown> | null {
-  return value && typeof value === "object" && !Array.isArray(value)
-    ? (value as Record<string, unknown>)
-    : null;
-}
-
-function normalizeString(value: unknown): string {
-  return typeof value === "string" ? value.trim() : "";
-}
-
 function parseMatchRecord(value: unknown): MatchRecord | null {
-  const record = toRecord(value);
-  if (!record) {
-    return null;
-  }
-  const color =
-    record.color === "white" || record.color === "black" ? record.color : null;
-  const fen = typeof record.fen === "string" ? record.fen : "";
-  const flatMovesString =
-    typeof record.flatMovesString === "string" ? record.flatMovesString : "";
-  if (
-    !isMatchFenWithinLimit(fen) ||
-    !isMatchHistoryWithinLimits(flatMovesString)
-  ) {
+  if (value === null) return null;
+  const match = readMatchDocument(value);
+  if (!match)
     throw new AuthApiFailure(
       409,
       "failed-precondition",
       "match-result-unavailable",
     );
-  }
-  return {
-    color,
-    fen,
-    flatMovesString,
-    status: normalizeString(record.status),
-    timer: normalizeString(record.timer),
-  };
+  return match;
 }
 
 export function resolveWagerMatchResult(
   player: MatchRecord,
   opponent: MatchRecord,
 ): "gg" | "none" | "win" {
-  if (
-    player.status === "surrendered" ||
-    opponent.timer === MATCH_TIMER_TERMINAL
-  ) {
+  if (player.status === "surrendered" || opponent.timer.state === "finished") {
     return "gg";
   }
-  if (
-    opponent.status === "surrendered" ||
-    player.timer === MATCH_TIMER_TERMINAL
-  ) {
+  if (opponent.status === "surrendered" || player.timer.state === "finished") {
     return "win";
   }
   if (
@@ -226,7 +189,11 @@ async function claimSettlement(
   signal?: AbortSignal,
   assertMutationAllowed?: () => Promise<void>,
 ): Promise<
-  "already-resolved" | "insufficient-materials" | "no-wager" | WagerSettlement
+  | "already-resolved"
+  | "insufficient-materials"
+  | "no-wager"
+  | "manual-required"
+  | WagerSettlement
 > {
   let current: DecodedWager | null;
   await assertMutationAllowed?.();
@@ -241,6 +208,7 @@ async function claimSettlement(
       },
       signal,
     );
+    if (transaction.decision === "manual-required") return "manual-required";
     if (transaction.decision === "no-wager") {
       return "no-wager";
     }
@@ -256,6 +224,7 @@ async function claimSettlement(
   } catch {
     current = await repository.wagers.readWager(wagerKey, signal);
   }
+  if (current?.state === "blocked") return "manual-required";
   const settlement = readStoredSettlement(current);
   if (
     settlement?.operationId === operationId &&
@@ -349,13 +318,12 @@ async function readWagerSettlementRetry(
     inviteId: task.inviteId,
     matchId: task.matchId,
   });
-  if (wager === null || wager === undefined) {
+  if (wager === null || wager.state === "blocked") {
     return { state: "stale" };
   }
-  if (!wager.record) throw new Error("wager-settlement-malformed");
   const settlement = readStoredSettlement(wager);
   if (!settlement) {
-    if (wager.resolved.raw) return { state: "stale" };
+    if (wager.resolved) return { state: "stale" };
     return task.resolution ? { state: "unclaimed" } : { state: "stale" };
   }
   if (settlement.operationId !== task.operationId) return { state: "stale" };
@@ -405,7 +373,11 @@ export async function resumeWagerSettlement(
     if (claimed === WAGER_SETTLEMENT_INSUFFICIENT_MATERIALS_REASON) {
       return "completed";
     }
-    if (claimed === "already-resolved" || claimed === "no-wager") {
+    if (
+      claimed === "already-resolved" ||
+      claimed === "no-wager" ||
+      claimed === "manual-required"
+    ) {
       return "stale";
     }
     settlement = claimed;
@@ -488,10 +460,12 @@ export async function resolveWagerOutcome(
     wagerKey,
     dependencies.signal,
   );
+  if (snapshot.wager?.state === "blocked")
+    return { ok: false, reason: "manual-review-required" };
   if (snapshot.resolutionMarker === true) {
     const markedWager = snapshot.wager;
     const markedSettlement = readStoredSettlement(markedWager);
-    const proposals = markedWager?.proposals.value?.entries;
+    const proposals = markedWager?.proposals;
     if (
       markedSettlement?.state === "completed" &&
       markedSettlement.failureReason ===
@@ -504,10 +478,10 @@ export async function resolveWagerOutcome(
       };
     }
     if (
-      !markedWager?.record ||
-      markedWager.resolved.raw ||
+      !markedWager ||
+      markedWager.resolved ||
       markedSettlement?.state === "completed" ||
-      (!markedWager.agreed.raw && Object.keys(proposals || {}).length === 0)
+      (!markedWager.agreed && Object.keys(proposals || {}).length === 0)
     ) {
       return { ok: true, reason: "already-resolved", mining: await mining() };
     }
@@ -569,6 +543,8 @@ export async function resolveWagerOutcome(
     dependencies.signal,
     dependencies.assertMutationAllowed,
   );
+  if (settlement === "manual-required")
+    return { ok: false, reason: "manual-review-required" };
   if (settlement === "no-wager") {
     return { ok: true, reason: "no-wager", mining: await mining() };
   }

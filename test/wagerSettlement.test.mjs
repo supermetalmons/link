@@ -1,3 +1,4 @@
+import { required } from "./fixtures/canonicalData.mjs";
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
@@ -7,26 +8,41 @@ import {
 } from "./wagerClientHarness.mjs";
 
 const materials = { dust: 8, slime: 0, gum: 0, metal: 0, ice: 0 };
+/** @type {{ok: true; mining: import("@mons/shared/mining").MiningSnapshot}} */
 const response = { ok: true, mining: { materials, lastRockDate: null } };
+/** @type {import("@mons/shared/invite-wagers").PublicMatchWagerState} */
 const agreedState = {
+  schemaVersion: 1,
+  state: "agreed",
+  proposals: {},
+  proposedBy: {},
+  resolved: null,
+  blocked: null,
   agreed: {
     material: "dust",
     count: 3,
     total: 6,
     proposerId: "actor",
     accepterId: "opponent",
+    acceptedAt: 1,
   },
 };
 
 function harness() {
   const h = createWagerClientHarness();
+  /** @type {PromiseWithResolvers<import("@mons/shared/wagers").WagerOutcomeResolveResponse>} */
   const pending = deferred();
+  /**
+   * @type {import("@mons/shared/wagers").WagerOutcomeResolveRequest[]}
+   */
   const requests = [];
   h.dependencies.api.resolveWagerOutcomeViaApi = async (request, provider) => {
     await provider(false);
+    assert.ok(provider.assertCurrentUser);
     provider.assertCurrentUser();
     requests.push(request);
     const value = await pending.promise;
+    assert.ok(provider.assertCurrentUser);
     provider.assertCurrentUser();
     return value;
   };
@@ -46,16 +62,16 @@ function harness() {
     },
     banners: h.events.banners,
     refreshes: () => h.events.refreshes,
-    setProfile: (value) => {
+    setProfile: (/** @type {string} */ value) => {
       h.session.profileId = value;
     },
     rematch: () => {
       h.session.activeContext = {
-        ...h.session.activeContext,
+        ...required(h.session.activeContext),
         contextId: 2,
         matchId: "rematch",
       };
-      h.client.bindContext(h.session.activeContext);
+      h.client.bindContext(required(h.session.activeContext));
       h.client.updateWagerStateForCurrentMatch();
     },
   };
@@ -63,7 +79,7 @@ function harness() {
 
 test("a rematch cannot discard the finished match's settlement or inventory", async (t) => {
   const h = harness();
-  t.after(() => h.poller.stop());
+  t.after(() => required(h.poller).stop());
   const result = h.instance.resolveWagerOutcome(true);
   await flush();
   h.rematch();
@@ -77,9 +93,9 @@ test("a rematch cannot discard the finished match's settlement or inventory", as
 
 test("settlement starts even while another wager mutation is pending", async (t) => {
   const h = harness();
-  t.after(() => h.poller.stop());
+  t.after(() => required(h.poller).stop());
   const prior = deferred();
-  const mutation = h.poller.runMutation(() => prior.promise, {
+  const mutation = required(h.poller).runMutation(() => prior.promise, {
     isCurrent: () => true,
   });
   await flush();
@@ -96,7 +112,7 @@ test("settlement starts even while another wager mutation is pending", async (t)
 
 test("captures the finished match before authentication yields", async (t) => {
   const h = harness();
-  t.after(() => h.poller.stop());
+  t.after(() => required(h.poller).stop());
   const authentication = deferred();
   h.dependencies.ensureAuthenticated = () => authentication.promise;
   const result = h.instance.resolveWagerOutcome(true);
@@ -111,7 +127,7 @@ test("captures the finished match before authentication yields", async (t) => {
 
 test("settlement completes after navigation without replacing newer inventory", async (t) => {
   const h = harness();
-  t.after(() => h.poller.stop());
+  t.after(() => required(h.poller).stop());
   const result = h.instance.resolveWagerOutcome(true);
   await flush();
   h.session.epoch++;
@@ -130,11 +146,11 @@ test("settlement completes after navigation without replacing newer inventory", 
 
 test("settlement cannot replace inventory after the active invite changes within the same session", async (t) => {
   const h = harness();
-  t.after(() => h.poller.stop());
+  t.after(() => required(h.poller).stop());
   const result = h.instance.resolveWagerOutcome(true);
   await flush();
   h.session.activeContext = {
-    ...h.session.activeContext,
+    ...required(h.session.activeContext),
     contextId: 2,
     inviteId: "other-invite",
   };
@@ -145,17 +161,19 @@ test("settlement cannot replace inventory after the active invite changes within
 });
 
 test("account and profile changes cannot receive an old inventory response", async (t) => {
-  for (const change of [
+  for (const change of /** @satisfies {Array<(h: ReturnType<typeof harness>) => void>} */ ([
     (h) => {
       h.session.auth.currentUser = {
         uid: "other",
+        sessionId: "other-session",
+        generation: "other-generation",
         getIdToken: async () => "other-token",
       };
     },
     (h) => h.setProfile("other-profile"),
-  ]) {
+  ])) {
     const h = harness();
-    t.after(() => h.poller.stop());
+    t.after(() => required(h.poller).stop());
     const result = h.instance.resolveWagerOutcome(true);
     await flush();
     change(h);
@@ -168,12 +186,14 @@ test("account and profile changes cannot receive an old inventory response", asy
 
 test("an account switch during authentication never sends the old settlement", async (t) => {
   const h = harness();
-  t.after(() => h.poller.stop());
+  t.after(() => required(h.poller).stop());
   const authentication = deferred();
   h.dependencies.ensureAuthenticated = () => authentication.promise;
   const result = h.instance.resolveWagerOutcome(true);
   h.session.auth.currentUser = {
     uid: "other",
+    sessionId: "other-session",
+    generation: "other-generation",
     getIdToken: async () => "other-token",
   };
   authentication.resolve();
@@ -183,7 +203,7 @@ test("an account switch during authentication never sends the old settlement", a
 
 test("failed settlement refreshes balances without restoring a new match's UI", async (t) => {
   const h = harness();
-  t.after(() => h.poller.stop());
+  t.after(() => required(h.poller).stop());
   const result = h.instance.resolveWagerOutcome(true);
   const rejected = assert.rejects(result, /reload-required/);
   await flush();
@@ -195,10 +215,21 @@ test("failed settlement refreshes balances without restoring a new match's UI", 
   );
   await rejected;
   assert.equal(h.requests.length, 1);
-  assert.deepEqual(h.instance.wagers.finished.agreed, agreedState.agreed);
-  assert.equal(h.instance.wagers.finished.resolved, undefined);
-  assert.equal(h.events.states.at(-1).matchId, "rematch");
-  assert.equal(h.events.states.at(-1).state, null);
+  assert.deepEqual(
+    required(required(storedWagers(h.instance)).finished).agreed,
+    agreedState.agreed,
+  );
+  assert.equal(
+    required(required(storedWagers(h.instance)).finished).resolved,
+    agreedState.resolved,
+  );
+  assert.equal(required(h.events.states.at(-1)).matchId, "rematch");
+  assert.equal(required(h.events.states.at(-1)).state, null);
   assert.equal(h.banners.length, 1);
   assert.equal(h.refreshes(), 1);
 });
+
+/** @param {import("../src/connection/wagerClient.ts").WagerClient} client @returns {import("../src/connection/wagerClient.ts").WagerClient["wagers"]} */
+function storedWagers(client) {
+  return Reflect.get(client, "wagers");
+}

@@ -1,3 +1,4 @@
+import { readInviteDocument } from "@mons/shared/invite-records";
 import { inviteDocumentFixture } from "./inviteDocumentFixture.ts";
 import { retainedInviteSourceFixture } from "./inviteDocumentFixture.ts";
 import assert from "node:assert/strict";
@@ -46,7 +47,7 @@ function ownershipReader(owners: Readonly<Record<string, string | null>>) {
             {
               profile: {
                 profileId,
-                aura: "",
+                aura: "none" as const,
                 emoji: 1,
                 eth: "",
                 rating: 1500,
@@ -202,7 +203,7 @@ test("unrelated and unlinked identities may watch but cannot mutate as participa
   }
 });
 
-test("pending reads omit absent guests and treat any own password property as private", async () => {
+test("pending reads preserve absent guests and require a canonical password for protection", async () => {
   const { reader, reads } = ownershipReader({
     "linked-login": "profile-host",
     "host-login": "profile-host",
@@ -233,7 +234,7 @@ test("pending reads omit absent guests and treat any own password property as pr
     resolveInviteRoleFromSnapshot(
       identity,
       request,
-      inviteDocumentFixture({ ...pending, password: undefined }),
+      inviteDocumentFixture({ ...pending, password: "private" }),
       reader,
     ),
     failure(403, "permission-denied"),
@@ -248,67 +249,47 @@ test("pending reads omit absent guests and treat any own password property as pr
   );
 });
 
-test("read validation stays stricter than participant record-key validation without normalizing IDs", async () => {
+test("read validation rejects malformed participant IDs without ownership reads", async () => {
   const { reader, reads } = ownershipReader({});
-  for (const invite of [
+  for (const fields of [
     { hostId: " host-login ", guestId: "guest-login" },
     { hostId: "h".repeat(129), guestId: "guest-login" },
     { hostId: "same-login", guestId: "same-login" },
   ]) {
-    const identity = { uid: invite.hostId };
+    const source = { ...inviteDocumentFixture(paired), ...fields };
+    assert.equal(readInviteDocument(source), null);
     await assert.rejects(
-      resolveInviteRoleFromSnapshot(
-        identity,
+      Reflect.apply(resolveInviteRoleFromSnapshot, undefined, [
+        { uid: fields.hostId },
         request,
-        inviteDocumentFixture(invite),
+        source,
         reader,
-      ),
+      ]),
       failure(409, "invite-invalid"),
     );
-    const participant = await resolveInviteParticipant(
-      identity,
-      inviteDocumentFixture(invite),
-      reader,
-    );
-    assert.equal(participant.actorUid, invite.hostId);
-    assert.equal(participant.opponentUid, invite.guestId);
-    assert.equal(participant.role, "host");
-    assert.equal(participant.ownership, null);
   }
   assert.equal(reads.length, 0);
 });
 
-test("role reads ignore unrelated malformed metadata and preserve pending source fields", async () => {
+test("role reads reject malformed metadata before resolving ownership", async () => {
   const { reader, reads } = ownershipReader({});
   const source = {
-    hostId: paired.hostId,
-    guestId: undefined,
+    ...inviteDocumentFixture({ hostId: paired.hostId }),
     hostColor: 7,
     hostRematches: false,
-    guestRematches: ["1"],
-    eventId: { malformed: true },
-    automatchStateHint: "future-state",
-    password: null,
   };
   const before = structuredClone(source);
-  assert.deepEqual(
-    await resolveInviteRoleFromSnapshot(
+  await assert.rejects(
+    Reflect.apply(resolveInviteRoleFromSnapshot, undefined, [
       { uid: paired.hostId },
       request,
-      inviteDocumentFixture(source),
+      source,
       reader,
-    ),
-    {
-      ok: true,
-      inviteId: request.inviteId,
-      hostId: paired.hostId,
-      guestId: null,
-      actorUid: paired.hostId,
-      role: "host",
-    },
+    ]),
+    failure(409, "invite-invalid"),
   );
   assert.deepEqual(source, before);
-  assert.deepEqual(reads, []);
+  assert.equal(reads.length, 0);
 });
 
 test("ownership failures never degrade into spectator access or permission errors", async () => {

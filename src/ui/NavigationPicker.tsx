@@ -64,7 +64,7 @@ const NavigationPicker: React.FC<NavigationPickerProps> = ({
     isGamesLoading,
     isLoadingMoreGames,
     hasMoreGames,
-    onLoadMoreGames,
+    ...(onLoadMoreGames ? { onLoadMoreGames } : {}),
   });
   const preventScroll = (e: React.TouchEvent) => {
     e.preventDefault();
@@ -107,7 +107,7 @@ const NavigationPicker: React.FC<NavigationPickerProps> = ({
             key={item.id}
             event={item}
             isActive={selectedNavigationItemId === item.id}
-            onSelectGame={onSelectGame}
+            {...(onSelectGame ? { onSelectGame } : {})}
           />
         ) : (
           <NavigationGameRow
@@ -116,8 +116,8 @@ const NavigationPicker: React.FC<NavigationPickerProps> = ({
             isSelected={selectedNavigationItemId === item.id}
             isRemoving={!!removingGameInviteIds?.has(item.inviteId)}
             queueManaImage={queueManaImage}
-            onSelectGame={onSelectGame}
-            onRemoveGame={onRemoveGame}
+            {...(onSelectGame ? { onSelectGame } : {})}
+            {...(onRemoveGame ? { onRemoveGame } : {})}
           />
         ),
       )}

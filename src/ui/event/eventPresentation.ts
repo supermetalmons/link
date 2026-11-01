@@ -225,7 +225,7 @@ export const getEndedEventWinnerPodiumEntries = (
   if (!event || event.status !== "ended" || rounds.length === 0) {
     return [];
   }
-  const finalRound = rounds[rounds.length - 1];
+  const finalRound = rounds[rounds.length - 1]!;
   const finalMatch = getSortedMatches(finalRound)[0];
   if (!finalMatch) {
     return [];

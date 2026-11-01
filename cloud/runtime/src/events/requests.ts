@@ -1,4 +1,7 @@
-import { resolveEventTelegramAnnouncements } from "../shared/events.js";
+import {
+  resolveEventTelegramAnnouncements,
+  isEventAnnouncements,
+} from "../shared/events.js";
 
 function fields(value: unknown): Record<string, unknown> {
   return value && typeof value === "object"
@@ -32,11 +35,24 @@ export function eventRequestStartsInMinutes(value: unknown): number {
 
 export function eventCreateOptions(value: unknown) {
   const data = fields(value);
+  if (
+    Object.hasOwn(data, "telegramAnnouncements") &&
+    !isEventAnnouncements(data.telegramAnnouncements)
+  ) {
+    throw Object.assign(
+      new Error("Telegram announcements must contain boolean preferences."),
+      { code: "invalid-argument" },
+    );
+  }
   return {
     validSundayMons:
       !Object.hasOwn(data, "isSundayMons") ||
       typeof data.isSundayMons === "boolean",
     isSundayMons: data.isSundayMons === true,
-    telegramAnnouncements: resolveEventTelegramAnnouncements(data),
+    telegramAnnouncements: resolveEventTelegramAnnouncements(
+      isEventAnnouncements(data.telegramAnnouncements)
+        ? { telegramAnnouncements: data.telegramAnnouncements }
+        : {},
+    ),
   };
 }

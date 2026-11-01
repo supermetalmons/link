@@ -1,4 +1,5 @@
 // Generated from src/shared/navigation.ts. Run npm run generate:runtime.
+import { type Aura, type EmojiId } from "./appearance.js";
 import type { ReadGameBootstrapResponse } from "./game-bootstrap.js";
 export type NavigationStatus =
   "pending" | "waiting" | "active" | "ended" | "dismissed";
@@ -19,7 +20,7 @@ export interface NavigationGameItem extends NavigationOrderingItem {
   guestLoginId: string | null;
   opponentProfileId: string | null;
   opponentName: string | null;
-  opponentEmoji: number | null;
+  opponentEmoji: EmojiId | null;
   automatchStateHint: AutomatchStateHint | null;
   isPendingAutomatch: boolean;
   isOptimistic?: boolean;
@@ -27,8 +28,8 @@ export interface NavigationGameItem extends NavigationOrderingItem {
 export interface EventNavigationPreviewParticipant {
   profileId: string | null;
   displayName: string | null;
-  emojiId: number | null;
-  aura: string | null;
+  emojiId: EmojiId | null;
+  aura: Aura | null;
 }
 export interface NavigationEventItem extends NavigationOrderingItem {
   entityType: "event";
@@ -66,8 +67,8 @@ export interface AutomatchStateHintInput {
   storedStateHint?: unknown;
 }
 export interface StartAutomatchRequest {
-  emojiId: number;
-  aura: string;
+  emojiId: EmojiId;
+  aura: Aura;
 }
 export type StartAutomatchResponse =
   | {
@@ -115,9 +116,13 @@ export interface RemoveNavigationGameResponse {
   inviteId: string;
 }
 declare const AUTOMATCH_API_MAX_RESPONSE_BYTES: number;
-declare const NAVIGATION_SORT_BUCKETS: Readonly<
-  Record<NavigationStatus, 20 | 30 | 40 | 50>
->;
+declare const NAVIGATION_SORT_BUCKETS: Readonly<{
+  readonly pending: 20;
+  readonly waiting: 30;
+  readonly active: 40;
+  readonly ended: 50;
+  readonly dismissed: 50;
+}>;
 declare const normalizeStrictAutomatchStateHint: (
   value: unknown,
 ) => AutomatchStateHint | null;
@@ -139,8 +144,8 @@ declare const compareNavigationItems: <T extends NavigationOrderingItem>(
   right: T,
 ) => number;
 declare const mapProfileGameProjection: (
-  rawData: unknown,
-  fallbackProjectionId: string,
+  value: unknown,
+  projectionId: string,
 ) => NavigationItem | null;
 declare const isNavigationItem: (value: unknown) => value is NavigationItem;
 declare const isNavigationGamesCursor: (

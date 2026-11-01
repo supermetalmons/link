@@ -105,7 +105,7 @@ export type EventPrizeAssignmentWireRecord = {
   place: 1 | 2 | 3;
   prizeId: string;
   assignedAtMs: number;
-} & Record<string, unknown>;
+};
 export type EventPrizeAssignmentRecord = EventPrizeAssignmentWireRecord & {
   eventId: EventPrizeEventId;
   prizeId: EventPrizeId;

@@ -37,6 +37,7 @@ import {
 } from "../../../runtime/events/ownership.js";
 import { AuthApiFailure } from "./authErrors.ts";
 import type { GameplayProfile } from "./gameplayRepository.ts";
+import { isAura, isEmojiId } from "@mons/shared/appearance";
 
 export type EventRecord = EventDocument;
 
@@ -106,8 +107,15 @@ export function buildParticipant(
   loginUid: string,
   joinedAtMs: number,
 ): EventParticipantSnapshot {
+  if (!isAura(profile.aura) || !isEmojiId(profile.emoji)) {
+    throw new AuthApiFailure(
+      503,
+      "unavailable",
+      "event-participation-service-unavailable",
+    );
+  }
   const participant = buildEventParticipantSnapshot(
-    profile,
+    { ...profile, aura: profile.aura, emoji: profile.emoji },
     loginUid,
     joinedAtMs,
   );
@@ -159,7 +167,7 @@ function participantFromCanonicalParent(
       "event-participation-service-unavailable",
     );
   }
-  return directParticipantSnapshot(matches[0][1], matches[0][0], loginUid);
+  return directParticipantSnapshot(matches[0]![1], matches[0]![0], loginUid);
 }
 
 export function inspectJoin(
@@ -333,7 +341,11 @@ export function finalizeJoin(
       draft.participant.loginUid,
     );
   }
-  return { participant, updates, expectedTransitionStatus };
+  return {
+    participant,
+    updates,
+    ...(expectedTransitionStatus ? { expectedTransitionStatus } : {}),
+  };
 }
 
 export function resolveRemovalContext({

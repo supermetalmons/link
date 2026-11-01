@@ -2,6 +2,7 @@ import {
   matchCreationWireValue,
   matchWireValue,
   type MatchWireValue,
+  type MatchDocument,
 } from "./matchRecordCodec.ts";
 import {
   timerClaimWireValue,
@@ -16,7 +17,7 @@ import type {
 } from "./matchStateTypes.ts";
 
 export type MatchStateCreationWire = Omit<MatchStateCreation, "value"> & {
-  value: unknown;
+  value: MatchDocument;
 };
 export type MatchStateCreateWireRequest = Omit<
   MatchStateCreateRequest,
@@ -28,8 +29,8 @@ export type MatchStateEventEffectsWireRequest = Omit<
   MatchStateEventEffectsRequest,
   "creations" | "claims"
 > & {
-  creations?: MatchStateCreationWire[];
-  claims?: Array<
+  creations: MatchStateCreationWire[];
+  claims: Array<
     Omit<
       NonNullable<MatchStateEventEffectsRequest["claims"]>[number],
       "claim"
@@ -68,20 +69,8 @@ export function matchCreateWireRequest(
 export function matchEventEffectsWireRequest(
   input: MatchStateEventEffectsRequest,
 ): MatchStateEventEffectsWireRequest {
-  return {
-    ...input,
-    ...(input.creations === undefined
-      ? {}
-      : { creations: input.creations.map(creationWire) }),
-    ...(input.claims === undefined
-      ? {}
-      : {
-          claims: input.claims.map((entry) => ({
-            ...entry,
-            claim: timerClaimWireValue(entry.claim),
-          })),
-        }),
-  };
+  const { creations, claims, ...identity } = input;
+  return { ...identity, creations: creations.map(creationWire), claims };
 }
 
 export function matchPairWire(pair: MatchStatePair): MatchStatePairWire {

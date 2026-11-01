@@ -1,4 +1,6 @@
-import { inviteDocumentFixture } from "./inviteDocumentFixture.ts";
+import { readInviteDocument } from "@mons/shared/invite-records";
+import { publicMatchFixture } from "./matchRecordFixture.ts";
+import { inviteDocumentFixture as baseInviteDocumentFixture } from "./inviteDocumentFixture.ts";
 import { retainedInviteSourceFixture } from "./inviteDocumentFixture.ts";
 import type { MatchStateRecord } from "../src/matchStateTypes.ts";
 import assert from "node:assert/strict";
@@ -8,7 +10,6 @@ import {
   MAX_MATCH_FEN_BYTES,
   MAX_MATCH_HISTORY_ENTRIES,
 } from "@mons/shared/match-protocol";
-import { MATCH_TIMER_TERMINAL } from "@mons/shared/timers";
 import { Color, Game } from "mons-rules";
 import { AuthApiFailure } from "../src/authErrors.ts";
 import type { RequestIdentity } from "../src/requestIdentity.ts";
@@ -31,7 +32,6 @@ import {
   updateRatings as updateRatingsImpl,
   type RatingUpdateDependencies,
 } from "../src/ratingUpdate.ts";
-import { createMemoryGameplayCoordinationStores } from "./gameplayCoordinationTestUtils.ts";
 
 const request = {
   playerId: "player",
@@ -40,25 +40,19 @@ const request = {
   matchId: "auto_aaaaaaaaaaa",
 };
 
+function inviteDocumentFixture(fields: object) {
+  return baseInviteDocumentFixture({
+    hostId: request.playerId,
+    guestId: request.opponentId,
+    ...fields,
+  });
+}
+
 const identity: RequestIdentity = {
   uid: "player",
 };
 
-type RatingDependencyOverrides = Omit<RatingUpdateDependencies, "timerStarts">;
-
-const coordinationByRepository = new WeakMap<
-  RatingRepository,
-  ReturnType<typeof createMemoryGameplayCoordinationStores>
->();
-
-function coordination(repository: RatingRepository) {
-  let stores = coordinationByRepository.get(repository);
-  if (!stores) {
-    stores = createMemoryGameplayCoordinationStores();
-    coordinationByRepository.set(repository, stores);
-  }
-  return stores;
-}
+type RatingDependencyOverrides = RatingUpdateDependencies;
 
 function updateRatings(
   actor: RequestIdentity,
@@ -66,10 +60,7 @@ function updateRatings(
   repository: RatingRepository,
   dependencies: RatingDependencyOverrides = {},
 ) {
-  return updateRatingsImpl(actor, ratingRequest, repository, {
-    ...dependencies,
-    timerStarts: coordination(repository).timerStarts,
-  });
+  return updateRatingsImpl(actor, ratingRequest, repository, dependencies);
 }
 
 function match(
@@ -77,12 +68,18 @@ function match(
   overrides: Record<string, unknown> = {},
 ) {
   return {
+    schemaVersion: 1 as const,
+    version: 2 as const,
+    aura: "none" as const,
+    gameVariant: "Classic",
+    sessionCreation: null,
+    reaction: null,
     color,
     emojiId: color === "white" ? 1 : 2,
     fen: new Game().toFen(),
     flatMovesString: "move",
-    status: "",
-    timer: "",
+    status: "active" as const,
+    timer: { state: "idle" as const },
     ...overrides,
   };
 }
@@ -93,28 +90,28 @@ function historicalMatchPair() {
     matchId: request.matchId,
     hostPlayerId: request.playerId,
     guestPlayerId: request.opponentId,
-    hostMatch: {
+    hostMatch: publicMatchFixture({
       version: 2,
       color: "white" as const,
       emojiId: 1,
-      aura: "",
+      aura: "none" as const,
       gameVariant: "Classic",
       fen,
       status: "",
       flatMovesString: "move",
       timer: "",
-    },
-    guestMatch: {
+    }),
+    guestMatch: publicMatchFixture({
       version: 2,
       color: "black" as const,
       emojiId: 2,
-      aura: "",
+      aura: "none" as const,
       gameVariant: "Classic",
       fen,
       status: "surrendered",
       flatMovesString: "move",
       timer: "",
-    },
+    }),
   };
 }
 
@@ -123,7 +120,7 @@ function profile(
   overrides: Partial<RatingProfile> = {},
 ): RatingProfile {
   return {
-    aura: "",
+    aura: "none" as const,
     emoji: 1,
     eth: "",
     nonce: 4,
@@ -140,6 +137,7 @@ function ratingPlan(
   overrides: Partial<Parameters<typeof buildRatingPlan>[0]> = {},
 ) {
   return buildRatingPlan({
+    wager: null,
     historicalMatchPair: historicalMatchPair(),
     invite: inviteDocumentFixture({}),
     matchId: request.matchId,
@@ -158,6 +156,28 @@ function completedData(
   overrides: Partial<RatingUpdateData> = {},
 ): RatingUpdateData {
   return {
+    completedAtMs: 1_000,
+    eventId: null,
+    eventOwned: false,
+    eventProgressReason: null,
+    eventProgressState: null,
+    eventProgressUpdatedAtMs: null,
+    eventProgressVersion: null,
+    historicalMatchArchiveVersion: null,
+    historicalMatchPair: null,
+    isEventMatch: false,
+    opponentManaPoints: null,
+    playerManaPoints: null,
+    profileGameProjectionReason: null,
+    profileGameProjectionState: null,
+    profileGameProjectionUpdatedAtMs: null,
+    profileGameProjectionVersion: null,
+    telegramDeliveryVersion: null,
+    telegramProjectionReason: null,
+    telegramProjectionState: null,
+    telegramProjectionUpdatedAtMs: null,
+    telegramProjectionVersion: null,
+    updateRatingMessage: null,
     inviteId: request.inviteId,
     leaseExpiresAtMs: 1_000,
     matchId: request.matchId,
@@ -255,6 +275,7 @@ function createRepository({
   let finalized = 0;
   let operationReads = 0;
   const repository: RatingRepository = {
+    readWagerAgreement: async () => null,
     applyFebruaryChallengeReplay: async () => undefined,
     finalizeRatingUpdate: async (_input, buildPlan) => {
       finalized++;
@@ -326,14 +347,8 @@ test("builds exact non-event rating, mana, and Telegram fields", () => {
   const historical = historicalMatchPair();
   const result = buildRatingPlan({
     historicalMatchPair: historical,
-    invite: inviteDocumentFixture({
-      telegramDeliveryVersion: 2,
-      wagers: {
-        [request.matchId]: {
-          agreed: { material: "dust", count: 3 },
-        },
-      },
-    }),
+    invite: inviteDocumentFixture({ telegramDeliveryVersion: 2 }),
+    wager: { material: "dust", count: 3 },
     matchId: request.matchId,
     nowMs,
     opponent,
@@ -399,12 +414,13 @@ test("event ratings preserve win and mana without applying a rating delta", () =
   const historical = historicalMatchPair();
   const nowMs = FEB_CHALLENGE_START_UTC + 1;
   const built = buildRatingPlan({
+    wager: null,
     historicalMatchPair: historical,
     invite: inviteDocumentFixture({ eventOwned: true, eventId: "event-1" }),
     matchId: request.matchId,
     nowMs,
     opponent: profile("profile-opponent"),
-    opponentMatch: match("black", { timer: MATCH_TIMER_TERMINAL }),
+    opponentMatch: match("black", { timer: { state: "finished" as const } }),
     player: profile("profile-player"),
     playerMatch: match("white"),
     request,
@@ -470,14 +486,16 @@ test("preserves Telegram wording, fallback names, and terminal marker precedence
     {
       input: {
         result: "gg",
-        opponentMatch: match("black", { timer: MATCH_TIMER_TERMINAL }),
+        opponentMatch: match("black", {
+          timer: { state: "finished" as const },
+        }),
       },
       message:
         'Bob 1589↑ Alice 1307↓ (0 - 0) <tg-emoji emoji-id="5229098317530568280">&#11088;</tg-emoji>',
     },
     {
       input: {
-        playerMatch: match("white", { timer: MATCH_TIMER_TERMINAL }),
+        playerMatch: match("white", { timer: { state: "finished" as const } }),
         opponentMatch: match("black", { status: "surrendered" }),
       },
       message:
@@ -489,7 +507,7 @@ test("preserves Telegram wording, fallback names, and terminal marker precedence
           username: "",
           eth: "0x1234567890123456789012345678901234567890",
           sol: "ignored-sol-address",
-          emoji: "",
+          emoji: 0,
         }),
         opponent: profile("profile-opponent", {
           nonce: 8,
@@ -512,24 +530,17 @@ test("preserves Telegram wording, fallback names, and terminal marker precedence
   }
 });
 
-test("preserves wager message coercion and the explicit wager match key", () => {
+test("formats canonical wager material and count for the selected match", () => {
   for (const [material, emojiId] of [
     ["dust", "5235835141238063097"],
     ["slime", "5235497595463303384"],
     ["gum", "5233425978117621609"],
     ["metal", "5235794850149863190"],
     ["ice", "5233743994676086020"],
-  ]) {
+  ] as const) {
     const built = ratingPlan({
       matchId: "wager-match",
-      invite: inviteDocumentFixture({
-        wagers: {
-          "wager-match": {
-            agreed: { material: ` ${material} `, count: "2.5" },
-          },
-          [request.matchId]: { agreed: { material: "dust", count: 99 } },
-        },
-      }),
+      wager: { material, count: 3 },
     });
     assert.equal(
       built.ratingUpdate.updateRatingMessage,
@@ -537,22 +548,10 @@ test("preserves wager message coercion and the explicit wager match key", () => 
     );
     assert.equal(built.ratingUpdate.matchId, request.matchId);
   }
-  for (const agreed of [
-    { material: "unknown", count: 3 },
-    ...[0, -1, Infinity, "invalid", null].map((count) => ({
-      material: "dust",
-      count,
-    })),
-  ]) {
-    assert.equal(
-      ratingPlan({
-        invite: inviteDocumentFixture({
-          wagers: { [request.matchId]: { agreed } },
-        }),
-      }).ratingUpdate.updateRatingMessage,
-      "Alice 1631↑ Bob 1272↓ (0 - 0)",
-    );
-  }
+  assert.equal(
+    ratingPlan({ wager: null }).ratingUpdate.updateRatingMessage,
+    "Alice 1631↑ Bob 1272↓ (0 - 0)",
+  );
 });
 
 test("keeps the February challenge interval and next-nonce rating inputs", () => {
@@ -595,42 +594,34 @@ test("keeps the February challenge interval and next-nonce rating inputs", () =>
   }
 });
 
-test("preserves event eligibility and omitted projection keys", () => {
-  for (const invite of [
-    { eventId: " event-1 ", telegramDeliveryVersion: 2 },
-    { eventOwned: true, telegramDeliveryVersion: 2 },
-  ]) {
-    const built = ratingPlan({
-      invite: inviteDocumentFixture(invite),
-      nowMs: FEB_CHALLENGE_START_UTC,
-    });
-    assert.equal(built.ratingUpdate.isEventMatch, true);
-    assert.equal(built.ratingUpdate.didApplyRatingDelta, false);
-    assert.equal(built.ratingUpdate.telegramDeliveryVersion, null);
-    assert.equal(built.repairData.shouldUpdateFebruaryChallenge, false);
-    assert.equal(Object.hasOwn(built.playerUpdate!, "rating"), false);
-    assert.equal(Object.hasOwn(built.opponentUpdate!, "rating"), false);
-    assert.equal(
-      Object.keys(built.ratingUpdate).some(
-        (key) =>
-          key.startsWith("telegramProjection") ||
-          key.startsWith("eventProgress"),
-      ),
-      false,
-    );
-  }
-  const legacy = ratingPlan();
-  assert.equal(legacy.ratingUpdate.telegramDeliveryVersion, null);
+test("preserves canonical event eligibility and omits Telegram projection fields", () => {
+  const event = inviteDocumentFixture({ eventOwned: true, eventId: "event-1" });
+  const built = ratingPlan({ invite: event, nowMs: FEB_CHALLENGE_START_UTC });
+  assert.equal(built.ratingUpdate.isEventMatch, true);
+  assert.equal(built.ratingUpdate.didApplyRatingDelta, false);
+  assert.equal(built.ratingUpdate.telegramDeliveryVersion, null);
+  assert.equal(built.repairData.shouldUpdateFebruaryChallenge, false);
+  assert.equal(Object.hasOwn(built.playerUpdate!, "rating"), false);
+  assert.equal(Object.hasOwn(built.opponentUpdate!, "rating"), false);
   assert.equal(
-    Object.keys(legacy.ratingUpdate).some((key) =>
+    Object.keys(built.ratingUpdate).some((key) =>
       key.startsWith("telegramProjection"),
     ),
     false,
   );
+  assert.equal(built.ratingUpdate.eventProgressState, "pending");
+  for (const fields of [
+    { eventId: " event-1 " },
+    { eventId: null },
+    { telegramDeliveryVersion: 2 },
+  ])
+    assert.equal(readInviteDocument({ ...event, ...fields }), null);
+  assert.equal(ratingPlan().ratingUpdate.telegramDeliveryVersion, null);
 });
 
 test("completes rating records without profile writes when profiles are absent", () => {
   const built = buildRatingPlan({
+    wager: null,
     historicalMatchPair: historicalMatchPair(),
     invite: inviteDocumentFixture({}),
     matchId: request.matchId,
@@ -651,6 +642,7 @@ test("completes rating records without profile writes when profiles are absent",
 
 test("completes merged-profile ratings without profile or challenge writes", () => {
   const built = buildRatingPlan({
+    wager: null,
     historicalMatchPair: historicalMatchPair(),
     invite: inviteDocumentFixture({}),
     matchId: request.matchId,
@@ -687,7 +679,7 @@ test("resolves surrender and timer outcomes for both players", () => {
   );
   assert.equal(
     resolveRatingResult(
-      match("white", { timer: MATCH_TIMER_TERMINAL }),
+      match("white", { timer: { state: "finished" as const } }),
       match("black"),
     ),
     "win",
@@ -695,18 +687,21 @@ test("resolves surrender and timer outcomes for both players", () => {
   assert.equal(
     resolveRatingResult(
       match("white"),
-      match("black", { timer: MATCH_TIMER_TERMINAL }),
+      match("black", { timer: { state: "finished" as const } }),
     ),
     "gg",
   );
 });
 
 test("scores a surrender from the valid match replica", () => {
-  const playerMatch = readMatchRecord(match("white", { fen: undefined }));
+  const playerMatch = readMatchRecord(
+    match("white", { fen: "invalid-score-replica" }),
+  );
   const opponentMatch = readMatchRecord(
     match("black", { status: "surrendered" }),
   );
   const built = buildRatingPlan({
+    wager: null,
     historicalMatchPair: historicalMatchPair(),
     invite: inviteDocumentFixture({}),
     matchId: request.matchId,
@@ -772,16 +767,6 @@ test("resolves a normally completed game through mons-rules", () => {
 
 test("updates once without writing Firebase rating markers", async () => {
   const state = createRepository();
-  for (const playerId of [request.playerId, request.opponentId]) {
-    coordination(state.repository).timerRows.set(
-      `${playerId}/${request.matchId}`,
-      {
-        timer: "7;1000",
-        turnNumber: 7,
-        updatedAtMs: 1,
-      },
-    );
-  }
   const projectionTasks: unknown[] = [];
   assert.deepEqual(
     await updateRatings(identity, request, state.repository, {
@@ -817,34 +802,43 @@ test("updates once without writing Firebase rating markers", async () => {
     },
   ]);
   assert.deepEqual(state.patches, []);
-  assert.equal(coordination(state.repository).timerRows.size, 0);
 });
 
-test("freezes rating-valid matches with legacy presentation fields", async () => {
+test("rejects malformed match presentation before acquiring a rating lease", async () => {
   const state = createRepository({
-    playerMatchValue: match("white", {
-      aura: "x".repeat(33),
-      emojiId: 0,
+    playerMatchValue: {
+      ...match("white"),
+      aura: "invalid-aura",
       fen: undefined,
-      status: "x".repeat(2_000),
-      timer: "x".repeat(2_000),
-    }),
+      timer: "legacy-timer",
+    },
   });
-  assert.deepEqual(
-    await updateRatings(identity, request, state.repository, {
-      now: () => 2_000,
-    }),
-    { ok: true },
+  await assert.rejects(
+    updateRatings(identity, request, state.repository, { now: () => 2_000 }),
+    /something is wrong with the game state/,
   );
-  const frozen = state.getFinalPlan()?.ratingUpdate.historicalMatchPair;
-  assert.ok(isHistoricalMatchPair(frozen));
-  assert.ok(frozen.hostMatch);
-  assert.equal(frozen.hostMatch.emojiId, 0);
-  assert.equal(frozen.hostMatch.aura, "");
-  assert.equal(frozen.hostMatch.fen, "");
-  assert.equal(frozen.hostMatch.status, "");
-  assert.equal(frozen.hostMatch.timer, "");
-  assert.equal(frozen.guestMatch?.status, "surrendered");
+  assert.equal(state.getAttempts(), 0);
+  assert.equal(state.getFinalized(), 0);
+  assert.equal(state.getFinalPlan(), null);
+});
+
+test("rating messages use the canonical wager agreement for the requested match", async () => {
+  const state = createRepository();
+  const reads: unknown[] = [];
+  state.repository.readWagerAgreement = async (inviteId, matchId) => {
+    reads.push({ inviteId, matchId });
+    return { material: "ice", count: 4 };
+  };
+  await updateRatings(identity, request, state.repository, {
+    now: () => 2_000,
+  });
+  assert.deepEqual(reads, [
+    { inviteId: request.inviteId, matchId: request.matchId },
+  ]);
+  assert.match(
+    state.getFinalPlan()!.ratingUpdate.updateRatingMessage!,
+    /5233743994676086020.*4$/,
+  );
 });
 
 test("event ratings persist and dispatch one deterministic progress outbox", async () => {
@@ -872,12 +866,12 @@ test("event ratings persist and dispatch one deterministic progress outbox", asy
   );
   assert.equal(progressPlans.length, 1);
   assert.equal(
-    progressPlans[0].params.sourceKey,
+    progressPlans[0]!.params.sourceKey,
     `rating:${request.inviteId}:${request.matchId}`,
   );
-  const update = state.patches[0];
+  const update = state.patches[0]!;
   assert.equal(
-    Object.hasOwn(update, `eventProgressOutbox/${progressPlans[0].outboxId}`),
+    Object.hasOwn(update, `eventProgressOutbox/${progressPlans[0]!.outboxId}`),
     true,
   );
   assert.equal(
@@ -964,9 +958,6 @@ test("replays the stored February challenge flag after the challenge has ended",
   state.repository.readRatingUpdate = async () =>
     completedData({ shouldUpdateFebruaryChallenge: true });
   const steps: string[] = [];
-  coordination(state.repository).timerStarts.deletePair = async () => {
-    steps.push("timers");
-  };
   state.repository.applyFebruaryChallengeReplay = async (...args) => {
     assert.deepEqual(args, ["profile-player", "profile-opponent"]);
     steps.push("challenge");
@@ -980,7 +971,7 @@ test("replays the stored February challenge flag after the challenge has ended",
     }),
     { ok: true },
   );
-  assert.deepEqual(steps, ["guard", "timers", "challenge"]);
+  assert.deepEqual(steps, ["guard", "challenge"]);
   assert.equal(state.getAttempts(), 0);
   assert.equal(state.getFinalized(), 0);
 });
@@ -1041,9 +1032,6 @@ test("observed completions dispatch only pending projections in recovery order",
           data: scenario.data,
         });
         const steps: string[] = [];
-        coordination(state.repository).timerStarts.deletePair = async () => {
-          steps.push("timers");
-        };
         assert.deepEqual(
           await updateRatings(identity, request, state.repository, {
             enqueueTelegramProjection: async () => {
@@ -1055,7 +1043,7 @@ test("observed completions dispatch only pending projections in recovery order",
           }),
           { ok: true },
         );
-        assert.deepEqual(steps, ["timers", ...scenario.expected]);
+        assert.deepEqual(steps, scenario.expected);
         assert.equal(state.getAttempts(), entry === "existing" ? 0 : 1);
         assert.equal(state.getFinalized(), 0);
         assert.equal(state.getOperationReads(), 1);
@@ -1072,7 +1060,7 @@ test("finalizer replays retain finalized projection eligibility and order", asyn
           invite: inviteDocumentFixture({
             hostId: request.playerId,
             guestId: request.opponentId,
-            ...(kind !== "legacy" ? { telegramDeliveryVersion: 2 } : {}),
+            ...(kind === "v2" ? { telegramDeliveryVersion: 2 } : {}),
             ...(kind === "event"
               ? { eventOwned: true, eventId: "event-1" }
               : {}),
@@ -1117,7 +1105,7 @@ test("finalizer replays retain finalized projection eligibility and order", asyn
 });
 
 test("completion repairs finish before dispatch and stop on repair failures", async (t) => {
-  for (const failure of [null, "outbox", "timers", "challenge"] as const) {
+  for (const failure of [null, "outbox", "challenge"] as const) {
     await t.test(failure || "success", async () => {
       const state = createRepository({
         leaseStatus: "done",
@@ -1148,9 +1136,6 @@ test("completion repairs finish before dispatch and stop on repair failures", as
       state.repository.putEventProgressOutbox = async () => {
         recordRepair("outbox");
       };
-      coordination(state.repository).timerStarts.deletePair = async () => {
-        recordRepair("timers");
-      };
       state.repository.applyFebruaryChallengeReplay = async (...args) => {
         assert.deepEqual(args, ["profile-player", "profile-opponent"]);
         recordRepair("challenge");
@@ -1173,19 +1158,13 @@ test("completion repairs finish before dispatch and stop on repair failures", as
         await assert.rejects(result, (error) => error === repairFailure);
         assert.deepEqual(
           steps,
-          failure === "outbox"
-            ? ["guard", "outbox"]
-            : failure === "timers"
-              ? ["guard", "outbox", "guard", "timers"]
-              : ["guard", "timers", "challenge"],
+          failure === "outbox" ? ["guard", "outbox"] : ["guard", "challenge"],
         );
       } else {
         assert.deepEqual(await result, { ok: true });
         assert.deepEqual(steps, [
           "guard",
           "outbox",
-          "guard",
-          "timers",
           "event",
           "telegram",
           "profile",
@@ -1195,33 +1174,6 @@ test("completion repairs finish before dispatch and stop on repair failures", as
       assert.equal(state.getFinalized(), 0);
     });
   }
-});
-
-test("repairs D1 timer marker cleanup on a completed replay", async () => {
-  const state = createRepository({ completed: true, failMatchReads: true });
-  const stores = coordination(state.repository);
-  stores.timerRows.set(`${request.playerId}/${request.matchId}`, {
-    timer: "7;1000",
-    turnNumber: 7,
-    updatedAtMs: 1,
-  });
-  const deletePair = stores.timerStarts.deletePair;
-  let cleanupAttempts = 0;
-  stores.timerStarts.deletePair = async (...args) => {
-    cleanupAttempts++;
-    if (cleanupAttempts === 1) throw new Error("timer-cleanup-failed");
-    return deletePair(...args);
-  };
-  await assert.rejects(
-    updateRatings(identity, request, state.repository),
-    /timer-cleanup-failed/,
-  );
-  assert.ok(stores.timerRows.has(`${request.playerId}/${request.matchId}`));
-  assert.deepEqual(await updateRatings(identity, request, state.repository), {
-    ok: true,
-  });
-  assert.equal(cleanupAttempts, 2);
-  assert.equal(stores.timerRows.size, 0);
 });
 
 test("repairs a D1-completed rating without Firebase markers or match reads", async () => {

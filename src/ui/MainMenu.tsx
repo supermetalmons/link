@@ -618,7 +618,7 @@ const MainMenu: React.FC = () => {
 
     if (isMenuOpen) {
       const colors = ["var(--crackAnimationColor)"];
-      const randomColor = colors[Math.floor(Math.random() * colors.length)];
+      const randomColor = colors[Math.floor(Math.random() * colors.length)]!;
       const newCracks = Array.from({ length: 6 }, () => ({
         angle: Math.random() * 140 + 180,
         color: randomColor,
@@ -639,7 +639,7 @@ const MainMenu: React.FC = () => {
           const newCracks = [...prevCracks];
           indices.forEach((index) => {
             newCracks[index] = {
-              ...newCracks[index],
+              ...newCracks[index]!,
               angle: Math.random() * 140 + 180,
             };
           });
@@ -752,7 +752,11 @@ const MainMenu: React.FC = () => {
   }, [closeMainMenuPopupsHandler, closeMenuIfAllowedForEvent]);
 
   useEffect(() => {
-    const handleTapOutside = (event: any) => {
+    const handleTapOutside = (event: TouchEvent) => {
+      const target = event.target;
+      if (!(target instanceof Node)) return;
+      const targetElement =
+        target instanceof Element ? target : target.parentElement;
       const shouldKeepVisibleWhenShinyCardIsBeingDismissed = isMobile
         ? showsShinyCardSomewhere ||
           !didNotDismissAnythingWithOutsideTapJustNow()
@@ -761,8 +765,8 @@ const MainMenu: React.FC = () => {
         !shouldKeepVisibleWhenShinyCardIsBeingDismissed &&
         isMenuOpen &&
         menuRef.current &&
-        !menuRef.current.contains(event.target as Node) &&
-        !event.target.closest('[data-shiny-card="true"]')
+        !menuRef.current.contains(target) &&
+        !targetElement?.closest('[data-shiny-card="true"]')
       ) {
         didDismissSomethingWithOutsideTapJustNow();
         setIsMenuOpen(false);

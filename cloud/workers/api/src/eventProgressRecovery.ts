@@ -180,8 +180,11 @@ async function reconcileScheduledEvents(
       urgent.status === "fulfilled" &&
       (traversedCount > 0 || rows.length === 0)
     ) {
+      const traversed = page[traversedCount - 1];
+      if (traversedCount > 0 && !traversed)
+        throw new Error("invalid-event-recovery-traversal");
       const nextCursor =
-        traversedCount < rows.length ? page[traversedCount - 1].cursor : null;
+        traversedCount < rows.length ? (traversed?.cursor ?? null) : null;
       try {
         await recovery.checkpoint(snapshot.revision, nextCursor, now());
       } catch (error) {
@@ -290,10 +293,12 @@ async function recoverRatingEventProgress(
             source: "rating",
             phase,
             itemIndex,
-            eventId:
-              entry.kind === "candidate" ? entry.value.eventId : undefined,
-            operationId:
-              entry.kind === "candidate" ? entry.value.operationId : undefined,
+            ...(entry.kind === "candidate"
+              ? {
+                  eventId: entry.value.eventId,
+                  operationId: entry.value.operationId,
+                }
+              : {}),
           },
           error,
         );

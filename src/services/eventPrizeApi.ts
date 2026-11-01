@@ -1,3 +1,8 @@
+import { AuthApiError } from "./authApi";
+import {
+  parseApiErrorDetails,
+  type ApiErrorDetails,
+} from "@mons/shared/api-errors";
 import type {
   ApiPathRequest,
   ApiPathResponse,
@@ -32,29 +37,14 @@ type EventPrizeApiDependencies = {
 
 export class EventPrizeWithdrawalApiError extends Error {
   readonly code: string;
-  readonly details?: unknown;
+  readonly details: ApiErrorDetails | undefined;
 
-  constructor(code: string, message: string, details?: unknown) {
+  constructor(code: string, message: string, details?: ApiErrorDetails) {
     super(message);
     this.name = "EventPrizeWithdrawalApiError";
     this.code = code;
-    this.details = details;
+    this.details = parseApiErrorDetails(code, details);
   }
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-function isAuthApiError(
-  value: unknown,
-): value is Error & { code: string; details?: unknown } {
-  return (
-    value instanceof Error &&
-    value.name === "AuthApiError" &&
-    "code" in value &&
-    typeof value.code === "string"
-  );
 }
 
 const withdrawalErrorPolicy: ApiErrorPolicy = {
@@ -64,7 +54,7 @@ const withdrawalErrorPolicy: ApiErrorPolicy = {
     error instanceof EventPrizeWithdrawalApiError ? error : undefined,
   normalizeError: (error) => {
     if (error instanceof EventPrizeWithdrawalApiError) return error;
-    if (isAuthApiError(error)) {
+    if (error instanceof AuthApiError) {
       return new EventPrizeWithdrawalApiError(
         error.code,
         error.message,
@@ -176,7 +166,7 @@ export async function withdrawEventPrizeViaApi(
       if (
         !(error instanceof EventPrizeWithdrawalApiError) ||
         error.code !== "unavailable" ||
-        (isRecord(error.details) && error.details.terminal === true)
+        (error.details !== undefined && "terminal" in error.details)
       ) {
         throw error;
       }

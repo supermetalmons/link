@@ -11,7 +11,10 @@ import {
   type MiningMaterialName as SharedMiningMaterialName,
 } from "@mons/shared/mining";
 import type {
-  AutomatchStateHint,
+  NavigationGameItem as SharedNavigationGameItem,
+  NavigationEventItem as SharedNavigationEventItem,
+  EventNavigationPreviewParticipant as SharedEventNavigationPreviewParticipant,
+  NavigationItem as SharedNavigationItem,
   NavigationStatus as SharedNavigationStatus,
   RemoveNavigationGameResponse,
 } from "@mons/shared/navigation";
@@ -20,23 +23,14 @@ import type {
   EventPrizeWithdrawalCompletedResponse,
 } from "@mons/shared/event-prizes";
 import type { PlayerProfile as SharedPlayerProfile } from "@mons/shared/profiles";
-import type { HistoricalMatchPair as SharedHistoricalMatchPair } from "@mons/shared/game-sessions";
-import type { Reaction } from "@mons/shared/reactions";
+import type {
+  GameSessionMatch,
+  HistoricalMatchPair as SharedHistoricalMatchPair,
+} from "@mons/shared/game-sessions";
 import type { InviteMetadataSnapshot } from "@mons/shared/invite-metadata";
 export type { Reaction, InviteReaction } from "@mons/shared/reactions";
 
-export interface Match {
-  version: number;
-  color: string;
-  emojiId: number;
-  aura?: string;
-  gameVariant?: string;
-  fen: string;
-  status: string;
-  flatMovesString: string;
-  timer: string;
-  reaction?: Reaction;
-}
+export type Match = GameSessionMatch;
 
 export interface Invite extends Omit<
   InviteMetadataSnapshot,
@@ -63,50 +57,11 @@ export type HistoricalMatchPair = SharedHistoricalMatchPair;
 
 export type NavigationItemStatus = SharedNavigationStatus;
 export type NavigationGameStatus = Exclude<SharedNavigationStatus, "dismissed">;
-type NavigationEventStatus = Exclude<SharedNavigationStatus, "pending">;
-
-export interface NavigationGameItem {
-  id: string;
-  entityType: "game";
-  inviteId: string;
-  kind: "auto" | "direct";
-  status: NavigationGameStatus;
-  sortBucket: number;
-  listSortAtMs: number;
-  hostLoginId: string | null;
-  guestLoginId: string | null;
-  opponentProfileId: string | null;
-  opponentName: string | null;
-  opponentEmoji: number | null;
-  automatchStateHint: AutomatchStateHint | null;
-  isPendingAutomatch: boolean;
-  isOptimistic?: boolean;
-}
-
-export interface EventNavigationPreviewParticipant {
-  profileId: string | null;
-  displayName: string | null;
-  emojiId: number | null;
-  aura: string | null;
-}
-
-export interface NavigationEventItem {
-  id: string;
-  entityType: "event";
-  eventId: string;
-  status: NavigationEventStatus;
-  sortBucket: number;
-  listSortAtMs: number;
-  startAtMs: number | null;
-  updatedAtMs: number | null;
-  endedAtMs: number | null;
-  participantCount: number;
-  participantPreview: EventNavigationPreviewParticipant[];
-  winnerDisplayName: string | null;
-  isOptimistic?: boolean;
-}
-
-export type NavigationItem = NavigationGameItem | NavigationEventItem;
+export type NavigationGameItem = SharedNavigationGameItem;
+export type NavigationEventItem = SharedNavigationEventItem;
+export type EventNavigationPreviewParticipant =
+  SharedEventNavigationPreviewParticipant;
+export type NavigationItem = SharedNavigationItem;
 
 export type RemoveWaitingNavigationGameResult =
   | RemoveNavigationGameResponse
@@ -164,10 +119,13 @@ type WagerResolution = {
 };
 
 export type MatchWagerState = {
+  schemaVersion?: 1;
+  state?: "proposed" | "agreed" | "settling" | "settled" | "blocked";
+  blocked?: import("@mons/shared/invite-wagers").PublicWagerBlock | null;
   proposals?: Record<string, WagerProposal>;
   proposedBy?: Record<string, boolean>;
-  agreed?: WagerAgreement;
-  resolved?: WagerResolution;
+  agreed?: WagerAgreement | null;
+  resolved?: WagerResolution | null;
 };
 
 export type PlayerProfile = SharedPlayerProfile;

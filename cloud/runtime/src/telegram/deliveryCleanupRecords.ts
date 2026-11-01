@@ -15,8 +15,6 @@ import {
   writeCleanup,
   type CleanupAcquireDecision,
   type FinishStatusInput,
-  DeliverySnapshot,
-  PendingDeleteSnapshot,
   deliveryDocument,
   pendingDeleteDocument,
 } from "./deliveryState.js";
@@ -30,7 +28,10 @@ import {
 import { TELEGRAM_PENDING_DELETE_TASK_KIND } from "./taskKinds.js";
 import { readProperty } from "./values.js";
 import type { TelegramMessageDocument } from "./records.js";
-type RawRecord = Record<string, unknown>;
+import {
+  requireTelegramOrphanedDelete,
+  requireTelegramTransaction,
+} from "./recordCodec.js";
 
 type OrphanPendingDeleteRecordInput = {
   apiGateSettleOwner: FinishStatusInput["apiGateSettleOwner"];
@@ -45,7 +46,7 @@ export function orphanPendingDeleteRecord(
 ): TransactionDecision<TelegramMessageDocument> {
   const { apiGateSettleOwner, nowMs, ownerToken, pendingDeleteId, result } =
     input;
-  const apply = (record: RawRecord) => {
+  const apply = (record: TelegramMessageDocument) => {
     const delivery = readDelivery(record.delivery);
     const pendingDelete = readPendingDelete(delivery.pendingDelete);
     if (
@@ -54,12 +55,12 @@ export function orphanPendingDeleteRecord(
     ) {
       return { commit: false, decision: "pending-delete-lost" };
     }
-    const orphanedDeletes = asObject(delivery.orphanedDeletes);
+    const orphanedDeletes = delivery.orphanedDeletes;
     const nextDelivery = promotePendingDeleteQueue({
       ...omitKeys(delivery, ["pendingDelete"]),
       orphanedDeletes: {
         ...orphanedDeletes,
-        [pendingDeleteId]: {
+        [pendingDeleteId]: requireTelegramOrphanedDelete({
           ...omitRetryState(
             omitKeys(pendingDelete, [
               "leaseOwner",
@@ -69,7 +70,7 @@ export function orphanPendingDeleteRecord(
           ),
           terminalAtMs: nowMs,
           lastError: buildErrorState(result, nowMs),
-        },
+        }),
       },
     });
     return {
@@ -85,8 +86,7 @@ export function orphanPendingDeleteRecord(
       decision: "pending-delete-orphaned",
     };
   };
-  const output: unknown = apply(asObject(current));
-  return output as TransactionDecision<TelegramMessageDocument>;
+  return requireTelegramTransaction(apply(current));
 }
 
 type RecordCleanupRetryProofInput = {
@@ -109,7 +109,7 @@ export function recordCleanupRetryProof(
     retryState,
     revision,
   } = input;
-  const apply = (record: RawRecord) => {
+  const apply = (record: TelegramMessageDocument) => {
     const delivery = readDelivery(record.delivery);
     const latestPendingDelete = readPendingDelete(delivery.pendingDelete);
     if (
@@ -141,8 +141,7 @@ export function recordCleanupRetryProof(
       decision: "pending-rate-limit-proof-required",
     };
   };
-  const output: unknown = apply(asObject(current));
-  return output as TransactionDecision<TelegramMessageDocument>;
+  return requireTelegramTransaction(apply(current));
 }
 
 type RecordCleanupRetryStateInput = {
@@ -165,7 +164,7 @@ export function recordCleanupRetryState(
     result,
     retryState,
   } = input;
-  const apply = (record: RawRecord) => {
+  const apply = (record: TelegramMessageDocument) => {
     const delivery = readDelivery(record.delivery);
     const latestPendingDelete = readPendingDelete(delivery.pendingDelete);
     if (
@@ -205,8 +204,7 @@ export function recordCleanupRetryState(
       decision: "pending-delete-retryable",
     };
   };
-  const output: unknown = apply(asObject(current));
-  return output as TransactionDecision<TelegramMessageDocument>;
+  return requireTelegramTransaction(apply(current));
 }
 
 type AcquirePendingDeleteRecordInput = {
@@ -231,7 +229,7 @@ export function acquirePendingDeleteRecord(
     requestedPendingDeleteId,
     observeDecision,
   } = input;
-  const apply = (record: RawRecord) => {
+  const apply = (record: TelegramMessageDocument) => {
     let decision: CleanupAcquireDecision = "missing";
 
     const delivery = readDelivery(record.delivery);
@@ -278,8 +276,8 @@ export function acquirePendingDeleteRecord(
       const nextDelivery = promotePendingDeleteQueue({
         ...omitKeys(delivery, ["pendingDelete"]),
         orphanedDeletes: {
-          ...asObject(delivery.orphanedDeletes),
-          [pendingDeleteId]: {
+          ...delivery.orphanedDeletes,
+          [pendingDeleteId]: requireTelegramOrphanedDelete({
             ...pendingDeleteDocument(pendingDelete),
             pendingDeleteId,
             terminalAtMs: nowMs,
@@ -287,7 +285,7 @@ export function acquirePendingDeleteRecord(
               code: "invalid-pending-delete",
               atMs: nowMs,
             },
-          },
+          }),
         },
       });
       return {
@@ -332,16 +330,22 @@ export function acquirePendingDeleteRecord(
       const nextDelivery = promotePendingDeleteQueue({
         ...omitKeys(delivery, ["pendingDelete"]),
         orphanedDeletes: {
-          ...asObject(delivery.orphanedDeletes),
-          [pendingDeleteId]: {
-            ...omitRetryState(pendingDeleteDocument(pendingDelete)),
+          ...delivery.orphanedDeletes,
+          [pendingDeleteId]: requireTelegramOrphanedDelete({
+            ...omitRetryState(
+              omitKeys(pendingDeleteDocument(pendingDelete), [
+                "status",
+                "leaseOwner",
+                "leaseExpiresAtMs",
+              ]),
+            ),
             pendingDeleteId,
             terminalAtMs: nowMs,
             lastError: {
               code: "safe-retry-window-exhausted",
               atMs: nowMs,
             },
-          },
+          }),
         },
       });
       return {
@@ -401,8 +405,7 @@ export function acquirePendingDeleteRecord(
       decision,
     };
   };
-  const output: unknown = apply(asObject(current));
-  return output as TransactionDecision<TelegramMessageDocument>;
+  return requireTelegramTransaction(apply(current));
 }
 
 type ClearPendingDeleteRecordInput = {
@@ -415,7 +418,7 @@ export function clearPendingDeleteRecord(
   input: ClearPendingDeleteRecordInput,
 ): TransactionDecision<TelegramMessageDocument> {
   const { apiGateOwner, ownerToken, pendingDeleteId } = input;
-  const apply = (record: RawRecord) => {
+  const apply = (record: TelegramMessageDocument) => {
     const delivery = readDelivery(record.delivery);
     const latestPendingDelete = readPendingDelete(delivery.pendingDelete);
     if (
@@ -436,18 +439,5 @@ export function clearPendingDeleteRecord(
       decision: "pending-delete-cleared",
     };
   };
-  const output: unknown = apply(asObject(current));
-  return output as TransactionDecision<TelegramMessageDocument>;
+  return requireTelegramTransaction(apply(current));
 }
-
-const asObject = (value: unknown): Record<string, unknown> => {
-  const retained =
-    value instanceof DeliverySnapshot
-      ? deliveryDocument(value)
-      : value instanceof PendingDeleteSnapshot
-        ? pendingDeleteDocument(value)
-        : value;
-  return retained && typeof retained === "object" && !Array.isArray(retained)
-    ? (retained as Record<string, unknown>)
-    : {};
-};

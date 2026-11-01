@@ -16,13 +16,13 @@ function eventRecordStatement(
 ): D1PreparedStatement {
   if (!state.next) {
     return db
-      .prepare("DELETE FROM event_records WHERE event_id = ?")
+      .prepare("DELETE FROM event_records_canonical WHERE event_id = ?")
       .bind(eventId);
   }
   const event = validateEventAggregate(eventId, state.next);
   return db
     .prepare(
-      `INSERT INTO event_records (
+      `INSERT INTO event_records_canonical (
          event_id, status, start_at_ms, updated_at_ms, revision,
          pending_transition_id, record_json
        ) VALUES (?, ?, ?, ?, 1, ?, ?)
@@ -30,7 +30,7 @@ function eventRecordStatement(
          status = excluded.status,
          start_at_ms = excluded.start_at_ms,
          updated_at_ms = excluded.updated_at_ms,
-         revision = event_records.revision + 1,
+         revision = event_records_canonical.revision + 1,
          pending_transition_id = excluded.pending_transition_id,
          record_json = excluded.record_json`,
     )
@@ -72,7 +72,7 @@ export function buildEventStatements(
         guardStatement(
           db,
           `NOT EXISTS (
-             SELECT 1 FROM event_transition_intents
+             SELECT 1 FROM event_transition_intents_canonical
              WHERE transition_id = ? AND event_id = ?
                AND expected_revision = ? AND status = 'pending'
            )`,
@@ -97,7 +97,7 @@ export function buildEventStatements(
           mutations.push(
             db
               .prepare(
-                "DELETE FROM event_prize_selections WHERE event_id = ? AND profile_id = ?",
+                "DELETE FROM event_prize_selections_canonical WHERE event_id = ? AND profile_id = ?",
               )
               .bind(eventId, profileId),
           );
@@ -113,7 +113,7 @@ export function buildEventStatements(
         mutations.push(
           db
             .prepare(
-              `INSERT INTO event_prize_selections (
+              `INSERT INTO event_prize_selections_canonical (
                  event_id, profile_id, prize_id, updated_at_ms
                ) VALUES (?, ?, ?, ?)
                ON CONFLICT (event_id, profile_id) DO UPDATE SET

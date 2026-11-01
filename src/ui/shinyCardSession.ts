@@ -1,3 +1,18 @@
+import {
+  isCardBackgroundId,
+  isCardSubtitleId,
+  isMonSelectionIndex,
+  PROFILE_STICKER_CATALOG,
+  withMonSelection,
+  withStickerSelection,
+  type CardBackgroundId,
+  type CardSubtitleId,
+  type SelectedMons,
+  type MonSelectionKind,
+  type StickerMap,
+  type StickerName,
+  type StickerSlot,
+} from "@mons/shared/appearance";
 import { emojipackSize, getIncrementedEmojiId } from "../content/emojis";
 import { asciimojisCount, getAsciimojiAtIndex } from "../utils/asciimoji";
 import { isMobile, getStableRandomIdForProfileId } from "../utils/misc";
@@ -5,7 +20,8 @@ import { storage } from "../utils/storage";
 import { handleEditDisplayName } from "./identity/profileUiPort";
 import {
   getNextRegularId,
-  parseStickerMap,
+  createMonCardEdit,
+  createStickerCardEdit,
   type ShinyCardChange,
   type ShinyCardEdit,
 } from "./shinyCardModels";
@@ -16,7 +32,6 @@ import {
   type StickerType,
 } from "../utils/stickers";
 import type { PlayerProfile } from "../connection/connectionModels";
-import { normalizeProfileEmojiId } from "@mons/shared/profiles";
 import {
   MonType,
   getMonId,
@@ -25,7 +40,7 @@ import {
   demonTypes,
   angelTypes,
   drainerTypes,
-  getMonsIndexes,
+  getMonsSelection,
 } from "../utils/namedMons";
 import {
   attachRainbowAura,
@@ -115,29 +130,40 @@ type ShinyCardSessionOptions = {
   onDispose: (session: ShinyCardSession) => void;
 };
 
-function getBgIdForProfile(profile: PlayerProfile | null): number {
+function getBgIdForProfile(profile: PlayerProfile | null): CardBackgroundId {
   return profile?.cardBackgroundId ?? defaultCardBgIndex;
 }
 
 function getEmojiIdForProfile(profile: PlayerProfile | null): number {
-  return normalizeProfileEmojiId(
-    profile?.emoji,
-    getStableRandomIdForProfileId(profile?.id ?? "", emojipackSize),
+  return (
+    profile?.emoji ??
+    getStableRandomIdForProfileId(profile?.id ?? "", emojipackSize)
   );
 }
 
-function getSubtitleIdForProfile(profile: PlayerProfile | null): number {
+function getSubtitleIdForProfile(
+  profile: PlayerProfile | null,
+): CardSubtitleId {
   return profile?.cardSubtitleId ?? defaultSubtitleIndex;
 }
 
-const getNextRegularCardBackgroundId = (currentBgId: number): number =>
-  getNextRegularId(currentBgId, totalCardBgsCount);
+const getNextRegularCardBackgroundId = (
+  currentBgId: CardBackgroundId,
+): CardBackgroundId => {
+  const next = getNextRegularId(currentBgId, totalCardBgsCount);
+  if (!isCardBackgroundId(next)) throw new Error("invalid-card-background");
+  return next;
+};
 
 export class ShinyCardSession {
-  private displayedMonsIndexes: ReturnType<typeof getMonsIndexes> = [
-    0, 0, 0, 0, 0,
-  ];
-  private currentlySelectedStickers: Record<string, string> = {};
+  private displayedMons: SelectedMons = {
+    demon: 0,
+    angel: 0,
+    drainer: 0,
+    spirit: 0,
+    mystic: 0,
+  };
+  private currentlySelectedStickers: StickerMap = {};
 
   private panelUndoButton: HTMLButtonElement | null = null;
   private isEditingMode = false;
@@ -171,8 +197,8 @@ export class ShinyCardSession {
   private readonly options: ShinyCardSessionOptions;
   private root: HTMLDivElement | null = null;
   private disposed = false;
-  private cardIndex = defaultCardBgIndex;
-  private asciimojiIndex = defaultSubtitleIndex;
+  private cardIndex: CardBackgroundId = defaultCardBgIndex;
+  private asciimojiIndex: CardSubtitleId = defaultSubtitleIndex;
   private readonly timeouts = new Set<number>();
   private readonly frames = new Set<number>();
   private readonly cleanups = new Map<EventTarget, Set<() => void>>();
@@ -504,7 +530,7 @@ export class ShinyCardSession {
     emojiImg.style.visibility = "hidden";
     emojiImg.style.zIndex = "2";
     emojiImg.draggable = false;
-    emojiImg.src = `https://cdn.lil.org/mons/emojipack/regular/${isOtherPlayer ? getEmojiIdForProfile(profile) : storage.getPlayerEmojiId("1")}.webp`;
+    emojiImg.src = `https://cdn.lil.org/mons/emojipack/regular/${isOtherPlayer ? getEmojiIdForProfile(profile) : storage.getPlayerEmojiId(1)}.webp`;
     this.setImageCallbacks(
       emojiImg,
       () => {
@@ -514,8 +540,8 @@ export class ShinyCardSession {
           setRainbowAuraMask(rainbowAuraInner, emojiImg.src);
         if (rainbowAuraBackground) {
           const currentAura = isOtherPlayer
-            ? (profile?.aura ?? "")
-            : storage.getPlayerEmojiAura("");
+            ? (profile?.aura ?? "none")
+            : storage.getPlayerEmojiAura("none");
           if (currentAura === "rainbow") {
             showRainbowAura(rainbowAuraBackground);
           } else {
@@ -559,12 +585,12 @@ export class ShinyCardSession {
         }, 130);
       }
 
-      const oldEmojiId = storage.getPlayerEmojiId("1");
-      const oldAura = storage.getPlayerEmojiAura("");
+      const oldEmojiId = storage.getPlayerEmojiId(1);
+      const oldAura = storage.getPlayerEmojiAura("none");
       const playerEmojiId = getIncrementedEmojiId(oldEmojiId);
       this.updateContent({
         contentType: "emojiAndAura",
-        value: { emojiId: playerEmojiId, aura: "" },
+        value: { emojiId: playerEmojiId, aura: "none" },
         undo: {
           kind: "record",
           value: { emojiId: oldEmojiId, aura: oldAura },
@@ -702,7 +728,10 @@ export class ShinyCardSession {
       cardContentsLayer.style.transform = "translateY(-2.77%) scale(1.03)";
 
       Object.keys(STICKER_ADD_PROMPTS_FRAMES).forEach((stickerType) => {
-        if (!this.currentlySelectedStickers[stickerType]) {
+        if (
+          isStickerType(stickerType) &&
+          !this.currentlySelectedStickers[stickerType]
+        ) {
           const hitArea = this.stickerHitAreas[stickerType];
           if (hitArea) {
             hitArea.style.opacity = "0";
@@ -925,8 +954,10 @@ export class ShinyCardSession {
 
       let clientX, clientY;
       if ("touches" in e) {
-        clientX = e.touches[0].clientX;
-        clientY = e.touches[0].clientY;
+        const touch = e.touches[0];
+        if (!touch) return;
+        clientX = touch.clientX;
+        clientY = touch.clientY;
       } else {
         clientX = (e as MouseEvent).clientX;
         clientY = (e as MouseEvent).clientY;
@@ -1055,9 +1086,12 @@ export class ShinyCardSession {
         if (isOtherPlayer) {
           return;
         }
+        const nextSubtitle = (this.asciimojiIndex + 1) % asciimojisCount;
+        if (!isCardSubtitleId(nextSubtitle))
+          throw new Error("invalid-card-subtitle");
         this.updateContent({
           contentType: "subtitle",
-          value: (this.asciimojiIndex + 1) % asciimojisCount,
+          value: nextSubtitle,
           undo: { kind: "record", value: this.asciimojiIndex },
         });
       },
@@ -1118,10 +1152,10 @@ export class ShinyCardSession {
       return;
     }
 
-    const stickersJson = isOtherPlayer
-      ? (profile?.cardStickers ?? "")
-      : storage.getCardStickers("");
-    this.displayStickers(cardContentsLayer, stickersJson);
+    const stickers = isOtherPlayer
+      ? (profile?.cardStickers ?? {})
+      : storage.getCardStickers({});
+    this.displayStickers(cardContentsLayer, stickers);
     this.updateUndoButton();
   }
 
@@ -1133,7 +1167,7 @@ export class ShinyCardSession {
 
   private didUpdateSticker(
     stickerType: StickerType,
-    nextSticker: string | undefined,
+    nextSticker: StickerName | undefined,
   ) {
     if (nextSticker) {
       const element = this.stickerElements[stickerType];
@@ -1174,20 +1208,23 @@ export class ShinyCardSession {
 
   private showHitAreasForStickersThatAreNotSet() {
     Object.keys(STICKER_ADD_PROMPTS_FRAMES).forEach((stickerType) => {
-      if (!this.currentlySelectedStickers[stickerType]) {
+      if (
+        isStickerType(stickerType) &&
+        !this.currentlySelectedStickers[stickerType]
+      ) {
         this.setupHitAreaForStickerType(stickerType, true, true);
       }
     });
   }
 
   private setupHitAreaForStickerType(
-    stickerType: string,
+    stickerType: StickerSlot,
     visible: boolean,
     animated: boolean,
   ): HTMLDivElement {
-    let hitArea = this.stickerHitAreas[stickerType];
-    if (!hitArea) {
-      hitArea = document.createElement("div");
+    const existingHitArea = this.stickerHitAreas[stickerType];
+    const hitArea = existingHitArea ?? document.createElement("div");
+    if (!existingHitArea) {
       hitArea.style.position = "absolute";
       hitArea.style.userSelect = "none";
       hitArea.style.outline = "none";
@@ -1322,47 +1359,48 @@ export class ShinyCardSession {
 
   private displayStickers(
     cardContentsLayer: HTMLElement,
-    stickersJson: string,
+    selectedStickers: StickerMap,
   ) {
-    const selectedStickers = parseStickerMap(stickersJson);
-    this.currentlySelectedStickers = selectedStickers;
-    for (const [path, sticker] of Object.entries(selectedStickers)) {
-      this.appendStickerLayer(cardContentsLayer, path, sticker);
+    this.currentlySelectedStickers = { ...selectedStickers };
+    for (const slot of Object.keys(PROFILE_STICKER_CATALOG)) {
+      if (!isStickerType(slot)) continue;
+      const sticker = selectedStickers[slot];
+      if (sticker !== undefined)
+        this.appendStickerLayer(cardContentsLayer, slot, sticker);
     }
   }
 
-  private handleStickerClick(type: string) {
-    const stickersForType = STICKER_PATHS[type];
+  private handleStickerClick(type: StickerSlot) {
+    const stickersForType = PROFILE_STICKER_CATALOG[type];
     const currentSticker = this.currentlySelectedStickers[type];
-
-    let nextSticker: string | undefined;
-
-    if (!currentSticker) {
-      nextSticker = stickersForType[0]?.name;
+    let nextSticker: StickerName | undefined;
+    if (currentSticker === undefined) {
+      nextSticker = stickersForType[0];
     } else {
       const currentIndex = stickersForType.findIndex(
-        (s) => s.name === currentSticker,
+        (name) => name === currentSticker,
       );
-      if (currentIndex === stickersForType.length - 1 || currentIndex === -1) {
-        nextSticker = undefined;
-      } else {
-        nextSticker = stickersForType[currentIndex + 1]?.name;
-        if (nextSticker === "gate") {
-          nextSticker = stickersForType[currentIndex + 2]?.name;
-        }
+      if (currentIndex !== stickersForType.length - 1 && currentIndex !== -1) {
+        nextSticker = stickersForType[currentIndex + 1];
+        if (nextSticker === "gate")
+          nextSticker = stickersForType[currentIndex + 2];
       }
     }
-
-    if (isStickerType(type)) {
-      this.updateContent({
-        contentType: type,
-        value: nextSticker,
-        undo: { kind: "record", value: currentSticker },
-      });
-    }
+    const next = withStickerSelection(
+      this.currentlySelectedStickers,
+      type,
+      nextSticker,
+    );
+    this.updateContent(
+      createStickerCardEdit(type, this.currentlySelectedStickers, next),
+    );
   }
 
-  private appendStickerLayer(to: HTMLElement, type: string, name: string) {
+  private appendStickerLayer(
+    to: HTMLElement,
+    type: StickerSlot,
+    name: StickerName,
+  ) {
     const stickers = this.createOverlayStickersImage(type, name);
     to.appendChild(stickers);
 
@@ -1380,8 +1418,8 @@ export class ShinyCardSession {
 
   private applyStickerFrame(
     hitArea: HTMLElement,
-    type: string,
-    name: string,
+    type: StickerSlot,
+    name: StickerName,
     stickerElement: HTMLElement,
   ) {
     const stickerPath = STICKER_PATHS[type]?.find(
@@ -1625,8 +1663,8 @@ export class ShinyCardSession {
   }
 
   private createOverlayStickersImage(
-    type: string,
-    name: string,
+    type: StickerSlot,
+    name: StickerName,
   ): HTMLImageElement {
     const url = `https://cdn.lil.org/mons/id_cards/stickers_overlays/${type}/${name}.webp`;
     const overlayImg = document.createElement("img");
@@ -1674,16 +1712,16 @@ export class ShinyCardSession {
     ) {
       return;
     }
-    const monsIndexes = getMonsIndexes(isOtherPlayer, profile);
+    const selectedMons = getMonsSelection(isOtherPlayer, profile);
     if (!this.isLive()) return;
-    this.displayedMonsIndexes = monsIndexes;
+    this.displayedMons = selectedMons;
     for (const monType of Object.values(MonType)) {
-      const { index, left } = CARD_MONS[monType];
+      const { left } = CARD_MONS[monType];
       this.addImageToCard(
         cardContentsLayer,
         left,
         "74.37%",
-        getSpriteByKey(getMonId(monType, this.displayedMonsIndexes[index])),
+        getSpriteByKey(getMonId(monType, this.displayedMons[monType])),
         1,
         monType,
         isOtherPlayer,
@@ -1692,13 +1730,13 @@ export class ShinyCardSession {
   }
 
   private didClickMonImage(monType: MonType) {
-    const { index, regularCount } = CARD_MONS[monType];
-    const currentIndex = this.displayedMonsIndexes[index];
-    void this.updateContent({
-      contentType: monType,
-      value: getNextRegularId(currentIndex, regularCount),
-      undo: { kind: "record", value: currentIndex },
-    });
+    const { regularCount } = CARD_MONS[monType];
+    const currentIndex = this.displayedMons[monType];
+    const nextIndex = getNextRegularId(currentIndex, regularCount);
+    if (!isMonSelectionIndex(monType, nextIndex))
+      throw new Error("invalid-mon-selection");
+    const next = withMonSelection(this.displayedMons, monType, nextIndex);
+    this.updateContent(createMonCardEdit(monType, this.displayedMons, next));
     this.options.onMonsChanged();
   }
 
@@ -1758,9 +1796,9 @@ export class ShinyCardSession {
       case MonType.DRAINER:
       case MonType.SPIRIT:
       case MonType.MYSTIC: {
-        const monsIndexes = getMonsIndexes(false, null);
+        const selectedMons = getMonsSelection(false, null);
         if (!this.isLive()) return;
-        this.displayedMonsIndexes = monsIndexes;
+        this.displayedMons = selectedMons;
         const revision = (this.monRevisions[contentType] ?? 0) + 1;
         this.monRevisions[contentType] = revision;
         const image = this.ownMonImages[contentType];
@@ -1772,16 +1810,14 @@ export class ShinyCardSession {
       }
       default: {
         if (!(contentType in STICKER_ADD_PROMPTS_FRAMES)) return;
-        this.currentlySelectedStickers = parseStickerMap(
-          storage.getCardStickers(""),
-        );
+        this.currentlySelectedStickers = storage.getCardStickers({});
         this.didUpdateSticker(contentType, value);
       }
     }
   }
 
   private async updateMonImage(
-    type: MonType,
+    type: MonSelectionKind,
     id: number,
     image: HTMLImageElement,
     revision: number,

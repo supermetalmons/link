@@ -1,4 +1,10 @@
 import { AUTH_METHODS } from "@mons/shared/auth";
+import {
+  parseCanonicalAuthOperationRow,
+  parseCanonicalAuthMethodRow,
+  parseCanonicalAuthRecoveryRow,
+  parseCanonicalCooldownRow,
+} from "./authRecords.ts";
 import type {
   AuthMethodRow,
   AuthOperationRow,
@@ -21,7 +27,7 @@ export function authMethodWriteRow(
   ) {
     throw new TypeError("invalid-canonical-auth-method");
   }
-  return {
+  const row: Omit<AuthMethodRow, "revision"> = {
     method: value.method,
     normalized_value: value.normalizedValue,
     profile_id: value.profileId,
@@ -34,12 +40,15 @@ export function authMethodWriteRow(
     created_at_ms: value.createdAtMs,
     updated_at_ms: value.updatedAtMs,
   };
+  parseCanonicalAuthMethodRow({ ...row, revision: 1 });
+  return row;
 }
 
 export function authOperationWriteRow(
   value: CanonicalAuthOperationValue,
 ): Omit<AuthOperationRow, "revision"> {
-  return {
+  const row: Omit<AuthOperationRow, "revision"> = {
+    schema_version: 1,
     operation_id: value.operationId,
     kind: value.kind,
     method: value.method,
@@ -51,11 +60,15 @@ export function authOperationWriteRow(
     error_message: value.errorMessage,
     started_at_ms: value.startedAtMs,
     updated_at_ms: value.updatedAtMs,
+    cancelled_at_ms: value.cancelledAtMs,
+    cancellation_reason: value.cancellationReason,
   };
+  parseCanonicalAuthOperationRow({ ...row, revision: 1 });
+  return row;
 }
 
 export function cooldownWriteRow(value: CanonicalCooldownValue) {
-  return {
+  const row = {
     profile_id: value.profileId,
     method: value.method,
     scope: value.scope,
@@ -65,6 +78,8 @@ export function cooldownWriteRow(value: CanonicalCooldownValue) {
     retry_at_ms: value.retryAtMs,
     updated_at_ms: value.updatedAtMs,
   };
+  parseCanonicalCooldownRow({ ...row, revision: 1 });
+  return row;
 }
 
 export function methodRevocationWriteRow(
@@ -81,7 +96,7 @@ export function methodRevocationWriteRow(
 export function recoveryWriteRow(
   value: CanonicalAuthRecoveryValue,
 ): Omit<RecoveryRow, "revision"> {
-  return {
+  const row: Omit<RecoveryRow, "revision"> = {
     profile_id: value.profileId,
     login_uids_json: JSON.stringify(value.loginUids),
     source_profile_ids_json: JSON.stringify(value.sourceProfileIds),
@@ -92,4 +107,6 @@ export function recoveryWriteRow(
     created_at_ms: value.createdAtMs,
     updated_at_ms: value.updatedAtMs,
   };
+  parseCanonicalAuthRecoveryRow({ ...row, revision: 1 });
+  return row;
 }

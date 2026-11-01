@@ -3,29 +3,40 @@ import type { MiningMaterialName } from "./mining.js";
 export type PublicWagerProposal = {
   material: MiningMaterialName;
   count: number;
-  createdAt?: number;
+  createdAt: number;
 };
 export type PublicWagerAgreement = {
   material: MiningMaterialName;
   count: number;
-  total?: number;
+  total: number;
   proposerId: string;
   accepterId: string;
-  acceptedAt?: number;
+  acceptedAt: number;
 };
 export type PublicWagerResolution = {
   winnerId: string;
   loserId: string;
   material: MiningMaterialName;
   count: number;
-  total?: number;
-  resolvedAt?: number;
+  total: number;
+  resolvedAt: number;
+};
+export type PublicWagerBlock = {
+  reason:
+    | "legacy-agreement-unsettled"
+    | "legacy-partial"
+    | "legacy-settlement-incomplete"
+    | "legacy-resolution-marker";
+  requiresManualReview: true;
 };
 export type PublicMatchWagerState = {
-  proposals?: Record<string, PublicWagerProposal>;
-  proposedBy?: Record<string, boolean>;
-  agreed?: PublicWagerAgreement;
-  resolved?: PublicWagerResolution;
+  schemaVersion: 1;
+  state: "proposed" | "agreed" | "settling" | "settled" | "blocked";
+  proposals: Record<string, PublicWagerProposal>;
+  proposedBy: Record<string, boolean>;
+  agreed: PublicWagerAgreement | null;
+  resolved: PublicWagerResolution | null;
+  blocked: PublicWagerBlock | null;
 };
 export type InviteWagersSnapshot = {
   inviteId: string;

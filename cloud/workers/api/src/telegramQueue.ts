@@ -10,6 +10,7 @@ import {
 import {
   buildTelegramDeliveryTaskId,
   normalizeTaskPayload,
+  parseTelegramTaskPayload,
   type TelegramTaskPayload,
 } from "../../../runtime/telegram/taskIdentity.js";
 import {
@@ -23,7 +24,6 @@ import {
   readTelegramStorageMode,
   type TelegramStorageMode,
 } from "./telegramD1.ts";
-import { parseWagerSettlementRetryTask } from "./wagerSettlementQueue.ts";
 import { ackQueueMessage, retryQueueMessage } from "./queueMessage.ts";
 import {
   infrastructureRetryDelaySeconds,
@@ -36,12 +36,6 @@ const TELEGRAM_FROZEN_RETRY_SECONDS = 60;
 
 const defaultSleep = (milliseconds: number) =>
   new Promise<void>((resolve) => setTimeout(resolve, milliseconds));
-
-function toRecord(value: unknown): Record<string, unknown> | null {
-  return value && typeof value === "object" && !Array.isArray(value)
-    ? (value as Record<string, unknown>)
-    : null;
-}
 
 function logicalDelaySeconds(scheduleTimeMs: number, nowMs: number): number {
   return Math.min(
@@ -96,47 +90,23 @@ export async function handleTelegramQueueMessage(
     sleep?: (milliseconds: number) => Promise<void>;
   } = {},
 ): Promise<void> {
-  const raw = toRecord(message.body);
-  if (raw?.kind === "wager-settlement") {
-    const task = parseWagerSettlementRetryTask(raw);
-    if (!task) {
+  let startedAtMs: number | null = null;
+  let messageKey = "unknown";
+  try {
+    let payload: TelegramTaskPayload;
+    try {
+      const parsed = parseTelegramTaskPayload(message.body);
+      if (!parsed) throw new TypeError("invalid-telegram-task");
+      payload = parsed;
+    } catch (error) {
+      if (!(error instanceof TypeError)) throw error;
       ackQueueMessage(message, {
-        entry: { event: "wager_settlement_queue_invalid_message" },
+        entry: { event: "telegram_queue_invalid_message" },
         level: "error",
         logger,
       });
       return;
     }
-    try {
-      await queueFor(env, "WAGER_SETTLEMENT_QUEUE").send(task);
-      ackQueueMessage(message, {
-        entry: {
-          event: "wager_settlement_queue_forwarded",
-          operationId: task.operationId,
-        },
-        level: "info",
-        logger,
-      });
-    } catch (error) {
-      retryQueueMessage(
-        message,
-        infrastructureRetryDelaySeconds(message.attempts),
-        {
-          entry: {
-            event: "wager_settlement_queue_forward_failed",
-            operationId: task.operationId,
-            code: error instanceof Error ? error.message : "unknown",
-          },
-          level: "error",
-          logger,
-        },
-      );
-    }
-    return;
-  }
-  let startedAtMs: number | null = null;
-  let messageKey = "unknown";
-  try {
     const storageMode = await (readStorageMode || readTelegramStorageMode)(
       env.TELEGRAM_DB,
     );
@@ -149,18 +119,6 @@ export async function handleTelegramQueueMessage(
       return;
     }
     startedAtMs = now();
-    let payload: TelegramTaskPayload;
-    try {
-      payload = normalizeTaskPayload(message.body);
-    } catch (error) {
-      if (!(error instanceof TypeError)) throw error;
-      ackQueueMessage(message, {
-        entry: { event: "telegram_queue_invalid_message" },
-        level: "error",
-        logger,
-      });
-      return;
-    }
     messageKey = payload.messageKey;
     const engine = createEngine({
       repository: createRepository
@@ -173,23 +131,17 @@ export async function handleTelegramQueueMessage(
       logger,
       localRetryBarrier: createTelegramLocalRetryBarrier(),
     });
+    const {
+      schemaVersion: _schemaVersion,
+      dataEpoch: _dataEpoch,
+      revision,
+      generation,
+      ...task
+    } = payload;
     const result: TelegramEngineResult = await engine.reconcile({
-      messageKey: payload.messageKey,
-      requestedRevision: payload.revision,
-      requestedGeneration: payload.generation,
-      taskKind: payload.taskKind,
-      retrySequence: payload.retrySequence,
-      retryStartedAtMs: payload.retryStartedAtMs,
-      retryDeadlineAtMs: payload.retryDeadlineAtMs,
-      retryAtMs: payload.retryAtMs,
-      safeRejectedAttemptId: payload.safeRejectedAttemptId,
-      pendingDeleteId: payload.pendingDeleteId,
-      retryProofLeaseOwner: payload.retryProofLeaseOwner,
-      proofTaskKind: payload.proofTaskKind,
-      barrierProofOwner: payload.barrierProofOwner,
-      barrierRetryNotBeforeMs: payload.barrierRetryNotBeforeMs,
-      apiGateReclaimOwner: payload.apiGateReclaimOwner,
-      apiGateSettleOwner: payload.apiGateSettleOwner,
+      ...task,
+      requestedRevision: revision,
+      requestedGeneration: generation,
     });
     if (result.status === "retryable" && !result.scheduled) {
       throw new Error("telegram-retry-not-scheduled");

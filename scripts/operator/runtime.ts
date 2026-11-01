@@ -28,6 +28,26 @@ const PROFILE_DATABASE = "mons-link-profiles";
 const ROOT = resolve(import.meta.dirname, "../..");
 
 const MAX_FILE_BYTES = 64 * 1024 * 1024;
+const MAX_PRIVATE_FILE_BYTES = 128 * 1024 * 1024;
+type PrivateJsonOptions = { maximumBytes?: number };
+
+function privateJsonMaximumBytes(options: PrivateJsonOptions): number {
+  const maximumBytes =
+    options.maximumBytes === undefined ? MAX_FILE_BYTES : options.maximumBytes;
+  if (
+    !Number.isSafeInteger(maximumBytes) ||
+    maximumBytes <= 0 ||
+    maximumBytes > MAX_PRIVATE_FILE_BYTES
+  )
+    throw new Error("invalid-private-artifact-size-limit");
+  return maximumBytes;
+}
+
+function fileSizeLimit(maximumBytes: number): string {
+  return maximumBytes % (1024 * 1024) === 0
+    ? `${maximumBytes / (1024 * 1024)} MiB`
+    : `${maximumBytes} bytes`;
+}
 
 const VERSION_PATTERN =
   /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i;
@@ -58,6 +78,16 @@ function canonicalJson(value: unknown): string {
     if (Array.isArray(entry)) return entry.map(visit);
     const object = record(entry);
     if (!object) throw new Error("invalid-json-value");
+    const real = object.value;
+    if (
+      Object.keys(object).length === 2 &&
+      Object.hasOwn(object, "kind") &&
+      Object.hasOwn(object, "value") &&
+      object.kind === "real" &&
+      typeof real === "number" &&
+      Number.isFinite(real)
+    )
+      return { kind: "real", value: real };
     return Object.fromEntries(
       Object.keys(object)
         .sort()
@@ -99,7 +129,11 @@ function privateDirectory(directory: string): string {
   return real;
 }
 
-function readPrivateJson(path: string): unknown {
+function readPrivateJson(
+  path: string,
+  options: PrivateJsonOptions = {},
+): unknown {
+  const maximumBytes = privateJsonMaximumBytes(options);
   const fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW);
   try {
     const stat = fstatSync(fd);
@@ -107,10 +141,10 @@ function readPrivateJson(path: string): unknown {
       !stat.isFile() ||
       (stat.mode & 0o777) !== 0o600 ||
       stat.uid !== process.getuid?.() ||
-      stat.size > MAX_FILE_BYTES
+      stat.size > maximumBytes
     ) {
       throw new Error(
-        "artifact must be a private regular file no larger than 64 MiB",
+        `artifact must be a private regular file no larger than ${fileSizeLimit(maximumBytes)}`,
       );
     }
     if (stat.nlink === 2) {
@@ -144,12 +178,22 @@ function readPrivateJson(path: string): unknown {
   }
 }
 
-function writePrivateImmutable(path: string, value: unknown): void {
+function writePrivateImmutable(
+  path: string,
+  value: unknown,
+  options: PrivateJsonOptions = {},
+): void {
+  const maximumBytes = privateJsonMaximumBytes(options);
   const data = canonicalJson(value) + "\n";
-  if (Buffer.byteLength(data) > MAX_FILE_BYTES)
-    throw new Error("artifact exceeds the 64 MiB limit");
+  if (Buffer.byteLength(data) > maximumBytes)
+    throw new Error(
+      `artifact exceeds the ${fileSizeLimit(maximumBytes)} limit`,
+    );
   if (existsSync(path)) {
-    if (canonicalJson(readPrivateJson(path)) !== canonicalJson(value))
+    if (
+      canonicalJson(readPrivateJson(path, { maximumBytes })) !==
+      canonicalJson(value)
+    )
       throw new Error("immutable artifact conflict");
     return;
   }
@@ -174,7 +218,8 @@ function writePrivateImmutable(path: string, value: unknown): void {
     } catch (error) {
       if (
         !existsSync(path) ||
-        canonicalJson(readPrivateJson(path)) !== canonicalJson(value)
+        canonicalJson(readPrivateJson(path, { maximumBytes })) !==
+          canonicalJson(value)
       )
         throw error;
     }

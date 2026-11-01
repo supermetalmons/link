@@ -1,4 +1,3 @@
-import { sameCanonicalProfileLegacy } from "./retainedRecords.ts";
 import type { CanonicalCommitPlan, CanonicalExpectation } from "./types.ts";
 
 export function validateCanonicalCommitPlan(plan: CanonicalCommitPlan): void {
@@ -117,11 +116,7 @@ export function validateCanonicalCommitPlan(plan: CanonicalCommitPlan): void {
             mutation.profile.mergedAtMs !== null &&
             mutation.redirect.sourceProfileId === sourceProfileId &&
             mutation.redirect.mergedAtMs === mutation.profile.mergedAtMs &&
-            sourceProfileId !== targetProfileId &&
-            sameCanonicalProfileLegacy(
-              mutation.profile.legacyFields,
-              mutation.redirect.sourceLegacyFields,
-            ),
+            sourceProfileId !== targetProfileId,
         );
         requireExpectation(
           has(
@@ -391,7 +386,6 @@ export function validateCanonicalCommitPlan(plan: CanonicalCommitPlan): void {
         break;
       case "update-rating-update":
       case "update-rating-projection":
-      case "patch-rating-projection":
       case "delete-rating-update": {
         const operationId =
           mutation.kind === "delete-rating-update"
@@ -401,9 +395,7 @@ export function validateCanonicalCommitPlan(plan: CanonicalCommitPlan): void {
           has(
             (expectation) =>
               expectation.kind === "rating-update-revision" &&
-              expectation.operationId === operationId &&
-              (mutation.kind !== "patch-rating-projection" ||
-                expectation.revision === mutation.currentRevision),
+              expectation.operationId === operationId,
           ),
         );
         break;
@@ -507,7 +499,6 @@ export function canonicalTopologyProfileIds(
       case "insert-rating-update":
       case "update-rating-update":
       case "update-rating-projection":
-      case "patch-rating-projection":
       case "delete-rating-update":
       case "insert-wager-settlement":
         break;

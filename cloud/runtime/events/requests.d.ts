@@ -6,5 +6,5 @@ export declare function eventRequestStartsInMinutes(value: unknown): number;
 export declare function eventCreateOptions(value: unknown): {
   validSundayMons: boolean;
   isSundayMons: boolean;
-  telegramAnnouncements: import("../shared/events.js").EventTelegramAnnouncements;
+  telegramAnnouncements: import("../shared/event-types.js").EventTelegramAnnouncements;
 };

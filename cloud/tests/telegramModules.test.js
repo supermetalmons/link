@@ -38,7 +38,10 @@ test("retry policy preserves deadline clamping and rate-limit proof timing", () 
 });
 
 test("task identities stay deterministic and distinguish pending deletes", () => {
+  /** @type {import("../runtime/telegram/taskIdentity").TelegramTaskPayload} */
   const payload = {
+    schemaVersion: 1,
+    dataEpoch: 1,
     messageKey: "automatch:invite-1",
     revision: "revision-1",
     taskKind: "pending-delete",

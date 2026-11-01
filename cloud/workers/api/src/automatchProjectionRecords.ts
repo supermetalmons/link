@@ -1,28 +1,25 @@
-import type { ProfileProjectionRequest } from "../../../runtime/gameSessionChanges.js";
-import type { HistoricalMatchDescriptorWrite } from "../../../runtime/automatchRecords.js";
+import {
+  isAutomatchProfileOutboxRecord,
+  isAutomatchTelegramOutboxRecord,
+  type AutomatchProfileOutboxRecord,
+  type AutomatchTelegramOutboxRecord,
+  type AutomatchTelegramSourceRecord,
+} from "../../../runtime/automatchRecords.js";
 import type { AutomatchOutboxClaimSnapshot } from "./automatchD1/types.ts";
 import type { AutomatchTelegramProjectionTask } from "./telegramProjectionTasks.ts";
-import { isSafeRecordKey } from "./recordKeys.ts";
-import {
-  PROFILE_GAME_PROJECTION_SCHEMA_VERSION,
-  type AutomatchProfileGameProjectionTask,
-} from "./profileGameProjectionTasks.ts";
+import type { AutomatchProfileGameProjectionTask } from "./profileGameProjectionTasks.ts";
 import {
   inviteTelegramFingerprint,
   type InviteDocument,
 } from "@mons/shared/invite-records";
 import {
   buildAutomatchTelegramProjection,
-  retainAutomatchTelegramSource,
   mergeRatingResultFragment,
   type AutomatchTelegramProjection,
 } from "../../../runtime/telegram/projectionCore.js";
 import type { RawGameSessionPort } from "./gameSessionContracts.ts";
 import type { HistoricalMatchDescriptor } from "./historicalMatches.ts";
-import {
-  parseAutomatchProfileGameProjectionOutbox,
-  salvageHistoricalMatchDescriptors,
-} from "./profileGameProjectionOutbox.ts";
+import { parseAutomatchProfileGameProjectionOutbox } from "./profileGameProjectionOutbox.ts";
 import type { RatingUpdateData } from "./ratingContracts.ts";
 import { parseAutomatchTelegramProjectionOutbox } from "./telegramProjectionOutbox.ts";
 
@@ -30,16 +27,13 @@ export type AutomatchTelegramSourceSnapshot = {
   project(invite: InviteDocument | null): AutomatchTelegramProjection | null;
   fingerprint(invite: InviteDocument | null): string;
 };
-
 export type AutomatchTelegramOutboxSnapshot = {
   value: ReturnType<typeof parseAutomatchTelegramProjectionOutbox>;
 };
-
 export type AutomatchProfileOutboxSnapshot = {
   value: ReturnType<typeof parseAutomatchProfileGameProjectionOutbox>;
   matchesCancellationRequest(requestId: string): boolean;
 };
-
 export type AutomatchTelegramRatingResultInput = Pick<
   RatingUpdateData,
   | "telegramDeliveryVersion"
@@ -52,51 +46,34 @@ export type AutomatchTelegramRatingResultInput = Pick<
   | "updateRatingMessage"
   | "completedAtMs"
 >;
-
-function toRecord(value: unknown): Record<string, unknown> | null {
-  return value && typeof value === "object" && !Array.isArray(value)
-    ? (value as Record<string, unknown>)
-    : null;
-}
-
 export function createAutomatchTelegramSourceSnapshot(
   inviteId: string,
-  raw: unknown,
+  source: AutomatchTelegramSourceRecord | null,
 ): AutomatchTelegramSourceSnapshot {
   return {
     project: (inviteData) =>
-      buildAutomatchTelegramProjection({
-        inviteId,
-        source: retainAutomatchTelegramSource(toRecord(raw)),
-        inviteData,
-      }),
-    fingerprint: (invite) => inviteTelegramFingerprint(raw, invite),
+      buildAutomatchTelegramProjection({ inviteId, source, inviteData }),
+    fingerprint: (invite) => inviteTelegramFingerprint(source, invite),
   };
 }
-
 export function createAutomatchTelegramOutboxSnapshot(
-  raw: unknown,
+  source: AutomatchTelegramOutboxRecord | null,
 ): AutomatchTelegramOutboxSnapshot {
-  return { value: parseAutomatchTelegramProjectionOutbox(raw) };
+  return { value: parseAutomatchTelegramProjectionOutbox(source) };
 }
-
 export function createAutomatchProfileOutboxSnapshot(
-  raw: unknown,
+  source: AutomatchProfileOutboxRecord | null,
 ): AutomatchProfileOutboxSnapshot {
   return {
-    value: parseAutomatchProfileGameProjectionOutbox(raw),
-    matchesCancellationRequest(requestId) {
-      const value = toRecord(raw)?.requestId;
-      return (typeof value === "string" ? value.trim() : "") === requestId;
-    },
+    value: parseAutomatchProfileGameProjectionOutbox(source),
+    matchesCancellationRequest: (requestId) =>
+      source?.status === "pending" && source.requestId === requestId,
   };
 }
-
 export type InvalidAutomatchSweepResult =
   | { kind: "changed" }
   | { kind: "removed" }
   | { kind: "repaired"; task: AutomatchProfileGameProjectionTask };
-
 export function createAutomatchProjectionCommands(
   raw: Pick<
     RawGameSessionPort,
@@ -108,116 +85,24 @@ export function createAutomatchProjectionCommands(
   return {
     async repairInvalidAutomatchProfileOutbox(
       inviteId: string,
-      nowMs: number,
-      createRequestId: () => string,
+      _nowMs: number,
+      _createRequestId: () => string,
     ): Promise<InvalidAutomatchSweepResult> {
-      const safeInviteId = isSafeRecordKey(inviteId);
-      const requestId = safeInviteId ? createRequestId() : "";
-      const result = await raw.transactAutomatchProfileOutbox(
-        inviteId,
-        (current) => {
-          const record = toRecord(current);
-          if (
-            current === null ||
-            current === undefined ||
-            (record &&
-              parseAutomatchProfileGameProjectionOutbox(current) &&
-              isSafeRecordKey(inviteId))
-          ) {
-            return { commit: false, decision: "changed" };
-          }
-          if (!safeInviteId) {
-            return { value: null, decision: "removed-invalid" };
-          }
-          const sourceUpdatedAtMs = record?.sourceUpdatedAtMs;
-          const historicalMatches = salvageHistoricalMatchDescriptors(current);
-          return {
-            value: {
-              schemaVersion: PROFILE_GAME_PROJECTION_SCHEMA_VERSION,
-              status: "pending",
-              requestId,
-              reason:
-                typeof record?.reason === "string" && record.reason.trim()
-                  ? record.reason.trim()
-                  : "automatch-queue",
-              sourceUpdatedAtMs:
-                typeof sourceUpdatedAtMs === "number" &&
-                Number.isFinite(sourceUpdatedAtMs) &&
-                sourceUpdatedAtMs >= 0
-                  ? Math.floor(sourceUpdatedAtMs)
-                  : nowMs,
-              lastQueuedAtMs: nowMs,
-              ...(historicalMatches.length > 0
-                ? {
-                    historicalMatches: Object.fromEntries(
-                      historicalMatches.map((descriptor) => [
-                        descriptor.matchId,
-                        {
-                          finalizedAtMs: descriptor.finalizedAtMs,
-                          guestPlayerId: descriptor.guestPlayerId,
-                          hostPlayerId: descriptor.hostPlayerId,
-                          source: descriptor.source,
-                          ...(descriptor.retryNotBeforeMs === undefined
-                            ? {}
-                            : {
-                                retryNotBeforeMs: descriptor.retryNotBeforeMs,
-                              }),
-                        },
-                      ]),
-                    ),
-                  }
-                : {}),
-            } satisfies ProfileProjectionRequest & {
-              historicalMatches?: Record<
-                string,
-                HistoricalMatchDescriptorWrite
-              >;
-            },
-            decision: "repaired-invalid",
-          };
-        },
-      );
-      if (!result.committed) {
-        return { kind: "changed" };
-      }
-      return safeInviteId
-        ? {
-            kind: "repaired",
-            task: {
-              kind: "automatch-profile-game-projection",
-              inviteId,
-              requestId,
-            },
-          }
-        : { kind: "removed" };
+      await raw.transactAutomatchProfileOutbox(inviteId, (current) => {
+        if (current !== null && !isAutomatchProfileOutboxRecord(current))
+          throw new Error("invalid-canonical-profile-outbox");
+        return { commit: false, decision: "changed" };
+      });
+      return { kind: "changed" };
     },
     async repairInvalidAutomatchTelegramOutbox(
       inviteId: string,
-      nowMs: number,
+      _nowMs: number,
     ): Promise<void> {
       await raw.transactAutomatchTelegramOutbox(inviteId, (current) => {
-        const record = toRecord(current);
-        const updatedAtMs = record?.updatedAtMs;
-        if (
-          !record ||
-          (parseAutomatchTelegramProjectionOutbox(current) &&
-            isSafeRecordKey(inviteId)) ||
-          typeof updatedAtMs !== "number" ||
-          !Number.isFinite(updatedAtMs) ||
-          updatedAtMs > nowMs
-        ) {
-          return { commit: false, decision: "changed" };
-        }
-        return {
-          value: {
-            ...record,
-            status: "dead",
-            reason: "invalid-record",
-            updatedAtMs: null,
-            deadAtMs: nowMs,
-          },
-          decision: "dead",
-        };
+        if (current !== null && !isAutomatchTelegramOutboxRecord(current))
+          throw new Error("invalid-canonical-telegram-outbox");
+        return { commit: false, decision: "changed" };
       });
     },
     async mergeAutomatchTelegramRatingResult(
@@ -225,22 +110,19 @@ export function createAutomatchProjectionCommands(
       update: AutomatchTelegramRatingResultInput,
       signal?: AbortSignal,
     ): Promise<"inserted" | "duplicate" | "skipped"> {
-      let mergeReason: "inserted" | "duplicate" | "skipped" = "skipped";
+      let reason: "inserted" | "duplicate" | "skipped" = "skipped";
       await raw.transactAutomatchTelegramSource(
         inviteId,
         (source) => {
-          const merged = mergeRatingResultFragment(
-            retainAutomatchTelegramSource(source),
-            update,
-          );
-          mergeReason = merged.reason;
-          return merged.changed
-            ? { value: merged.source, decision: merged.reason }
-            : { commit: false, decision: merged.reason };
+          const result = mergeRatingResultFragment(source, update);
+          reason = result.reason;
+          return result.changed
+            ? { value: result.source, decision: reason }
+            : { commit: false, decision: reason };
         },
         signal,
       );
-      return mergeReason;
+      return reason;
     },
     async markAutomatchTelegramOutboxDead(
       inviteId: string,
@@ -251,22 +133,20 @@ export function createAutomatchProjectionCommands(
     ): Promise<boolean> {
       const result = await raw.transactAutomatchTelegramOutbox(
         inviteId,
-        (current) => {
-          const record = toRecord(current);
-          if (record?.requestId !== requestId) {
-            return { commit: false, decision: "stale" };
-          }
-          return {
-            value: {
-              ...record,
-              status: "dead",
-              reason,
-              updatedAtMs: null,
-              deadAtMs: now(),
-            },
-            decision: "dead",
-          };
-        },
+        (current) =>
+          current?.status === "pending" && current.requestId === requestId
+            ? {
+                value: {
+                  schemaVersion: 2,
+                  status: "dead",
+                  requestId,
+                  reason,
+                  updatedAtMs: null,
+                  deadAtMs: now(),
+                },
+                decision: "dead",
+              }
+            : { commit: false, decision: "stale" },
         signal,
       );
       return result.committed;
@@ -281,42 +161,28 @@ export function createAutomatchProjectionCommands(
       const result = await raw.transactAutomatchProfileOutbox(
         inviteId,
         (current) => {
-          const record = toRecord(current);
-          const outbox = parseAutomatchProfileGameProjectionOutbox(current);
-          if (!record || !outbox || outbox.requestId !== requestId) {
+          if (current?.status !== "pending" || current.requestId !== requestId)
             return { commit: false, decision: "superseded" };
-          }
-          const historicalMatches = {
-            ...(toRecord(record.historicalMatches) || {}),
-          };
-          const stored = outbox.historicalMatches?.find(
-            ({ matchId }) => matchId === expected.matchId,
-          );
+          const stored = current.historicalMatches[expected.matchId];
           if (
             !stored ||
             stored.finalizedAtMs !== expected.finalizedAtMs ||
             stored.hostPlayerId !== expected.hostPlayerId ||
             stored.guestPlayerId !== expected.guestPlayerId ||
             stored.source !== expected.source ||
-            stored.retryNotBeforeMs !== expected.retryNotBeforeMs
-          ) {
+            stored.retryNotBeforeMs !== (expected.retryNotBeforeMs ?? null)
+          )
             return { commit: false, decision: "changed" };
-          }
+          const historicalMatches = { ...current.historicalMatches };
           if (retryNotBeforeMs === undefined)
             delete historicalMatches[expected.matchId];
           else
             historicalMatches[expected.matchId] = {
-              ...toRecord(historicalMatches[expected.matchId]),
+              ...stored,
               retryNotBeforeMs,
             };
-          const next = { ...record };
-          if (Object.keys(historicalMatches).length > 0) {
-            next.historicalMatches = historicalMatches;
-          } else {
-            delete next.historicalMatches;
-          }
           return {
-            value: next,
+            value: { ...current, historicalMatches },
             decision: retryNotBeforeMs === undefined ? "settled" : "deferred",
           };
         },
@@ -326,7 +192,6 @@ export function createAutomatchProjectionCommands(
     },
   };
 }
-
 export type AutomatchProjectionCommands = ReturnType<
   typeof createAutomatchProjectionCommands
 >;
@@ -342,31 +207,36 @@ export type AutomatchProfileRecoveryEntry =
   | { inviteId: string; kind: "invalid" };
 
 export function readAutomatchProfileRecoveryEntries(
-  value: unknown,
+  value: Record<string, AutomatchProfileOutboxRecord | null> | null,
   snapshots?: ReadonlyMap<
     string,
     AutomatchOutboxClaimSnapshot<"profileGameProjectionOutbox/automatch">
   >,
 ): AutomatchProfileRecoveryEntry[] {
-  const records = toRecord(value) || {};
-  return Object.entries(records).map(([inviteId, raw]) => {
-    const outbox = parseAutomatchProfileGameProjectionOutbox(raw);
-    const snapshot = snapshots?.get(inviteId);
-    return outbox && isSafeRecordKey(inviteId)
-      ? {
-          kind: "candidate",
-          value: {
-            ...(snapshot ? { snapshot } : {}),
-            lastQueuedAtMs: outbox.lastQueuedAtMs,
-            task: {
-              kind: "automatch-profile-game-projection",
-              inviteId,
-              requestId: outbox.requestId,
+  const records = value ?? {};
+  return Object.entries(records).flatMap(
+    ([inviteId, raw]): AutomatchProfileRecoveryEntry[] => {
+      if (raw === null || raw.status !== "pending") return [];
+      const outbox = parseAutomatchProfileGameProjectionOutbox(raw);
+      const snapshot = snapshots?.get(inviteId);
+      return outbox
+        ? [
+            {
+              kind: "candidate",
+              value: {
+                ...(snapshot ? { snapshot } : {}),
+                lastQueuedAtMs: outbox.lastQueuedAtMs,
+                task: {
+                  kind: "automatch-profile-game-projection",
+                  inviteId,
+                  requestId: outbox.requestId,
+                },
+              },
             },
-          },
-        }
-      : { inviteId, kind: "invalid" };
-  });
+          ]
+        : [{ inviteId, kind: "invalid" }];
+    },
+  );
 }
 
 export type AutomatchTelegramRecoveryCandidate = {
@@ -380,18 +250,19 @@ export type AutomatchTelegramRecoveryEntry =
   | { inviteId: string; kind: "invalid" };
 
 export function readAutomatchTelegramRecoveryEntries(
-  value: unknown,
+  value: Record<string, AutomatchTelegramOutboxRecord | null> | null,
   snapshots?: ReadonlyMap<
     string,
     AutomatchOutboxClaimSnapshot<"telegramProjectionOutbox/automatch">
   >,
 ): AutomatchTelegramRecoveryEntry[] {
-  const records = toRecord(value) || {};
+  const records = value ?? {};
   return Object.entries(records).flatMap(([inviteId, raw]) => {
+    if (raw === null || raw.status !== "pending") return [];
     const outbox = parseAutomatchTelegramProjectionOutbox(raw);
     const snapshot = snapshots?.get(inviteId);
     return [
-      outbox && isSafeRecordKey(inviteId)
+      outbox
         ? {
             kind: "candidate" as const,
             value: {

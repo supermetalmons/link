@@ -1,8 +1,14 @@
+import type {
+  AutomatchTelegramSourceRecord,
+  AutomatchTelegramOutboxRecord,
+  AutomatchProfileOutboxRecord,
+} from "../../../runtime/automatchRecords.js";
 import type { TransactionDecision } from "./repositoryContracts.ts";
-import type { AutomatchD1StoreOptions } from "./automatchD1/types.ts";
+import type { AutomatchD1StoreOptions } from "./automatchD1/options.ts";
 import { createAutomatchReads } from "./automatchD1/reads.ts";
 import { createAutomatchMutations } from "./automatchD1/mutations.ts";
 import { createAutomatchProjectionOutboxes } from "./automatchD1/projectionOutboxes.ts";
+export type { AutomatchD1StoreOptions } from "./automatchD1/options.ts";
 
 export {
   AUTOMATCH_RECORD_TABLES,
@@ -13,12 +19,10 @@ export {
   type AutomatchRuntimeControl,
   type AutomatchWriteAdmission,
   type RecordRow,
-  type AutomatchD1StoreOptions,
 } from "./automatchD1/types.ts";
 export {
   decodeSnapshot,
   isAutomatchRevisionConflict,
-  resolveAutomatchServerValues,
 } from "./automatchD1/codec.ts";
 export {
   prepareAutomatchRuntimeControlRead,
@@ -51,12 +55,15 @@ export function createAutomatchD1Store(
     buildWriteGuardStatements,
     buildRevisionGuardStatements,
     buildCommitStatements,
-    buildRetainedCommitStatements,
     commit,
     prepareChanges,
     transactRecord,
     expireReceipts,
-  } = createAutomatchMutations(db, { now, writeGuards }, reads);
+  } = createAutomatchMutations(
+    db,
+    { now, ...(writeGuards === undefined ? {} : { writeGuards }) },
+    reads,
+  );
   return {
     ...createAutomatchProjectionOutboxes(db, {
       read,
@@ -77,7 +84,9 @@ export function createAutomatchD1Store(
     ) => (await read("telegramAutomatches", inviteId, signal)).value,
     transactAutomatchTelegramSource: (
       inviteId: string,
-      update: (value: unknown) => TransactionDecision<unknown>,
+      update: (
+        value: AutomatchTelegramSourceRecord | null,
+      ) => TransactionDecision<AutomatchTelegramSourceRecord>,
       signal?: AbortSignal,
     ) => transactRecord("telegramAutomatches", inviteId, update, signal),
     readAutomatchTelegramOutbox: async (
@@ -88,7 +97,9 @@ export function createAutomatchD1Store(
         .value,
     transactAutomatchTelegramOutbox: (
       inviteId: string,
-      update: (value: unknown) => TransactionDecision<unknown>,
+      update: (
+        value: AutomatchTelegramOutboxRecord | null,
+      ) => TransactionDecision<AutomatchTelegramOutboxRecord>,
       signal?: AbortSignal,
     ) =>
       transactRecord(
@@ -107,7 +118,9 @@ export function createAutomatchD1Store(
         .value,
     transactAutomatchProfileOutbox: (
       inviteId: string,
-      update: (value: unknown) => TransactionDecision<unknown>,
+      update: (
+        value: AutomatchProfileOutboxRecord | null,
+      ) => TransactionDecision<AutomatchProfileOutboxRecord>,
       signal?: AbortSignal,
     ) =>
       transactRecord(
@@ -123,7 +136,6 @@ export function createAutomatchD1Store(
     listEntriesByLogins,
     buildRevisionGuardStatements,
     buildCommitStatements,
-    buildRetainedCommitStatements,
     commit,
     expireReceipts,
   };

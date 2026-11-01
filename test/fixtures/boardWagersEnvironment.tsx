@@ -1,18 +1,34 @@
+import type { MatchWagerState } from "../../src/connection/connectionModels";
+import type {
+  WagerRenderState,
+  WagerSlotLayoutMap,
+} from "../../src/game/boardWagerModels";
+import type { AvailableMaterialsSnapshot } from "../../src/services/availableMaterials";
+import { requireValue } from "./browserAssertions";
+type WagerSubscriber = (state: MatchWagerState | null) => void;
+type SquareSubscriber = Parameters<
+  typeof import("../../src/game/gameController").subscribeToDisplayedBoardSquareTypes
+>[0];
+type OutsideHandler = NonNullable<
+  Parameters<
+    typeof import("../../src/ui/controls/bottomControlsPort").setWagerPanelOutsideTapHandler
+  >[0]
+>;
 import { useSyncExternalStore } from "react";
 import { wagerSlotLayoutsEqual } from "../../src/game/boardWagerModels";
 export const environment = {
   calls: [] as string[],
   botStrengthActivations: 0,
   boardPatternRenders: 0,
-  subscribers: new Set<Function>(),
-  watchSubscribers: new Set<Function>(),
-  styleSubscribers: new Set<Function>(),
-  materialSubscribers: new Set<Function>(),
-  squareSubscribers: new Set<Function>(),
-  transient: null as Function | null,
-  render: null as Function | null,
-  layouts: null as any,
-  replay: null as Function | null,
+  subscribers: new Set<WagerSubscriber>(),
+  watchSubscribers: new Set<(value: boolean) => void>(),
+  styleSubscribers: new Set<() => void>(),
+  materialSubscribers: new Set<() => void>(),
+  squareSubscribers: new Set<SquareSubscriber>(),
+  transient: null as ((fadeOutVideos?: boolean) => void) | null,
+  render: null as ((state: WagerRenderState) => void) | null,
+  layouts: null as WagerSlotLayoutMap | null,
+  replay: null as (() => void) | null,
   requestedLayoutRevision: 0,
   committedLayoutRevision: -1,
   layoutCalls: [] as {
@@ -26,16 +42,17 @@ export const environment = {
     committed: number;
     hasLayout: boolean;
   }[],
-  outside: null as Function | null,
+  outside: null as OutsideHandler | null,
   visible: () => false,
   style: "grid",
   mobile: new URLSearchParams(location.search).has("mobile"),
-  state: null as any,
+  state: null as MatchWagerState | null,
   snapshotConfirmed: true,
   balance: {
-    availableMaterials: { obsidian: 50, gold: 50 },
+    availableMaterials: { dust: 50, slime: 0, gum: 0, metal: 50, ice: 0 },
     frozenMaterialsStatus: "ready",
-  },
+    hasConfirmedSnapshot: true,
+  } as AvailableMaterialsSnapshot,
 };
 export const materialImage = (gold = false) =>
   "data:image/svg+xml," +
@@ -44,7 +61,7 @@ export const materialImage = (gold = false) =>
       (gold ? "#dba436" : "#79589f") +
       '" stroke="#242138" stroke-width="2"/><path d="m8 12 14 5 13-4M22 17v20M22 17 22 3" fill="none" stroke="#b9aac9" stroke-width="2"/></svg>',
   );
-const subscribe = (set: Set<Function>, callback: Function) => {
+const subscribe = <Callback,>(set: Set<Callback>, callback: Callback) => {
   set.add(callback);
   return () => set.delete(callback);
 };
@@ -53,13 +70,13 @@ export const setWatchOnly = (value: boolean) => {
   isWatchOnly = value;
   environment.watchSubscribers.forEach((callback) => callback(value));
 };
-export const subscribeToWatchOnly = (cb: Function) => {
+export const subscribeToWatchOnly = (cb: (value: boolean) => void) => {
   const unsubscribe = subscribe(environment.watchSubscribers, cb);
   cb(isWatchOnly);
   return unsubscribe;
 };
 export const getCurrentDisplayedBoardSquareTypes = () => null;
-export const subscribeToDisplayedBoardSquareTypes = (cb: Function) => {
+export const subscribeToDisplayedBoardSquareTypes = (cb: SquareSubscriber) => {
   const unsubscribe = subscribe(environment.squareSubscribers, cb);
   cb(getCurrentDisplayedBoardSquareTypes());
   return unsubscribe;
@@ -70,7 +87,9 @@ export const didClickBotStrengthControlButton = () => {
 export { WAGER_WIN_PILE_SCALE } from "../../src/game/boardWagerModels";
 export const playerSideMetadata = { uid: "p" };
 export const opponentSideMetadata = { uid: "o" };
-export const setWagerRenderHandler = (callback: Function | null) => {
+export const setWagerRenderHandler = (
+  callback: ((state: WagerRenderState) => void) | null,
+) => {
   environment.render = callback;
   if (callback) {
     environment.renderBindings.push({
@@ -81,7 +100,10 @@ export const setWagerRenderHandler = (callback: Function | null) => {
     environment.replay?.();
   }
 };
-export const setWagerSlotLayouts = (layouts: any, revision?: number) => {
+export const setWagerSlotLayouts = (
+  layouts: WagerSlotLayoutMap | null,
+  revision?: number,
+) => {
   const accepted = !layouts || revision === environment.requestedLayoutRevision;
   environment.layoutCalls.push({
     revision,
@@ -89,7 +111,7 @@ export const setWagerSlotLayouts = (layouts: any, revision?: number) => {
     binding: !!environment.render,
   });
   if (!accepted) return;
-  environment.committedLayoutRevision = layouts ? revision! : -1;
+  environment.committedLayoutRevision = layouts ? requireValue(revision) : -1;
   const changed = !wagerSlotLayoutsEqual(environment.layouts, layouts);
   environment.layouts = layouts;
   if (layouts && changed) environment.replay?.();
@@ -106,13 +128,13 @@ export const connection = Object.fromEntries(
     ],
   ),
 );
-export const subscribeToWagerState = (callback: Function) => {
+export const subscribeToWagerState = (callback: WagerSubscriber) => {
   const unsubscribe = subscribe(environment.subscribers, callback);
   callback(environment.state);
   return unsubscribe;
 };
 export const hasConfirmedWagerSnapshot = () => environment.snapshotConfirmed;
-const materialSubscribe = (cb: Function) =>
+const materialSubscribe = (cb: () => void) =>
   subscribe(environment.materialSubscribers, cb);
 export const useAvailableMaterials = () =>
   useSyncExternalStore(materialSubscribe, () => environment.balance);
@@ -130,7 +152,7 @@ export const getCurrentColorSet = () => ({
 export const isCustomPictureBoardEnabled = () =>
   environment.style === "pangchiu";
 export const isPangchiuBoard = isCustomPictureBoardEnabled;
-export const subscribeToBoardColorSetChanges = (cb: Function) =>
+export const subscribeToBoardColorSetChanges = (cb: () => void) =>
   subscribe(environment.styleSubscribers, cb);
 export const getImageResource = () => ({
   load: async () => materialImage(),
@@ -154,13 +176,17 @@ export const setRainbowAuraMask = (inner: HTMLElement, url: string) => {
 export const showRainbowAura = (background: HTMLElement) => {
   background.dataset.visible = "true";
 };
-export const registerBoardTransientUiHandler = (callback: Function) => {
+export const registerBoardTransientUiHandler = (
+  callback: (fadeOutVideos?: boolean) => void,
+) => {
   environment.transient = callback;
   return () => {
     environment.transient = null;
   };
 };
-export const setWagerPanelOutsideTapHandler = (callback: Function | null) => {
+export const setWagerPanelOutsideTapHandler = (
+  callback: OutsideHandler | null,
+) => {
   environment.outside = callback;
 };
 export const setWagerPanelVisibilityChecker = (callback: () => boolean) => {

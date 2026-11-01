@@ -1,9 +1,18 @@
+import {
+  withMonSelection,
+  withStickerSelection,
+  isAura,
+  type EmojiId,
+  type StickerMap,
+} from "@mons/shared/appearance";
+import type { Aura } from "@mons/shared/appearance";
 import { emojis, swagpackStart } from "../content/emojis";
 import { storage } from "../utils/storage";
 import type { PlayerProfile } from "../connection/connectionModels";
 import {
   MonType,
   getMonsIndexes,
+  getMonsSelection,
   royalAguapwoshiDrainerIndex,
 } from "../utils/namedMons";
 import {
@@ -25,7 +34,6 @@ import {
   getShinyCardUndoEntry,
   getShinyCardUndoUpdateSource,
   isInventoryEmojiId,
-  parseStickerMap,
   type ShinyCardEdit,
   type ShinyCardUndoEntry,
   type ShinyCardUpdateSource,
@@ -57,21 +65,17 @@ const getOwnSession = (): ShinyCardSession | null =>
     ? activeSession
     : null;
 
-const getStoredOwnStickers = (): Record<string, string> =>
-  parseStickerMap(storage.getCardStickers(""));
+const getStoredOwnStickers = (): StickerMap => storage.getCardStickers({});
 
 const isInventoryOnlyEmojiId = (
-  emojiId: string | number | undefined,
+  emojiId: EmojiId | null | undefined,
 ): boolean => {
   return isInventoryEmojiId(emojiId, swagpackStart);
 };
 
 export const getActiveInventoryItemSelection =
   (): ActiveInventoryItemSelection => {
-    const storedEmojiId = Number.parseInt(
-      String(storage.getPlayerEmojiId("")),
-      10,
-    );
+    const storedEmojiId = storage.getPlayerEmojiId(1);
     const specialIds = new Set<number>();
 
     if (
@@ -186,8 +190,8 @@ function updateContent(
       updateShinyCardProfileCounter(newId);
       break;
     case "emojiAndAura": {
-      const nextEmojiId = newId?.emojiId;
-      const nextAura = newId?.aura ?? "";
+      const nextEmojiId = newId.emojiId;
+      const nextAura = newId.aura;
       if (
         source !== "inventory" &&
         (isInventoryOnlyEmojiId(nextEmojiId) || nextAura === "rainbow")
@@ -223,11 +227,13 @@ function updateContent(
       ) {
         return;
       }
-      const ownMonsIndexes = getMonsIndexes(false, null);
-      ownMonsIndexes[CARD_MONS[contentType].index] = newId;
-      const monsIndexesString = ownMonsIndexes.join(",");
-      storage.setProfileMons(monsIndexesString);
-      updateShinyCardProfileMons(monsIndexesString);
+      const selection = withMonSelection(
+        getMonsSelection(false, null),
+        contentType,
+        newId,
+      );
+      storage.setProfileMons(selection);
+      updateShinyCardProfileMons(selection);
       break;
     }
     case "big-mon-top-right":
@@ -245,12 +251,13 @@ function updateContent(
       ) {
         return;
       }
-      const updatedStickers = getStoredOwnStickers();
-      if (newId) updatedStickers[contentType] = newId;
-      else delete updatedStickers[contentType];
-      const currentJson = JSON.stringify(updatedStickers);
-      storage.setCardStickers(currentJson);
-      updateShinyCardStickers(currentJson);
+      const updatedStickers = withStickerSelection(
+        getStoredOwnStickers(),
+        contentType,
+        newId,
+      );
+      storage.setCardStickers(updatedStickers);
+      updateShinyCardStickers(updatedStickers);
       break;
     }
     default: {
@@ -295,9 +302,7 @@ export function setOwnershipVerifiedSpecialItem(id: number) {
       if (royalAguapwoshiDrainerIndex < 0) {
         break;
       }
-      const ownDrainerIndex = getMonsIndexes(false, null)[
-        CARD_MONS[MonType.DRAINER].index
-      ];
+      const ownDrainerIndex = getMonsSelection(false, null).drainer;
       updateContent(
         {
           contentType: MonType.DRAINER,
@@ -338,16 +343,16 @@ export function setOwnershipVerifiedSpecialItem(id: number) {
   }
 }
 
-export function setOwnershipVerifiedIdCardEmoji(id: number, aura: string) {
-  if (!isInventoryOnlyEmojiId(id)) {
+export function setOwnershipVerifiedIdCardEmoji(id: number, aura: Aura) {
+  if (!isInventoryOnlyEmojiId(id) || !isAura(aura)) {
     return;
   }
-  const oldEmojiId = storage.getPlayerEmojiId("1");
-  const oldAura = storage.getPlayerEmojiAura("");
+  const oldEmojiId = storage.getPlayerEmojiId(1);
+  const oldAura = storage.getPlayerEmojiAura("none");
   updateContent(
     {
       contentType: "emojiAndAura",
-      value: { emojiId: id, aura: aura === "rainbow" ? "rainbow" : "" },
+      value: { emojiId: id, aura },
       undo: { kind: "record", value: { emojiId: oldEmojiId, aura: oldAura } },
     },
     "inventory",

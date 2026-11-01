@@ -18,7 +18,7 @@ import {
   type WagerReservationRuntime,
 } from "./wagerReservationRuntime.ts";
 
-export const WAGER_SETTLEMENT_QUEUE_NAME = "mons-link-wager-settlement";
+export const WAGER_SETTLEMENT_QUEUE_NAME = "mons-link-wager-settlement-data1";
 export const WAGER_SETTLEMENT_RETRY_DELAY_SECONDS = 5 * 60;
 
 class WagerSettlementWritesDisabled extends Error {}

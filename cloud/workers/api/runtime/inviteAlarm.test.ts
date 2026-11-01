@@ -1,5 +1,5 @@
 import { env } from "cloudflare:workers";
-import { runInDurableObject } from "cloudflare:test";
+import { runInCanonicalMatchRoom as runInDurableObject } from "./canonicalMatchTestFixture.ts";
 import { afterEach, expect, it } from "vitest";
 import type { InviteReactions } from "../src/inviteReactions.ts";
 import type { InviteAlarmWork } from "../src/inviteAlarmCoordinator.ts";

@@ -159,7 +159,7 @@ const IslandRock = forwardRef<IslandRockHandle, Props>(function IslandRock(
       }
     }
     if (typeof window !== "undefined") {
-      const win = window as any;
+      const win = window;
       if (typeof win.requestIdleCallback === "function") {
         idleHandle = win.requestIdleCallback(() => prepare());
       } else {
@@ -168,7 +168,7 @@ const IslandRock = forwardRef<IslandRockHandle, Props>(function IslandRock(
     }
     return () => {
       if (typeof window === "undefined") return;
-      const win = window as any;
+      const win = window;
       if (idleHandle !== null && typeof win.cancelIdleCallback === "function") {
         win.cancelIdleCallback(idleHandle);
       }
@@ -246,13 +246,13 @@ const IslandRock = forwardRef<IslandRockHandle, Props>(function IslandRock(
     function step(now: number) {
       const t = Math.min(1, (now - start) / duration);
       for (let i = 0; i < parts.length; i++) {
-        update(parts[i], t, i);
+        update(parts[i]!, t, i);
       }
       if (t < 1) {
         requestAnimationFrame(step);
       } else {
         for (let i = 0; i < parts.length; i++) {
-          const el = parts[i];
+          const el = parts[i]!;
           el.remove();
           const done = cleanups[i];
           if (done) done();
@@ -457,7 +457,7 @@ const IslandRock = forwardRef<IslandRockHandle, Props>(function IslandRock(
           "stop-color",
           CRASH_COLOR_PALETTE[
             Math.floor(Math.random() * CRASH_COLOR_PALETTE.length)
-          ],
+          ]!,
         );
         meta.star.setAttribute("points", points.join(" "));
         meta.angle = angle;
@@ -513,7 +513,7 @@ const IslandRock = forwardRef<IslandRockHandle, Props>(function IslandRock(
         src={resolvedSrc}
         alt=""
         draggable={false}
-        $heightPct={heightPct}
+        {...(heightPct === undefined ? {} : { $heightPct: heightPct })}
         $hidden={hideRock}
         onLoad={() => {
           setVisible(true);

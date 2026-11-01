@@ -32,6 +32,7 @@ import {
   type MatchPresentationReadDependencies,
 } from "./matchPresentationAccess.ts";
 import { isSafeRecordKey } from "./recordKeys.ts";
+import { APPLICATION_DATA_SOCKET_PROTOCOL } from "@mons/shared/data-contract";
 import {
   verifySessionRequest,
   type SessionIdentity,
@@ -53,17 +54,25 @@ function readSocketToken(request: Request): string | null {
     REACTION_MAX_MESSAGE_BYTES +
       REACTION_AUTH_PROTOCOL_PREFIX.length +
       REACTION_SOCKET_PROTOCOL.length +
+      APPLICATION_DATA_SOCKET_PROTOCOL.length +
+      2 +
       4
   )
     throw invalid();
   const protocols = protocolHeader
     .split(",")
     .map((protocol) => protocol.trim());
+  if (
+    protocols.filter(
+      (protocol) => protocol === APPLICATION_DATA_SOCKET_PROTOCOL,
+    ).length !== 1
+  )
+    throw unsupported();
   if (!protocols.includes(REACTION_SOCKET_PROTOCOL)) throw unsupported();
   const bearer = protocols.find((protocol) =>
     protocol.startsWith(REACTION_AUTH_PROTOCOL_PREFIX),
   );
-  if (protocols.length !== (bearer ? 2 : 1)) throw invalid();
+  if (protocols.length !== (bearer ? 3 : 2)) throw invalid();
   let protocolToken: string | null = null;
   if (bearer) {
     protocolToken = bearer.slice(REACTION_AUTH_PROTOCOL_PREFIX.length);
@@ -122,7 +131,7 @@ function readRoute(
   const match = url.pathname.match(REACTION_ROUTE_PATTERN);
   let inviteId = "";
   try {
-    inviteId = match ? decodeURIComponent(match[1]) : "";
+    inviteId = match ? decodeURIComponent(match[1]!) : "";
   } catch {
     throw new AuthApiFailure(400, "invalid-argument", "invalid-invite-id");
   }

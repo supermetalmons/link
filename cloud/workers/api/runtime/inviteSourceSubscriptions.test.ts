@@ -1,10 +1,22 @@
-import { createLegacyInviteSourceD1Store as createInviteSourceD1Store } from "../test/legacyInviteSourceFixture.ts";
-import { env } from "cloudflare:workers";
+import { applyCanonicalTestMigrations } from "./canonicalTestMigrations.ts";
 import {
-  applyD1Migrations,
+  subscriptionWagerFixture,
+  publicWagerFixture,
+} from "./wagerSubscriptionFixture.ts";
+import {
+  APPLICATION_DATA_HEADER,
+  APPLICATION_DATA_EPOCH,
+} from "@mons/shared/data-contract";
+import { activateCanonicalApplicationFixture } from "./applicationRoomFixture.ts";
+import {
+  canonicalMatchEnvironment,
+  runInCanonicalMatchRoom,
+  evictCanonicalMatchRoom,
+} from "./canonicalMatchTestFixture.ts";
+import { createLegacyInviteSourceD1Store as createInviteSourceD1Store } from "../test/legacyInviteSourceFixture.ts";
+import { env as rawEnv } from "cloudflare:workers";
+import {
   createExecutionContext,
-  evictDurableObject,
-  runInDurableObject,
   waitOnExecutionContext,
   type D1Migration,
 } from "cloudflare:test";
@@ -19,6 +31,7 @@ import {
 } from "../src/wagerStateD1.ts";
 import { applyRetiredProfileMigrations } from "./profileTestMigrations.ts";
 
+const env = canonicalMatchEnvironment(rawEnv);
 const testEnv = env as Env & {
   TEST_D1_MIGRATIONS: D1Migration[];
   TEST_PROFILE_D1_MIGRATIONS: D1Migration[];
@@ -40,7 +53,11 @@ async function readHttpResponse(
       : handleInviteWagersRoute;
   const response = await handler(
     new Request(`https://api.mons.link/invites/${inviteId}/${channel}`, {
-      headers: { Origin: "https://mons.link", "CF-Connecting-IP": "192.0.2.1" },
+      headers: {
+        [APPLICATION_DATA_HEADER]: String(APPLICATION_DATA_EPOCH),
+        Origin: "https://mons.link",
+        "CF-Connecting-IP": "192.0.2.1",
+      },
     }),
     env,
     ctx,
@@ -77,11 +94,11 @@ async function seedInvite() {
       1,
     ),
   );
-  const wager = {
+  const wager = subscriptionWagerFixture({
     proposals: { "host-login": { material: "dust", count: 2, createdAt: 1 } },
-  };
+  });
   await env.PROFILE_DB.prepare(
-    `INSERT INTO invite_wager_states
+    `INSERT INTO invite_wager_states_canonical
      (invite_id, match_id, wager_json, resolution_marker, revision, updated_at_ms)
      VALUES (?, ?, ?, 0, 1, 1)`,
   )
@@ -89,12 +106,19 @@ async function seedInvite() {
     .run();
   const room = env.INVITE_REACTIONS.getByName(inviteId);
   rooms.push(room);
-  return { inviteId, source, room, wager };
+  return {
+    inviteId,
+    source,
+    room,
+    wager: publicWagerFixture({
+      proposals: { "host-login": { material: "dust", count: 2, createdAt: 1 } },
+    }),
+  };
 }
 
 async function trackReads(room: Room) {
   const reads = { metadata: 0, wagers: 0, failure: null as string | null };
-  await runInDurableObject(room, (instance) => {
+  await runInCanonicalMatchRoom(room, (instance) => {
     const target = instance as unknown as {
       inviteReader: (inviteId: string) => Promise<unknown>;
       wagerReader: (inviteId: string) => Promise<WagerStateSnapshot[]>;
@@ -115,14 +139,14 @@ async function trackReads(room: Room) {
 }
 
 async function storedWagers(room: Room) {
-  return runInDurableObject(room, (_instance, state) =>
+  return runInCanonicalMatchRoom(room, (_instance, state) =>
     state.storage.sql
       .exec<{
         revision: number;
         snapshot_json: string;
         source_fingerprint: string;
       }>(
-        "SELECT revision, snapshot_json, source_fingerprint FROM invite_wagers WHERE singleton = 1",
+        "SELECT revision, snapshot_json, source_fingerprint FROM invite_wagers_canonical WHERE singleton = 1",
       )
       .one(),
   );
@@ -138,6 +162,7 @@ async function openSocket(
   const response = await room.fetch(
     new Request(`https://room.internal/${channel}/socket`, {
       headers: {
+        [APPLICATION_DATA_HEADER]: String(APPLICATION_DATA_EPOCH),
         Upgrade: "websocket",
         "Sec-WebSocket-Protocol":
           channel === "metadata"
@@ -176,7 +201,7 @@ afterEach(async () => {
     rooms
       .splice(0)
       .map((room) =>
-        runInDurableObject(room, (_instance, state) =>
+        runInCanonicalMatchRoom(room, (_instance, state) =>
           state.storage.deleteAlarm(),
         ),
       ),
@@ -194,12 +219,16 @@ afterEach(async () => {
 });
 
 beforeAll(async () => {
-  await applyD1Migrations(env.PROFILE_GAMES_DB, testEnv.TEST_D1_MIGRATIONS);
+  await applyCanonicalTestMigrations(
+    env.PROFILE_GAMES_DB,
+    testEnv.TEST_D1_MIGRATIONS,
+  );
   await applyRetiredProfileMigrations(
     env.PROFILE_DB,
     testEnv.TEST_PROFILE_D1_MIGRATIONS,
     "a".repeat(64),
   );
+  await activateCanonicalApplicationFixture();
   await env.PROFILE_GAMES_DB.batch([
     env.PROFILE_GAMES_DB.prepare(
       "UPDATE automatch_runtime_control SET backend = 'd1', state = 'active' WHERE singleton = 1",
@@ -227,7 +256,10 @@ it("delivers HTTP and socket metadata and wagers from canonical D1 through evict
     first.snapshot.revision,
   );
   const initial = await read();
-  expect(initial.snapshot.hostRematches).toBe("");
+  expect(initial.snapshot.hostRematches).toEqual({
+    state: "open",
+    indices: [],
+  });
   const wagers = await room.readWagers(inviteId);
   if (wagers.status !== "ok") throw new Error("wagers-unavailable");
   expect(wagers.snapshot.wagers).toEqual({ [inviteId]: wager });
@@ -245,7 +277,10 @@ it("delivers HTTP and socket metadata and wagers from canonical D1 through evict
     source.buildCommitStatements(
       await source.preparePatch(
         {
-          [`invites/${inviteId}/hostRematches`]: "1",
+          [`invites/${inviteId}/hostRematches`]: {
+            state: "open",
+            indices: [1],
+          },
         },
         2,
       ),
@@ -254,18 +289,27 @@ it("delivers HTTP and socket metadata and wagers from canonical D1 through evict
   );
   await room.notifyMetadataChanged(inviteId);
   const changed = await read();
-  expect(changed.snapshot.hostRematches).toBe("1");
+  expect(changed.snapshot.hostRematches).toEqual({
+    state: "open",
+    indices: [1],
+  });
   expect(changed.snapshot.revision).toBeGreaterThan(initial.snapshot.revision);
   const nextWagers = await room.readWagers(inviteId);
   if (nextWagers.status !== "ok") throw new Error("wagers-unavailable");
   expect(nextWagers.snapshot).toEqual(wagers.snapshot);
-  const changedWager = {
+  const changedWager = publicWagerFixture({
     proposals: { "host-login": { material: "dust", count: 5, createdAt: 1 } },
-  };
+  });
   await env.PROFILE_DB.prepare(
-    "UPDATE invite_wager_states SET wager_json = ?, revision = 2 WHERE invite_id = ? AND match_id = ?",
+    "UPDATE invite_wager_states_canonical SET wager_json = ?, revision = 2 WHERE invite_id = ? AND match_id = ?",
   )
-    .bind(JSON.stringify(changedWager), inviteId, inviteId)
+    .bind(
+      JSON.stringify(
+        subscriptionWagerFixture({ proposals: changedWager.proposals }),
+      ),
+      inviteId,
+      inviteId,
+    )
     .run();
   await room.notifyWagersChanged(inviteId);
   const changedWagers = await readWagers();
@@ -273,11 +317,14 @@ it("delivers HTTP and socket metadata and wagers from canonical D1 through evict
   expect(changedWagers.snapshot.revision).toBeGreaterThan(
     wagers.snapshot.revision,
   );
-  await evictDurableObject(room);
+  await evictCanonicalMatchRoom(room);
   const recovered = await room.readMetadata(inviteId);
   expect(recovered).toMatchObject({
     status: "ok",
-    snapshot: { hostRematches: "1", revision: changed.snapshot.revision },
+    snapshot: {
+      hostRematches: { state: "open", indices: [1] },
+      revision: changed.snapshot.revision,
+    },
   });
   expect((await readHttp(inviteId, "metadata")).snapshot).toEqual(
     changed.snapshot,
@@ -328,7 +375,10 @@ it("serves and refreshes metadata-only HTTP and sockets without querying wagers"
   );
   await room.notifyMetadataChanged(inviteId);
   const changed = await read();
-  expect(changed.snapshot.hostRematches).toBe("1");
+  expect(changed.snapshot.hostRematches).toEqual({
+    state: "open",
+    indices: [1],
+  });
   expect(changed.snapshot.revision).toBeGreaterThan(first.snapshot.revision);
   expect((await readHttp(inviteId, "metadata")).snapshot).toEqual(
     changed.snapshot,
@@ -376,7 +426,10 @@ it.each(["wager-state-not-activated", "wager-state-corrupt"])(
     const changed = await room.readMetadata(inviteId);
     if (changed.status !== "ok") throw new Error("metadata-unavailable");
     expect((await readMetadata()).snapshot).toEqual(changed.snapshot);
-    expect(changed.snapshot.hostRematches).toBe("1");
+    expect(changed.snapshot.hostRematches).toEqual({
+      state: "open",
+      indices: [1],
+    });
     expect(changed.snapshot.revision).toBeGreaterThan(
       initial.metadata.snapshot.revision,
     );

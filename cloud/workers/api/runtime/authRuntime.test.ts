@@ -1,3 +1,9 @@
+import { activateCanonicalApplicationFixture } from "./applicationRoomFixture.ts";
+import {
+  APPLICATION_DATA_HEADER,
+  APPLICATION_DATA_EPOCH,
+} from "@mons/shared/data-contract";
+import { createDefaultProfileAppearance } from "@mons/shared/appearance";
 import { describe, expect, it } from "vitest";
 import { exports } from "cloudflare:workers";
 import { ParsedMessage } from "@spruceid/siwe-parser";
@@ -27,7 +33,7 @@ const profile: AuthProfileResponse = {
   username: "Mons123",
   linkedMethods: { apple: false, eth: true, sol: true, x: false },
   appleLinked: false,
-  emoji: 1,
+  ...createDefaultProfileAppearance(1),
   opId: `intent:${intentId}`,
 };
 const ctx = { waitUntil: (_promise: Promise<unknown>) => undefined };
@@ -35,7 +41,10 @@ const ctx = { waitUntil: (_promise: Promise<unknown>) => undefined };
 function request(path: string, body: unknown): Request {
   return new Request(`https://api.mons.link${path}`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: {
+      [APPLICATION_DATA_HEADER]: String(APPLICATION_DATA_EPOCH),
+      "Content-Type": "application/json",
+    },
     body: JSON.stringify(body),
   });
 }
@@ -129,7 +138,7 @@ describe("auth runtime primitives", () => {
           nacl.sign.detached(solanaMessage, solana.secretKey),
         ).toString("base64"),
         emoji: 1,
-        aura: null,
+        aura: "none",
       }),
       identity,
       env,
@@ -158,7 +167,7 @@ describe("auth runtime primitives", () => {
         message,
         signature: await wallet.signMessage(message),
         emoji: 1,
-        aura: null,
+        aura: "none",
       }),
       identity,
       env,
@@ -181,6 +190,7 @@ describe("auth runtime primitives", () => {
         JSON.stringify({ keys: [{ ...staleJwk, kid: "stale-key" }] }),
         {
           headers: {
+            [APPLICATION_DATA_HEADER]: String(APPLICATION_DATA_EPOCH),
             "Cache-Control": "public, max-age=3600",
           },
         },
@@ -225,10 +235,12 @@ describe("auth runtime primitives", () => {
   });
 
   it("dispatches the complete mutation route through the production entrypoint", async () => {
+    await activateCanonicalApplicationFixture();
     const preflight = await exports.default.fetch(
       new Request("https://api.mons.link/auth/x/flows/complete", {
         method: "OPTIONS",
         headers: {
+          [APPLICATION_DATA_HEADER]: String(APPLICATION_DATA_EPOCH),
           Origin: "https://mons.link",
           "Access-Control-Request-Headers": "Authorization, Content-Type",
           "Access-Control-Request-Method": "POST",
@@ -240,6 +252,7 @@ describe("auth runtime primitives", () => {
       new Request("https://api.mons.link/auth/x/flows/complete", {
         method: "POST",
         headers: {
+          [APPLICATION_DATA_HEADER]: String(APPLICATION_DATA_EPOCH),
           Origin: "https://mons.link",
           "Content-Type": "application/json",
         },

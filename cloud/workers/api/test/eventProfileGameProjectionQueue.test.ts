@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { prepareEventProfileGameProjection } from "../src/eventProfileGameProjectionProducer.ts";
-import { handleProfileGameProjectionMessage } from "../src/profileGameProjection.ts";
 import { handleProfileGameProjectionMessage as handleQueueMessage } from "../src/profileGameProjection/queue.ts";
 import { createEventProfileGameProjectionState } from "../src/eventProfileGameProjectionState.ts";
 import {
@@ -11,12 +10,25 @@ import {
 } from "../src/profileGameProjectionTasks.ts";
 import worker from "../src/workerHandler.ts";
 import { TELEGRAM_TEST_ENV, withProfileControl } from "./testEnv.ts";
+import { queueEnvelope, parseQueueEnvelope } from "../src/queueEnvelope.ts";
+import { parseProfileGameProjectionTask } from "../src/profileGameProjectionTasks.ts";
 
 const task: EventProfileGameProjectionTask = {
   kind: "event-profile-game-projection",
   eventId: "event-queue-isolation",
   requestId: "request-queue-isolation",
 };
+
+function sentPayload(value: unknown) {
+  const envelope = parseQueueEnvelope(
+    value,
+    "EVENT_PROFILE_GAME_PROJECTION_QUEUE",
+  );
+  assert.ok(envelope);
+  const payload = parseProfileGameProjectionTask(envelope.payload);
+  assert.ok(payload);
+  return payload;
+}
 
 function delivery(body: unknown = task) {
   const outcomes: string[] = [];
@@ -38,10 +50,22 @@ function delivery(body: unknown = task) {
 function batch(
   queue: string,
   message: Message<unknown>,
-): MessageBatch<unknown> {
+): Parameters<typeof worker.queue>[0] {
+  const payload = parseProfileGameProjectionTask(message.body);
+  if (!payload) throw new Error("invalid test queue payload");
   return {
     queue,
-    messages: [message],
+    messages: [
+      {
+        ...message,
+        body: queueEnvelope(
+          queue === EVENT_PROFILE_GAME_PROJECTION_QUEUE_NAME
+            ? "EVENT_PROFILE_GAME_PROJECTION_QUEUE"
+            : "PROFILE_GAME_PROJECTION_QUEUE",
+          payload,
+        ),
+      },
+    ],
     metadata: { metrics: { backlogCount: 0, backlogBytes: 0 } },
     ackAll: () => undefined,
     retryAll: () => undefined,
@@ -119,7 +143,7 @@ test("event producers use the dedicated queue with unchanged task payloads", asy
       EVENT_PROFILE_GAME_PROJECTION_QUEUE: {
         ...TELEGRAM_TEST_ENV.EVENT_PROFILE_GAME_PROJECTION_QUEUE,
         send: async (body) => {
-          sent.push(body);
+          sent.push(sentPayload(body));
           return TELEGRAM_TEST_ENV.EVENT_PROFILE_GAME_PROJECTION_QUEUE.send();
         },
       },
@@ -147,77 +171,14 @@ test("event producers use the dedicated queue with unchanged task payloads", asy
   assert.deepEqual(sent, [task]);
 });
 
-test("legacy event messages acknowledge only after dedicated forwarding succeeds", async () => {
-  const tracked = delivery();
-  const sending = Promise.withResolvers<void>();
-  const release = Promise.withResolvers<void>();
-  const logs: string[] = [];
-  const processing = handleProfileGameProjectionMessage(
-    tracked.message,
-    {
-      ...TELEGRAM_TEST_ENV,
-      EVENT_PROFILE_GAME_PROJECTION_QUEUE: {
-        ...TELEGRAM_TEST_ENV.EVENT_PROFILE_GAME_PROJECTION_QUEUE,
-        send: async (body) => {
-          assert.deepEqual(body, task);
-          sending.resolve();
-          await release.promise;
-          tracked.outcomes.push("sent");
-          return TELEGRAM_TEST_ENV.EVENT_PROFILE_GAME_PROJECTION_QUEUE.send();
-        },
-      },
-    },
-    {
-      forwardEventTasks: true,
-      createStateRepository: () => {
-        throw new Error("forwarding-must-not-read-event-state");
-      },
-      logger: {
-        info: (value) => logs.push(String(value)),
-        error: logger.error,
-      },
-    },
-  );
-  await sending.promise;
-  assert.deepEqual(tracked.outcomes, []);
-  release.resolve();
-  await processing;
-  assert.deepEqual(tracked.outcomes, ["sent", "ack"]);
-  assert.deepEqual(tracked.retries, []);
-  assert.ok(
-    logs.some(
-      (entry) => entry.includes(task.eventId) && entry.includes(task.requestId),
-    ),
-  );
-});
-
-test("legacy forwarding failures retry without acknowledging", async () => {
-  const tracked = delivery();
-  await handleProfileGameProjectionMessage(
-    tracked.message,
-    {
-      ...TELEGRAM_TEST_ENV,
-      EVENT_PROFILE_GAME_PROJECTION_QUEUE: {
-        ...TELEGRAM_TEST_ENV.EVENT_PROFILE_GAME_PROJECTION_QUEUE,
-        send: async () => {
-          throw new Error("queue-unavailable");
-        },
-      },
-    },
-    { forwardEventTasks: true, logger },
-  );
-  assert.deepEqual(tracked.outcomes, ["retry"]);
-  assert.equal(tracked.retries.length, 1);
-});
-
-test("Worker routes legacy events to forwarding and dedicated events to processing", async () => {
+test("Worker rejects misrouted events and processes the dedicated event queue", async () => {
   const sent: unknown[] = [];
   const environment: Env = {
     ...TELEGRAM_TEST_ENV,
     EVENT_PROFILE_GAME_PROJECTION_QUEUE: {
       ...TELEGRAM_TEST_ENV.EVENT_PROFILE_GAME_PROJECTION_QUEUE,
       send: async (body) => {
-        sent.push(body);
+        sent.push(sentPayload(body));
         return TELEGRAM_TEST_ENV.EVENT_PROFILE_GAME_PROJECTION_QUEUE.send();
       },
     },
@@ -228,14 +189,14 @@ test("Worker routes legacy events to forwarding and dedicated events to processi
     environment,
   );
   assert.deepEqual(legacy.outcomes, ["ack"]);
-  assert.deepEqual(sent, [task]);
+  assert.deepEqual(sent, []);
   const dedicated = delivery();
   await worker.queue(
     batch(EVENT_PROFILE_GAME_PROJECTION_QUEUE_NAME, dedicated.message),
     environment,
   );
   assert.deepEqual(dedicated.outcomes, ["ack"]);
-  assert.deepEqual(sent, [task]);
+  assert.deepEqual(sent, []);
 });
 
 test("the dedicated event queue honors frozen profile and automatch controls", async () => {

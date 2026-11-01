@@ -292,7 +292,9 @@ export class WagerClient {
               acc[key] = {
                 material: proposal.material,
                 count: proposal.count,
-                createdAt: proposal.createdAt,
+                ...(proposal.createdAt === undefined
+                  ? {}
+                  : { createdAt: proposal.createdAt }),
               };
             }
             return acc;
@@ -304,10 +306,11 @@ export class WagerClient {
     const agreed = state.agreed ? { ...state.agreed } : undefined;
     const resolved = state.resolved ? { ...state.resolved } : undefined;
     return {
-      proposals,
-      proposedBy,
-      agreed,
-      resolved,
+      ...state,
+      ...(proposals ? { proposals } : {}),
+      ...(proposedBy ? { proposedBy } : {}),
+      ...(agreed ? { agreed } : {}),
+      ...(resolved ? { resolved } : {}),
     };
   }
 
@@ -351,6 +354,8 @@ export class WagerClient {
     requiresSnapshot: boolean,
   ): Promise<T | { ok: false }> {
     const requestedContext = this.activeContext;
+    if (requestedContext && this.wagers?.[requestedContext.matchId]?.blocked)
+      return { ok: false };
     await this.dependencies.ensureAuthenticated();
     if (requestedContext !== this.activeContext) return { ok: false };
     const context = this.dependencies.requireWritableContext(
@@ -362,7 +367,8 @@ export class WagerClient {
       !context ||
       !poller ||
       this.inviteWagersSnapshot?.inviteId !== context.inviteId ||
-      this.wagerSnapshotNeedsReconciliation
+      this.wagerSnapshotNeedsReconciliation ||
+      this.wagers?.[context.matchId]?.blocked
     )
       return { ok: false };
     const boundTokenProvider = this.dependencies.getUserBoundAuthTokenProvider(
@@ -472,9 +478,8 @@ export class WagerClient {
     }
     const winnerId = isWin ? writableContext.actorUid : opponentId;
     const loserId = isWin ? opponentId : writableContext.actorUid;
-    this.setLocalWagerState({
+    const nextState: MatchWagerState = {
       ...state,
-      proposals: undefined,
       resolved: {
         winnerId,
         loserId,
@@ -484,7 +489,9 @@ export class WagerClient {
         resolvedAt: this.dependencies.now(),
         optimistic: true,
       },
-    });
+    };
+    delete nextState.proposals;
+    this.setLocalWagerState(nextState);
     this.optimisticResolvedMatchIds.add(matchId);
     return true;
   }
@@ -526,6 +533,8 @@ export class WagerClient {
       "wagerOutcomeResolve",
     );
     if (!writableContext) return { ok: false };
+    if (this.wagers?.[writableContext.matchId]?.blocked)
+      return { ok: false, reason: "manual-review-required" };
     const opponentId = this.dependencies.getOpponentId(
       writableContext.actorUid,
     );
@@ -737,9 +746,9 @@ export class WagerClient {
           if (!latestState?.resolved) {
             const nextState: MatchWagerState = {
               ...(latestState ?? {}),
-              proposals: undefined,
               agreed,
             };
+            delete nextState.proposals;
             this.setLocalWagerState(nextState);
             const delta = agreed.count - optimisticCount;
             if (delta !== 0) {
@@ -858,9 +867,9 @@ export class WagerClient {
         delete proposals[playerUid];
         const nextState: MatchWagerState = {
           ...(currentState ?? {}),
-          proposals: Object.keys(proposals).length > 0 ? proposals : undefined,
-          proposedBy: currentState?.proposedBy,
+          proposals,
         };
+        if (Object.keys(proposals).length === 0) delete nextState.proposals;
         this.setLocalWagerState(nextState);
         this.dependencies.materialStore.applyFrozenMaterialsDelta({
           [proposal.material]: -proposal.count,
@@ -964,9 +973,9 @@ export class WagerClient {
         delete proposals[opponentUid];
         const nextState: MatchWagerState = {
           ...(currentState ?? {}),
-          proposals: Object.keys(proposals).length > 0 ? proposals : undefined,
-          proposedBy: currentState?.proposedBy,
+          proposals,
         };
+        if (Object.keys(proposals).length === 0) delete nextState.proposals;
         this.setLocalWagerState(nextState);
         optimisticApplied = true;
       }
@@ -1088,10 +1097,9 @@ export class WagerClient {
           };
           const nextState: MatchWagerState = {
             ...(currentState ?? {}),
-            proposals: undefined,
-            proposedBy: currentState?.proposedBy,
             agreed: optimisticAgreement,
           };
+          delete nextState.proposals;
           this.setLocalWagerState(nextState);
           const deltas: Partial<Record<MiningMaterialName, number>> = {};
           if (ownProposal) {

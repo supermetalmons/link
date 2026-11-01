@@ -4,7 +4,7 @@ import type {
 } from "../../../runtime/gameSessionChanges.js";
 import type { GameSessionChange } from "./gameSessionContracts.ts";
 import type { HistoricalMatchDescriptor } from "./historicalMatches.ts";
-import { PROFILE_GAME_PROJECTION_SCHEMA_VERSION } from "./profileGameProjectionTasks.ts";
+import { AUTOMATCH_PROFILE_GAME_PROJECTION_SCHEMA_VERSION } from "./profileGameProjectionTasks.ts";
 
 export function requestAutomatchProfileProjection(input: {
   inviteId: string;
@@ -15,7 +15,7 @@ export function requestAutomatchProfileProjection(input: {
   merge?: boolean;
 }): GameSessionChange[] {
   const value: ProfileProjectionRequest = {
-    schemaVersion: PROFILE_GAME_PROJECTION_SCHEMA_VERSION,
+    schemaVersion: AUTOMATCH_PROFILE_GAME_PROJECTION_SCHEMA_VERSION,
     status: "pending",
     requestId: input.requestId,
     reason:
@@ -24,6 +24,8 @@ export function requestAutomatchProfileProjection(input: {
         : "automatch-queue",
     sourceUpdatedAtMs: input.timestamp,
     lastQueuedAtMs: input.timestamp,
+    historicalMatches: {},
+    archiveRetry: null,
   };
   return input.merge
     ? [
@@ -39,6 +41,7 @@ export function requestAutomatchProfileProjection(input: {
                 guestPlayerId: descriptor.guestPlayerId,
                 hostPlayerId: descriptor.hostPlayerId,
                 source: descriptor.source,
+                retryNotBeforeMs: descriptor.retryNotBeforeMs ?? null,
               },
             ]),
           ),

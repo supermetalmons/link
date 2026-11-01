@@ -12,6 +12,32 @@ exports.deriveLatestMatchId =
   exports.rematchSeriesEnded =
   exports.parseRematchIndices =
     void 0;
+exports.isRematchSeries = isRematchSeries;
+function isRematchSeries(value) {
+  if (value === null || typeof value !== "object" || Array.isArray(value))
+    return false;
+  const row = Object.fromEntries(Object.entries(value));
+  if (
+    Object.keys(row).length !== 2 ||
+    !Object.hasOwn(row, "state") ||
+    !Object.hasOwn(row, "indices") ||
+    (row.state !== "open" && row.state !== "ended") ||
+    !Array.isArray(row.indices)
+  )
+    return false;
+  const indices = row.indices;
+  let previous = 0;
+  for (const index of indices) {
+    if (
+      typeof index !== "number" ||
+      !Number.isSafeInteger(index) ||
+      index <= previous
+    )
+      return false;
+    previous = index;
+  }
+  return true;
+}
 const normalizeString = (value) =>
   typeof value === "string" && value.trim() !== "" ? value.trim() : null;
 const parseCanonicalRematchIndex = (value) => {
@@ -21,35 +47,19 @@ const parseCanonicalRematchIndex = (value) => {
   const parsed = Number(value);
   return Number.isSafeInteger(parsed) ? parsed : null;
 };
-const parseRematchIndices = (rawValue) => {
-  if (typeof rawValue !== "string" || rawValue === "") {
-    return [];
-  }
-  const normalized = rawValue.endsWith("x") ? rawValue.slice(0, -1) : rawValue;
-  if (normalized === "") {
-    return [];
-  }
-  return normalized
-    .split(";")
-    .map(parseCanonicalRematchIndex)
-    .filter((value) => value !== null);
+const parseRematchIndices = (value) => {
+  if (value === null || value === undefined) return [];
+  if (!isRematchSeries(value)) throw new TypeError("invalid-rematch-series");
+  return [...value.indices];
 };
 exports.parseRematchIndices = parseRematchIndices;
-const rematchSeriesEnded = (inviteData) => {
-  if (!inviteData || typeof inviteData !== "object") {
-    return false;
-  }
-  const record = inviteData;
-  const hostRematches =
-    typeof record.hostRematches === "string" ? record.hostRematches : "";
-  const guestRematches =
-    typeof record.guestRematches === "string" ? record.guestRematches : "";
-  return hostRematches.endsWith("x") || guestRematches.endsWith("x");
-};
+const rematchSeriesEnded = (inviteData) =>
+  inviteData?.hostRematches.state === "ended" ||
+  inviteData?.guestRematches.state === "ended";
 exports.rematchSeriesEnded = rematchSeriesEnded;
 const inviteMatchesPlayers = (inviteData, playerId, opponentId) =>
-  !!inviteData &&
-  typeof inviteData === "object" &&
+  inviteData !== null &&
+  inviteData !== undefined &&
   ((inviteData.hostId === playerId && inviteData.guestId === opponentId) ||
     (inviteData.hostId === opponentId && inviteData.guestId === playerId));
 exports.inviteMatchesPlayers = inviteMatchesPlayers;

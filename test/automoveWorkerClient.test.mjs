@@ -1,3 +1,4 @@
+import { required } from "./fixtures/canonicalData.mjs";
 import assert from "node:assert/strict";
 import { registerHooks } from "node:module";
 import test from "node:test";
@@ -26,19 +27,26 @@ registerHooks({
 });
 
 class FakeWorker {
+  /** @type {FakeWorker[]} */
   static instances = [];
 
+  /** @param {string | URL} url @param {WorkerOptions} [options] */
   constructor(url, options) {
     this.url = url;
     this.options = options;
+    /** @type {import("../src/game/automoveWorkerProtocol.ts").WorkerAutomoveRequest[]} */
     this.messages = [];
+    /** @type {((event: MessageEvent<import("../src/game/automoveWorkerProtocol.ts").WorkerAutomoveResponse>) => void) | null} */
     this.onmessage = null;
+    /** @type {((event: { message: string }) => void) | null} */
     this.onerror = null;
+    /** @type {(() => void) | null} */
     this.onmessageerror = null;
     this.terminated = false;
     FakeWorker.instances.push(this);
   }
 
+  /** @param {import("../src/game/automoveWorkerProtocol.ts").WorkerAutomoveRequest} message */
   postMessage(message) {
     this.messages.push(message);
   }
@@ -47,17 +55,21 @@ class FakeWorker {
     this.terminated = true;
   }
 
+  /** @param {import("../src/game/automoveWorkerProtocol.ts").WorkerAutomoveResult} result */
   resolveLast(result) {
-    const request = this.messages.at(-1);
-    this.onmessage?.({
-      data: {
-        type: "result",
-        id: request.id,
-        result,
-      },
-    });
+    const request = required(this.messages.at(-1));
+    this.onmessage?.(
+      new MessageEvent("message", {
+        data: {
+          type: "result",
+          id: request.id,
+          result,
+        },
+      }),
+    );
   }
 
+  /** @param {string} message */
   fail(message) {
     this.onerror?.({ message });
   }
@@ -69,8 +81,9 @@ test("uses module workers, cleans up rejections, and restarts after failure", as
     configurable: true,
     value: FakeWorker,
   });
+  /** @type {unknown[]} */
   const unhandledRejections = [];
-  const handleUnhandledRejection = (reason) => {
+  const handleUnhandledRejection = (/** @type {unknown} */ reason) => {
     unhandledRejections.push(reason);
   };
   process.on("unhandledRejection", handleUnhandledRejection);
@@ -80,7 +93,7 @@ test("uses module workers, cleans up rejections, and restarts after failure", as
       await import("../src/game/automoveWorkerClient.ts");
 
     const firstRequest = requestSmartAutomoveFromWorker("fen-1", "normal");
-    const firstWorker = FakeWorker.instances[0];
+    const firstWorker = required(FakeWorker.instances[0]);
     assert.ok(firstWorker.url instanceof URL);
     assert.deepEqual(firstWorker.options, { type: "module" });
     firstWorker.resolveLast({ kind: "other" });
@@ -94,7 +107,7 @@ test("uses module workers, cleans up rejections, and restarts after failure", as
     assert.equal(firstWorker.terminated, true);
 
     const restartedRequest = requestSmartAutomoveFromWorker("fen-3", "fast");
-    const restartedWorker = FakeWorker.instances[1];
+    const restartedWorker = required(FakeWorker.instances[1]);
     assert.notStrictEqual(restartedWorker, firstWorker);
     restartedWorker.resolveLast({ kind: "other" });
     assert.deepEqual(await restartedRequest, { kind: "other" });
@@ -103,7 +116,7 @@ test("uses module workers, cleans up rejections, and restarts after failure", as
     if (previousWorker) {
       Object.defineProperty(globalThis, "Worker", previousWorker);
     } else {
-      delete globalThis.Worker;
+      Reflect.deleteProperty(globalThis, "Worker");
     }
   }
 });

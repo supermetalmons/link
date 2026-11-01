@@ -98,7 +98,7 @@ test("freeze advances the fence once and reports retained uncertain admissions",
   assert.equal(state.control.storageMode, "frozen");
   assert.equal(state.control.freezeGeneration, 3);
   assert.equal(state.admissions.length, 1);
-  assert.equal(JSON.parse(state.logs[0]).uncertainAdmissions, 1);
+  assert.equal(JSON.parse(state.logs[0]!).uncertainAdmissions, 1);
   manageWagerReservations("freeze", dependencies);
   assert.equal(state.updates, 1);
 });

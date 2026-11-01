@@ -42,6 +42,7 @@ declare const REACTION_AUTH_PROTOCOL_PREFIX = "bearer.";
 declare const FIXED_STICKER_IDS: readonly number[];
 declare const STICKER_ID_WHITELIST: readonly number[];
 declare const isReactionSocketToken: (value: unknown) => value is string;
+export declare const isReaction: (value: unknown) => value is Reaction;
 declare const isInviteReaction: (value: unknown) => value is InviteReaction;
 declare const isInviteReactionForInvite: (
   inviteId: string,

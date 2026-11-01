@@ -1,3 +1,6 @@
+import { canonicalQueuePayloadFixture } from "../test/canonicalQueueFixture.ts";
+import { parseAuthRecoveryTask } from "../src/authRecovery.ts";
+import { materializeProfileFixture as materializeCanonicalProfile } from "../test/profileDataBoundaryFixture.ts";
 import { env } from "cloudflare:workers";
 import type { D1Migration } from "cloudflare:test";
 import {
@@ -13,10 +16,7 @@ import {
   sweepAuthRecoveryJobs,
   type AuthRecoveryTask,
 } from "../src/authRecovery.ts";
-import {
-  commitCanonicalPlan,
-  materializeCanonicalProfile,
-} from "../src/profileCanonicalD1.ts";
+import { commitCanonicalPlan } from "../src/profileCanonicalD1.ts";
 import {
   inspectCanonicalAuthRecoverySweepRow,
   listCanonicalAuthRecoverySweepRows,
@@ -35,7 +35,15 @@ const send =
 const sweepEnv = new Proxy(testEnv, {
   get(target, property, receiver) {
     return property === "AUTH_RECOVERY_QUEUE"
-      ? { send }
+      ? {
+          send: async (body: unknown, options?: QueueSendOptions) => {
+            const task = parseAuthRecoveryTask(
+              canonicalQueuePayloadFixture(body),
+            );
+            if (!task) throw new Error("invalid-auth-task-fixture");
+            return send(task, options);
+          },
+        }
       : Reflect.get(target, property, receiver);
   },
 });
@@ -78,13 +86,13 @@ async function seedJob(
   });
   if (profileId !== originalId) {
     await testEnv.PROFILE_DB.prepare(
-      "UPDATE profile_records SET profile_id = ? WHERE profile_id = ?",
+      "UPDATE profile_records_canonical SET profile_id = ?, payload_json = json_set(payload_json, '$.id', ?) WHERE profile_id = ?",
     )
-      .bind(profileId, originalId)
+      .bind(profileId, profileId, originalId)
       .run();
   }
   await testEnv.PROFILE_DB.prepare(
-    `INSERT INTO profile_auth_recovery_jobs (
+    `INSERT INTO profile_auth_recovery_jobs_canonical (
       profile_id, login_uids_json, source_profile_ids_json, source_phase,
       prize_cursor, phase_started_at_ms, last_enqueued_at_ms, created_at_ms,
       updated_at_ms, revision
@@ -102,7 +110,7 @@ async function seedJob(
 
 function readJob(profileId: string) {
   return testEnv.PROFILE_DB.prepare(
-    "SELECT * FROM profile_auth_recovery_jobs WHERE profile_id = ?",
+    "SELECT * FROM profile_auth_recovery_jobs_canonical WHERE profile_id = ?",
   )
     .bind(profileId)
     .first<Record<string, unknown>>();
@@ -110,7 +118,7 @@ function readJob(profileId: string) {
 
 function readQuarantine(profileId: string) {
   return testEnv.PROFILE_DB.prepare(
-    "SELECT * FROM profile_auth_recovery_quarantine WHERE profile_id = ?",
+    "SELECT * FROM profile_auth_recovery_quarantine_canonical WHERE profile_id = ?",
   )
     .bind(profileId)
     .first<Record<string, unknown>>();
@@ -127,13 +135,13 @@ async function seedRawProfileId(
   const keySql = storage === "blob" ? `x'${hex}'` : `CAST(x'${hex}' AS TEXT)`;
   await testEnv.PROFILE_DB.batch([
     testEnv.PROFILE_DB.prepare(
-      "DELETE FROM profile_auth_recovery_jobs WHERE profile_id = ?",
+      "DELETE FROM profile_auth_recovery_jobs_canonical WHERE profile_id = ?",
     ).bind(originalId),
     testEnv.PROFILE_DB.prepare(
-      `UPDATE profile_records SET profile_id = ${keySql} WHERE profile_id = ?`,
+      `UPDATE profile_records_canonical SET profile_id = ${keySql} WHERE profile_id = ?`,
     ).bind(originalId),
     testEnv.PROFILE_DB.prepare(
-      `INSERT INTO profile_auth_recovery_jobs (
+      `INSERT INTO profile_auth_recovery_jobs_canonical (
         profile_id, login_uids_json, source_profile_ids_json, source_phase,
         prize_cursor, phase_started_at_ms, last_enqueued_at_ms, created_at_ms,
         updated_at_ms, revision
@@ -150,7 +158,7 @@ async function readRawRecoveryEvidence() {
        source_phase, typeof(prize_cursor) AS cursor_type, hex(prize_cursor) AS cursor_hex,
        phase_started_at_ms, last_enqueued_at_ms, created_at_ms, updated_at_ms,
        typeof(revision) AS revision_type, hex(revision) AS revision_hex
-     FROM profile_auth_recovery_jobs ORDER BY hex(profile_id)`,
+     FROM profile_auth_recovery_jobs_canonical ORDER BY hex(profile_id)`,
   ).all();
   return result.results;
 }
@@ -159,7 +167,7 @@ async function readRawQuarantines() {
   const result = await testEnv.PROFILE_DB.prepare(
     `SELECT typeof(profile_id) AS key_type, hex(profile_id) AS key_hex,
        hex(revision_token) AS revision_hex, reason, quarantined_at_ms
-     FROM profile_auth_recovery_quarantine ORDER BY hex(profile_id)`,
+     FROM profile_auth_recovery_quarantine_canonical ORDER BY hex(profile_id)`,
   ).all();
   return result.results;
 }
@@ -221,7 +229,7 @@ function observedDatabase({
         }
         if (property === "all" || property === "first") {
           return async (column?: string) => {
-            const stage = query.includes("profile_auth_recovery_jobs")
+            const stage = query.includes("profile_auth_recovery_jobs_canonical")
               ? /\bLIMIT\b/i.test(query)
                 ? "scan"
                 : query.includes("recovery_type_0")
@@ -279,7 +287,7 @@ function afterSweepRead(afterRead: () => Promise<void>): D1Database {
 
 async function observedInvalidJob(db = testEnv.PROFILE_DB) {
   const [row] = await listCanonicalAuthRecoverySweepRows(db, 1_000, 10);
-  const inspected = inspectCanonicalAuthRecoverySweepRow(row);
+  const inspected = inspectCanonicalAuthRecoverySweepRow(row!);
   expect(inspected.quarantineReason).not.toBeNull();
   const entry = await readCanonicalAuthRecoveryQuarantineEntry(
     db,
@@ -305,7 +313,7 @@ describe("canonical auth recovery sweep quarantine", () => {
     logger.error.mockClear();
     logger.info.mockClear();
     await testEnv.PROFILE_DB.prepare(
-      "DELETE FROM profile_auth_recovery_jobs",
+      "DELETE FROM profile_auth_recovery_jobs_canonical",
     ).run();
   });
 
@@ -368,10 +376,10 @@ describe("canonical auth recovery sweep quarantine", () => {
       const database = afterSweepRead(async () => {
         const statement = {
           deleted:
-            "DELETE FROM profile_auth_recovery_jobs WHERE profile_id = ?",
-          rescheduled: `UPDATE profile_auth_recovery_jobs
+            "DELETE FROM profile_auth_recovery_jobs_canonical WHERE profile_id = ?",
+          rescheduled: `UPDATE profile_auth_recovery_jobs_canonical
             SET last_enqueued_at_ms = ${nowMs} WHERE profile_id = ?`,
-          quarantined: `INSERT INTO profile_auth_recovery_quarantine (
+          quarantined: `INSERT INTO profile_auth_recovery_quarantine_canonical (
             profile_id, revision_token, reason, quarantined_at_ms
           ) VALUES (?, '1', 'invalid-record', 1000)`,
         }[change];
@@ -409,11 +417,13 @@ describe("canonical auth recovery sweep quarantine", () => {
     async (change) => {
       const invalid = await seedJob({ loginUidsJson: "[false]" });
       if (change === "blob-to-text") {
-        await testEnv.PROFILE_DB.prepare(
-          "UPDATE profile_auth_recovery_jobs SET prize_cursor = x'61' WHERE profile_id = ?",
-        )
-          .bind(invalid)
-          .run();
+        await expect(
+          testEnv.PROFILE_DB.prepare(
+            "UPDATE profile_auth_recovery_jobs_canonical SET prize_cursor = x'61' WHERE profile_id = ?",
+          )
+            .bind(invalid)
+            .run(),
+        ).rejects.toThrow("BLOB");
       }
       const entry = await observedInvalidJob();
       if (change === "frozen") {
@@ -422,15 +432,15 @@ describe("canonical auth recovery sweep quarantine", () => {
         ).run();
       } else {
         const statement = {
-          "same-revision": `UPDATE profile_auth_recovery_jobs
+          "same-revision": `UPDATE profile_auth_recovery_jobs_canonical
             SET login_uids_json = '[]' WHERE profile_id = ?`,
-          "new-revision": `UPDATE profile_auth_recovery_jobs
+          "new-revision": `UPDATE profile_auth_recovery_jobs_canonical
             SET login_uids_json = '[]', revision = revision + 1 WHERE profile_id = ?`,
           deleted:
-            "DELETE FROM profile_auth_recovery_jobs WHERE profile_id = ?",
-          rescheduled: `UPDATE profile_auth_recovery_jobs
+            "DELETE FROM profile_auth_recovery_jobs_canonical WHERE profile_id = ?",
+          rescheduled: `UPDATE profile_auth_recovery_jobs_canonical
             SET last_enqueued_at_ms = ${nowMs} WHERE profile_id = ?`,
-          "blob-to-text": `UPDATE profile_auth_recovery_jobs
+          "blob-to-text": `UPDATE profile_auth_recovery_jobs_canonical
             SET prize_cursor = 'a' WHERE profile_id = ?`,
         }[change];
         await testEnv.PROFILE_DB.prepare(statement).bind(invalid).run();
@@ -462,7 +472,7 @@ describe("canonical auth recovery sweep quarantine", () => {
       { kind: "auth-profile-recovery", profileId: healthy },
       { delaySeconds: 60 },
     );
-    expect(JSON.parse(logger.error.mock.calls[0][0])).toMatchObject({
+    expect(JSON.parse(logger.error.mock.calls[0]![0]!)).toMatchObject({
       event: "auth_recovery_quarantine_failure",
       phase: "inspect",
       profileId: invalid,
@@ -497,11 +507,15 @@ describe("canonical auth recovery sweep quarantine", () => {
         ...(kind === "json" ? { sourceProfileIdsJson: sources } : {}),
       });
       if (kind === "blob") {
-        await testEnv.PROFILE_DB.prepare(
-          "UPDATE profile_auth_recovery_jobs SET prize_cursor = ? WHERE profile_id = ?",
-        )
-          .bind(new Uint8Array(550_000).fill(255), invalid)
-          .run();
+        await expect(
+          testEnv.PROFILE_DB.prepare(
+            "UPDATE profile_auth_recovery_jobs_canonical SET prize_cursor = ? WHERE profile_id = ?",
+          )
+            .bind(new Uint8Array(550_000).fill(255), invalid)
+            .run(),
+        ).rejects.toThrow("BLOB");
+        expect(await readQuarantine(invalid)).toBeNull();
+        return;
       }
       const original = await readJob(invalid);
       const healthy = await seedJob({ lastEnqueuedAtMs: 1 });
@@ -521,36 +535,19 @@ describe("canonical auth recovery sweep quarantine", () => {
     },
   );
 
-  it("distinguishes adjacent REAL revisions when guarding a stale observation", async () => {
+  it("rejects fractional recovery revisions before a stale observation can be stored", async () => {
     const profileId = await seedJob();
-    await testEnv.PROFILE_DB.prepare(
-      "UPDATE profile_auth_recovery_jobs SET revision = ? WHERE profile_id = ?",
-    )
-      .bind(1.0000000000000002, profileId)
-      .run();
-    const entry = await observedInvalidJob();
-    await testEnv.PROFILE_DB.prepare(
-      "UPDATE profile_auth_recovery_jobs SET revision = ? WHERE profile_id = ?",
-    )
-      .bind(1.0000000000000004, profileId)
-      .run();
-
-    await expect(
-      quarantineCanonicalAuthRecoveryJob(testEnv.PROFILE_DB, entry, nowMs),
-    ).resolves.toBeNull();
+    const original = await readJob(profileId);
+    for (const revision of [1.5, 1.5000000000000002])
+      await expect(
+        testEnv.PROFILE_DB.prepare(
+          "UPDATE profile_auth_recovery_jobs_canonical SET revision = ? WHERE profile_id = ?",
+        )
+          .bind(revision, profileId)
+          .run(),
+      ).rejects.toThrow("INTEGER column");
+    expect(await readJob(profileId)).toEqual(original);
     expect(await readQuarantine(profileId)).toBeNull();
-    const current = await observedInvalidJob();
-    const token = await testEnv.PROFILE_DB.prepare(
-      "SELECT CAST(revision AS TEXT) AS revision_token FROM profile_auth_recovery_jobs WHERE profile_id = ?",
-    )
-      .bind(profileId)
-      .first<string>("revision_token");
-    await expect(
-      quarantineCanonicalAuthRecoveryJob(testEnv.PROFILE_DB, current, nowMs),
-    ).resolves.not.toBeNull();
-    expect(await readQuarantine(profileId)).toMatchObject({
-      revision_token: token,
-    });
   });
 
   it("advances beyond a full malformed page on the next bounded sweep", async () => {
@@ -571,7 +568,7 @@ describe("canonical auth recovery sweep quarantine", () => {
     expect(await Promise.all(invalid.map(readJob))).toEqual(original);
     expect(
       await testEnv.PROFILE_DB.prepare(
-        "SELECT COUNT(*) AS count FROM profile_auth_recovery_quarantine",
+        "SELECT COUNT(*) AS count FROM profile_auth_recovery_quarantine_canonical",
       ).first<number>("count"),
     ).toBe(10);
 
@@ -587,7 +584,8 @@ describe("canonical auth recovery sweep quarantine", () => {
     async (kind) => {
       for (let index = 0; index < 10; index++) {
         if (kind === "blob-id") {
-          await seedRawProfileId("blob", index);
+          await expect(seedRawProfileId("blob", index)).rejects.toThrow("BLOB");
+          return;
         } else {
           const profileId = await seedJob({
             lastEnqueuedAtMs: index,
@@ -599,8 +597,18 @@ describe("canonical auth recovery sweep quarantine", () => {
             kind === "blob-revision"
               ? "revision = x'ff'"
               : "prize_cursor = CAST(x'ff' AS TEXT)";
+          if (kind === "blob-revision") {
+            await expect(
+              testEnv.PROFILE_DB.prepare(
+                `UPDATE profile_auth_recovery_jobs_canonical SET ${assignment} WHERE profile_id = ?`,
+              )
+                .bind(profileId)
+                .run(),
+            ).rejects.toThrow("BLOB");
+            return;
+          }
           await testEnv.PROFILE_DB.prepare(
-            `UPDATE profile_auth_recovery_jobs SET ${assignment} WHERE profile_id = ?`,
+            `UPDATE profile_auth_recovery_jobs_canonical SET ${assignment} WHERE profile_id = ?`,
           )
             .bind(profileId)
             .run();
@@ -633,68 +641,27 @@ describe("canonical auth recovery sweep quarantine", () => {
     },
   );
 
-  it("quarantines an invalid UTF-8 TEXT ID without enqueueing its decoded replacement", async () => {
-    const raw = await seedRawProfileId("text");
-    const replacementId = `${raw.originalId}\uFFFD`;
-    await seedJob({ profileId: replacementId, lastEnqueuedAtMs: nowMs });
-    const original = await readRawRecoveryEvidence();
-
-    await expect(sweep()).resolves.toBe(0);
+  it("rejects invalid UTF-8 profile identity bytes before recovery can enqueue them", async () => {
+    await expect(seedRawProfileId("text")).rejects.toThrow(
+      /CHECK constraint failed|INTEGER column/,
+    );
     expect(send).not.toHaveBeenCalled();
-    expect(await readRawRecoveryEvidence()).toEqual(original);
-    expect(await readRawQuarantines()).toEqual([
-      {
-        key_type: "text",
-        key_hex: raw.hex,
-        revision_hex: "31",
-        reason: "invalid-profile-id",
-        quarantined_at_ms: nowMs,
-      },
-    ]);
-    expect(await readQuarantine(replacementId)).toBeNull();
-    await expect(sweep(testEnv.PROFILE_DB, nowMs + 1)).resolves.toBe(0);
-    expect(send).not.toHaveBeenCalled();
+    expect(await readRawQuarantines()).toEqual([]);
   });
 
   it.each(["blob", "text"] as const)(
-    "does not quarantine a raw %s ID replaced by a valid key at the same revision",
+    "rejects raw %s profile identities without creating quarantine state",
     async (storage) => {
-      const raw = await seedRawProfileId(storage);
-      const repairedId = `${raw.originalId}-repaired`;
-      const database = afterSweepRead(async () => {
-        await testEnv.PROFILE_DB.batch([
-          testEnv.PROFILE_DB.prepare(
-            `DELETE FROM profile_auth_recovery_jobs WHERE profile_id = ${raw.keySql}`,
-          ),
-          testEnv.PROFILE_DB.prepare(
-            `UPDATE profile_records SET profile_id = ? WHERE profile_id = ${raw.keySql}`,
-          ).bind(repairedId),
-          testEnv.PROFILE_DB.prepare(
-            `INSERT INTO profile_auth_recovery_jobs (
-              profile_id, login_uids_json, source_profile_ids_json, source_phase,
-              prize_cursor, phase_started_at_ms, last_enqueued_at_ms, created_at_ms,
-              updated_at_ms, revision
-            ) VALUES (?, '[]', '[]', 'finalize', NULL, 1000, 0, 1000, 1000, 1)`,
-          ).bind(repairedId),
-        ]);
-      });
-
-      await expect(sweep(database)).resolves.toBe(0);
-      expect(send).not.toHaveBeenCalled();
+      await expect(seedRawProfileId(storage)).rejects.toThrow();
       expect(await readRawQuarantines()).toEqual([]);
-      expect(await readJob(repairedId)).toMatchObject({ revision: 1 });
-      await expect(sweep()).resolves.toBe(1);
-      expect(send).toHaveBeenCalledExactlyOnceWith(
-        { kind: "auth-profile-recovery", profileId: repairedId },
-        { delaySeconds: 60 },
-      );
+      expect(send).not.toHaveBeenCalled();
     },
   );
 
   it("honors previously persisted plain revision markers without rewriting them", async () => {
     const profileId = await seedJob({ loginUidsJson: "[false]" });
     await testEnv.PROFILE_DB.prepare(
-      `INSERT INTO profile_auth_recovery_quarantine
+      `INSERT INTO profile_auth_recovery_quarantine_canonical
        (profile_id, revision_token, reason, quarantined_at_ms)
        VALUES (?, '1', 'invalid-record', 1000)`,
     )
@@ -744,8 +711,19 @@ describe("canonical auth recovery sweep quarantine", () => {
     "quarantines an invalid revision %s using its exact SQL token",
     async (revision) => {
       const profileId = await seedJob();
+      if (revision === "1.5") {
+        await expect(
+          testEnv.PROFILE_DB.prepare(
+            `UPDATE profile_auth_recovery_jobs_canonical SET revision = ${revision} WHERE profile_id = ?`,
+          )
+            .bind(profileId)
+            .run(),
+        ).rejects.toThrow("INTEGER column");
+        expect(await readQuarantine(profileId)).toBeNull();
+        return;
+      }
       await testEnv.PROFILE_DB.prepare(
-        `UPDATE profile_auth_recovery_jobs SET revision = ${revision} WHERE profile_id = ?`,
+        `UPDATE profile_auth_recovery_jobs_canonical SET revision = ${revision} WHERE profile_id = ?`,
       )
         .bind(profileId)
         .run();
@@ -762,54 +740,35 @@ describe("canonical auth recovery sweep quarantine", () => {
     },
   );
 
-  it("quarantines a BLOB cursor without blocking healthy work or changing its bytes", async () => {
-    const invalid = await seedJob();
-    await testEnv.PROFILE_DB.prepare(
-      "UPDATE profile_auth_recovery_jobs SET prize_cursor = x'61' WHERE profile_id = ?",
-    )
-      .bind(invalid)
-      .run();
-    const original = await readJob(invalid);
-    const healthy = await seedJob();
-
-    await expect(sweep()).resolves.toBe(1);
-    expect(send).toHaveBeenCalledExactlyOnceWith(
-      { kind: "auth-profile-recovery", profileId: healthy },
-      { delaySeconds: 60 },
-    );
-    expect(await readJob(invalid)).toEqual(original);
-    expect(
-      await testEnv.PROFILE_DB.prepare(
-        "SELECT typeof(prize_cursor) AS storage_type, hex(prize_cursor) AS bytes FROM profile_auth_recovery_jobs WHERE profile_id = ?",
+  it("rejects a BLOB cursor without changing recovery bytes or blocking healthy work", async () => {
+    const profileId = await seedJob();
+    const original = await readJob(profileId);
+    await expect(
+      testEnv.PROFILE_DB.prepare(
+        "UPDATE profile_auth_recovery_jobs_canonical SET prize_cursor = x'61' WHERE profile_id = ?",
       )
-        .bind(invalid)
-        .first(),
-    ).toEqual({ storage_type: "blob", bytes: "61" });
-    expect(await readQuarantine(invalid)).toMatchObject({
-      profile_id: invalid,
-      revision_token: "1",
-      reason: "invalid-record",
-    });
+        .bind(profileId)
+        .run(),
+    ).rejects.toThrow("BLOB");
+    expect(await readJob(profileId)).toEqual(original);
+    expect(await readQuarantine(profileId)).toBeNull();
+    await expect(sweep()).resolves.toBe(1);
   });
 
-  it("does not quarantine a BLOB cursor repaired to matching hex text at the same revision", async () => {
+  it("accepts a text cursor after rejecting its BLOB representation", async () => {
     const profileId = await seedJob();
+    await expect(
+      testEnv.PROFILE_DB.prepare(
+        "UPDATE profile_auth_recovery_jobs_canonical SET prize_cursor = x'61' WHERE profile_id = ?",
+      )
+        .bind(profileId)
+        .run(),
+    ).rejects.toThrow("BLOB");
     await testEnv.PROFILE_DB.prepare(
-      "UPDATE profile_auth_recovery_jobs SET prize_cursor = x'61' WHERE profile_id = ?",
+      "UPDATE profile_auth_recovery_jobs_canonical SET prize_cursor = '61' WHERE profile_id = ?",
     )
       .bind(profileId)
       .run();
-    const database = afterSweepRead(async () => {
-      await testEnv.PROFILE_DB.prepare(
-        "UPDATE profile_auth_recovery_jobs SET prize_cursor = '61' WHERE profile_id = ?",
-      )
-        .bind(profileId)
-        .run();
-    });
-
-    await expect(sweep(database)).resolves.toBe(0);
-    expect(send).not.toHaveBeenCalled();
-    expect(await readQuarantine(profileId)).toBeNull();
     expect(await readJob(profileId)).toMatchObject({
       prize_cursor: "61",
       revision: 1,
@@ -822,7 +781,7 @@ describe("canonical auth recovery sweep quarantine", () => {
     await expect(sweep()).resolves.toBe(0);
     const quarantine = await readQuarantine(profileId);
     await testEnv.PROFILE_DB.prepare(
-      "UPDATE profile_auth_recovery_jobs SET login_uids_json = '[]' WHERE profile_id = ?",
+      "UPDATE profile_auth_recovery_jobs_canonical SET login_uids_json = '[]' WHERE profile_id = ?",
     )
       .bind(profileId)
       .run();
@@ -832,7 +791,7 @@ describe("canonical auth recovery sweep quarantine", () => {
     expect(await readQuarantine(profileId)).toEqual(quarantine);
 
     await testEnv.PROFILE_DB.prepare(
-      "UPDATE profile_auth_recovery_jobs SET revision = revision + 1 WHERE profile_id = ?",
+      "UPDATE profile_auth_recovery_jobs_canonical SET revision = revision + 1 WHERE profile_id = ?",
     )
       .bind(profileId)
       .run();
@@ -853,10 +812,10 @@ describe("canonical auth recovery sweep quarantine", () => {
         if (repair === "recreated") {
           await testEnv.PROFILE_DB.batch([
             testEnv.PROFILE_DB.prepare(
-              "DELETE FROM profile_auth_recovery_jobs WHERE profile_id = ?",
+              "DELETE FROM profile_auth_recovery_jobs_canonical WHERE profile_id = ?",
             ).bind(profileId),
             testEnv.PROFILE_DB.prepare(
-              `INSERT INTO profile_auth_recovery_jobs (
+              `INSERT INTO profile_auth_recovery_jobs_canonical (
                 profile_id, login_uids_json, source_profile_ids_json, source_phase,
                 prize_cursor, phase_started_at_ms, last_enqueued_at_ms, created_at_ms,
                 updated_at_ms, revision
@@ -865,7 +824,7 @@ describe("canonical auth recovery sweep quarantine", () => {
           ]);
         } else {
           await testEnv.PROFILE_DB.prepare(
-            `UPDATE profile_auth_recovery_jobs SET login_uids_json = '[]',
+            `UPDATE profile_auth_recovery_jobs_canonical SET login_uids_json = '[]',
                revision = revision + ? WHERE profile_id = ?`,
           )
             .bind(repair === "new-revision" ? 1 : 0, profileId)
@@ -890,7 +849,7 @@ describe("canonical auth recovery sweep quarantine", () => {
     expect(await readQuarantine(profileId)).toEqual(quarantine);
 
     await testEnv.PROFILE_DB.prepare(
-      "DELETE FROM profile_auth_recovery_jobs WHERE profile_id = ?",
+      "DELETE FROM profile_auth_recovery_jobs_canonical WHERE profile_id = ?",
     )
       .bind(profileId)
       .run();
@@ -917,7 +876,7 @@ describe("canonical auth recovery sweep quarantine", () => {
       quarantined_at_ms: nowMs,
     });
     await testEnv.PROFILE_DB.prepare(
-      "UPDATE profile_auth_recovery_jobs SET revision = revision + 1 WHERE profile_id = ?",
+      "UPDATE profile_auth_recovery_jobs_canonical SET revision = revision + 1 WHERE profile_id = ?",
     )
       .bind(profileId)
       .run();
@@ -961,7 +920,7 @@ describe("canonical auth recovery sweep quarantine", () => {
       const entry = await observedInvalidJob();
       if (state === "deleted") {
         await testEnv.PROFILE_DB.prepare(
-          "DELETE FROM profile_auth_recovery_jobs WHERE profile_id = ?",
+          "DELETE FROM profile_auth_recovery_jobs_canonical WHERE profile_id = ?",
         )
           .bind(profileId)
           .run();
@@ -997,7 +956,7 @@ describe("canonical auth recovery sweep quarantine", () => {
           entry,
           timestamp,
         ),
-      ).rejects.toThrow("CHECK constraint failed");
+      ).rejects.toThrow(/CHECK constraint failed|INTEGER column/);
       expect(await readQuarantine(profileId)).toBeNull();
       expect(await readJob(profileId)).toEqual(source);
     },
@@ -1024,7 +983,7 @@ describe("canonical auth recovery sweep quarantine", () => {
     const healthy = await seedJob();
     await testEnv.PROFILE_DB.prepare(
       `CREATE TRIGGER reject_auth_recovery_quarantine
-       BEFORE INSERT ON profile_auth_recovery_quarantine
+       BEFORE INSERT ON profile_auth_recovery_quarantine_canonical
        BEGIN SELECT RAISE(ABORT, 'simulated-quarantine-failure'); END`,
     ).run();
 
@@ -1038,7 +997,7 @@ describe("canonical auth recovery sweep quarantine", () => {
     expect(await readJob(healthy)).toMatchObject({
       last_enqueued_at_ms: nowMs,
     });
-    const entry = JSON.parse(logger.error.mock.calls[0][0]);
+    const entry = JSON.parse(logger.error.mock.calls[0]![0]!);
     expect(entry).toMatchObject({
       event: "auth_recovery_quarantine_failure",
       scope: "auth",
@@ -1069,7 +1028,7 @@ describe("canonical auth recovery sweep quarantine", () => {
       { delaySeconds: 60 },
     );
     expect(await readQuarantine(invalid)).not.toBeNull();
-    expect(JSON.parse(logger.error.mock.calls[0][0])).toMatchObject({
+    expect(JSON.parse(logger.error.mock.calls[0]![0]!)).toMatchObject({
       event: "auth_recovery_job_quarantined",
       profileIdHex: Array.from(new TextEncoder().encode(invalid), (byte) =>
         byte.toString(16).padStart(2, "0"),
@@ -1178,7 +1137,7 @@ describe("canonical auth recovery sweep quarantine", () => {
     const healthy = await seedJob({ lastEnqueuedAtMs: 1 });
     await testEnv.PROFILE_DB.prepare(
       `CREATE TRIGGER reject_auth_recovery_quarantine
-       BEFORE INSERT ON profile_auth_recovery_quarantine
+       BEFORE INSERT ON profile_auth_recovery_quarantine_canonical
        BEGIN SELECT RAISE(ABORT, 'simulated-quarantine-failure'); END`,
     ).run();
 
@@ -1187,7 +1146,7 @@ describe("canonical auth recovery sweep quarantine", () => {
       { kind: "auth-profile-recovery", profileId: healthy },
       { delaySeconds: 60 },
     );
-    const entry = JSON.parse(logger.error.mock.calls[0][0]);
+    const entry = JSON.parse(logger.error.mock.calls[0]![0]!);
     expect(entry).toMatchObject({ itemIndex: 0, phase: "quarantine" });
     expect(entry).not.toHaveProperty("profileId");
     expect(JSON.stringify(entry)).not.toContain(invalid);

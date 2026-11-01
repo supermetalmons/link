@@ -2,7 +2,7 @@ import {
   applyMaterialDeltas,
   computeAvailableMaterials as computeSharedAvailableMaterials,
   createEmptyMaterials as createSharedEmptyMaterials,
-  normalizeMaterials as normalizeSharedMaterials,
+  parseMiningMaterials,
 } from "@mons/shared/mining";
 import type { MaterialName } from "./rocksMiningService";
 
@@ -19,10 +19,6 @@ type FrozenListener = (
 
 const createEmptyMaterials = (): FrozenMaterials =>
   createSharedEmptyMaterials();
-
-const normalizeMaterials = (
-  source?: Partial<Record<MaterialName, number>> | null,
-): FrozenMaterials => normalizeSharedMaterials(source);
 
 let frozenMaterials = createEmptyMaterials();
 let status: FrozenMaterialsStatus = "idle";
@@ -46,10 +42,15 @@ export const getFrozenMaterialsStatus = (): FrozenMaterialsStatus => status;
 export const hasConfirmedFrozenMaterials = (): boolean => hasConfirmedSnapshot;
 
 export const setFrozenMaterials = (
-  source?: Partial<Record<MaterialName, number>> | null,
+  source?: FrozenMaterials | null,
   nextStatus = status,
 ): void => {
-  frozenMaterials = normalizeMaterials(source);
+  const next =
+    source === null || source === undefined
+      ? createEmptyMaterials()
+      : parseMiningMaterials(source);
+  if (!next) throw new TypeError("invalid-mining-materials");
+  frozenMaterials = next;
   status = nextStatus;
   if (status === "ready") hasConfirmedSnapshot = true;
   else if (status === "loading" || status === "idle") {

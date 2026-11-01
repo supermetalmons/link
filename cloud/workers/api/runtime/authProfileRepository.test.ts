@@ -1,3 +1,4 @@
+import { materializeProfileFixture as materializeCanonicalProfile } from "../test/profileDataBoundaryFixture.ts";
 import { env } from "cloudflare:workers";
 import type { D1Migration } from "cloudflare:test";
 import { beforeAll, describe, expect, it, vi } from "vitest";
@@ -15,7 +16,6 @@ import {
 import {
   CanonicalProfileCorruption,
   commitCanonicalPlan,
-  materializeCanonicalProfile,
   readCanonicalProfile,
   type CanonicalAuthMethodValue,
 } from "../src/profileCanonicalD1.ts";
@@ -225,8 +225,7 @@ async function outcome<T>(work: () => Promise<T>) {
 }
 
 function withoutRetainedFields(snapshot: CanonicalAuthProfileSnapshot) {
-  const { legacyFields: _legacyFields, ...profile } = snapshot.profile;
-  return { ...snapshot, profile };
+  return snapshot;
 }
 
 describe("canonical auth profile reads", () => {
@@ -236,9 +235,16 @@ describe("canonical auth profile reads", () => {
       testEnv.TEST_PROFILE_D1_MIGRATIONS,
       "c".repeat(64),
     );
+    expect(
+      await db
+        .prepare(
+          "SELECT name FROM sqlite_schema WHERE name = 'profile_records'",
+        )
+        .first(),
+    ).toBeNull();
     await db
       .prepare(
-        `CREATE TABLE ${validationTable} AS SELECT * FROM profile_records WHERE 0`,
+        `CREATE TABLE ${validationTable} AS SELECT *, NULL AS legacy_fields_json FROM profile_records_canonical WHERE 0`,
       )
       .run();
   });
@@ -292,8 +298,8 @@ describe("canonical auth profile reads", () => {
       const observed = observeDatabase();
       const result = await readAuthIdentityProfile(observed.database, loginUid);
       expect(observed.batchQueries).toHaveLength(1);
-      expect(observed.batchQueries[0].join("\n")).not.toMatch(
-        /profile_auth_recovery_jobs|profile_february_opponents/,
+      expect(observed.batchQueries[0]!.join("\n")).not.toMatch(
+        /profile_auth_recovery_jobs_canonical|profile_february_opponents_canonical/,
       );
       if (loginUid !== profile.loginUid) {
         expect(result).toEqual({ ok: true, profile: null });
@@ -312,15 +318,8 @@ describe("canonical auth profile reads", () => {
     }
   });
 
-  it("returns the complete profile once for four methods without rewriting retained fields", async () => {
+  it("returns the complete canonical profile once for four methods without writes", async () => {
     const profile = await createProfile(validMethodValues, "FourMethods");
-    const legacyJson = JSON.stringify({ retained: "x".repeat(65_536) });
-    await db
-      .prepare(
-        "UPDATE profile_records SET legacy_fields_json = ? WHERE profile_id = ?",
-      )
-      .bind(legacyJson, profile.profileId)
-      .run();
     const before = await readCanonicalProfile(db, profile.profileId);
     const observed = observeDatabase();
     const snapshot = await readCanonicalAuthProfileByLogin(
@@ -335,19 +334,23 @@ describe("canonical auth profile reads", () => {
       "x",
     ]);
     expect(observed.batchQueries).toHaveLength(1);
-    const [profileResult, methodsResult] = observed.batchResults[0];
-    expect(profileResult.results).toHaveLength(1);
-    expect(profileResult.results[0].legacy_fields_json).toBe(legacyJson);
-    expect(methodsResult.results).toHaveLength(4);
-    for (const method of methodsResult.results) {
+    const [profileResult, methodsResult] = observed.batchResults[0]!;
+    expect(profileResult!.results).toHaveLength(1);
+    expect(profileResult!.results[0]).not.toHaveProperty("legacy_fields_json");
+    expect(methodsResult!.results).toHaveLength(4);
+    for (const method of methodsResult!.results) {
       expect(method).not.toHaveProperty("payload_json");
       expect(method).not.toHaveProperty("legacy_fields_json");
     }
-    for (const result of observed.batchResults[0]) {
+    for (const result of observed.batchResults[0]!) {
       expect(result.meta.rows_written).toBe(0);
     }
-    expect(observed.batchQueries[0][0]).not.toContain("profile_auth_methods");
-    expect(observed.batchQueries[0][1]).not.toContain("profile_records");
+    expect(observed.batchQueries[0]![0]!).not.toContain(
+      "profile_auth_methods_canonical",
+    );
+    expect(observed.batchQueries[0]![1]!).not.toContain(
+      "profile_records_canonical",
+    );
     await expect(readCanonicalProfile(db, profile.profileId)).resolves.toEqual(
       before,
     );
@@ -364,7 +367,7 @@ describe("canonical auth profile reads", () => {
       expect(observed.batchQueries).toHaveLength(1);
       expect(observed.batchBindings).toEqual([[[loginUid], [loginUid]]]);
       expect(
-        observed.batchResults[0].map((result) => result.meta.rows_written),
+        observed.batchResults[0]!.map((result) => result.meta.rows_written),
       ).toEqual([0, 0]);
     }
   });
@@ -409,14 +412,14 @@ describe("canonical auth profile reads", () => {
   ];
 
   it.each(retainedCases)(
-    "preserves full-reader validation and discards retained data for $label",
-    async ({ value, valid, ...options }) => {
+    "reads canonical profiles independently from archived bytes for $label",
+    async ({ value, valid: _valid, ...options }) => {
       const { profileId, loginUid } = await createProfile({
         sol: validMethodValues.sol,
       });
       await db
         .prepare(
-          `INSERT INTO ${validationTable} SELECT * FROM profile_records WHERE profile_id = ?`,
+          `INSERT INTO ${validationTable} SELECT *, NULL FROM profile_records_canonical WHERE profile_id = ?`,
         )
         .bind(profileId)
         .run();
@@ -465,7 +468,7 @@ describe("canonical auth profile reads", () => {
           spy.mockRestore();
         }
       });
-      expect(full.ok).toBe(valid);
+      expect(full.ok).toBe(true);
       expect(narrow.ok).toBe(full.ok);
       if (full.ok && narrow.ok) {
         expect(full.value).not.toBeNull();
@@ -504,103 +507,92 @@ describe("canonical auth profile reads", () => {
         expect(observed.batchQueries).toHaveLength(1);
         expect(observed.batchBindings).toEqual([[[loginUid], [loginUid]]]);
         expect(
-          observed.batchResults[0].map((result) => result.meta.rows_written),
+          observed.batchResults[0]!.map((result) => result.meta.rows_written),
         ).toEqual([0, 0]);
       }
       for (const observed of [fullDb, narrowDb]) {
         expect(observed.batchQueries).toHaveLength(1);
         expect(observed.batchBindings).toEqual([[[loginUid], [loginUid]]]);
         expect(
-          observed.batchResults[0].map((result) => result.meta.rows_written),
+          observed.batchResults[0]!.map((result) => result.meta.rows_written),
         ).toEqual([0, 0]);
       }
       expect(await retainedBytes()).toEqual(before);
     },
   );
 
-  it("bounds auth read payloads independently of retained JSON size", async () => {
+  it("bounds canonical auth reads to one profile and its linked methods", async () => {
     const { profileId, loginUid } = await createProfile(
       validMethodValues,
       "ReadOnlyProfile",
     );
-    const narrowSizes: number[] = [];
-    const samples: Array<Record<string, number>> = [];
-    for (const retainedBytes of [0, 64 * 1024, 256 * 1024]) {
-      const legacyJson = JSON.stringify({ archive: "x".repeat(retainedBytes) });
-      await db
-        .prepare(
-          "UPDATE profile_records SET legacy_fields_json = ? WHERE profile_id = ?",
-        )
-        .bind(legacyJson, profileId)
-        .run();
-      const before = await db
-        .prepare("SELECT * FROM profile_records WHERE profile_id = ?")
-        .bind(profileId)
-        .first();
-      const fullDb = observeDatabase();
-      const narrowDb = observeDatabase();
-      const full = (await readCanonicalAuthProfileByLogin(
-        fullDb.database,
-        loginUid,
-      ))!;
-      const narrow = await readCanonicalAuthReadSnapshotByLogin(
-        narrowDb.database,
-        loginUid,
-      );
-      expect(narrow).toEqual(withoutRetainedFields(full));
-      const rowBytes = (observed: ReturnType<typeof observeDatabase>) =>
-        new TextEncoder().encode(
-          JSON.stringify(
-            observed.batchResults[0].map((result) => result.results),
-          ),
-        ).byteLength;
-      const fullBytes = rowBytes(fullDb);
-      const narrowBytes = rowBytes(narrowDb);
-      narrowSizes.push(narrowBytes);
-      for (const consumer of ["identity", "methods"] as const) {
-        const observed = observeDatabase();
-        if (consumer === "identity") {
-          await expect(
-            readAuthIdentityProfile(observed.database, loginUid),
-          ).resolves.toEqual({ ok: true, profile: full.profile.profile });
-        } else {
-          await expect(
-            createAuthProfileRepository(testEnv, {
-              d1: observed.database,
-            }).getLinkedAuthMethods(loginUid),
-          ).resolves.toEqual({
-            ok: true,
-            profileId,
-            linkedMethods: { apple: true, eth: true, sol: true, x: true },
-            appleLinked: true,
-          });
-        }
-        expect(observed.batchQueries).toHaveLength(1);
-        expect(observed.batchBindings).toEqual([[[loginUid], [loginUid]]]);
-        expect(rowBytes(observed)).toBe(narrowBytes);
-        const [profileResult, methodsResult] = observed.batchResults[0];
-        expect(profileResult.results[0]).not.toHaveProperty(
-          "legacy_fields_json",
-        );
-        expect(profileResult.results[0].legacy_fields_fallback_json).toBeNull();
-        expect(methodsResult.results).toEqual(
-          fullDb.batchResults[0][1].results,
-        );
-        expect(
-          observed.batchResults[0].map((result) => result.meta.rows_written),
-        ).toEqual([0, 0]);
+    const before = await db
+      .prepare("SELECT * FROM profile_records_canonical WHERE profile_id = ?")
+      .bind(profileId)
+      .first();
+    const fullDb = observeDatabase();
+    const narrowDb = observeDatabase();
+    const full = (await readCanonicalAuthProfileByLogin(
+      fullDb.database,
+      loginUid,
+    ))!;
+    const narrow = await readCanonicalAuthReadSnapshotByLogin(
+      narrowDb.database,
+      loginUid,
+    );
+    expect(narrow).toEqual(withoutRetainedFields(full));
+    const rowBytes = (observed: ReturnType<typeof observeDatabase>) =>
+      new TextEncoder().encode(
+        JSON.stringify(
+          observed.batchResults[0]!.map((result) => result.results),
+        ),
+      ).byteLength;
+    const fullBytes = rowBytes(fullDb);
+    const narrowBytes = rowBytes(narrowDb);
+    for (const consumer of ["identity", "methods"] as const) {
+      const observed = observeDatabase();
+      if (consumer === "identity") {
+        await expect(
+          readAuthIdentityProfile(observed.database, loginUid),
+        ).resolves.toEqual({ ok: true, profile: full.profile.profile });
+      } else {
+        await expect(
+          createAuthProfileRepository(testEnv, {
+            d1: observed.database,
+          }).getLinkedAuthMethods(loginUid),
+        ).resolves.toEqual({
+          ok: true,
+          profileId,
+          linkedMethods: { apple: true, eth: true, sol: true, x: true },
+          appleLinked: true,
+        });
       }
+      expect(observed.batchQueries).toHaveLength(1);
+      expect(observed.batchBindings).toEqual([[[loginUid], [loginUid]]]);
+      expect(rowBytes(observed)).toBe(narrowBytes);
+      const [profileResult, methodsResult] = observed.batchResults[0]!;
+      expect(profileResult!.results[0]).not.toHaveProperty(
+        "legacy_fields_json",
+      );
+      expect(profileResult!.results[0]).not.toHaveProperty(
+        "legacy_fields_fallback_json",
+      );
+      expect(methodsResult!.results).toEqual(
+        fullDb.batchResults[0]![1]!.results,
+      );
       expect(
-        await db
-          .prepare("SELECT * FROM profile_records WHERE profile_id = ?")
-          .bind(profileId)
-          .first(),
-      ).toEqual(before);
-      samples.push({ retainedBytes, fullBytes, narrowBytes });
+        observed.batchResults[0]!.map((result) => result.meta.rows_written),
+      ).toEqual([0, 0]);
     }
-    expect(new Set(narrowSizes).size).toBe(1);
-    expect(samples[2].narrowBytes).toBeLessThan(samples[2].fullBytes / 50);
-    console.info(JSON.stringify({ event: "auth_profile_read_sizes", samples }));
+    expect(
+      await db
+        .prepare("SELECT * FROM profile_records_canonical WHERE profile_id = ?")
+        .bind(profileId)
+        .first(),
+    ).toEqual(before);
+    expect(narrowBytes).toBeLessThanOrEqual(fullBytes);
+    expect(fullDb.batchResults[0]![0]!.results).toHaveLength(1);
+    expect(fullDb.batchResults[0]![1]!.results).toHaveLength(4);
   });
 
   it.each([
@@ -617,6 +609,8 @@ describe("canonical auth profile reads", () => {
       const observed = observeDatabase({
         mapResults: (results) => {
           const [profileResult, methodsResult] = results;
+          if (!profileResult || !methodsResult)
+            throw new Error("missing-auth-fixture-results");
           switch (failure) {
             case "missing":
               return [profileResult];
@@ -641,7 +635,10 @@ describe("canonical auth profile reads", () => {
               return [
                 {
                   ...profileResult,
-                  results: [...profileResult.results, ...profileResult.results],
+                  results: [
+                    ...profileResult!.results,
+                    ...profileResult!.results,
+                  ],
                 },
                 methodsResult,
               ];
@@ -760,8 +757,8 @@ describe("canonical auth profile reads", () => {
         appleLinked: linkedMethods.apple,
       });
       expect(observed.batchQueries).toHaveLength(1);
-      expect(observed.batchQueries[0].join("\n")).not.toMatch(
-        /profile_auth_recovery_jobs|profile_february_opponents/,
+      expect(observed.batchQueries[0]!.join("\n")).not.toMatch(
+        /profile_auth_recovery_jobs_canonical|profile_february_opponents_canonical/,
       );
     },
   );
@@ -778,18 +775,10 @@ describe("canonical auth profile reads", () => {
     ["owner timestamp", 0, { canonical_owner_created_at_ms: -1 }],
     ["profile revision", 0, { revision: 0 }],
     ["profile payload", 0, { payload_json: "{}" }],
-    ["legacy fields", 0, { legacy_fields_validation: 0 }],
-    ["missing legacy validation", 0, { legacy_fields_validation: undefined }],
-    [
-      "invalid legacy fallback",
-      0,
-      { legacy_fields_validation: 2, legacy_fields_fallback_json: "[]" },
-    ],
-    [
-      "unexpected legacy fallback",
-      0,
-      { legacy_fields_validation: 1, legacy_fields_fallback_json: "{}" },
-    ],
+    ["gameplay emoji", 0, { gameplay_emoji: "1" }],
+    ["missing gameplay emoji", 0, { gameplay_emoji: undefined }],
+    ["invalid profile presence", 0, { emoji_present: 2 }],
+    ["unexpected schema version", 0, { schema_version: 2 }],
     [
       "retiring profile",
       0,

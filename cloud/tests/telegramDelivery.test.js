@@ -30,18 +30,131 @@ const {
   buildTelegramDeliveryTaskId,
 } = require("../runtime/telegram/taskIdentity");
 
-const clone = (value) =>
-  value === undefined ? undefined : structuredClone(value);
-
+/**
+ * @typedef {import("../runtime/telegram/records").TelegramMessageDocument} Message
+ * @typedef {import("../runtime/telegram/records").TelegramDeliveryDocument} Delivery
+ * @typedef {import("../runtime/telegram/records").TelegramAppliedDocument} Applied
+ * @typedef {import("../runtime/telegram/records").TelegramSendEvidence} SendEvidence
+ * @typedef {import("../runtime/telegram/records").TelegramCleanupDocument} Cleanup
+ * @typedef {Omit<Cleanup, "instanceKey" | "chatId" | "messageId"> & Partial<Pick<Cleanup, "instanceKey" | "chatId" | "messageId">>} CleanupFixture
+ * @typedef {Omit<Cleanup, "instanceKey"> & Partial<Pick<Cleanup, "instanceKey">>} QueuedCleanupFixture
+ * @typedef {Omit<Delivery, "sendInFlight" | "pendingDelete" | "pendingDeleteQueue"> & {sendInFlight?: Partial<SendEvidence>, pendingDelete?: CleanupFixture, pendingDeleteQueue?: Record<string, QueuedCleanupFixture>}} DeliveryFixture
+ * @typedef {Omit<Partial<Message>, "applied" | "delivery"> & {applied?: Omit<Applied, "appliedAtMs" | "revision"> & Partial<Pick<Applied, "appliedAtMs" | "revision">>, delivery?: DeliveryFixture}} MessageFixture
+ * @typedef {import("../runtime/telegram/deliveryTypes").TelegramRepository} Repository
+ * @typedef {import("../runtime/telegram/records").TelegramApiGateWrite} ApiGate
+ * @typedef {import("../runtime/telegram/deliveryTypes").TelegramRetrySchedule} ScheduledTask
+ * @typedef {ReturnType<typeof createTelegramDeliveryEngine>} Engine
+ * @typedef {boolean | (() => boolean)} FailureSwitch
+ * @typedef {{retryNotBeforeMs?: number, apiGate?: ApiGate, rejectCommit?: (input: {messageKey: string, current: Message | null, output: {commit?: false, value?: Message | null, decision?: string}, transactionCount: number}) => unknown, rejectBarrierRead?: FailureSwitch, rejectBarrierWrite?: FailureSwitch, rejectApiGateWrite?: FailureSwitch, rejectApiGateRelease?: FailureSwitch, rejectBarrierProofWrite?: FailureSwitch}} RepositoryOptions
+ * @typedef {Repository & {state: Map<string, Message> & {set(key: string, value: MessageFixture | null | undefined): Map<string, Message>}, control: {retryNotBeforeMs: number, apiGate?: ApiGate}, localRetryBarrier: import("../runtime/telegram/deliveryRetryTypes").TelegramLocalRetryBarrier}} TestRepository
+ */
+/** @template Value @param {Value} value @returns {Value} */
+const clone = (value) => (value === undefined ? value : structuredClone(value));
+/** @template Value @param {Value} value @returns {NonNullable<Value>} */
+function present(value) {
+  assert.ok(value !== null && value !== undefined);
+  return value;
+}
+/** @param {import("../runtime/telegram/deliveryTypes").TelegramEngineResult} result */
+function cleanupResult(result) {
+  const cleanup = result.cleanup;
+  assert.ok(cleanup && typeof cleanup === "object");
+  return cleanup;
+}
+/** @param {unknown} value */
+function desiredFixture(value) {
+  const desired =
+    require("../runtime/telegram/recordCodec").readTelegramDesired(value);
+  assert.ok(desired);
+  return desired;
+}
+/** @param {FailureSwitch | undefined} value */
 const enabled = (value) => (typeof value === "function" ? value() : value);
+/** @param {MessageFixture | null | undefined} input @returns {Message} */
+const canonicalMessageFixture = (input) => {
+  const value = { schemaVersion: /** @type {const} */ (1), ...clone(input) };
+  const desired = value.desired;
+  /** @type {Pick<Message, "applied" | "delivery">} */
+  const completed = {};
+  if (value.applied)
+    completed.applied = {
+      appliedAtMs: 1,
+      revision: desired?.revision || "applied-revision",
+      ...value.applied,
+    };
+  if (value.delivery) {
+    const { sendInFlight, pendingDelete, pendingDeleteQueue, ...delivery } =
+      value.delivery;
+    const text =
+      desired && desired.operation !== "delete" ? desired : undefined;
+    completed.delivery = {
+      ...delivery,
+      ...(delivery.status === "delivered" &&
+      delivery.deliveredAtMs === undefined
+        ? { deliveredAtMs: 1 }
+        : {}),
+      ...(sendInFlight
+        ? {
+            sendInFlight: {
+              attemptId: "fixture-attempt",
+              revision: desired?.revision || "revision",
+              destination: desired?.destination || "community",
+              chatId: "community-chat",
+              instanceKey:
+                text?.instanceKey || value.applied?.instanceKey || "instance",
+              contentHash: text?.contentHash || "content",
+              startedAtMs: 1,
+              apiGateOwner: "send:fixture-attempt",
+              ...sendInFlight,
+            },
+          }
+        : {}),
+      ...(pendingDelete
+        ? {
+            pendingDelete: {
+              instanceKey: "",
+              chatId: "community-chat",
+              messageId: 1,
+              ...pendingDelete,
+            },
+          }
+        : {}),
+      ...(pendingDeleteQueue
+        ? {
+            pendingDeleteQueue: Object.fromEntries(
+              Object.entries(pendingDeleteQueue).map(([key, item]) => [
+                key,
+                { instanceKey: "", ...item },
+              ]),
+            ),
+          }
+        : {}),
+    };
+  }
+  return Object.assign(value, completed);
+};
 
+/** @param {Record<string, MessageFixture>} [initial] @param {RepositoryOptions} [options] @returns {TestRepository} */
 const createRepository = (initial = {}, options = {}) => {
-  const state = new Map(
-    Object.entries(initial).map(([key, value]) => [key, clone(value)]),
+  const values = new Map(
+    Object.entries(initial).map(([key, value]) => [
+      key,
+      canonicalMessageFixture(value),
+    ]),
   );
+  const setFixture = values.set.bind(values);
+  const state = Object.assign(values, {
+    /** @param {string} key @param {MessageFixture | null | undefined} value */
+    set(key, value) {
+      return setFixture(key, canonicalMessageFixture(value));
+    },
+  });
+  /** @type {TestRepository["control"]} */
   const control = {
     retryNotBeforeMs:
-      Number.isFinite(options.retryNotBeforeMs) && options.retryNotBeforeMs > 0
+      typeof options.retryNotBeforeMs === "number" &&
+      Number.isFinite(options.retryNotBeforeMs) &&
+      options.retryNotBeforeMs > 0
         ? Math.floor(options.retryNotBeforeMs)
         : 0,
     ...(options.apiGate ? { apiGate: clone(options.apiGate) } : {}),
@@ -60,7 +173,7 @@ const createRepository = (initial = {}, options = {}) => {
       const current = clone(state.get(messageKey) || null);
       const output = updater(current);
       if (
-        output?.commit === false ||
+        "commit" in output ||
         options.rejectCommit?.({
           messageKey,
           current,
@@ -71,20 +184,22 @@ const createRepository = (initial = {}, options = {}) => {
         return {
           committed: false,
           value: current,
-          decision: output?.decision,
+          ...(output.decision === undefined
+            ? {}
+            : { decision: output.decision }),
         };
       }
-      state.set(messageKey, clone(output?.value));
+      state.set(messageKey, clone(output.value));
       return {
         committed: true,
-        value: clone(output?.value),
-        decision: output?.decision,
+        value: clone(output.value),
+        ...(output.decision === undefined ? {} : { decision: output.decision }),
       };
     },
     async getRetryNotBeforeMs() {
       if (enabled(options.rejectBarrierRead)) {
         const error = new Error("retry-barrier-read-failed");
-        error.code = "retry-barrier-read-failed";
+        Object.assign(error, { code: "retry-barrier-read-failed" });
         throw error;
       }
       return control.retryNotBeforeMs;
@@ -92,7 +207,7 @@ const createRepository = (initial = {}, options = {}) => {
     async extendRetryNotBeforeMs(candidateMs) {
       if (enabled(options.rejectBarrierWrite)) {
         const error = new Error("retry-barrier-write-failed");
-        error.code = "retry-barrier-write-failed";
+        Object.assign(error, { code: "retry-barrier-write-failed" });
         throw error;
       }
       control.retryNotBeforeMs = Math.max(
@@ -104,7 +219,7 @@ const createRepository = (initial = {}, options = {}) => {
     async acquireApiGate(input) {
       if (enabled(options.rejectApiGateWrite)) {
         const error = new Error("api-gate-write-failed");
-        error.code = "api-gate-write-failed";
+        Object.assign(error, { code: "api-gate-write-failed" });
         throw error;
       }
       if (control.retryNotBeforeMs > input.acquiredAtMs) {
@@ -112,7 +227,7 @@ const createRepository = (initial = {}, options = {}) => {
           acquired: false,
           reason: "retry-after",
           retryNotBeforeMs: control.retryNotBeforeMs,
-          gate: clone(control.apiGate || {}),
+          gate: clone(control.apiGate ?? null),
         };
       }
       if (
@@ -146,7 +261,7 @@ const createRepository = (initial = {}, options = {}) => {
     async releaseApiGate(owner) {
       if (enabled(options.rejectApiGateRelease)) {
         const error = new Error("api-gate-release-failed");
-        error.code = "api-gate-release-failed";
+        Object.assign(error, { code: "api-gate-release-failed" });
         throw error;
       }
       if (control.apiGate?.owner !== owner) {
@@ -161,7 +276,7 @@ const createRepository = (initial = {}, options = {}) => {
         enabled(options.rejectBarrierWrite)
       ) {
         const error = new Error("retry-barrier-write-failed");
-        error.code = "retry-barrier-write-failed";
+        Object.assign(error, { code: "retry-barrier-write-failed" });
         throw error;
       }
       if (control.apiGate?.owner && control.apiGate.owner !== owner) {
@@ -175,7 +290,7 @@ const createRepository = (initial = {}, options = {}) => {
         return {
           applied: false,
           retryNotBeforeMs: control.retryNotBeforeMs,
-          gate: {},
+          gate: null,
         };
       }
       control.retryNotBeforeMs = Math.max(
@@ -186,25 +301,61 @@ const createRepository = (initial = {}, options = {}) => {
       return {
         applied: true,
         retryNotBeforeMs: control.retryNotBeforeMs,
-        gate: {},
+        gate: null,
       };
     },
   };
 };
 
+/**
+ * @typedef {import("../runtime/telegram/client").TelegramFailure} Failure
+ * @typedef {Pick<Failure, "ok" | "classification" | "code"> & Partial<Omit<Failure, "ok" | "classification" | "code">>} FailureFixture
+ * @typedef {import("../runtime/telegram/client").TelegramSendSuccess} SendSuccess
+ * @typedef {import("../runtime/telegram/client").TelegramEditSuccess} EditSuccess
+ * @typedef {import("../runtime/telegram/client").TelegramDeleteSuccess} DeleteSuccess
+ * @typedef {Pick<SendSuccess, "ok" | "messageId"> & Partial<Omit<SendSuccess, "ok" | "messageId">>} SendFixture
+ * @typedef {Pick<EditSuccess, "ok"> & Partial<Omit<EditSuccess, "ok">>} EditFixture
+ * @typedef {Pick<DeleteSuccess, "ok"> & Partial<Omit<DeleteSuccess, "ok">>} DeleteFixture
+ * @typedef {{sendTelegramMessage?: (input: import("../runtime/telegram/client").TelegramSendInput) => Promise<SendFixture | FailureFixture>, editTelegramMessage?: (input: import("../runtime/telegram/client").TelegramEditInput) => Promise<EditFixture | FailureFixture>, deleteTelegramMessage?: (input: import("../runtime/telegram/client").TelegramDeleteInput) => Promise<DeleteFixture | FailureFixture>}} ClientFixture
+ */
+/** @param {FailureFixture} result @returns {Failure} */
+function failureResult(result) {
+  return {
+    description: "",
+    httpStatus: null,
+    retryAfterSeconds: null,
+    ...result,
+  };
+}
+/** @param {ClientFixture} [overrides] @returns {import("../runtime/telegram/client").TelegramClient} */
 const createClient = (overrides = {}) => ({
-  async sendTelegramMessage() {
-    return { ok: true, outcome: "sent", messageId: 101 };
+  async sendTelegramMessage(input) {
+    const result = overrides.sendTelegramMessage
+      ? await overrides.sendTelegramMessage(input)
+      : { ok: /** @type {const} */ (true), messageId: 101 };
+    return result.ok
+      ? { outcome: "sent", httpStatus: 200, ...result }
+      : failureResult(result);
   },
-  async editTelegramMessage() {
-    return { ok: true, outcome: "edited" };
+  async editTelegramMessage(input) {
+    const result = overrides.editTelegramMessage
+      ? await overrides.editTelegramMessage(input)
+      : { ok: /** @type {const} */ (true) };
+    return result.ok
+      ? { outcome: "edited", httpStatus: 200, ...result }
+      : failureResult(result);
   },
-  async deleteTelegramMessage() {
-    return { ok: true, outcome: "deleted" };
+  async deleteTelegramMessage(input) {
+    const result = overrides.deleteTelegramMessage
+      ? await overrides.deleteTelegramMessage(input)
+      : { ok: /** @type {const} */ (true) };
+    return result.ok
+      ? { outcome: "deleted", httpStatus: 200, ...result }
+      : failureResult(result);
   },
-  ...overrides,
 });
 
+/** @param {Omit<import("../runtime/telegram/deliveryTypes").TelegramEngineOptions, "repository" | "client"> & {repository: TestRepository, client?: import("../runtime/telegram/client").TelegramClient}} input */
 const createEngine = ({
   repository,
   client,
@@ -230,35 +381,61 @@ test("delivery engine requires an explicit complete client", () => {
   const repository = createRepository();
   assert.throws(
     () =>
-      createTelegramDeliveryEngine({
-        repository,
-        scheduleRetry: async () => ({ scheduled: true }),
-        localRetryBarrier: repository.localRetryBarrier,
-      }),
+      Reflect.apply(createTelegramDeliveryEngine, undefined, [
+        {
+          repository,
+          scheduleRetry: async () => ({ scheduled: true }),
+          localRetryBarrier: repository.localRetryBarrier,
+        },
+      ]),
     /complete Telegram client is required/,
   );
 });
 
-const reconcileScheduledTask = (engine, task) =>
-  engine.reconcile({
+/** @param {Engine} engine @param {ScheduledTask | undefined} task */
+const reconcileScheduledTask = (engine, task) => {
+  assert.ok(task);
+  return engine.reconcile({
     messageKey: task.messageKey,
     requestedRevision: task.revision,
     requestedGeneration: task.generation,
     taskKind: task.taskKind,
     retrySequence: task.retrySequence,
-    retryStartedAtMs: task.retryStartedAtMs,
-    retryDeadlineAtMs: task.retryDeadlineAtMs,
-    retryAtMs: task.retryAtMs,
-    safeRejectedAttemptId: task.safeRejectedAttemptId,
-    pendingDeleteId: task.pendingDeleteId,
-    retryProofLeaseOwner: task.retryProofLeaseOwner,
-    proofTaskKind: task.proofTaskKind,
-    barrierProofOwner: task.barrierProofOwner,
-    barrierRetryNotBeforeMs: task.barrierRetryNotBeforeMs,
-    apiGateReclaimOwner: task.apiGateReclaimOwner,
-    apiGateSettleOwner: task.apiGateSettleOwner,
+    ...(task.retryStartedAtMs === undefined
+      ? {}
+      : { retryStartedAtMs: task.retryStartedAtMs }),
+    ...(task.retryDeadlineAtMs === undefined
+      ? {}
+      : { retryDeadlineAtMs: task.retryDeadlineAtMs }),
+    ...(task.retryAtMs === undefined ? {} : { retryAtMs: task.retryAtMs }),
+    ...(task.safeRejectedAttemptId === undefined
+      ? {}
+      : { safeRejectedAttemptId: task.safeRejectedAttemptId }),
+    ...(task.pendingDeleteId === undefined
+      ? {}
+      : { pendingDeleteId: task.pendingDeleteId }),
+    ...(task.retryProofLeaseOwner === undefined
+      ? {}
+      : { retryProofLeaseOwner: task.retryProofLeaseOwner }),
+    ...(task.proofTaskKind === undefined
+      ? {}
+      : { proofTaskKind: task.proofTaskKind }),
+    ...(task.barrierProofOwner === undefined
+      ? {}
+      : { barrierProofOwner: task.barrierProofOwner }),
+    ...(task.barrierRetryNotBeforeMs === undefined
+      ? {}
+      : { barrierRetryNotBeforeMs: task.barrierRetryNotBeforeMs }),
+    ...(task.apiGateReclaimOwner === undefined
+      ? {}
+      : { apiGateReclaimOwner: task.apiGateReclaimOwner }),
+    ...(task.apiGateSettleOwner === undefined
+      ? {}
+      : { apiGateSettleOwner: task.apiGateSettleOwner }),
   });
+};
 
+/** @param {Partial<import("../runtime/telegram/desiredStateCore").TelegramSendDesiredInput>} [overrides] */
 const sendDesired = (overrides = {}) =>
   buildTelegramSendDesired({
     destination: "community",
@@ -270,6 +447,7 @@ const sendDesired = (overrides = {}) =>
     ...overrides,
   });
 
+/** @param {Partial<import("../runtime/telegram/desiredStateCore").TelegramEditDesiredInput>} [overrides] */
 const editDesired = (overrides = {}) =>
   buildTelegramEditDesired({
     destination: "community",
@@ -283,6 +461,7 @@ const editDesired = (overrides = {}) =>
   });
 
 test("builds deterministic desired state and multipath state updates", () => {
+  /** @type {Parameters<typeof buildTelegramSendUpdates>[0]} */
   const input = {
     messageKey: "automatch:invite-1",
     destination: "community",
@@ -296,11 +475,11 @@ test("builds deterministic desired state and multipath state updates", () => {
   const second = buildTelegramSendUpdates(input);
   assert.deepEqual(first, second);
   const desired = first["telegramMessages/automatch:invite-1/desired"];
-  assert.equal(desired.schemaVersion, 2);
-  assert.equal(desired.operation, "send");
-  assert.equal(desired.sourceRevision, "3");
-  assert.equal(desired.revision.length, 64);
-  assert.equal(desired.contentHash.length, 64);
+  assert.equal(present(desired).schemaVersion, 2);
+  assert.equal(present(desired).operation, "send");
+  assert.equal(present(desired).sourceRevision, "3");
+  assert.equal(present(desired).revision.length, 64);
+  assert.equal(present(desired).contentHash.length, 64);
   assert.equal(JSON.stringify(desired).includes("chat_id"), false);
 
   const changedMode = buildTelegramSendDesired({
@@ -311,15 +490,15 @@ test("builds deterministic desired state and multipath state updates", () => {
     ...input,
     destination: "events",
   });
-  assert.notEqual(desired.contentHash, changedMode.contentHash);
-  assert.notEqual(desired.contentHash, changedDestination.contentHash);
+  assert.notEqual(present(desired).contentHash, changedMode.contentHash);
+  assert.notEqual(present(desired).contentHash, changedDestination.contentHash);
 
   const edit = buildTelegramEditUpdates({
     ...input,
     ifMissing: "send",
   })["telegramMessages/automatch:invite-1/desired"];
-  assert.equal(edit.operation, "edit");
-  assert.equal(edit.ifMissing, "send");
+  assert.equal(present(edit).operation, "edit");
+  assert.equal(present(edit).ifMissing, "send");
 
   const deletion = buildTelegramDeleteUpdates({
     messageKey: "automatch:invite-1",
@@ -383,12 +562,18 @@ test("delivers a new send and persists its receipt", async () => {
     disableWebPagePreview: true,
   });
   const state = repository.state.get("key");
-  assert.equal(state.applied.messageId, 55);
-  assert.equal(state.applied.chatId, "community-chat");
-  assert.equal(state.applied.contentHash, desired.contentHash);
-  assert.equal(state.delivery.status, "delivered");
-  assert.equal(state.delivery.attempts, 1);
-  assert.equal(Object.hasOwn(state.delivery, "leaseOwner"), false);
+  assert.equal(present(present(state).applied).messageId, 55);
+  assert.equal(present(present(state).applied).chatId, "community-chat");
+  assert.equal(
+    present(present(state).applied).contentHash,
+    desired.contentHash,
+  );
+  assert.equal(present(present(state).delivery).status, "delivered");
+  assert.equal(present(present(state).delivery).attempts, 1);
+  assert.equal(
+    Object.hasOwn(present(present(state).delivery), "leaseOwner"),
+    false,
+  );
 });
 
 test("settles a delete-only smoke record without calling Telegram", async () => {
@@ -407,7 +592,7 @@ test("settles a delete-only smoke record without calling Telegram", async () => 
   });
   const result = await engine.reconcile({ messageKey: "key" });
   assert.equal(result.status, "delivered");
-  assert.equal(repository.state.get("key").applied, undefined);
+  assert.equal(present(repository.state.get("key")).applied, undefined);
 });
 
 test("always reconciles the latest desired revision from storage", async () => {
@@ -435,6 +620,7 @@ test("leaves a newer desired revision pending when state changes during delivery
     ifMissing: "send",
   });
   const repository = createRepository({ key: { desired: initial } });
+  /** @type {string[]} */
   const calls = [];
   const engine = createEngine({
     repository,
@@ -454,12 +640,24 @@ test("leaves a newer desired revision pending when state changes during delivery
     }),
   });
   await engine.reconcile({ messageKey: "key" });
-  assert.equal(repository.state.get("key").delivery.status, "pending");
-  assert.equal(repository.state.get("key").delivery.revision, latest.revision);
-  assert.equal(repository.state.get("key").delivery.attempts, 0);
+  assert.equal(
+    present(present(repository.state.get("key")).delivery).status,
+    "pending",
+  );
+  assert.equal(
+    present(present(repository.state.get("key")).delivery).revision,
+    latest.revision,
+  );
+  assert.equal(
+    present(present(repository.state.get("key")).delivery).attempts,
+    0,
+  );
   await engine.reconcile({ messageKey: "key" });
   assert.deepEqual(calls, ["send-initial", "edit-latest"]);
-  assert.equal(repository.state.get("key").delivery.status, "delivered");
+  assert.equal(
+    present(present(repository.state.get("key")).delivery).status,
+    "delivered",
+  );
 });
 
 test("never retries an abandoned send-in-flight marker", async () => {
@@ -493,7 +691,10 @@ test("never retries an abandoned send-in-flight marker", async () => {
   }).reconcile({ messageKey: "key" });
   assert.equal(result.status, "uncertain");
   assert.equal(sends, 0);
-  assert.equal(repository.state.get("key").delivery.status, "uncertain");
+  assert.equal(
+    present(present(repository.state.get("key")).delivery).status,
+    "uncertain",
+  );
 });
 
 test("an abandoned send releases the global gate without retrying it", async () => {
@@ -554,12 +755,15 @@ test("an abandoned send releases the global gate without retrying it", async () 
   await assert.rejects(() => engine.reconcile({ messageKey: "first" }), {
     code: "api-gate-release-failed",
   });
-  assert.equal(repository.state.get("first").delivery.status, "uncertain");
   assert.equal(
-    repository.state.get("first").delivery.apiGateSettleOwner,
+    present(present(repository.state.get("first")).delivery).status,
+    "uncertain",
+  );
+  assert.equal(
+    present(present(repository.state.get("first")).delivery).apiGateSettleOwner,
     apiGateOwner,
   );
-  assert.equal(repository.control.apiGate.owner, apiGateOwner);
+  assert.equal(present(repository.control.apiGate).owner, apiGateOwner);
 
   rejectRelease = false;
   assert.equal(
@@ -639,14 +843,15 @@ test("persists Telegram retry-after without marking the send uncertain", async (
     retryAtMs: 18_000,
     scheduled: true,
   });
-  const delivery = repository.state.get("key").delivery;
-  assert.equal(delivery.status, "retryable");
-  assert.equal(delivery.retryAtMs, 18_000);
-  assert.equal(Object.hasOwn(delivery, "sendInFlight"), false);
+  const delivery = present(repository.state.get("key")).delivery;
+  assert.equal(present(delivery).status, "retryable");
+  assert.equal(present(delivery).retryAtMs, 18_000);
+  assert.equal(Object.hasOwn(present(delivery), "sendInFlight"), false);
 });
 
 test("persists the global retry barrier before finalizing a rate limit", async () => {
   const desired = sendDesired();
+  /** @type {string[]} */
   const order = [];
   const repository = createRepository(
     { key: { desired } },
@@ -706,14 +911,15 @@ test("starts retry-after when the Telegram response is classified", async () => 
     retryAtMs: 33_000,
     scheduled: true,
   });
-  const delivery = repository.state.get("key").delivery;
-  assert.equal(delivery.retryAtMs, 33_000);
-  assert.equal(delivery.lastError.atMs, 25_000);
+  const delivery = present(repository.state.get("key")).delivery;
+  assert.equal(present(delivery).retryAtMs, 33_000);
+  assert.equal(present(present(delivery).lastError).atMs, 25_000);
 });
 
 test("keeps a full bot-wide retry-after beyond the message retry deadline", async () => {
   const desired = sendDesired();
   const repository = createRepository({ key: { desired } });
+  /** @type {ScheduledTask[]} */
   const scheduled = [];
   let nowMs = 10_000;
   let sends = 0;
@@ -743,12 +949,15 @@ test("keeps a full bot-wide retry-after beyond the message retry deadline", asyn
   });
   assert.equal(result.retryAtMs, 610_000);
   assert.equal(repository.control.retryNotBeforeMs, 910_000);
-  assert.equal(repository.state.get("key").delivery.retryDeadlineAtMs, 610_000);
+  assert.equal(
+    present(present(repository.state.get("key")).delivery).retryDeadlineAtMs,
+    610_000,
+  );
   assert.equal(scheduled.length, 1);
-  assert.equal(scheduled[0].taskKind, "rate-limit-proof");
-  assert.equal(scheduled[0].proofTaskKind, "desired");
-  assert.equal(scheduled[0].barrierRetryNotBeforeMs, 910_000);
-  assert.equal(scheduled[0].scheduleTimeMs, 10_000);
+  assert.equal(present(scheduled[0]).taskKind, "rate-limit-proof");
+  assert.equal(present(scheduled[0]).proofTaskKind, "desired");
+  assert.equal(present(scheduled[0]).barrierRetryNotBeforeMs, 910_000);
+  assert.equal(present(scheduled[0]).scheduleTimeMs, 10_000);
 
   nowMs = 610_000;
   const exhausted = await engine.reconcile({ messageKey: "key" });
@@ -801,7 +1010,10 @@ test("duplicate tasks defer until retry-after and resume at the deadline", async
     "delivered",
   );
   assert.equal(sends, 2);
-  assert.equal(repository.state.get("key").delivery.attempts, 2);
+  assert.equal(
+    present(present(repository.state.get("key")).delivery).attempts,
+    2,
+  );
 });
 
 test("a bot-wide retry barrier blocks other keys and new revisions", async () => {
@@ -903,14 +1115,17 @@ test("durable API gate blocks cold workers when barrier persistence fails", asyn
   }).reconcile({ messageKey: "key" });
   assert.equal(resultA.status, "retryable");
   assert.equal(resultA.scheduled, true);
-  const delivery = repository.state.get("key").delivery;
-  assert.equal(delivery.status, "processing");
-  assert.equal(delivery.leaseOwner, "owner-1");
-  assert.equal(delivery.sendInFlight.revision, desired.revision);
-  assert.equal(delivery.safeRejectionAtMs, undefined);
+  const delivery = present(repository.state.get("key")).delivery;
+  assert.equal(present(delivery).status, "processing");
+  assert.equal(present(delivery).leaseOwner, "owner-1");
+  assert.equal(
+    present(present(delivery).sendInFlight).revision,
+    desired.revision,
+  );
+  assert.equal(present(delivery).safeRejectionAtMs, undefined);
   assert.equal(repository.control.retryNotBeforeMs, 0);
   assert.equal(repository.localRetryBarrier.getRetryNotBeforeMs(), 18_000);
-  assert.equal(repository.control.apiGate.messageKey, "key");
+  assert.equal(present(repository.control.apiGate).messageKey, "key");
 
   repository.localRetryBarrier = createTelegramLocalRetryBarrier();
 
@@ -927,7 +1142,7 @@ test("durable API gate blocks cold workers when barrier persistence fails", asyn
   assert.equal(resultB.status, "retryable");
   assert.equal(resultB.scheduled, true);
   assert.equal(bSends, 0);
-  assert.equal(repository.control.apiGate.messageKey, "key");
+  assert.equal(present(repository.control.apiGate).messageKey, "key");
 });
 
 test("exact rate-limit proof repairs a failed barrier write after a cold start", async () => {
@@ -944,6 +1159,7 @@ test("exact rate-limit proof repairs a failed barrier write after a cold start",
     { a: { desired: desiredA }, b: { desired: desiredB } },
     { rejectBarrierProofWrite: () => rejectBarrierProofWrite },
   );
+  /** @type {ScheduledTask[]} */
   const scheduled = [];
   const firstEngine = createEngine({
     repository,
@@ -968,8 +1184,8 @@ test("exact rate-limit proof repairs a failed barrier write after a cold start",
   });
   assert.equal(first.status, "retryable");
   assert.equal(repository.control.retryNotBeforeMs, 0);
-  assert.equal(repository.control.apiGate.messageKey, "a");
-  assert.equal(scheduled[0].barrierRetryNotBeforeMs, 910_000);
+  assert.equal(present(repository.control.apiGate).messageKey, "a");
+  assert.equal(present(scheduled[0]).barrierRetryNotBeforeMs, 910_000);
 
   repository.localRetryBarrier = createTelegramLocalRetryBarrier();
   let bSends = 0;
@@ -998,14 +1214,19 @@ test("exact rate-limit proof repairs a failed barrier write after a cold start",
   assert.equal(repaired.status, "retryable");
   assert.equal(repository.control.retryNotBeforeMs, 910_000);
   assert.equal(repository.control.apiGate, undefined);
-  assert.equal(repository.state.get("a").delivery.status, "retryable");
+  assert.equal(
+    present(present(repository.state.get("a")).delivery).status,
+    "retryable",
+  );
   assert.equal(bSends, 0);
 });
 
 test("an immediate rate proof cannot leave a late proof-required marker", async () => {
   const desired = sendDesired();
   const repository = createRepository({ key: { desired } });
+  /** @type {ScheduledTask[]} */
   const scheduled = [];
+  /** @type {Engine} */
   let engine;
   let ranImmediateProof = false;
   let sends = 0;
@@ -1041,10 +1262,13 @@ test("an immediate rate proof cannot leave a late proof-required marker", async 
   assert.equal(repository.control.retryNotBeforeMs, 18_000);
   assert.equal(repository.control.apiGate, undefined);
   assert.equal(
-    repository.state.get("key").delivery.apiGateProofRequired,
+    present(present(repository.state.get("key")).delivery).apiGateProofRequired,
     undefined,
   );
-  assert.equal(repository.state.get("key").delivery.status, "retryable");
+  assert.equal(
+    present(present(repository.state.get("key")).delivery).status,
+    "retryable",
+  );
 });
 
 test("a cold native retry reconstructs a rate proof after enqueue failure", async () => {
@@ -1053,7 +1277,9 @@ test("a cold native retry reconstructs a rate proof after enqueue failure", asyn
   let rejectEnqueue = true;
   let nowMs = 10_000;
   let sends = 0;
+  /** @type {ScheduledTask[]} */
   const scheduled = [];
+  /** @type {import("../runtime/telegram/deliveryTypes").TelegramRetryScheduler} */
   const scheduleRetry = async (task) => {
     if (task.taskKind === "rate-limit-proof" && rejectEnqueue) {
       throw Object.assign(new Error("queue-unavailable"), {
@@ -1086,9 +1312,12 @@ test("a cold native retry reconstructs a rate proof after enqueue failure", asyn
     { code: "queue-unavailable" },
   );
   assert.equal(repository.control.retryNotBeforeMs, 0);
-  assert.equal(repository.control.apiGate.messageKey, "key");
+  assert.equal(present(repository.control.apiGate).messageKey, "key");
   assert.equal(
-    repository.state.get("key").delivery.apiGateProofRequired.proofTaskKind,
+    present(
+      present(present(repository.state.get("key")).delivery)
+        .apiGateProofRequired,
+    ).proofTaskKind,
     "desired",
   );
 
@@ -1104,8 +1333,8 @@ test("a cold native retry reconstructs a rate proof after enqueue failure", asyn
   assert.equal(recovered.status, "retryable");
   assert.equal(recovered.reason, "rate-limit-proof-pending");
   assert.equal(scheduled.length, 1);
-  assert.equal(scheduled[0].taskKind, "rate-limit-proof");
-  assert.equal(scheduled[0].safeRejectedAttemptId, "attempt-1");
+  assert.equal(present(scheduled[0]).taskKind, "rate-limit-proof");
+  assert.equal(present(scheduled[0]).safeRejectedAttemptId, "attempt-1");
   assert.equal(repository.control.retryNotBeforeMs, 18_000);
   assert.equal(repository.control.apiGate, undefined);
   assert.equal(sends, 1);
@@ -1116,6 +1345,7 @@ test("a cold deadline wake cannot bypass an unresolved full rate barrier", async
   let rejectBarrierProofWrite = true;
   let nowMs = 10_000;
   let sends = 0;
+  /** @type {ScheduledTask[]} */
   const scheduled = [];
   const repository = createRepository(
     { key: { desired } },
@@ -1132,6 +1362,7 @@ test("a cold deadline wake cannot bypass an unresolved full rate barrier", async
       };
     },
   });
+  /** @type {import("../runtime/telegram/deliveryTypes").TelegramRetryScheduler} */
   const scheduleRetry = async (task) => {
     scheduled.push(task);
     return { scheduled: true };
@@ -1160,8 +1391,11 @@ test("a cold deadline wake cannot bypass an unresolved full rate barrier", async
   assert.equal(blocked.reason, "rate-limit-proof-pending");
   assert.equal(sends, 1);
   assert.equal(repository.control.retryNotBeforeMs, 0);
-  assert.equal(repository.control.apiGate.messageKey, "key");
-  assert.equal(repository.state.get("key").delivery.status, "processing");
+  assert.equal(present(repository.control.apiGate).messageKey, "key");
+  assert.equal(
+    present(present(repository.state.get("key")).delivery).status,
+    "processing",
+  );
 
   rejectBarrierProofWrite = false;
   const repaired = await reconcileScheduledTask(coldEngine, exactProof);
@@ -1179,6 +1413,7 @@ test("a pending cleanup rate proof fences a newer desired wake", async () => {
   let nowMs = 10_000;
   let edits = 0;
   let deletes = 0;
+  /** @type {ScheduledTask[]} */
   const scheduled = [];
   const repository = createRepository(
     {
@@ -1222,6 +1457,7 @@ test("a pending cleanup rate proof fences a newer desired wake", async () => {
       };
     },
   });
+  /** @type {import("../runtime/telegram/deliveryTypes").TelegramRetryScheduler} */
   const scheduleRetry = async (task) => {
     scheduled.push(task);
     return { scheduled: true };
@@ -1262,7 +1498,7 @@ test("a pending cleanup rate proof fences a newer desired wake", async () => {
   assert.equal(blocked.status, "retryable");
   assert.equal(blocked.reason, "pending-rate-limit-proof-pending");
   assert.equal(edits, 0);
-  assert.equal(repository.control.apiGate.messageKey, "key");
+  assert.equal(present(repository.control.apiGate).messageKey, "key");
 
   rejectBarrierProofWrite = false;
   await reconcileScheduledTask(coldEngine, exactProof);
@@ -1428,9 +1664,12 @@ test("uncertain waiting send blocks a fresh matched instance", async () => {
   );
   assert.equal(sends, 1);
   const state = repository.state.get("key");
-  assert.equal(state.applied, undefined);
-  assert.equal(state.delivery.sendInFlight.instanceKey, "waiting:invite-1");
-  assert.equal(state.delivery.revision, matched.revision);
+  assert.equal(present(state).applied, undefined);
+  assert.equal(
+    present(present(present(state).delivery).sendInFlight).instanceKey,
+    "waiting:invite-1",
+  );
+  assert.equal(present(present(state).delivery).revision, matched.revision);
 });
 
 test("same-instance desired changes remain blocked after an uncertain send", async () => {
@@ -1465,10 +1704,13 @@ test("same-instance desired changes remain blocked after an uncertain send", asy
     reason: "abandoned-send-in-flight",
   });
   assert.equal(sends, 1);
-  const delivery = repository.state.get("key").delivery;
-  assert.equal(delivery.revision, changedWaiting.revision);
-  assert.equal(delivery.sendInFlight.instanceKey, "waiting:invite-1");
-  assert.equal(delivery.unmanagedSend, undefined);
+  const delivery = present(repository.state.get("key")).delivery;
+  assert.equal(present(delivery).revision, changedWaiting.revision);
+  assert.equal(
+    present(present(delivery).sendInFlight).instanceKey,
+    "waiting:invite-1",
+  );
+  assert.equal(Reflect.get(present(delivery), "unmanagedSend"), undefined);
 });
 
 test("uncertain replacement send blocks deleting a known applied message", async () => {
@@ -1526,8 +1768,11 @@ test("uncertain replacement send blocks deleting a known applied message", async
   );
   assert.equal(deletes, 0);
   const state = repository.state.get("key");
-  assert.equal(state.applied.messageId, 1);
-  assert.equal(state.delivery.sendInFlight.instanceKey, "matched:invite-1");
+  assert.equal(present(present(state).applied).messageId, 1);
+  assert.equal(
+    present(present(present(state).delivery).sendInFlight).instanceKey,
+    "matched:invite-1",
+  );
 });
 
 test("lets Telegram classify raw HTML longer than 4096 characters", async () => {
@@ -1569,7 +1814,10 @@ test("persists Telegram's terminal oversized-text rejection", async () => {
   }).reconcile({ messageKey: "key" });
   assert.equal(result.status, "terminal");
   assert.equal(result.reason, "telegram-400");
-  assert.equal(repository.state.get("key").delivery.status, "terminal");
+  assert.equal(
+    present(present(repository.state.get("key")).delivery).status,
+    "terminal",
+  );
 });
 
 test("replaces a changed instance before independently deleting the old message", async () => {
@@ -1578,6 +1826,7 @@ test("replaces a changed instance before independently deleting the old message"
     text: "Alice vs Bob",
     sourceRevision: "matched",
   });
+  /** @type {NonNullable<MessageFixture["applied"]>} */
   const oldApplied = {
     destination: "community",
     chatId: "community-chat",
@@ -1589,12 +1838,15 @@ test("replaces a changed instance before independently deleting the old message"
   const repository = createRepository({
     key: { desired, applied: oldApplied },
   });
+  /** @type {string[]} */
   const order = [];
   const client = createClient({
     async sendTelegramMessage() {
       order.push("send");
       assert.equal(
-        repository.state.get("key").delivery.sendInFlight.revision,
+        present(
+          present(present(repository.state.get("key")).delivery).sendInFlight,
+        ).revision,
         desired.revision,
       );
       return { ok: true, messageId: 20 };
@@ -1602,10 +1854,14 @@ test("replaces a changed instance before independently deleting the old message"
     async deleteTelegramMessage({ messageId }) {
       order.push("delete");
       assert.equal(messageId, 10);
-      assert.equal(repository.state.get("key").applied.messageId, 20);
+      assert.equal(
+        present(present(repository.state.get("key")).applied).messageId,
+        20,
+      );
       return { ok: true, outcome: "deleted" };
     },
   });
+  /** @type {ScheduledTask[]} */
   const scheduled = [];
   const engine = createEngine({
     repository,
@@ -1622,20 +1878,24 @@ test("replaces a changed instance before independently deleting the old message"
   assert.equal(result.cleanupScheduled, true);
   assert.deepEqual(order, ["send"]);
   let state = repository.state.get("key");
-  assert.equal(state.applied.messageId, 20);
-  assert.equal(state.delivery.status, "delivered");
-  assert.equal(state.delivery.pendingDelete.messageId, 10);
-  assert.equal(scheduled.at(-1).taskKind, "pending-delete");
+  assert.equal(present(present(state).applied).messageId, 20);
+  assert.equal(present(present(state).delivery).status, "delivered");
+  assert.equal(
+    present(present(present(state).delivery).pendingDelete).messageId,
+    10,
+  );
+  assert.equal(present(scheduled.at(-1)).taskKind, "pending-delete");
 
   await engine.reconcile({
     messageKey: "key",
     taskKind: "pending-delete",
-    pendingDeleteId: state.delivery.pendingDelete.pendingDeleteId,
+    pendingDeleteId: present(present(present(state).delivery).pendingDelete)
+      .pendingDeleteId,
   });
   assert.deepEqual(order, ["send", "delete"]);
   state = repository.state.get("key");
-  assert.equal(state.delivery.pendingDelete, undefined);
-  assert.equal(state.delivery.status, "delivered");
+  assert.equal(present(present(state).delivery).pendingDelete, undefined);
+  assert.equal(present(present(state).delivery).status, "delivered");
 });
 
 test("does not delete the prior post when a send receipt cannot be persisted", async () => {
@@ -1676,8 +1936,11 @@ test("does not delete the prior post when a send receipt cannot be persisted", a
   });
   assert.equal(deletes, 0);
   const state = repository.state.get("key");
-  assert.equal(state.applied.messageId, 10);
-  assert.equal(state.delivery.sendInFlight.revision, desired.revision);
+  assert.equal(present(present(state).applied).messageId, 10);
+  assert.equal(
+    present(present(present(state).delivery).sendInFlight).revision,
+    desired.revision,
+  );
 });
 
 test("retries replacement cleanup when its success cannot be persisted", async () => {
@@ -1714,8 +1977,9 @@ test("retries replacement cleanup when its success cannot be persisted", async (
     }),
   });
   await engine.reconcile({ messageKey: "key" });
-  const pendingDeleteId =
-    repository.state.get("key").delivery.pendingDelete.pendingDeleteId;
+  const pendingDeleteId = present(
+    present(present(repository.state.get("key")).delivery).pendingDelete,
+  ).pendingDeleteId;
   await assert.rejects(
     () =>
       engine.reconcile({
@@ -1726,7 +1990,9 @@ test("retries replacement cleanup when its success cannot be persisted", async (
     { code: "pending-delete-finalization-failed" },
   );
   assert.equal(
-    repository.state.get("key").delivery.pendingDelete.messageId,
+    present(
+      present(present(repository.state.get("key")).delivery).pendingDelete,
+    ).messageId,
     10,
   );
 });
@@ -1776,20 +2042,33 @@ test("terminal replacement cleanup settles once and does not block newer desired
   });
   const delivered = await engine.reconcile({ messageKey: "key" });
   assert.equal(delivered.status, "delivered");
-  const pendingDeleteId =
-    repository.state.get("key").delivery.pendingDelete.pendingDeleteId;
+  const pendingDeleteId = present(
+    present(present(repository.state.get("key")).delivery).pendingDelete,
+  ).pendingDeleteId;
   const terminalCleanup = await engine.reconcile({
     messageKey: "key",
     taskKind: "pending-delete",
     pendingDeleteId,
   });
   assert.equal(terminalCleanup.status, "settled");
-  assert.equal(terminalCleanup.cleanup.cleanup, "orphaned");
-  assert.equal(repository.state.get("key").delivery.status, "delivered");
-  assert.equal(repository.state.get("key").delivery.pendingDelete, undefined);
+  assert.equal(cleanupResult(terminalCleanup).cleanup, "orphaned");
   assert.equal(
-    Object.values(repository.state.get("key").delivery.orphanedDeletes)[0]
-      .lastError.code,
+    present(present(repository.state.get("key")).delivery).status,
+    "delivered",
+  );
+  assert.equal(
+    present(present(repository.state.get("key")).delivery).pendingDelete,
+    undefined,
+  );
+  assert.equal(
+    present(
+      Object.values(
+        present(
+          present(present(repository.state.get("key")).delivery)
+            .orphanedDeletes,
+        ),
+      )[0],
+    ).lastError.code,
     "telegram-403",
   );
   assert.equal(
@@ -1831,25 +2110,27 @@ test("edits an existing instance and treats not-modified as success", async () =
       },
     },
   });
-  let editRequest;
+  /** @type {{request?: import("../runtime/telegram/client").TelegramEditInput}} */
+  const observedEdit = {};
   const result = await createEngine({
     repository,
     client: createClient({
       async editTelegramMessage(value) {
-        editRequest = value;
+        observedEdit.request = value;
         return { ok: true, outcome: "not-modified" };
       },
     }),
   }).reconcile({ messageKey: "key" });
   assert.equal(result.status, "delivered");
-  assert.equal(editRequest.messageId, 3);
+  assert.equal(present(observedEdit.request).messageId, 3);
   assert.equal(
-    repository.state.get("key").applied.contentHash,
+    present(present(repository.state.get("key")).applied).contentHash,
     desired.contentHash,
   );
 });
 
 test("handles missing edit targets according to ifMissing", async (t) => {
+  /** @type {NonNullable<MessageFixture["applied"]>} */
   const applied = {
     destination: "community",
     chatId: "community-chat",
@@ -1880,7 +2161,7 @@ test("handles missing edit targets according to ifMissing", async (t) => {
     }).reconcile({ messageKey: "key" });
     assert.equal(result.reason, "missing-skipped");
     assert.equal(sends, 0);
-    assert.equal(repository.state.get("key").applied, undefined);
+    assert.equal(present(repository.state.get("key")).applied, undefined);
   });
 
   await t.test("send", async () => {
@@ -1905,13 +2186,17 @@ test("handles missing edit targets according to ifMissing", async (t) => {
     }).reconcile({ messageKey: "key" });
     assert.equal(result.status, "delivered");
     assert.equal(sends, 1);
-    assert.equal(repository.state.get("key").applied.messageId, 5);
+    assert.equal(
+      present(present(repository.state.get("key")).applied).messageId,
+      5,
+    );
   });
 });
 
 test("manual event invite updates never resend a missing or deleted message", async (t) => {
   const eventId = "manual-event";
   const messageKey = `event:${eventId}:upcoming`;
+  /** @type {NonNullable<MessageFixture["applied"]>} */
   const applied = {
     destination: "community",
     chatId: "community-chat",
@@ -1920,20 +2205,22 @@ test("manual event invite updates never resend a missing or deleted message", as
   };
   const projection = buildEventTelegramProjection({
     eventId,
-    eventData: {
+    eventData: require("./fixtures/canonicalEvents").event({
       telegramDeliveryVersion: 2,
       telegramAnnouncements: { invite: false, matches: true, results: true },
       status: "scheduled",
       startAtMs: Date.UTC(2026, 7, 26, 17),
       participants: {},
       rounds: {},
-    },
-    upcomingMessage: { applied },
+    }),
+    upcomingMessage: canonicalMessageFixture({ applied }),
     nowMs: Date.UTC(2026, 7, 25, 12),
   });
-  const desired = buildEventTelegramProjectionUpdates({ eventId, projection })[
-    `telegramMessages/${messageKey}/desired`
-  ];
+  const desired = desiredFixture(
+    buildEventTelegramProjectionUpdates({ eventId, projection })[
+      `telegramMessages/${messageKey}/desired`
+    ],
+  );
   for (const deleted of [false, true]) {
     await t.test(
       deleted ? "deleted at Telegram" : "receipt disappeared",
@@ -1972,6 +2259,7 @@ test("stale cancellation preserves a different matched message", async () => {
     ifMissing: "skip",
     sourceRevision: "canceled",
   });
+  /** @type {NonNullable<MessageFixture["applied"]>} */
   const matchedApplied = {
     destination: "community",
     chatId: "community-chat",
@@ -2007,8 +2295,14 @@ test("stale cancellation preserves a different matched message", async () => {
     status: "delivered",
     reason: "missing-skipped",
   });
-  assert.deepEqual(repository.state.get("key").applied, matchedApplied);
-  assert.equal(repository.state.get("key").delivery.status, "delivered");
+  assert.deepEqual(present(repository.state.get("key")).applied, {
+    appliedAtMs: 1,
+    ...matchedApplied,
+  });
+  assert.equal(
+    present(present(repository.state.get("key")).delivery).status,
+    "delivered",
+  );
   assert.deepEqual(
     { sends, edits, deletes },
     { sends: 0, edits: 0, deletes: 0 },
@@ -2043,7 +2337,10 @@ test("retries transient edits and deletes idempotently", async (t) => {
       }),
     }).reconcile({ messageKey: "key" });
     assert.equal(result.status, "retryable");
-    assert.equal(repository.state.get("key").delivery.status, "retryable");
+    assert.equal(
+      present(present(repository.state.get("key")).delivery).status,
+      "retryable",
+    );
   });
 
   await t.test("delete", async () => {
@@ -2075,7 +2372,10 @@ test("retries transient edits and deletes idempotently", async (t) => {
       }),
     }).reconcile({ messageKey: "key" });
     assert.equal(result.status, "retryable");
-    assert.equal(repository.state.get("key").applied.messageId, 3);
+    assert.equal(
+      present(present(repository.state.get("key")).applied).messageId,
+      3,
+    );
   });
 });
 
@@ -2141,6 +2441,7 @@ test("safe send rejection schedules proof without reading the record again", asy
   repository.getMessage = async () => {
     throw new Error("unexpected record read");
   };
+  /** @type {ScheduledTask[]} */
   const scheduled = [];
   const result = await createEngine({
     repository,
@@ -2161,12 +2462,15 @@ test("safe send rejection schedules proof without reading the record again", asy
 
   assert.equal(result.status, "retryable");
   assert.equal(scheduled.length, 1);
-  assert.equal(scheduled[0].safeRejectedAttemptId, "attempt-1");
-  assert.equal(scheduled[0].retryProofLeaseOwner, undefined);
-  assert.equal(scheduled[0].retryStartedAtMs, 10_000);
-  assert.equal(scheduled[0].retryDeadlineAtMs, 610_000);
-  assert.equal(scheduled[0].retryAtMs, 11_000);
-  assert.equal(repository.state.get("key").delivery.sendInFlight, undefined);
+  assert.equal(present(scheduled[0]).safeRejectedAttemptId, "attempt-1");
+  assert.equal(present(scheduled[0]).retryProofLeaseOwner, undefined);
+  assert.equal(present(scheduled[0]).retryStartedAtMs, 10_000);
+  assert.equal(present(scheduled[0]).retryDeadlineAtMs, 610_000);
+  assert.equal(present(scheduled[0]).retryAtMs, 11_000);
+  assert.equal(
+    present(present(repository.state.get("key")).delivery).sendInFlight,
+    undefined,
+  );
 });
 
 test("send outcomes become durable before their API gate is released", async (t) => {
@@ -2192,12 +2496,15 @@ test("send outcomes become durable before their API gate is released", async (t)
         { code: "api-gate-release-failed" },
       );
       const persisted = repository.state.get("key");
-      assert.equal(persisted.applied.messageId, 71);
-      assert.equal(persisted.delivery.status, "delivered");
-      assert.equal(persisted.delivery.sendInFlight, undefined);
+      assert.equal(present(present(persisted).applied).messageId, 71);
+      assert.equal(present(present(persisted).delivery).status, "delivered");
       assert.equal(
-        persisted.delivery.apiGateSettleOwner,
-        repository.control.apiGate.owner,
+        present(present(persisted).delivery).sendInFlight,
+        undefined,
+      );
+      assert.equal(
+        present(present(persisted).delivery).apiGateSettleOwner,
+        present(repository.control.apiGate).owner,
       );
 
       rejectRelease = false;
@@ -2208,7 +2515,8 @@ test("send outcomes become durable before their API gate is released", async (t)
       assert.equal(sends, 1);
       assert.equal(repository.control.apiGate, undefined);
       assert.equal(
-        repository.state.get("key").delivery.apiGateSettleOwner,
+        present(present(repository.state.get("key")).delivery)
+          .apiGateSettleOwner,
         undefined,
       );
     },
@@ -2243,12 +2551,14 @@ test("send outcomes become durable before their API gate is released", async (t)
           }),
         { code: "send-receipt-not-persisted" },
       );
-      assert.equal(repository.state.get("key").applied, undefined);
+      assert.equal(present(repository.state.get("key")).applied, undefined);
       assert.equal(
-        repository.state.get("key").delivery.sendInFlight.attemptId,
+        present(
+          present(present(repository.state.get("key")).delivery).sendInFlight,
+        ).attemptId,
         "attempt-1",
       );
-      assert.equal(repository.control.apiGate.messageKey, "key");
+      assert.equal(present(repository.control.apiGate).messageKey, "key");
 
       rejectReceipt = false;
       nowMs = 71_000;
@@ -2261,7 +2571,8 @@ test("send outcomes become durable before their API gate is released", async (t)
       assert.equal(sends, 1);
       assert.equal(repository.control.apiGate, undefined);
       assert.equal(
-        repository.state.get("key").delivery.apiGateSettleOwner,
+        present(present(repository.state.get("key")).delivery)
+          .apiGateSettleOwner,
         undefined,
       );
     },
@@ -2308,11 +2619,17 @@ test("send outcomes become durable before their API gate is released", async (t)
         }),
       { code: "api-gate-release-failed" },
     );
-    const terminal = repository.state.get("key").delivery;
-    assert.equal(terminal.status, "terminal");
-    assert.equal(terminal.sendInFlight, undefined);
-    assert.equal(terminal.lastError.code, "safe-retry-window-exhausted");
-    assert.equal(terminal.apiGateSettleOwner, repository.control.apiGate.owner);
+    const terminal = present(repository.state.get("key")).delivery;
+    assert.equal(present(terminal).status, "terminal");
+    assert.equal(present(terminal).sendInFlight, undefined);
+    assert.equal(
+      present(present(terminal).lastError).code,
+      "safe-retry-window-exhausted",
+    );
+    assert.equal(
+      present(terminal).apiGateSettleOwner,
+      present(repository.control.apiGate).owner,
+    );
     assert.equal(sends, 0);
 
     rejectRelease = false;
@@ -2348,7 +2665,9 @@ test("acknowledged idempotent outcomes settle without repeating the API", async 
               destination: "community",
               chatId: "community-chat",
               messageId: 9,
-              instanceKey: desired.instanceKey || "waiting:invite-1",
+              instanceKey:
+                ("instanceKey" in desired ? desired.instanceKey : undefined) ||
+                "waiting:invite-1",
               contentHash: "old",
             },
           },
@@ -2378,11 +2697,11 @@ test("acknowledged idempotent outcomes settle without repeating the API", async 
           }),
         { code: "api-gate-release-failed" },
       );
-      const crashedDelivery = repository.state.get("key").delivery;
-      assert.equal(crashedDelivery.status, "delivered");
+      const crashedDelivery = present(repository.state.get("key")).delivery;
+      assert.equal(present(crashedDelivery).status, "delivered");
       assert.equal(
-        crashedDelivery.apiGateSettleOwner,
-        repository.control.apiGate.owner,
+        present(crashedDelivery).apiGateSettleOwner,
+        present(repository.control.apiGate).owner,
       );
 
       rejectRelease = false;
@@ -2400,7 +2719,8 @@ test("acknowledged idempotent outcomes settle without repeating the API", async 
       assert.equal(calls, 1);
       assert.equal(repository.control.apiGate, undefined);
       assert.equal(
-        repository.state.get("key").delivery.apiGateSettleOwner,
+        present(present(repository.state.get("key")).delivery)
+          .apiGateSettleOwner,
         undefined,
       );
     });
@@ -2451,11 +2771,11 @@ test("acknowledged idempotent outcomes settle without repeating the API", async 
         }),
       { code: "api-gate-release-failed" },
     );
-    const crashedDelivery = repository.state.get("key").delivery;
-    assert.equal(crashedDelivery.pendingDelete, undefined);
+    const crashedDelivery = present(repository.state.get("key")).delivery;
+    assert.equal(present(crashedDelivery).pendingDelete, undefined);
     assert.equal(
-      crashedDelivery.pendingDeleteApiGateSettleOwner,
-      repository.control.apiGate.owner,
+      present(crashedDelivery).pendingDeleteApiGateSettleOwner,
+      present(repository.control.apiGate).owner,
     );
 
     rejectRelease = false;
@@ -2474,7 +2794,10 @@ test("acknowledged idempotent outcomes settle without repeating the API", async 
     assert.equal(recovered.status, "settled");
     assert.equal(calls, 1);
     assert.equal(repository.control.apiGate, undefined);
-    assert.equal(repository.state.get("key").delivery.pendingDelete, undefined);
+    assert.equal(
+      present(present(repository.state.get("key")).delivery).pendingDelete,
+      undefined,
+    );
   });
 });
 
@@ -2484,6 +2807,7 @@ test("exact retry proofs settle gates left by retryable responses", async (t) =>
     let rejectRelease = true;
     let nowMs = 10_000;
     let sends = 0;
+    /** @type {ScheduledTask[]} */
     const scheduled = [];
     const repository = createRepository(
       { key: { desired } },
@@ -2512,8 +2836,8 @@ test("exact retry proofs settle gates left by retryable responses", async (t) =>
     await assert.rejects(() => engine.reconcile({ messageKey: "key" }), {
       code: "api-gate-release-failed",
     });
-    const strandedOwner = repository.control.apiGate.owner;
-    assert.equal(scheduled[0].apiGateSettleOwner, strandedOwner);
+    const strandedOwner = present(repository.control.apiGate).owner;
+    assert.equal(present(scheduled[0]).apiGateSettleOwner, strandedOwner);
 
     rejectRelease = false;
     nowMs = 11_000;
@@ -2522,7 +2846,10 @@ test("exact retry proofs settle gates left by retryable responses", async (t) =>
     assert.equal(recovered.status, "delivered");
     assert.equal(sends, 2);
     assert.equal(repository.control.apiGate, undefined);
-    assert.equal(repository.state.get("key").applied.messageId, 81);
+    assert.equal(
+      present(present(repository.state.get("key")).applied).messageId,
+      81,
+    );
   });
 
   await t.test("desired edit", async () => {
@@ -2530,6 +2857,7 @@ test("exact retry proofs settle gates left by retryable responses", async (t) =>
     let rejectRelease = true;
     let nowMs = 10_000;
     let edits = 0;
+    /** @type {ScheduledTask[]} */
     const scheduled = [];
     const repository = createRepository(
       {
@@ -2570,8 +2898,8 @@ test("exact retry proofs settle gates left by retryable responses", async (t) =>
       code: "api-gate-release-failed",
     });
     assert.equal(
-      scheduled[0].apiGateSettleOwner,
-      repository.control.apiGate.owner,
+      present(scheduled[0]).apiGateSettleOwner,
+      present(repository.control.apiGate).owner,
     );
 
     rejectRelease = false;
@@ -2587,6 +2915,7 @@ test("exact retry proofs settle gates left by retryable responses", async (t) =>
     let rejectRelease = true;
     let nowMs = 10_000;
     let deletes = 0;
+    /** @type {ScheduledTask[]} */
     const scheduled = [];
     const repository = createRepository(
       {
@@ -2637,14 +2966,14 @@ test("exact retry proofs settle gates left by retryable responses", async (t) =>
       { code: "api-gate-release-failed" },
     );
     assert.equal(
-      scheduled[0].apiGateSettleOwner,
-      repository.control.apiGate.owner,
+      present(scheduled[0]).apiGateSettleOwner,
+      present(repository.control.apiGate).owner,
     );
 
     rejectRelease = false;
     nowMs = 11_000;
     const recovered = await reconcileScheduledTask(engine, scheduled[0]);
-    assert.equal(recovered.cleanup.cleanup, "deleted");
+    assert.equal(cleanupResult(recovered).cleanup, "deleted");
     assert.equal(deletes, 2);
     assert.equal(repository.control.apiGate, undefined);
   });
@@ -2655,6 +2984,7 @@ test("a new desired revision durably settles a hard-crashed idempotent gate", as
   const desiredB = editDesired({ text: "B", sourceRevision: "B" });
   let rejectRelease = false;
   let nowMs = 10_000;
+  /** @type {string[]} */
   const edits = [];
   const repository = createRepository(
     {
@@ -2692,9 +3022,13 @@ test("a new desired revision durably settles a hard-crashed idempotent gate", as
       }),
     { code: "worker-died" },
   );
-  const gateAOwner = repository.control.apiGate.owner;
+
+  const gateAOwner = present(repository.control.apiGate).owner;
   assert.equal(
-    repository.state.get("key").delivery.appliedStateUnknown.operation,
+    present(
+      present(present(repository.state.get("key")).delivery)
+        .appliedStateUnknown,
+    ).operation,
     "edit",
   );
 
@@ -2726,9 +3060,9 @@ test("a new desired revision durably settles a hard-crashed idempotent gate", as
     { code: "api-gate-release-failed" },
   );
   assert.equal(bCalls, 0);
-  assert.equal(repository.control.apiGate.owner, gateAOwner);
+  assert.equal(present(repository.control.apiGate).owner, gateAOwner);
   assert.equal(
-    repository.state.get("key").delivery.apiGateSettleOwner,
+    present(present(repository.state.get("key")).delivery).apiGateSettleOwner,
     gateAOwner,
   );
 
@@ -2742,15 +3076,15 @@ test("a new desired revision durably settles a hard-crashed idempotent gate", as
   assert.deepEqual(edits, ["A", "B"]);
   assert.equal(repository.control.apiGate, undefined);
   assert.equal(
-    repository.state.get("key").delivery.apiGateSettleOwner,
+    present(present(repository.state.get("key")).delivery).apiGateSettleOwner,
     undefined,
   );
   assert.equal(
-    repository.state.get("key").applied.contentHash,
+    present(present(repository.state.get("key")).applied).contentHash,
     desiredB.contentHash,
   );
   assert.equal(
-    repository.state.get("key").delivery.appliedStateUnknown,
+    present(present(repository.state.get("key")).delivery).appliedStateUnknown,
     undefined,
   );
 });
@@ -2803,6 +3137,7 @@ test("a crashed delete cannot make restored content look already delivered", asy
     sourceRevision: "restored",
   });
   let nowMs = 10_000;
+  /** @type {string[]} */
   const calls = [];
   const repository = createRepository({
     key: {
@@ -2837,7 +3172,10 @@ test("a crashed delete cannot make restored content look already delivered", asy
     { code: "worker-died" },
   );
   assert.equal(
-    repository.state.get("key").delivery.appliedStateUnknown.operation,
+    present(
+      present(present(repository.state.get("key")).delivery)
+        .appliedStateUnknown,
+    ).operation,
     "delete",
   );
 
@@ -2866,9 +3204,12 @@ test("a crashed delete cannot make restored content look already delivered", asy
   });
   assert.equal(recovered.status, "delivered");
   assert.deepEqual(calls, ["delete", "edit-missing", "send"]);
-  assert.equal(repository.state.get("key").applied.messageId, 4);
   assert.equal(
-    repository.state.get("key").delivery.appliedStateUnknown,
+    present(present(repository.state.get("key")).applied).messageId,
+    4,
+  );
+  assert.equal(
+    present(present(repository.state.get("key")).delivery).appliedStateUnknown,
     undefined,
   );
 });
@@ -2877,6 +3218,7 @@ test("a new cleanup wake-up reclaims the current hard-crashed cleanup gate", asy
   const desired = sendDesired();
   let nowMs = 10_000;
   let deletes = 0;
+  /** @type {ScheduledTask[]} */
   const scheduled = [];
   const repository = createRepository({
     key: {
@@ -2923,7 +3265,7 @@ test("a new cleanup wake-up reclaims the current hard-crashed cleanup gate", asy
       }),
     { code: "worker-died" },
   );
-  const crashedOwner = repository.control.apiGate.owner;
+  const crashedOwner = present(repository.control.apiGate).owner;
 
   nowMs = 71_000;
   const wakeup = await engine.reconcile({
@@ -2932,14 +3274,17 @@ test("a new cleanup wake-up reclaims the current hard-crashed cleanup gate", asy
   });
   assert.equal(wakeup.cleanupScheduled, true);
   const cleanupTask = scheduled.at(-1);
-  assert.equal(cleanupTask.taskKind, "pending-delete");
-  assert.notEqual(cleanupTask.generation, "cleanup-original");
+  assert.equal(present(cleanupTask).taskKind, "pending-delete");
+  assert.notEqual(present(cleanupTask).generation, "cleanup-original");
 
   const recovered = await reconcileScheduledTask(engine, cleanupTask);
-  assert.equal(recovered.cleanup.cleanup, "deleted");
+  assert.equal(cleanupResult(recovered).cleanup, "deleted");
   assert.equal(deletes, 2);
   assert.equal(repository.control.apiGate, undefined);
-  assert.equal(repository.state.get("key").delivery.pendingDelete, undefined);
+  assert.equal(
+    present(present(repository.state.get("key")).delivery).pendingDelete,
+    undefined,
+  );
   assert.notEqual(crashedOwner, "");
 });
 
@@ -2949,6 +3294,7 @@ test("a newer desired API settles an expired cleanup gate before proceeding", as
   let nowMs = 10_000;
   let edits = 0;
   let deletes = 0;
+  /** @type {ScheduledTask[]} */
   const scheduled = [];
   const repository = createRepository({
     key: {
@@ -3024,11 +3370,14 @@ test("a newer desired API settles an expired cleanup gate before proceeding", as
   assert.equal(repository.control.apiGate, undefined);
 
   const cleanupTask = scheduled.at(-1);
-  assert.equal(cleanupTask.taskKind, "pending-delete");
+  assert.equal(present(cleanupTask).taskKind, "pending-delete");
   const cleaned = await reconcileScheduledTask(engine, cleanupTask);
-  assert.equal(cleaned.cleanup.cleanup, "deleted");
+  assert.equal(cleanupResult(cleaned).cleanup, "deleted");
   assert.equal(deletes, 2);
-  assert.equal(repository.state.get("key").delivery.pendingDelete, undefined);
+  assert.equal(
+    present(present(repository.state.get("key")).delivery).pendingDelete,
+    undefined,
+  );
 });
 
 test("expired hard-crash gates settle without another Telegram call", async (t) => {
@@ -3050,7 +3399,9 @@ test("expired hard-crash gates settle without another Telegram call", async (t) 
             destination: "community",
             chatId: "community-chat",
             messageId: 12,
-            instanceKey: desired.instanceKey || "old",
+            instanceKey:
+              ("instanceKey" in desired ? desired.instanceKey : undefined) ||
+              "old",
             contentHash: "old",
           },
         },
@@ -3082,7 +3433,7 @@ test("expired hard-crash gates settle without another Telegram call", async (t) 
           }),
         { code: "worker-died" },
       );
-      assert.equal(repository.control.apiGate.messageKey, "key");
+      assert.equal(present(repository.control.apiGate).messageKey, "key");
 
       nowMs = 610_000;
       const expired = await createEngine({
@@ -3096,7 +3447,8 @@ test("expired hard-crash gates settle without another Telegram call", async (t) 
       assert.equal(calls, 1);
       assert.equal(repository.control.apiGate, undefined);
       assert.equal(
-        repository.state.get("key").delivery.apiGateSettleOwner,
+        present(present(repository.state.get("key")).delivery)
+          .apiGateSettleOwner,
         undefined,
       );
     });
@@ -3157,12 +3509,16 @@ test("expired hard-crash gates settle without another Telegram call", async (t) 
       taskKind: "pending-delete",
       pendingDeleteId: "expired-cleanup",
     });
-    assert.equal(expired.cleanup.cleanup, "exhausted");
+    assert.equal(cleanupResult(expired).cleanup, "exhausted");
     assert.equal(deletes, 1);
     assert.equal(repository.control.apiGate, undefined);
     assert.equal(
-      repository.state.get("key").delivery.orphanedDeletes["expired-cleanup"]
-        .lastError.code,
+      present(
+        present(
+          present(present(repository.state.get("key")).delivery)
+            .orphanedDeletes,
+        )["expired-cleanup"],
+      ).lastError.code,
       "safe-retry-window-exhausted",
     );
   });
@@ -3197,6 +3553,7 @@ test("proof payload bounds an idempotent retry when state finalization failed", 
       },
     },
   );
+  /** @type {ScheduledTask[]} */
   const scheduled = [];
   let nowMs = 10_000;
   let edits = 0;
@@ -3222,25 +3579,31 @@ test("proof payload bounds an idempotent retry when state finalization failed", 
   await assert.rejects(() => engine.reconcile({ messageKey: "key" }), {
     code: "retryable-finalization-failed",
   });
-  assert.equal(repository.state.get("key").delivery.status, "processing");
-  assert.equal(scheduled[0].retrySequence, 1);
+  assert.equal(
+    present(present(repository.state.get("key")).delivery).status,
+    "processing",
+  );
+  assert.equal(present(scheduled[0]).retrySequence, 1);
 
-  nowMs = scheduled[0].retryDeadlineAtMs;
+  nowMs = present(present(scheduled[0]).retryDeadlineAtMs);
   const result = await engine.reconcile({
     messageKey: "key",
-    requestedRevision: scheduled[0].revision,
-    requestedGeneration: scheduled[0].generation,
-    taskKind: scheduled[0].taskKind,
-    retrySequence: scheduled[0].retrySequence,
-    retryStartedAtMs: scheduled[0].retryStartedAtMs,
-    retryDeadlineAtMs: scheduled[0].retryDeadlineAtMs,
-    retryAtMs: scheduled[0].retryAtMs,
-    retryProofLeaseOwner: scheduled[0].retryProofLeaseOwner,
+    requestedRevision: present(scheduled[0]).revision,
+    requestedGeneration: present(scheduled[0]).generation,
+    taskKind: present(scheduled[0]).taskKind,
+    retrySequence: present(scheduled[0]).retrySequence,
+    retryStartedAtMs: present(present(scheduled[0]).retryStartedAtMs),
+    retryDeadlineAtMs: present(present(scheduled[0]).retryDeadlineAtMs),
+    retryAtMs: present(present(scheduled[0]).retryAtMs),
+    retryProofLeaseOwner: present(present(scheduled[0]).retryProofLeaseOwner),
   });
   assert.equal(result.status, "terminal");
   assert.equal(result.reason, "safe-retry-window-exhausted");
   assert.equal(edits, 1);
-  assert.equal(repository.state.get("key").delivery.deadLetterAtMs, nowMs);
+  assert.equal(
+    present(present(repository.state.get("key")).delivery).deadLetterAtMs,
+    nowMs,
+  );
 });
 
 test("proof payload bounds pending cleanup when state finalization failed", async () => {
@@ -3277,6 +3640,7 @@ test("proof payload bounds pending cleanup when state finalization failed", asyn
       },
     },
   );
+  /** @type {ScheduledTask[]} */
   const scheduled = [];
   let nowMs = 10_000;
   let deletes = 0;
@@ -3309,29 +3673,32 @@ test("proof payload bounds pending cleanup when state finalization failed", asyn
     { code: "pending-delete-retryable-finalization-failed" },
   );
   assert.equal(
-    repository.state.get("key").delivery.pendingDelete.status,
+    present(
+      present(present(repository.state.get("key")).delivery).pendingDelete,
+    ).status,
     "processing",
   );
 
-  nowMs = scheduled[0].retryDeadlineAtMs;
+  nowMs = present(present(scheduled[0]).retryDeadlineAtMs);
   await engine.reconcile({
     messageKey: "key",
-    requestedRevision: scheduled[0].revision,
-    requestedGeneration: scheduled[0].generation,
+    requestedRevision: present(scheduled[0]).revision,
+    requestedGeneration: present(scheduled[0]).generation,
     taskKind: "pending-delete",
-    pendingDeleteId: scheduled[0].pendingDeleteId,
-    retrySequence: scheduled[0].retrySequence,
-    retryStartedAtMs: scheduled[0].retryStartedAtMs,
-    retryDeadlineAtMs: scheduled[0].retryDeadlineAtMs,
-    retryAtMs: scheduled[0].retryAtMs,
-    retryProofLeaseOwner: scheduled[0].retryProofLeaseOwner,
+    pendingDeleteId: present(present(scheduled[0]).pendingDeleteId),
+    retrySequence: present(scheduled[0]).retrySequence,
+    retryStartedAtMs: present(present(scheduled[0]).retryStartedAtMs),
+    retryDeadlineAtMs: present(present(scheduled[0]).retryDeadlineAtMs),
+    retryAtMs: present(present(scheduled[0]).retryAtMs),
+    retryProofLeaseOwner: present(present(scheduled[0]).retryProofLeaseOwner),
   });
-  const delivery = repository.state.get("key").delivery;
+  const delivery = present(repository.state.get("key")).delivery;
   assert.equal(deletes, 1);
-  assert.equal(delivery.status, "delivered");
-  assert.equal(delivery.pendingDelete, undefined);
+  assert.equal(present(delivery).status, "delivered");
+  assert.equal(present(delivery).pendingDelete, undefined);
   assert.equal(
-    delivery.orphanedDeletes["cleanup-1"].lastError.code,
+    present(present(present(delivery).orphanedDeletes)["cleanup-1"]).lastError
+      .code,
     "safe-retry-window-exhausted",
   );
 });
@@ -3342,6 +3709,7 @@ test("global deferral persists a bounded retry window", async () => {
     { key: { desired } },
     { retryNotBeforeMs: 3_610_000 },
   );
+  /** @type {ScheduledTask[]} */
   const scheduled = [];
   let nowMs = 10_000;
   let sends = 0;
@@ -3367,10 +3735,10 @@ test("global deferral persists a bounded retry window", async () => {
     retryAtMs: 610_000,
     scheduled: true,
   });
-  const retrying = repository.state.get("key").delivery;
-  assert.equal(retrying.retryStartedAtMs, 10_000);
-  assert.equal(retrying.retryDeadlineAtMs, 610_000);
-  assert.equal(scheduled[0].scheduleTimeMs, 610_000);
+  const retrying = present(repository.state.get("key")).delivery;
+  assert.equal(present(retrying).retryStartedAtMs, 10_000);
+  assert.equal(present(retrying).retryDeadlineAtMs, 610_000);
+  assert.equal(present(scheduled[0]).scheduleTimeMs, 610_000);
 
   nowMs = 610_000;
   const exhausted = await engine.reconcile({ messageKey: "key" });
@@ -3398,9 +3766,9 @@ test("pre-call enqueue failures cannot reset retry windows", async (t) => {
       repository,
       now: () => nowMs,
       scheduleRetry: async () => {
-        const delivery = repository.state.get("key").delivery;
-        assert.equal(delivery.status, "retryable");
-        assert.equal(delivery.retryDeadlineAtMs, 610_000);
+        const delivery = present(repository.state.get("key")).delivery;
+        assert.equal(present(delivery).status, "retryable");
+        assert.equal(present(delivery).retryDeadlineAtMs, 610_000);
         throw Object.assign(new Error("enqueue-failed"), {
           code: "enqueue-failed",
         });
@@ -3415,7 +3783,7 @@ test("pre-call enqueue failures cannot reset retry windows", async (t) => {
       code: "enqueue-failed",
     });
     assert.equal(
-      repository.state.get("key").delivery.retryDeadlineAtMs,
+      present(present(repository.state.get("key")).delivery).retryDeadlineAtMs,
       610_000,
     );
 
@@ -3451,10 +3819,10 @@ test("pre-call enqueue failures cannot reset retry windows", async (t) => {
           repository,
           now: () => nowMs,
           scheduleRetry: async () => {
-            const delivery = repository.state.get("key").delivery;
-            assert.equal(delivery.status, "retryable");
-            assert.equal(delivery.sendInFlight, undefined);
-            assert.equal(delivery.retryDeadlineAtMs, 610_000);
+            const delivery = present(repository.state.get("key")).delivery;
+            assert.equal(present(delivery).status, "retryable");
+            assert.equal(present(delivery).sendInFlight, undefined);
+            assert.equal(present(delivery).retryDeadlineAtMs, 610_000);
             throw Object.assign(new Error("enqueue-failed"), {
               code: "enqueue-failed",
             });
@@ -3517,10 +3885,11 @@ test("pre-call enqueue failures cannot reset retry windows", async (t) => {
         createEngine({
           repository,
           scheduleRetry: async () => {
-            const pendingDelete =
-              repository.state.get("key").delivery.pendingDelete;
-            assert.equal(pendingDelete.status, "retryable");
-            assert.equal(pendingDelete.retryDeadlineAtMs, 610_000);
+            const pendingDelete = present(
+              present(repository.state.get("key")).delivery,
+            ).pendingDelete;
+            assert.equal(present(pendingDelete).status, "retryable");
+            assert.equal(present(pendingDelete).retryDeadlineAtMs, 610_000);
             throw Object.assign(new Error("enqueue-failed"), {
               code: "enqueue-failed",
             });
@@ -3533,7 +3902,9 @@ test("pre-call enqueue failures cannot reset retry windows", async (t) => {
       { code: "enqueue-failed" },
     );
     assert.equal(
-      repository.state.get("key").delivery.pendingDelete.retryDeadlineAtMs,
+      present(
+        present(present(repository.state.get("key")).delivery).pendingDelete,
+      ).retryDeadlineAtMs,
       610_000,
     );
   });
@@ -3551,6 +3922,7 @@ test("rechecks retry deadlines immediately before Telegram calls", async (t) => 
                 destination: "community",
                 sourceRevision: "delete",
               });
+      /** @type {MessageFixture} */
       const record = {
         desired,
         delivery: {
@@ -3568,7 +3940,9 @@ test("rechecks retry deadlines immediately before Telegram calls", async (t) => 
           destination: "community",
           chatId: "community-chat",
           messageId: 4,
-          instanceKey: desired.instanceKey || "old",
+          instanceKey:
+            ("instanceKey" in desired ? desired.instanceKey : undefined) ||
+            "old",
           contentHash: "old",
         };
       }
@@ -3697,11 +4071,12 @@ test("rechecks retry deadlines immediately before Telegram calls", async (t) => 
       pendingDeleteId: "cleanup-deadline",
     });
     assert.equal(deletes, 0);
-    const delivery = repository.state.get("key").delivery;
-    assert.equal(delivery.status, "delivered");
-    assert.equal(delivery.pendingDelete, undefined);
+    const delivery = present(repository.state.get("key")).delivery;
+    assert.equal(present(delivery).status, "delivered");
+    assert.equal(present(delivery).pendingDelete, undefined);
     assert.equal(
-      delivery.orphanedDeletes["cleanup-deadline"].lastError.code,
+      present(present(present(delivery).orphanedDeletes)["cleanup-deadline"])
+        .lastError.code,
       "safe-retry-window-exhausted",
     );
   });
@@ -3753,10 +4128,12 @@ test("rechecks retry deadlines immediately before Telegram calls", async (t) => 
     });
     assert.equal(barrierReads, 2);
     assert.equal(deletes, 0);
-    const delivery = repository.state.get("key").delivery;
-    assert.equal(delivery.pendingDelete, undefined);
+    const delivery = present(repository.state.get("key")).delivery;
+    assert.equal(present(delivery).pendingDelete, undefined);
     assert.equal(
-      delivery.orphanedDeletes["cleanup-read-deadline"].lastError.code,
+      present(
+        present(present(delivery).orphanedDeletes)["cleanup-read-deadline"],
+      ).lastError.code,
       "safe-retry-window-exhausted",
     );
   });
@@ -3767,6 +4144,7 @@ test("stale retry proofs preserve newer desired and cleanup leases", async (t) =
     const desired = editDesired({ text: "A", sourceRevision: "A" });
     const interveningDesired = editDesired({ text: "B", sourceRevision: "B" });
     assert.notEqual(desired.revision, interveningDesired.revision);
+    /** @type {ScheduledTask[]} */
     const scheduled = [];
     const repository = createRepository({
       key: {
@@ -3809,22 +4187,24 @@ test("stale retry proofs preserve newer desired and cleanup leases", async (t) =
     });
     assert.equal(result.reason, "locked");
     assert.equal(
-      repository.state.get("key").delivery.leaseOwner,
+      present(present(repository.state.get("key")).delivery).leaseOwner,
       "newer-worker",
     );
-    assert.equal(scheduled[0].retryStartedAtMs, 1_000);
-    assert.equal(scheduled[0].retryDeadlineAtMs, 30_000);
-    assert.equal(scheduled[0].retryProofLeaseOwner, undefined);
-    assert.notEqual(scheduled[0].generation, "running-task");
+    assert.equal(present(scheduled[0]).retryStartedAtMs, 1_000);
+    assert.equal(present(scheduled[0]).retryDeadlineAtMs, 30_000);
+    assert.equal(present(scheduled[0]).retryProofLeaseOwner, undefined);
+    assert.notEqual(present(scheduled[0]).generation, "running-task");
     assert.notEqual(
       buildTelegramDeliveryTaskId({
+        schemaVersion: 1,
+        dataEpoch: 1,
         messageKey: "key",
         revision: desired.revision,
         taskKind: "desired",
         retrySequence: 2,
         generation: "running-task",
       }),
-      buildTelegramDeliveryTaskId(scheduled[0]),
+      buildTelegramDeliveryTaskId(present(scheduled[0])),
     );
   });
 
@@ -3832,6 +4212,7 @@ test("stale retry proofs preserve newer desired and cleanup leases", async (t) =
     "cleanup proof cannot clear a recreated cleanup lease",
     async () => {
       const desired = sendDesired();
+      /** @type {ScheduledTask[]} */
       const scheduled = [];
       const repository = createRepository({
         key: {
@@ -3872,15 +4253,17 @@ test("stale retry proofs preserve newer desired and cleanup leases", async (t) =
         retrySequence: 3,
         retryProofLeaseOwner: "first-cleanup-worker",
       });
-      assert.equal(result.cleanup.status, "retryable");
+      assert.equal(cleanupResult(result).status, "retryable");
       assert.equal(
-        repository.state.get("key").delivery.pendingDelete.leaseOwner,
+        present(
+          present(present(repository.state.get("key")).delivery).pendingDelete,
+        ).leaseOwner,
         "newer-cleanup",
       );
-      assert.equal(scheduled[0].retryStartedAtMs, 1_000);
-      assert.equal(scheduled[0].retryDeadlineAtMs, 30_000);
-      assert.equal(scheduled[0].retryProofLeaseOwner, undefined);
-      assert.notEqual(scheduled[0].generation, "running-cleanup");
+      assert.equal(present(scheduled[0]).retryStartedAtMs, 1_000);
+      assert.equal(present(scheduled[0]).retryDeadlineAtMs, 30_000);
+      assert.equal(present(scheduled[0]).retryProofLeaseOwner, undefined);
+      assert.notEqual(present(scheduled[0]).generation, "running-cleanup");
     },
   );
 });
@@ -3918,7 +4301,7 @@ test("pending cleanup proof cannot clear a top-level desired lease", async () =>
   });
   assert.equal(result.reason, "locked");
   assert.equal(
-    repository.state.get("key").delivery.leaseOwner,
+    present(present(repository.state.get("key")).delivery).leaseOwner,
     "desired-worker",
   );
 });
@@ -3929,6 +4312,7 @@ test("a delayed A barrier proof cannot release B's revision-scoped gate", async 
   let rejectBarrierProofWrite = true;
   let nowMs = 10_000;
   let edits = 0;
+  /** @type {ScheduledTask[]} */
   const scheduled = [];
   const repository = createRepository(
     {
@@ -3969,7 +4353,6 @@ test("a delayed A barrier proof cannot release B's revision-scoped gate", async 
     requestedGeneration: "A-task",
   });
   const proofA = scheduled[0];
-  const gateAOwner = repository.control.apiGate.owner;
 
   repository.state.set("key", {
     ...repository.state.get("key"),
@@ -3988,8 +4371,9 @@ test("a delayed A barrier proof cannot release B's revision-scoped gate", async 
   });
   assert.equal(edits, 1);
   const gateBOwner = "api-gate-B";
+  /** @type {Delivery} */
   const deliveryB = {
-    ...repository.state.get("key").delivery,
+    ...present(present(repository.state.get("key")).delivery),
     status: "processing",
     revision: desiredB.revision,
     apiGateOwner: gateBOwner,
@@ -4014,7 +4398,10 @@ test("a delayed A barrier proof cannot release B's revision-scoped gate", async 
     reason: "stale-rate-limit-proof",
   });
   assert.equal(repository.control.apiGate.owner, gateBOwner);
-  assert.equal(repository.state.get("key").delivery.apiGateOwner, gateBOwner);
+  assert.equal(
+    present(present(repository.state.get("key")).delivery).apiGateOwner,
+    gateBOwner,
+  );
 });
 
 test("manual recovery rejects an active send lease", async () => {
@@ -4047,14 +4434,26 @@ test("manual recovery rejects an active send lease", async () => {
   const first = await engine.reconcile({ messageKey: "key" });
   assert.equal(first.reason, "locked");
   const state = repository.state.get("key");
-  assert.equal(state.delivery.sendInFlight.attemptId, "active-attempt");
-  assert.equal(state.delivery.lastRecoveryRequestId, "recovery-active");
-  assert.equal(state.manualRecoveryResult.status, "rejected");
-  assert.equal(state.manualRecoveryResult.code, "recovery-not-uncertain");
-  const processedAtMs = state.manualRecoveryResult.processedAtMs;
+  assert.equal(
+    present(present(present(state).delivery).sendInFlight).attemptId,
+    "active-attempt",
+  );
+  assert.equal(
+    present(present(state).delivery).lastRecoveryRequestId,
+    "recovery-active",
+  );
+  assert.equal(present(present(state).manualRecoveryResult).status, "rejected");
+  assert.equal(
+    present(present(state).manualRecoveryResult).code,
+    "recovery-not-uncertain",
+  );
+  const processedAtMs = present(
+    present(state).manualRecoveryResult,
+  ).processedAtMs;
   await engine.reconcile({ messageKey: "key" });
   assert.equal(
-    repository.state.get("key").manualRecoveryResult.processedAtMs,
+    present(present(repository.state.get("key")).manualRecoveryResult)
+      .processedAtMs,
     processedAtMs,
   );
 });
@@ -4084,11 +4483,14 @@ test("an ambiguous send remains visible when desired changes during the call", a
     }),
   }).reconcile({ messageKey: "key" });
   assert.equal(result.status, "uncertain");
-  const delivery = repository.state.get("key").delivery;
-  assert.equal(delivery.status, "uncertain");
-  assert.equal(delivery.revision, latestDesired.revision);
-  assert.equal(delivery.sendInFlight.revision, firstDesired.revision);
-  assert.equal(delivery.lastError.code, "timeout");
+  const delivery = present(repository.state.get("key")).delivery;
+  assert.equal(present(delivery).status, "uncertain");
+  assert.equal(present(delivery).revision, latestDesired.revision);
+  assert.equal(
+    present(present(delivery).sendInFlight).revision,
+    firstDesired.revision,
+  );
+  assert.equal(present(present(delivery).lastError).code, "timeout");
 });
 
 test("manual abandon clears ambiguity and permits a later revision", async () => {
@@ -4115,10 +4517,11 @@ test("manual abandon clears ambiguity and permits a later revision", async () =>
   repository.state.set("key", {
     ...repository.state.get("key"),
     delivery: {
-      ...repository.state.get("key").delivery,
+      ...present(present(repository.state.get("key")).delivery),
       appliedStateUnknown: {
         revision: "older-edit",
         operation: "edit",
+        apiGateOwner: "older-edit-gate",
         markedAtMs: 1,
       },
     },
@@ -4126,10 +4529,13 @@ test("manual abandon clears ambiguity and permits a later revision", async () =>
   });
   const abandoned = await engine.reconcile({ messageKey: "key" });
   assert.equal(abandoned.status, "terminal");
-  let delivery = repository.state.get("key").delivery;
-  assert.equal(delivery.sendInFlight, undefined);
-  assert.equal(delivery.abandonedSend.attemptId, "attempt-1");
-  assert.equal(delivery.appliedStateUnknown.operation, "edit");
+  let delivery = present(repository.state.get("key")).delivery;
+  assert.equal(present(delivery).sendInFlight, undefined);
+  assert.equal(present(present(delivery).abandonedSend).attemptId, "attempt-1");
+  assert.equal(
+    present(present(delivery).appliedStateUnknown).operation,
+    "edit",
+  );
 
   const latest = sendDesired({ text: "next", sourceRevision: "next" });
   repository.state.set("key", {
@@ -4139,8 +4545,8 @@ test("manual abandon clears ambiguity and permits a later revision", async () =>
   const delivered = await engine.reconcile({ messageKey: "key" });
   assert.equal(delivered.status, "delivered");
   assert.equal(sends, 2);
-  delivery = repository.state.get("key").delivery;
-  assert.equal(delivery.status, "delivered");
+  delivery = present(repository.state.get("key")).delivery;
+  assert.equal(present(delivery).status, "delivered");
 });
 
 test("manual confirmation reconstructs an acknowledged ambiguous send", async () => {
@@ -4164,10 +4570,11 @@ test("manual confirmation reconstructs an acknowledged ambiguous send", async ()
   repository.state.set("key", {
     ...repository.state.get("key"),
     delivery: {
-      ...repository.state.get("key").delivery,
+      ...present(present(repository.state.get("key")).delivery),
       appliedStateUnknown: {
         revision: "older-edit",
         operation: "edit",
+        apiGateOwner: "older-edit-gate",
         markedAtMs: 1,
       },
     },
@@ -4179,13 +4586,16 @@ test("manual confirmation reconstructs an acknowledged ambiguous send", async ()
   });
   const recovered = await engine.reconcile({ messageKey: "key" });
   assert.equal(recovered.status, "delivered");
-  assert.equal(repository.state.get("key").applied.messageId, 77);
   assert.equal(
-    repository.state.get("key").manualRecoveryResult.status,
+    present(present(repository.state.get("key")).applied).messageId,
+    77,
+  );
+  assert.equal(
+    present(present(repository.state.get("key")).manualRecoveryResult).status,
     "accepted",
   );
   assert.equal(
-    repository.state.get("key").delivery.appliedStateUnknown,
+    present(present(repository.state.get("key")).delivery).appliedStateUnknown,
     undefined,
   );
   assert.equal(sends, 1);
@@ -4221,9 +4631,10 @@ test("manual recovery releases the matching send gate after a worker crash", asy
   await assert.rejects(() => engine.reconcile({ messageKey: "key" }), {
     code: "api-gate-release-failed",
   });
-  const crashedGateOwner = repository.control.apiGate.owner;
+  const crashedGateOwner = present(repository.control.apiGate).owner;
   assert.equal(
-    repository.state.get("key").delivery.sendInFlight.apiGateOwner,
+    present(present(present(repository.state.get("key")).delivery).sendInFlight)
+      .apiGateOwner,
     crashedGateOwner,
   );
 
@@ -4245,7 +4656,7 @@ test("manual recovery releases the matching send gate after a worker crash", asy
   assert.equal(sends, 2);
   assert.equal(repository.control.apiGate, undefined);
   assert.equal(
-    repository.state.get("key").delivery.apiGateReleaseOwner,
+    present(present(repository.state.get("key")).delivery).apiGateReleaseOwner,
     undefined,
   );
 });
@@ -4269,6 +4680,7 @@ test("manual confirmation of an ambiguous replacement preserves old cleanup", as
     },
   });
   let sends = 0;
+  /** @type {number[]} */
   const deleted = [];
   const engine = createEngine({
     repository,
@@ -4303,19 +4715,24 @@ test("manual confirmation of an ambiguous replacement preserves old cleanup", as
   assert.equal(recovered.status, "delivered");
   assert.equal(recovered.cleanupScheduled, true);
   let record = repository.state.get("key");
-  assert.equal(record.applied.messageId, 77);
-  assert.equal(record.delivery.pendingDelete.messageId, 10);
+  assert.equal(present(present(record).applied).messageId, 77);
+  assert.equal(
+    present(present(present(record).delivery).pendingDelete).messageId,
+    10,
+  );
   assert.equal(sends, 1);
 
-  const pendingDeleteId = record.delivery.pendingDelete.pendingDeleteId;
+  const pendingDeleteId = present(
+    present(present(record).delivery).pendingDelete,
+  ).pendingDeleteId;
   await engine.reconcile({
     messageKey: "key",
     taskKind: "pending-delete",
     pendingDeleteId,
   });
   record = repository.state.get("key");
-  assert.equal(record.applied.messageId, 77);
-  assert.equal(record.delivery.pendingDelete, undefined);
+  assert.equal(present(present(record).applied).messageId, 77);
+  assert.equal(present(present(record).delivery).pendingDelete, undefined);
   assert.deepEqual(deleted, [10]);
 });
 
@@ -4349,9 +4766,12 @@ test("manual absent confirmation safely retries the ambiguous send", async () =>
   });
   const recovered = await engine.reconcile({ messageKey: "key" });
   assert.equal(recovered.status, "delivered");
-  assert.equal(repository.state.get("key").applied.messageId, 88);
   assert.equal(
-    repository.state.get("key").manualRecoveryResult.status,
+    present(present(repository.state.get("key")).applied).messageId,
+    88,
+  );
+  assert.equal(
+    present(present(repository.state.get("key")).manualRecoveryResult).status,
     "accepted",
   );
   assert.equal(sends, 2);
@@ -4386,6 +4806,7 @@ test("pending cleanup runs after reconciling the latest desired revision", async
       },
     },
   });
+  /** @type {string[]} */
   const order = [];
   await createEngine({
     repository,
@@ -4397,7 +4818,7 @@ test("pending cleanup runs after reconciling the latest desired revision", async
       async deleteTelegramMessage() {
         order.push("delete");
         assert.equal(
-          repository.state.get("key").delivery.revision,
+          present(present(repository.state.get("key")).delivery).revision,
           desired.revision,
         );
         return { ok: true, outcome: "deleted" };
@@ -4409,9 +4830,9 @@ test("pending cleanup runs after reconciling the latest desired revision", async
     pendingDeleteId: "cleanup-old",
   });
   assert.deepEqual(order, ["edit", "delete"]);
-  const delivery = repository.state.get("key").delivery;
-  assert.equal(delivery.status, "delivered");
-  assert.equal(delivery.revision, desired.revision);
+  const delivery = present(repository.state.get("key")).delivery;
+  assert.equal(present(delivery).status, "delivered");
+  assert.equal(present(delivery).revision, desired.revision);
 });
 
 test("consecutive replacements preserve and drain every pending cleanup", async () => {
@@ -4437,6 +4858,7 @@ test("consecutive replacements preserve and drain every pending cleanup", async 
       },
     },
   });
+  /** @type {string[]} */
   const order = [];
   let nextMessageId = 20;
   const engine = createEngine({
@@ -4456,18 +4878,19 @@ test("consecutive replacements preserve and drain every pending cleanup", async 
   });
 
   await engine.reconcile({ messageKey: "key" });
-  const firstPendingDeleteId =
-    repository.state.get("key").delivery.pendingDelete.pendingDeleteId;
+  const firstPendingDeleteId = present(
+    present(present(repository.state.get("key")).delivery).pendingDelete,
+  ).pendingDeleteId;
   repository.state.set("key", {
     ...repository.state.get("key"),
     desired: secondReplacement,
   });
   await engine.reconcile({ messageKey: "key" });
 
-  let delivery = repository.state.get("key").delivery;
-  assert.equal(delivery.pendingDelete.messageId, 10);
+  let delivery = present(repository.state.get("key")).delivery;
+  assert.equal(present(present(delivery).pendingDelete).messageId, 10);
   assert.deepEqual(
-    Object.values(delivery.pendingDeleteQueue).map(
+    Object.values(present(present(delivery).pendingDeleteQueue)).map(
       ({ messageId }) => messageId,
     ),
     [20],
@@ -4479,31 +4902,38 @@ test("consecutive replacements preserve and drain every pending cleanup", async 
     pendingDeleteId: firstPendingDeleteId,
   });
   assert.equal(firstCleanup.cleanupScheduled, true);
-  delivery = repository.state.get("key").delivery;
-  assert.equal(delivery.pendingDelete.messageId, 20);
-  const secondPendingDeleteId = delivery.pendingDelete.pendingDeleteId;
+  delivery = present(repository.state.get("key")).delivery;
+  assert.equal(present(present(delivery).pendingDelete).messageId, 20);
+  const secondPendingDeleteId = present(
+    present(delivery).pendingDelete,
+  ).pendingDeleteId;
 
   await engine.reconcile({
     messageKey: "key",
     taskKind: "pending-delete",
     pendingDeleteId: secondPendingDeleteId,
   });
-  delivery = repository.state.get("key").delivery;
-  assert.equal(delivery.pendingDelete, undefined);
-  assert.equal(delivery.pendingDeleteQueue, undefined);
-  assert.equal(repository.state.get("key").applied.messageId, 30);
+  delivery = present(repository.state.get("key")).delivery;
+  assert.equal(present(delivery).pendingDelete, undefined);
+  assert.equal(present(delivery).pendingDeleteQueue, undefined);
+  assert.equal(
+    present(present(repository.state.get("key")).applied).messageId,
+    30,
+  );
   assert.deepEqual(order, ["send:20", "send:30", "delete:10", "delete:20"]);
 });
 
 test("A to B to A revisions retain distinct durable task generations", () => {
   const desiredA = sendDesired({ text: "A", sourceRevision: "A" });
   const desiredB = sendDesired({ text: "B", sourceRevision: "B" });
-  const taskIds = [
+  const taskIds = /** @type {[string, string][]} */ ([
     [desiredA.revision, "event-a-1"],
     [desiredB.revision, "event-b"],
     [desiredA.revision, "event-a-2"],
-  ].map(([revision, generation]) =>
+  ]).map(([revision, generation]) =>
     buildTelegramDeliveryTaskId({
+      schemaVersion: 1,
+      dataEpoch: 1,
       messageKey: "key",
       revision,
       generation,
@@ -4515,6 +4945,8 @@ test("A to B to A revisions retain distinct durable task generations", () => {
   assert.equal(
     taskIds[0],
     buildTelegramDeliveryTaskId({
+      schemaVersion: 1,
+      dataEpoch: 1,
       messageKey: "key",
       revision: desiredA.revision,
       generation: "event-a-1",
@@ -4525,7 +4957,7 @@ test("A to B to A revisions retain distinct durable task generations", () => {
 });
 
 test("retry coordination preserves scheduled proof payloads and generations", async (t) => {
-  for (const target of ["desired", "pending-delete"]) {
+  for (const target of /** @type {const} */ (["desired", "pending-delete"])) {
     for (const rateLimited of [false, true]) {
       await t.test(`${target} rateLimited=${rateLimited}`, async () => {
         const desired = sendDesired();
@@ -4550,10 +4982,12 @@ test("retry coordination preserves scheduled proof payloads and generations", as
               : {}),
           },
         });
+        /** @type {ScheduledTask[]} */
         const scheduled = [];
         let gateOwner;
+        /** @returns {Promise<FailureFixture>} */
         const reject = async () => {
-          gateOwner = repository.control.apiGate.owner;
+          gateOwner = present(repository.control.apiGate).owner;
           return {
             ok: false,
             classification: "retryable",
@@ -4563,7 +4997,10 @@ test("retry coordination preserves scheduled proof payloads and generations", as
         };
         await createEngine({
           repository,
-          scheduleRetry: async (task) => scheduled.push(task),
+          scheduleRetry: async (task) => {
+            scheduled.push(task);
+            return { scheduled: true };
+          },
           client: createClient({
             sendTelegramMessage: reject,
             deleteTelegramMessage: reject,
@@ -4577,6 +5014,8 @@ test("retry coordination preserves scheduled proof payloads and generations", as
         const retryProofLeaseOwner = target === "desired" ? "" : "owner-1";
         assert.deepEqual(scheduled, [
           {
+            schemaVersion: 1,
+            dataEpoch: 1,
             messageKey: "key",
             revision: desired.revision,
             taskKind,
@@ -4616,7 +5055,7 @@ test("retry coordination preserves scheduled proof payloads and generations", as
 });
 
 test("persisted rate proofs retain recovery state when retry delivery fails", async (t) => {
-  for (const kind of ["desired", "pending-delete"]) {
+  for (const kind of /** @type {const} */ (["desired", "pending-delete"])) {
     for (const failure of [
       "enqueue",
       "barrier-error",
@@ -4638,6 +5077,7 @@ test("persisted rate proofs retain recovery state when retry delivery fails", as
             ? { safeRejectedAttemptId: "attempt-1" }
             : { pendingDeleteId: "cleanup-1" }),
         };
+        /** @type {Pick<Delivery, "status" | "revision" | "leaseOwner" | "leaseExpiresAtMs" | "apiGateOwner" | "apiGateProofRequired"> & {status: "processing"}} */
         const processing = {
           status: "processing",
           revision: desired.revision,
@@ -4646,6 +5086,7 @@ test("persisted rate proofs retain recovery state when retry delivery fails", as
           apiGateOwner: proof.owner,
           apiGateProofRequired: proof,
         };
+        /** @type {MessageFixture} */
         const initial = {
           desired,
           delivery:
@@ -4661,7 +5102,9 @@ test("persisted rate proofs retain recovery state when retry delivery fails", as
                   status: "delivered",
                   revision: desired.revision,
                   pendingDelete: {
-                    ...processing,
+                    ...(({ revision: _revision, ...cleanup }) => cleanup)(
+                      processing,
+                    ),
                     pendingDeleteId: "cleanup-1",
                   },
                 },
@@ -4672,6 +5115,10 @@ test("persisted rate proofs retain recovery state when retry delivery fails", as
             apiGate: {
               owner:
                 failure === "barrier-unapplied" ? "newer-gate" : proof.owner,
+              messageKey: "key",
+              revision: desired.revision,
+              operation: kind === "desired" ? "send" : "pending-delete",
+              acquiredAtMs: 1000,
             },
             rejectBarrierProofWrite: failure === "barrier-error",
           },
@@ -4681,6 +5128,7 @@ test("persisted rate proofs retain recovery state when retry delivery fails", as
             throw new Error("recovery-write-failed");
           };
         }
+        /** @type {ScheduledTask[]} */
         const scheduled = [];
         const control = createTelegramDeliveryControl({
           repository,
@@ -4688,10 +5136,14 @@ test("persisted rate proofs retain recovery state when retry delivery fails", as
           now: () => 71_000,
           localRetryBarrier: repository.localRetryBarrier,
           scheduleRetry: async (task) => {
-            assert.deepEqual(repository.state.get("key"), initial);
+            assert.deepEqual(
+              repository.state.get("key"),
+              canonicalMessageFixture(initial),
+            );
             assert.ok(repository.control.apiGate);
             if (failure === "enqueue") throw new Error("queue-unavailable");
             scheduled.push(task);
+            return { scheduled: true };
           },
         });
         const recovery = createTelegramDeliveryRecovery({
@@ -4717,12 +5169,15 @@ test("persisted rate proofs retain recovery state when retry delivery fails", as
         } else {
           await resume();
         }
-        assert.deepEqual(repository.state.get("key"), initial);
+        assert.deepEqual(
+          repository.state.get("key"),
+          canonicalMessageFixture(initial),
+        );
         assert.equal(scheduled.length, failure === "enqueue" ? 0 : 1);
         if (scheduled.length) {
-          assert.equal(scheduled[0].taskKind, "rate-limit-proof");
-          assert.equal(scheduled[0].proofTaskKind, kind);
-          assert.equal(scheduled[0].scheduleTimeMs, 71_000);
+          assert.equal(present(scheduled[0]).taskKind, "rate-limit-proof");
+          assert.equal(present(scheduled[0]).proofTaskKind, kind);
+          assert.equal(present(scheduled[0]).scheduleTimeMs, 71_000);
         }
         assert.equal(
           repository.control.retryNotBeforeMs,
@@ -4743,13 +5198,13 @@ test("persisted cleanup proofs use a requested ID only for cleanup wakes", async
     {
       name: "cleanup wake fallback",
       requestedPendingDeleteId: " cleanup-1 ",
-      expectedScheduledId: " cleanup-1 ",
+      expectedScheduledId: "cleanup-1",
       expectedStatus: "retryable",
     },
     {
       name: "stored ID wins",
       requestedPendingDeleteId: "different-cleanup",
-      storedPendingDeleteId: " cleanup-1 ",
+      storedPendingDeleteId: "cleanup-1",
       expectedScheduledId: "cleanup-1",
       expectedStatus: "retryable",
     },
@@ -4787,15 +5242,27 @@ test("persisted cleanup proofs use a requested ID only for cleanup wakes", async
             },
           },
         },
-        { apiGate: { owner: proof.owner } },
+        {
+          apiGate: {
+            owner: proof.owner,
+            messageKey: "key",
+            revision: desired.revision,
+            operation: "pending-delete",
+            acquiredAtMs: 1000,
+          },
+        },
       );
+      /** @type {ScheduledTask[]} */
       const scheduled = [];
       const control = createTelegramDeliveryControl({
         repository,
         logger: { error() {}, info() {} },
         now: () => 71_000,
         localRetryBarrier: repository.localRetryBarrier,
-        scheduleRetry: async (task) => scheduled.push(task),
+        scheduleRetry: async (task) => {
+          scheduled.push(task);
+          return { scheduled: true };
+        },
       });
       const recovery = createTelegramDeliveryRecovery({
         repository,
@@ -4815,10 +5282,15 @@ test("persisted cleanup proofs use a requested ID only for cleanup wakes", async
         },
       });
       assert.equal(scheduled.length, 1);
-      assert.equal(scheduled[0].pendingDeleteId, scenario.expectedScheduledId);
-      const pendingDelete = repository.state.get("key").delivery.pendingDelete;
-      assert.equal(pendingDelete.status, scenario.expectedStatus);
-      assert.equal(pendingDelete.apiGateProofRequired, undefined);
+      assert.equal(
+        present(scheduled[0]).pendingDeleteId,
+        scenario.expectedScheduledId,
+      );
+      const pendingDelete = present(
+        present(repository.state.get("key")).delivery,
+      ).pendingDelete;
+      assert.equal(present(pendingDelete).status, scenario.expectedStatus);
+      assert.equal(present(pendingDelete).apiGateProofRequired, undefined);
       assert.equal(repository.control.retryNotBeforeMs, 18_000);
       assert.equal(repository.control.apiGate, undefined);
     });

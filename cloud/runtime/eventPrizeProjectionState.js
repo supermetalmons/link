@@ -42,9 +42,8 @@ const isWithdrawalRecordForPrize = (value, eventId, prizeId, assetAddress) => {
   const identity = (0, records_js_1.withdrawalIdentity)(value);
   const recordedAssetStandard = identity.assetStandard;
   const assetStandardMatches =
-    ((0, event_prizes_1.isEventPrizeStandard)(recordedAssetStandard) &&
-      recordedAssetStandard === expectedAssetStandard) ||
-    (!recordedAssetStandard && expectedAssetStandard === "core");
+    (0, event_prizes_1.isEventPrizeStandard)(recordedAssetStandard) &&
+    recordedAssetStandard === expectedAssetStandard;
   return (
     assetStandardMatches &&
     identity.eventId === normalizeString(eventId) &&

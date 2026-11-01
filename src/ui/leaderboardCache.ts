@@ -1,3 +1,4 @@
+import type { Aura } from "@mons/shared/appearance";
 import type {
   MiningMaterialName,
   PlayerProfile,
@@ -13,7 +14,7 @@ export interface LeaderboardEntry {
   win: boolean;
   id: string;
   emoji: number;
-  aura?: string;
+  aura?: Aura;
   ensName?: string | null;
   username?: string | null;
   profile: PlayerProfile;

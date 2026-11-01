@@ -1,8 +1,12 @@
+import { readTelegramRetryProof } from "./recordCodec.js";
 import {
   normalizeRetrySequence,
   normalizeTimestamp,
 } from "./deliveryPolicy.js";
-import { normalizeOptionalTimestamp } from "./taskIdentity.js";
+import {
+  normalizeOptionalTimestamp,
+  normalizeTaskPayload,
+} from "./taskIdentity.js";
 import {
   TELEGRAM_DESIRED_TASK_KIND,
   TELEGRAM_PENDING_DELETE_TASK_KIND,
@@ -24,15 +28,12 @@ import {
   type TelegramRetryProofDocument,
 } from "./records.js";
 
-declare const retainedRetry: unique symbol;
-type RetainedRetry<Kind extends string> = { readonly [retainedRetry]: Kind };
-export type RetainedTelegramExactRetryInput = RetainedRetry<"exact-input">;
-export type RetainedTelegramRetrySchedule = RetainedRetry<"schedule">;
-export type RetainedTelegramProofInput = RetainedRetry<"proof-input">;
-export type TelegramProofApplicationDocument =
-  RetainedRetry<"proof-application">;
-export type RetainedTelegramBarrierInput = RetainedRetry<"barrier-input">;
-export type RetainedTelegramOwner = RetainedRetry<"owner">;
+export type RetainedTelegramExactRetryInput = TelegramExactRetryInput;
+export type RetainedTelegramRetrySchedule = TelegramRetrySchedule;
+export type RetainedTelegramProofInput = TelegramProofInput;
+export type TelegramProofApplicationDocument = TelegramProofInput;
+export type RetainedTelegramBarrierInput = TelegramBarrierInput;
+export type RetainedTelegramOwner = string;
 export type TelegramProofInput = Partial<
   TelegramReconcileInput & { requestedPendingDeleteId: string }
 >;
@@ -40,57 +41,16 @@ export type TelegramBarrierInput = {
   barrierProofOwner?: string;
   barrierRetryNotBeforeMs?: number;
 };
-type RetryStateEvidence = {
-  retryStartedAtMs?: unknown;
-  retryDeadlineAtMs?: unknown;
-  retryAtMs?: unknown;
-  retrySequence?: unknown;
-};
-type ExactRetryEvidence = RetryStateEvidence & {
-  messageKey?: unknown;
-  revision?: unknown;
-  taskKind?: unknown;
-  retryState?: RetryStateEvidence;
-  safeRejectedAttemptId?: unknown;
-  pendingDeleteId?: unknown;
-  retryProofLeaseOwner?: unknown;
-  sourceGeneration?: unknown;
-  proofTaskKind?: unknown;
-  barrierProofOwner?: unknown;
-  barrierRetryNotBeforeMs?: unknown;
-  scheduleTimeMs?: unknown;
-  apiGateReclaimOwner?: unknown;
-  apiGateSettleOwner?: unknown;
-};
-type ProofEvidence = RetryStateEvidence & {
-  requestedRevision?: unknown;
-  safeRejectedAttemptId?: unknown;
-  pendingDeleteId?: unknown;
-  retryProofLeaseOwner?: unknown;
-  apiGateReclaimOwner?: unknown;
-};
-type ProofRecordEvidence = RetryStateEvidence & {
-  owner?: unknown;
-  retryNotBeforeMs?: unknown;
-  revision?: unknown;
-  safeRejectedAttemptId?: unknown;
-  pendingDeleteId?: unknown;
-  retryProofLeaseOwner?: unknown;
-};
+type ExactRetryEvidence = TelegramExactRetryInput;
+type ProofEvidence = TelegramProofInput;
 const normalizeString = (value: unknown): string =>
   typeof value === "string" && value.trim() !== "" ? value.trim() : "";
 const proofFields = (
   value: TelegramRetryProofDocument,
-): ProofRecordEvidence => {
-  const retained: unknown = value;
-  return retained as ProofRecordEvidence;
-};
+): TelegramRetryProofDocument => value;
 const applicationFields = (
   value: TelegramProofApplicationDocument,
-): ProofEvidence => {
-  const retained: unknown = value;
-  return retained as ProofEvidence;
-};
+): TelegramProofApplicationDocument => value;
 export const buildTelegramRetrySchedule: (
   input: TelegramExactRetryInput | RetainedTelegramExactRetryInput,
 ) => RetainedTelegramRetrySchedule = ({
@@ -109,8 +69,7 @@ export const buildTelegramRetrySchedule: (
   apiGateReclaimOwner = "",
   apiGateSettleOwner = "",
 }: ExactRetryEvidence & Partial<RetainedTelegramExactRetryInput>) => {
-  const normalizedTaskKind =
-    normalizeString(taskKind) || TELEGRAM_DESIRED_TASK_KIND;
+  const normalizedTaskKind = taskKind;
   const retrySequence = normalizeRetrySequence(retryState!.retrySequence);
   const generation = [
     normalizedTaskKind,
@@ -125,11 +84,11 @@ export const buildTelegramRetrySchedule: (
     normalizeString(apiGateReclaimOwner),
     normalizeString(apiGateSettleOwner),
   ].join(":");
-  const payload: unknown = {
+  const payload = {
     messageKey,
     revision,
     taskKind: normalizedTaskKind,
-    retrySequence,
+    ...(retrySequence === undefined ? {} : { retrySequence }),
     generation,
     retryStartedAtMs: normalizeTimestamp(retryState!.retryStartedAtMs),
     retryDeadlineAtMs: normalizeTimestamp(retryState!.retryDeadlineAtMs),
@@ -146,32 +105,35 @@ export const buildTelegramRetrySchedule: (
     ...(apiGateReclaimOwner ? { apiGateReclaimOwner } : {}),
     ...(apiGateSettleOwner ? { apiGateSettleOwner } : {}),
   };
-  return payload as RetainedTelegramRetrySchedule;
+  return {
+    ...normalizeTaskPayload(payload),
+    scheduleTimeMs: payload.scheduleTimeMs,
+  };
 };
 
 export function telegramRetryScheduleTime(
   input: TelegramRetrySchedule | RetainedTelegramRetrySchedule,
 ): number {
-  const retained: unknown = input;
-  const value = retained as { scheduleTimeMs?: unknown };
-  return normalizeOptionalTimestamp(value.scheduleTimeMs);
+  return normalizeOptionalTimestamp(input.scheduleTimeMs);
 }
 
 export function retainedRateLimitProof(
   value: unknown,
 ): TelegramRetryProofDocument {
-  return value as TelegramRetryProofDocument;
+  const proof = readTelegramRetryProof(value);
+  if (!proof) throw new TypeError("invalid-telegram-retry-proof");
+  return proof;
 }
 
 export function messageRateLimitProof(
-  value: TelegramDeliveryDocument,
+  value: Partial<TelegramDeliveryDocument>,
   pending = false,
 ): TelegramRetryProofDocument {
   const source = pending ? readProperty(value, "pendingDelete") : value;
   const proof = readProperty(source, "apiGateProofRequired");
-  return (
-    proof && typeof proof === "object" && !Array.isArray(proof) ? proof : {}
-  ) as TelegramRetryProofDocument;
+  const parsed = readTelegramRetryProof(proof);
+  if (!parsed) throw new TypeError("telegram-retry-proof-missing");
+  return parsed;
 }
 
 export function readRateLimitRetryState(
@@ -195,7 +157,7 @@ export function rateLimitProofRetryAt(
 export function rateLimitProofOwner(
   value: TelegramRetryProofDocument,
 ): RetainedTelegramOwner {
-  return proofFields(value).owner as RetainedTelegramOwner;
+  return proofFields(value).owner;
 }
 
 export function lockedDesiredRetryInput(
@@ -211,26 +173,28 @@ export function lockedDesiredRetryInput(
     apiGateReclaimOwner: string;
   },
 ): RetainedTelegramExactRetryInput {
-  const input: unknown = {
+  const input: TelegramExactRetryInput = {
     messageKey: context.messageKey,
     revision: context.revision,
     taskKind: TELEGRAM_DESIRED_TASK_KIND,
     retryState: {
       retryStartedAtMs:
-        readProperty(messageDeliveryDocument(delivery), "retryStartedAtMs") ||
+        messageDeliveryDocument(delivery).retryStartedAtMs ||
         context.retryStartedAtMs,
       retryDeadlineAtMs:
-        readProperty(messageDeliveryDocument(delivery), "retryDeadlineAtMs") ||
+        messageDeliveryDocument(delivery).retryDeadlineAtMs ||
         context.retryDeadlineAtMs,
-      retryAtMs: context.retryAtMs,
+      retryAtMs: context.retryAtMs ?? 0,
       retrySequence:
-        readProperty(messageDeliveryDocument(delivery), "retrySequence") ??
+        messageDeliveryDocument(delivery).retrySequence ??
         context.retrySequence,
     },
-    sourceGeneration: context.sourceGeneration,
+    ...(context.sourceGeneration === undefined
+      ? {}
+      : { sourceGeneration: context.sourceGeneration }),
     apiGateReclaimOwner: context.apiGateReclaimOwner,
   };
-  return input as RetainedTelegramExactRetryInput;
+  return input;
 }
 
 export function deferredDesiredRetryInput(
@@ -242,28 +206,23 @@ export function deferredDesiredRetryInput(
     sourceGeneration?: string;
   },
 ): RetainedTelegramExactRetryInput {
-  const input: unknown = {
+  const { retryStartedAtMs, retryDeadlineAtMs } =
+    messageDeliveryDocument(delivery);
+  const input: TelegramExactRetryInput = {
     messageKey: context.messageKey,
     revision: context.revision,
     taskKind: TELEGRAM_DESIRED_TASK_KIND,
     retryState: {
-      retryStartedAtMs: readProperty(
-        messageDeliveryDocument(delivery),
-        "retryStartedAtMs",
-      ),
-      retryDeadlineAtMs: readProperty(
-        messageDeliveryDocument(delivery),
-        "retryDeadlineAtMs",
-      ),
-      retryAtMs: context.retryAtMs,
-      retrySequence: readProperty(
-        messageDeliveryDocument(delivery),
-        "retrySequence",
-      ),
+      ...(retryStartedAtMs === undefined ? {} : { retryStartedAtMs }),
+      ...(retryDeadlineAtMs === undefined ? {} : { retryDeadlineAtMs }),
+      retryAtMs: context.retryAtMs ?? 0,
+      retrySequence: messageDeliveryDocument(delivery).retrySequence ?? 0,
     },
-    sourceGeneration: context.sourceGeneration,
+    ...(context.sourceGeneration === undefined
+      ? {}
+      : { sourceGeneration: context.sourceGeneration }),
   };
-  return input as RetainedTelegramExactRetryInput;
+  return input;
 }
 
 export type RateLimitProofTarget =
@@ -281,7 +240,7 @@ export function resumedRateLimitRetryInput(
 ): RetainedTelegramExactRetryInput {
   const proof = proofFields(value);
   const target = context.target;
-  const input: unknown = {
+  const input: TelegramExactRetryInput = {
     messageKey: context.messageKey,
     revision:
       normalizeString(proof.revision) || context.requestedRevision || "latest",
@@ -304,18 +263,18 @@ export function resumedRateLimitRetryInput(
     barrierRetryNotBeforeMs: proof.retryNotBeforeMs,
     scheduleTimeMs: context.nowMs,
   };
-  return input as RetainedTelegramExactRetryInput;
+  return input;
 }
 
 export function rateLimitBarrierInput(
   value: TelegramRetryProofDocument,
 ): RetainedTelegramBarrierInput {
   const proof = proofFields(value);
-  const input: unknown = {
+  const input: TelegramBarrierInput = {
     barrierProofOwner: proof.owner,
     barrierRetryNotBeforeMs: proof.retryNotBeforeMs,
   };
-  return input as RetainedTelegramBarrierInput;
+  return input;
 }
 
 export function desiredSafeProofInput(
@@ -323,12 +282,14 @@ export function desiredSafeProofInput(
   state: TelegramRetryState,
 ): RetainedTelegramProofInput {
   const proof = proofFields(value);
-  const input: unknown = {
+  const input: TelegramProofInput = {
     requestedRevision: proof.revision,
-    safeRejectedAttemptId: proof.safeRejectedAttemptId,
+    ...(proof.safeRejectedAttemptId === undefined
+      ? {}
+      : { safeRejectedAttemptId: proof.safeRejectedAttemptId }),
     ...state,
   };
-  return input as RetainedTelegramProofInput;
+  return input;
 }
 
 export function desiredWindowProofInput(
@@ -336,12 +297,14 @@ export function desiredWindowProofInput(
   state: TelegramRetryState,
 ): RetainedTelegramProofInput {
   const proof = proofFields(value);
-  const input: unknown = {
+  const input: TelegramProofInput = {
     requestedRevision: proof.revision,
-    retryProofLeaseOwner: proof.retryProofLeaseOwner,
+    ...(proof.retryProofLeaseOwner === undefined
+      ? {}
+      : { retryProofLeaseOwner: proof.retryProofLeaseOwner }),
     ...state,
   };
-  return input as RetainedTelegramProofInput;
+  return input;
 }
 
 export function cleanupWindowProofInput(
@@ -350,16 +313,19 @@ export function cleanupWindowProofInput(
   target: Extract<RateLimitProofTarget, { kind: "pending-delete" }>,
 ): RetainedTelegramProofInput {
   const proof = proofFields(value);
-  const input: unknown = {
-    pendingDeleteId:
-      target.requestedPendingDeleteId === undefined
-        ? proof.pendingDeleteId
-        : normalizeString(proof.pendingDeleteId) ||
-          target.requestedPendingDeleteId,
-    retryProofLeaseOwner: proof.retryProofLeaseOwner,
+  const pendingDeleteId =
+    target.requestedPendingDeleteId === undefined
+      ? proof.pendingDeleteId
+      : normalizeString(proof.pendingDeleteId) ||
+        target.requestedPendingDeleteId;
+  const input: TelegramProofInput = {
+    ...(pendingDeleteId === undefined ? {} : { pendingDeleteId }),
+    ...(proof.retryProofLeaseOwner === undefined
+      ? {}
+      : { retryProofLeaseOwner: proof.retryProofLeaseOwner }),
     ...state,
   };
-  return input as RetainedTelegramProofInput;
+  return input;
 }
 
 export const captureSafeRetryProof: (
@@ -372,15 +338,15 @@ export const captureSafeRetryProof: (
   retryAtMs,
   retrySequence,
 }: ProofEvidence & Partial<RetainedTelegramProofInput>) => {
-  const captured: unknown = {
-    requestedRevision,
-    safeRejectedAttemptId,
-    retryStartedAtMs,
-    retryDeadlineAtMs,
-    retryAtMs,
-    retrySequence,
+  const captured: TelegramProofApplicationDocument = {
+    ...(requestedRevision === undefined ? {} : { requestedRevision }),
+    ...(safeRejectedAttemptId === undefined ? {} : { safeRejectedAttemptId }),
+    ...(retryStartedAtMs === undefined ? {} : { retryStartedAtMs }),
+    ...(retryDeadlineAtMs === undefined ? {} : { retryDeadlineAtMs }),
+    ...(retryAtMs === undefined ? {} : { retryAtMs }),
+    ...(retrySequence === undefined ? {} : { retrySequence }),
   };
-  return captured as TelegramProofApplicationDocument;
+  return captured;
 };
 export const captureDesiredWindowProof: (
   input: TelegramProofInput | RetainedTelegramProofInput,
@@ -394,17 +360,17 @@ export const captureDesiredWindowProof: (
   retryProofLeaseOwner,
   apiGateReclaimOwner,
 }: ProofEvidence & Partial<RetainedTelegramProofInput>) => {
-  const captured: unknown = {
-    requestedRevision,
-    safeRejectedAttemptId,
-    retryStartedAtMs,
-    retryDeadlineAtMs,
-    retryAtMs,
-    retrySequence,
-    retryProofLeaseOwner,
-    apiGateReclaimOwner,
+  const captured: TelegramProofApplicationDocument = {
+    ...(requestedRevision === undefined ? {} : { requestedRevision }),
+    ...(safeRejectedAttemptId === undefined ? {} : { safeRejectedAttemptId }),
+    ...(retryStartedAtMs === undefined ? {} : { retryStartedAtMs }),
+    ...(retryDeadlineAtMs === undefined ? {} : { retryDeadlineAtMs }),
+    ...(retryAtMs === undefined ? {} : { retryAtMs }),
+    ...(retrySequence === undefined ? {} : { retrySequence }),
+    ...(retryProofLeaseOwner === undefined ? {} : { retryProofLeaseOwner }),
+    ...(apiGateReclaimOwner === undefined ? {} : { apiGateReclaimOwner }),
   };
-  return captured as TelegramProofApplicationDocument;
+  return captured;
 };
 export const captureCleanupWindowProof: (
   input: TelegramProofInput | RetainedTelegramProofInput,
@@ -417,16 +383,16 @@ export const captureCleanupWindowProof: (
   retryProofLeaseOwner,
   apiGateReclaimOwner,
 }: ProofEvidence & Partial<RetainedTelegramProofInput>) => {
-  const captured: unknown = {
-    pendingDeleteId,
-    retryStartedAtMs,
-    retryDeadlineAtMs,
-    retryAtMs,
-    retrySequence,
-    retryProofLeaseOwner,
-    apiGateReclaimOwner,
+  const captured: TelegramProofApplicationDocument = {
+    ...(pendingDeleteId === undefined ? {} : { pendingDeleteId }),
+    ...(retryStartedAtMs === undefined ? {} : { retryStartedAtMs }),
+    ...(retryDeadlineAtMs === undefined ? {} : { retryDeadlineAtMs }),
+    ...(retryAtMs === undefined ? {} : { retryAtMs }),
+    ...(retrySequence === undefined ? {} : { retrySequence }),
+    ...(retryProofLeaseOwner === undefined ? {} : { retryProofLeaseOwner }),
+    ...(apiGateReclaimOwner === undefined ? {} : { apiGateReclaimOwner }),
   };
-  return captured as TelegramProofApplicationDocument;
+  return captured;
 };
 
 export function safeRetryProofIdentity(
@@ -490,8 +456,8 @@ export const readBarrierProofInput: (
   barrierProofOwner,
   barrierRetryNotBeforeMs,
 }: {
-  barrierProofOwner?: unknown;
-  barrierRetryNotBeforeMs?: unknown;
+  barrierProofOwner?: string;
+  barrierRetryNotBeforeMs?: number;
 } & Partial<RetainedTelegramBarrierInput>) => {
   const owner = normalizeString(barrierProofOwner);
   const retryNotBeforeMs = normalizeTimestamp(barrierRetryNotBeforeMs);
@@ -502,8 +468,5 @@ export function messageSettlementOwnerInput(
   message: TelegramMessageDocument | null | undefined,
   field: "apiGateSettleOwner" | "pendingDeleteApiGateSettleOwner",
 ): RetainedTelegramOwner {
-  return readProperty(
-    readProperty(message, "delivery"),
-    field,
-  ) as RetainedTelegramOwner;
+  return message?.delivery?.[field] ?? "";
 }

@@ -4,6 +4,7 @@ import { EVENT_PRIZE_ANNOUNCEMENT_GRACE_MS } from "../../../runtime/telegram/eve
 import {
   parseEventProgressOutbox,
   parseEventProgressParams,
+  workflowIdFromOutboxId,
   type EventProgressWorkflowParams,
 } from "./eventProgressCodec.ts";
 import { InvalidEventProgressPayloadError } from "./eventProgressWorkflowRunner.ts";
@@ -48,6 +49,7 @@ export async function runEventAnnouncementWorkflow(
   }
   if (
     !params ||
+    workflowIdFromOutboxId(params.outboxId) !== event.instanceId ||
     !kind ||
     params.runAtMs === null ||
     params.sourceKey !== `${kind}:${params.eventId}:${params.runAtMs + leadMs}`

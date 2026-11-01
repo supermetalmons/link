@@ -20,12 +20,14 @@ const {
   normalizeEventPrizeAssignments,
 } = require("../runtime/eventPrizeAwards");
 
+/** @type {import("../runtime/events/model").EventPlacement[]} */
 const placements = [
   { place: 1, profileId: "first" },
   { place: 2, profileId: "second" },
   { place: 3, profileId: "third" },
 ];
 
+/** @param {Readonly<Record<string, string>>} selections @param {string} [eventId] */
 const build = (selections, eventId = "NN3eRzoZo80") =>
   buildEventPrizeAssignments({
     eventId,
@@ -34,15 +36,22 @@ const build = (selections, eventId = "NN3eRzoZo80") =>
     assignedAtMs: 1234,
   });
 
+/** @param {Record<string, import("../runtime/eventReads").EventPrizeAssignmentRecord>} values @param {string | number} place */
+function assignment(values, place) {
+  const value = values[place];
+  assert.ok(value);
+  return value;
+}
+
 test("honors distinct ranked preferences", () => {
   const assignments = build({
     first: "1514",
     second: "1092",
     third: "1111",
   });
-  assert.equal(assignments["1"].prizeId, "1514");
-  assert.equal(assignments["2"].prizeId, "1092");
-  assert.equal(assignments["3"].prizeId, "1111");
+  assert.equal(assignment(assignments, "1").prizeId, "1514");
+  assert.equal(assignment(assignments, "2").prizeId, "1092");
+  assert.equal(assignment(assignments, "3").prizeId, "1111");
 });
 
 test("resolves preference conflicts in rank order", () => {
@@ -51,23 +60,23 @@ test("resolves preference conflicts in rank order", () => {
     second: "1092",
     third: "1514",
   });
-  assert.equal(assignments["1"].prizeId, "1092");
-  assert.equal(assignments["2"].prizeId, "1111");
-  assert.equal(assignments["3"].prizeId, "1514");
+  assert.equal(assignment(assignments, "1").prizeId, "1092");
+  assert.equal(assignment(assignments, "2").prizeId, "1111");
+  assert.equal(assignment(assignments, "3").prizeId, "1514");
 });
 
 test("protects lower-ranked preferences from missing higher preferences", () => {
   const assignments = build({ second: "1092", third: "1111" });
-  assert.equal(assignments["1"].prizeId, "1514");
-  assert.equal(assignments["2"].prizeId, "1092");
-  assert.equal(assignments["3"].prizeId, "1111");
+  assert.equal(assignment(assignments, "1").prizeId, "1514");
+  assert.equal(assignment(assignments, "2").prizeId, "1092");
+  assert.equal(assignment(assignments, "3").prizeId, "1111");
 });
 
 test("uses stable fallbacks for missing and invalid preferences", () => {
   const assignments = build({ first: "invalid" });
-  assert.equal(assignments["1"].prizeId, "1092");
-  assert.equal(assignments["2"].prizeId, "1111");
-  assert.equal(assignments["3"].prizeId, "1514");
+  assert.equal(assignment(assignments, "1").prizeId, "1092");
+  assert.equal(assignment(assignments, "2").prizeId, "1111");
+  assert.equal(assignment(assignments, "3").prizeId, "1514");
 });
 
 test("assigns compressed prizes by preference with the supplied fallback order", () => {
@@ -80,14 +89,14 @@ test("assigns compressed prizes by preference with the supplied fallback order",
     },
     eventId,
   );
-  assert.equal(preferred["1"].prizeId, "6793");
-  assert.equal(preferred["2"].prizeId, "1866");
-  assert.equal(preferred["3"].prizeId, "1682");
+  assert.equal(assignment(preferred, "1").prizeId, "6793");
+  assert.equal(assignment(preferred, "2").prizeId, "1866");
+  assert.equal(assignment(preferred, "3").prizeId, "1682");
 
   const fallback = build({}, eventId);
-  assert.equal(fallback["1"].prizeId, "1866");
-  assert.equal(fallback["2"].prizeId, "1682");
-  assert.equal(fallback["3"].prizeId, "6793");
+  assert.equal(assignment(fallback, "1").prizeId, "1866");
+  assert.equal(assignment(fallback, "2").prizeId, "1682");
+  assert.equal(assignment(fallback, "3").prizeId, "6793");
 });
 
 test("assigns Artifact Magazine 3 prizes by preference with the supplied fallback order", () => {
@@ -100,9 +109,9 @@ test("assigns Artifact Magazine 3 prizes by preference with the supplied fallbac
     },
     eventId,
   );
-  assert.equal(preferred["1"].prizeId, "280");
-  assert.equal(preferred["2"].prizeId, "282");
-  assert.equal(preferred["3"].prizeId, "283");
+  assert.equal(assignment(preferred, "1").prizeId, "280");
+  assert.equal(assignment(preferred, "2").prizeId, "282");
+  assert.equal(assignment(preferred, "3").prizeId, "283");
 
   const conflict = build(
     {
@@ -112,14 +121,14 @@ test("assigns Artifact Magazine 3 prizes by preference with the supplied fallbac
     },
     eventId,
   );
-  assert.equal(conflict["1"].prizeId, "283");
-  assert.equal(conflict["2"].prizeId, "282");
-  assert.equal(conflict["3"].prizeId, "280");
+  assert.equal(assignment(conflict, "1").prizeId, "283");
+  assert.equal(assignment(conflict, "2").prizeId, "282");
+  assert.equal(assignment(conflict, "3").prizeId, "280");
 
   const fallback = build({}, eventId);
-  assert.equal(fallback["1"].prizeId, "282");
-  assert.equal(fallback["2"].prizeId, "283");
-  assert.equal(fallback["3"].prizeId, "280");
+  assert.equal(assignment(fallback, "1").prizeId, "282");
+  assert.equal(assignment(fallback, "2").prizeId, "283");
+  assert.equal(assignment(fallback, "3").prizeId, "280");
 });
 
 test("assigns second Artifact Magazine 3 prizes by preference with the supplied fallback order", () => {
@@ -132,9 +141,9 @@ test("assigns second Artifact Magazine 3 prizes by preference with the supplied 
     },
     eventId,
   );
-  assert.equal(preferred["1"].prizeId, "284");
-  assert.equal(preferred["2"].prizeId, "281");
-  assert.equal(preferred["3"].prizeId, "279");
+  assert.equal(assignment(preferred, "1").prizeId, "284");
+  assert.equal(assignment(preferred, "2").prizeId, "281");
+  assert.equal(assignment(preferred, "3").prizeId, "279");
 
   const conflict = build(
     {
@@ -144,14 +153,14 @@ test("assigns second Artifact Magazine 3 prizes by preference with the supplied 
     },
     eventId,
   );
-  assert.equal(conflict["1"].prizeId, "279");
-  assert.equal(conflict["2"].prizeId, "281");
-  assert.equal(conflict["3"].prizeId, "284");
+  assert.equal(assignment(conflict, "1").prizeId, "279");
+  assert.equal(assignment(conflict, "2").prizeId, "281");
+  assert.equal(assignment(conflict, "3").prizeId, "284");
 
   const fallback = build({}, eventId);
-  assert.equal(fallback["1"].prizeId, "281");
-  assert.equal(fallback["2"].prizeId, "279");
-  assert.equal(fallback["3"].prizeId, "284");
+  assert.equal(assignment(fallback, "1").prizeId, "281");
+  assert.equal(assignment(fallback, "2").prizeId, "279");
+  assert.equal(assignment(fallback, "3").prizeId, "284");
 });
 
 test("assigns Rare Weitsmans prizes by preference with the supplied fallback order", () => {
@@ -164,9 +173,9 @@ test("assigns Rare Weitsmans prizes by preference with the supplied fallback ord
     },
     eventId,
   );
-  assert.equal(preferred["1"].prizeId, "221");
-  assert.equal(preferred["2"].prizeId, "217");
-  assert.equal(preferred["3"].prizeId, "220");
+  assert.equal(assignment(preferred, "1").prizeId, "221");
+  assert.equal(assignment(preferred, "2").prizeId, "217");
+  assert.equal(assignment(preferred, "3").prizeId, "220");
 
   const conflict = build(
     {
@@ -176,14 +185,14 @@ test("assigns Rare Weitsmans prizes by preference with the supplied fallback ord
     },
     eventId,
   );
-  assert.equal(conflict["1"].prizeId, "220");
-  assert.equal(conflict["2"].prizeId, "217");
-  assert.equal(conflict["3"].prizeId, "221");
+  assert.equal(assignment(conflict, "1").prizeId, "220");
+  assert.equal(assignment(conflict, "2").prizeId, "217");
+  assert.equal(assignment(conflict, "3").prizeId, "221");
 
   const fallback = build({}, eventId);
-  assert.equal(fallback["1"].prizeId, "217");
-  assert.equal(fallback["2"].prizeId, "220");
-  assert.equal(fallback["3"].prizeId, "221");
+  assert.equal(assignment(fallback, "1").prizeId, "217");
+  assert.equal(assignment(fallback, "2").prizeId, "220");
+  assert.equal(assignment(fallback, "3").prizeId, "221");
 });
 
 test("assigns Planet Peppa prizes by preference with the supplied fallback order", () => {
@@ -196,9 +205,9 @@ test("assigns Planet Peppa prizes by preference with the supplied fallback order
     },
     eventId,
   );
-  assert.equal(preferred["1"].prizeId, "3729");
-  assert.equal(preferred["2"].prizeId, "3727");
-  assert.equal(preferred["3"].prizeId, "3728");
+  assert.equal(assignment(preferred, "1").prizeId, "3729");
+  assert.equal(assignment(preferred, "2").prizeId, "3727");
+  assert.equal(assignment(preferred, "3").prizeId, "3728");
 
   const conflict = build(
     {
@@ -208,17 +217,21 @@ test("assigns Planet Peppa prizes by preference with the supplied fallback order
     },
     eventId,
   );
-  assert.equal(conflict["1"].prizeId, "3728");
-  assert.equal(conflict["2"].prizeId, "3727");
-  assert.equal(conflict["3"].prizeId, "3729");
+  assert.equal(assignment(conflict, "1").prizeId, "3728");
+  assert.equal(assignment(conflict, "2").prizeId, "3727");
+  assert.equal(assignment(conflict, "3").prizeId, "3729");
 
   const fallback = build({}, eventId);
-  assert.equal(fallback["1"].prizeId, "3727");
-  assert.equal(fallback["2"].prizeId, "3728");
-  assert.equal(fallback["3"].prizeId, "3729");
+  assert.equal(assignment(fallback, "1").prizeId, "3727");
+  assert.equal(assignment(fallback, "2").prizeId, "3728");
+  assert.equal(assignment(fallback, "3").prizeId, "3729");
 });
 
-for (const [collectionName, eventId, prizeIds] of [
+for (const [
+  collectionName,
+  eventId,
+  prizeIds,
+] of /** @type {[string, string, [string, string, string]][]} */ ([
   ["Shelves", SHELVES_PRIZES_EVENT_ID, ["865", "1643", "1213"]],
   ["Vehicle Wammin", VEHICLE_WAMMIN_PRIZES_EVENT_ID, ["1241", "443", "1274"]],
   ["MI Note Cards", MI_NOTE_CARDS_PRIZES_EVENT_ID, ["561", "1025", "1195"]],
@@ -237,7 +250,7 @@ for (const [collectionName, eventId, prizeIds] of [
   ["Card NFT 2", CARD_NFT_2_PRIZES_EVENT_ID, ["2046", "5121", "462"]],
   ["pick-me ports", PICKME_PORTS_PRIZES_EVENT_ID, ["298", "894", "1031"]],
   ["aahngeez!", AAHNGEEZ_PRIZES_EVENT_ID, ["172", "104", "149"]],
-]) {
+])) {
   test(`assigns ${collectionName} prizes by preference with the supplied fallback order`, () => {
     const [firstPrizeId, secondPrizeId, thirdPrizeId] = prizeIds;
     const preferred = build(
@@ -248,9 +261,9 @@ for (const [collectionName, eventId, prizeIds] of [
       },
       eventId,
     );
-    assert.equal(preferred["1"].prizeId, thirdPrizeId);
-    assert.equal(preferred["2"].prizeId, firstPrizeId);
-    assert.equal(preferred["3"].prizeId, secondPrizeId);
+    assert.equal(assignment(preferred, "1").prizeId, thirdPrizeId);
+    assert.equal(assignment(preferred, "2").prizeId, firstPrizeId);
+    assert.equal(assignment(preferred, "3").prizeId, secondPrizeId);
 
     const conflict = build(
       {
@@ -260,13 +273,13 @@ for (const [collectionName, eventId, prizeIds] of [
       },
       eventId,
     );
-    assert.equal(conflict["1"].prizeId, secondPrizeId);
-    assert.equal(conflict["2"].prizeId, firstPrizeId);
-    assert.equal(conflict["3"].prizeId, thirdPrizeId);
+    assert.equal(assignment(conflict, "1").prizeId, secondPrizeId);
+    assert.equal(assignment(conflict, "2").prizeId, firstPrizeId);
+    assert.equal(assignment(conflict, "3").prizeId, thirdPrizeId);
 
     const fallback = build({}, eventId);
     assert.deepEqual(
-      [1, 2, 3].map((place) => fallback[place].prizeId),
+      [1, 2, 3].map((place) => assignment(fallback, place).prizeId),
       prizeIds,
     );
   });
@@ -294,26 +307,24 @@ test("validates prize IDs against their configured event", () => {
   assert.deepEqual(build({ first: "1092" }, "unsupported"), {});
 });
 
-test("normalizes only complete valid unique assignment entries", () => {
-  const assignments = normalizeEventPrizeAssignments(
-    {
-      1: {
-        eventId: "NN3eRzoZo80",
-        profileId: "first",
-        place: 1,
-        prizeId: "1092",
-        assignedAtMs: 1234.8,
-      },
-      2: {
-        eventId: "NN3eRzoZo80",
-        profileId: "second",
-        place: 2,
-        prizeId: "1092",
-        assignedAtMs: 1234,
-      },
-    },
-    "NN3eRzoZo80",
-  );
-  assert.deepEqual(Object.keys(assignments), ["1"]);
-  assert.equal(assignments["1"].assignedAtMs, 1234);
+test("canonical assignments reject fractional timestamps, duplicate prizes and partial entries", () => {
+  const first = {
+    eventId: "NN3eRzoZo80",
+    profileId: "first",
+    place: 1,
+    prizeId: "1092",
+    assignedAtMs: 1234,
+  };
+  const valid = { 1: first };
+  assert.deepEqual(normalizeEventPrizeAssignments(valid, first.eventId), valid);
+  for (const assignments of [
+    { 1: { ...first, assignedAtMs: 1234.8 } },
+    { 1: { ...first, assignedAtMs: "1234" } },
+    { 1: first, 2: { ...first, profileId: "second", place: 2 } },
+    { 1: { profileId: "first", prizeId: "1092" } },
+    { 1: { ...first, extension: true } },
+  ])
+    assert.throws(() =>
+      normalizeEventPrizeAssignments(assignments, first.eventId),
+    );
 });

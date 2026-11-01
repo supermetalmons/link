@@ -1,8 +1,9 @@
 // Generated from src/events/ownership.ts. Run npm run generate:runtime.
 import type { EventData, EventParticipants } from "./model.js";
+import type { Aura, EmojiId } from "../shared/appearance.js";
 export type EventOwnershipProfile = {
-  aura: string;
-  emoji: number | string;
+  aura: Aura;
+  emoji: EmojiId;
   eth: string;
   profileId: string;
   rating: number;
@@ -33,7 +34,7 @@ export type EventOwnershipResolutionSnapshot = Pick<
 > &
   Partial<Pick<EventOwnershipSnapshot, "profileById">>;
 type Signature_buildEventOwnershipQuery = (
-  event: EventData,
+  event: EventData | null,
   extras?: {
     loginUids?: string[];
     profileIds?: string[];
@@ -124,7 +125,7 @@ declare const resolveParticipantParticipation: Signature_resolveParticipantParti
 declare const requesterOwnsProfileReference: Signature_requesterOwnsProfileReference;
 declare const canonicalizeEventParticipants: Signature_canonicalizeEventParticipants;
 declare const canonicalizeEventPrizeSelections: <T>(
-  event: EventData,
+  event: Pick<EventData, "participants">,
   value: Record<string, T> | null | undefined,
   snapshot: EventOwnershipSnapshot | null,
 ) => {

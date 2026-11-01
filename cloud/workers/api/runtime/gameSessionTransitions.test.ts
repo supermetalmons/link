@@ -1,10 +1,14 @@
+import { inviteDocumentFixture } from "../test/inviteDocumentFixture.ts";
+import { canonicalAutomatchFixture } from "../test/automatchRecordFixture.ts";
 import { createLegacyInviteSourceD1Store as createInviteSourceD1Store } from "../test/legacyInviteSourceFixture.ts";
 import {
   legacySessionChanges,
   matchTestPort,
 } from "../test/gameSessionTestPorts.ts";
 import { beforeAll, beforeEach, describe, expect, it } from "vitest";
-import { env } from "cloudflare:workers";
+import { env as baseEnv } from "cloudflare:workers";
+import { activateCanonicalApplicationFixture } from "./applicationRoomFixture.ts";
+import { eventApplicationEnvironment } from "./eventApplicationFixture.ts";
 import type { D1Migration } from "cloudflare:test";
 import { applyStrictMatchStateTestMigrations } from "./strictMatchStateTestFixture.ts";
 import { createLegacyAutomatchD1Store as createAutomatchD1Store } from "../test/legacyAutomatchStoreFixture.ts";
@@ -29,14 +33,16 @@ import {
 } from "../src/matchPresentationRegistry.ts";
 import { resetMatchPresentationTestState } from "./matchPresentationTestFixture.ts";
 
+const env = eventApplicationEnvironment(baseEnv);
 const testEnv = env as Env & { TEST_D1_MIGRATIONS: D1Migration[] };
 const db = env.PROFILE_GAMES_DB;
 const NOW = 10_000;
-const INVITE = "auto-transition";
-const HOST = "host-transition";
-const OPERATION = "operation-transition";
-const MATCH_PATH = `players/${HOST}/matches/${INVITE}`;
-const INVITE_PATH = `invites/${INVITE}`;
+let INVITE = "auto-transition";
+let HOST = "host-transition";
+let OPERATION = "operation-transition";
+let MATCH_PATH = `players/${HOST}/matches/${INVITE}`;
+let INVITE_PATH = `invites/${INVITE}`;
+let fixtureIndex = 0;
 const SERVER_TIMESTAMP = { ".sv": "timestamp" };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -73,10 +79,9 @@ class MemoryStateRepository implements Pick<
       if (decision.commit === false) {
         return {
           committed: false,
-          decision:
-            typeof decision.decision === "string"
-              ? decision.decision
-              : undefined,
+          ...(typeof decision.decision === "string"
+            ? { decision: decision.decision }
+            : {}),
           value: current,
         };
       }
@@ -95,8 +100,9 @@ class MemoryStateRepository implements Pick<
       }
       return {
         committed: true,
-        decision:
-          typeof decision.decision === "string" ? decision.decision : undefined,
+        ...(typeof decision.decision === "string"
+          ? { decision: decision.decision }
+          : {}),
         value: structuredClone(decision.value),
       };
     }
@@ -155,7 +161,7 @@ function createUpdates() {
       color: "white",
       gameVariant: "v1",
       emojiId: 1,
-      aura: "",
+      aura: "none" as const,
     },
     [`automatch/${INVITE}`]: {
       uid: HOST,
@@ -179,12 +185,15 @@ function createUpdates() {
 function coordinator(
   state: MemoryStateRepository,
   options: Partial<Parameters<typeof createGameSessionTransitions>[0]> = {},
+  capturePresentation = true,
 ) {
   const transitions = createGameSessionTransitions({
     db,
     state: matchTestPort(state),
     now: () => NOW,
-    prepareMatchPresentations: presentationCapture().prepare,
+    ...(capturePresentation
+      ? { prepareMatchPresentations: presentationCapture().prepare }
+      : {}),
     ...options,
   });
   return {
@@ -200,14 +209,17 @@ function coordinator(
 function pendingCount() {
   return db
     .prepare(
-      "SELECT count(*) AS count FROM game_session_transitions WHERE status = 'pending'",
+      "SELECT count(*) AS count FROM game_session_transitions_canonical WHERE status = 'pending'",
     )
     .first<number>("count");
 }
 
 function presentationRegistrationCount() {
   return db
-    .prepare("SELECT COUNT(*) AS count FROM match_presentation_registrations")
+    .prepare(
+      "SELECT COUNT(*) AS count FROM match_presentation_registrations_canonical WHERE invite_id = ?",
+    )
+    .bind(INVITE)
     .first<number>("count");
 }
 
@@ -263,10 +275,17 @@ function interleavePreparations(
 
 describe("recoverable D1 game-session transitions", () => {
   beforeAll(async () => {
+    await activateCanonicalApplicationFixture();
     await applyStrictMatchStateTestMigrations(db, testEnv.TEST_D1_MIGRATIONS);
   });
 
   beforeEach(async () => {
+    fixtureIndex++;
+    INVITE = `auto-transition-${fixtureIndex}`;
+    HOST = `host-transition-${fixtureIndex}`;
+    OPERATION = `operation-transition-${fixtureIndex}`;
+    MATCH_PATH = `players/${HOST}/matches/${INVITE}`;
+    INVITE_PATH = `invites/${INVITE}`;
     await resetMatchPresentationTestState(
       db,
       testEnv.TEST_D1_MIGRATIONS,
@@ -274,49 +293,46 @@ describe("recoverable D1 game-session transitions", () => {
     );
     await db.batch([
       db.prepare("DELETE FROM invite_source_write_admissions"),
-      db.prepare("DELETE FROM invite_sources"),
+      db.prepare("DELETE FROM invite_sources_canonical"),
       db.prepare(
         "UPDATE invite_source_control SET backend = 'd1', state = 'active', epoch = 1, freeze_generation = 0, verified_at_ms = 1, activated_at_ms = 1 WHERE singleton = 1",
       ),
-      db.prepare("DELETE FROM login_match_discovery"),
+      db.prepare("DELETE FROM login_match_discovery_canonical"),
       db.prepare(
         "UPDATE login_match_discovery_control SET capture_enforced = 1, capture_version_id = '11111111-1111-4111-8111-111111111111', capture_started_at_ms = 1 WHERE singleton = 1",
       ),
       db.prepare(
         "UPDATE automatch_runtime_control SET backend = 'd1' WHERE singleton = 1",
       ),
-      db.prepare("DELETE FROM game_session_transition_resources"),
-      db.prepare("DELETE FROM game_session_transitions"),
+      db.prepare("DELETE FROM game_session_transition_resources_canonical"),
+      db.prepare("DELETE FROM game_session_transitions_canonical"),
       db.prepare("DELETE FROM game_session_mutation_locks"),
-      db.prepare("DELETE FROM automatch_entries"),
-      db.prepare("DELETE FROM automatch_telegram_sources"),
-      db.prepare("DELETE FROM automatch_telegram_projection_outbox"),
-      db.prepare("DELETE FROM game_session_projection_outbox"),
-      db.prepare("DELETE FROM game_session_mutation_receipts"),
+      db.prepare("DELETE FROM automatch_entries_canonical"),
+      db.prepare("DELETE FROM automatch_telegram_sources_canonical"),
+      db.prepare("DELETE FROM automatch_telegram_projection_outbox_canonical"),
+      db.prepare("DELETE FROM game_session_projection_outbox_canonical"),
+      db.prepare("DELETE FROM game_session_mutation_receipts_canonical"),
     ]);
   });
 
   describe("D1 invite source", () => {
-    it("preserves the deployed v2 transition serialization and creation digest", async () => {
+    it("persists the exact canonical transition identity and creation marker", async () => {
       const state = new MemoryStateRepository();
       await activateInviteSource(state);
       await coordinator(state, {
-        createId: () => "v2-serialization-proof",
+        createId: () => "canonical-serialization-proof",
       }).commit(createUpdates(), await leases());
-      const payload = await db
-        .prepare("SELECT payload_json FROM game_session_transitions")
+      const raw = await db
+        .prepare("SELECT payload_json FROM game_session_transitions_canonical")
         .first<string>("payload_json");
-      expect(payload).not.toBeNull();
-      const digest = await crypto.subtle.digest(
-        "SHA-256",
-        new TextEncoder().encode(payload!),
-      );
-      expect(
-        Array.from(new Uint8Array(digest), (byte) =>
-          byte.toString(16).padStart(2, "0"),
-        ).join(""),
-      ).toBe(
-        "45ff24a21370a2f6621f566638f12c92e3f504893a236422b5bafb4faad01d39",
+      expect(raw).not.toBeNull();
+      const payload = JSON.parse(raw!);
+      expect(payload.version).toBe(3);
+      expect(payload.inviteId).toBe(INVITE);
+      expect(payload.operationDigest).toMatch(/^[a-f0-9]{64}$/);
+      expect(payload.creations[0]!.marker).toBe(
+        ((await state.getPath(MATCH_PATH)) as Record<string, unknown>)
+          .sessionCreation,
       );
     });
 
@@ -329,10 +345,7 @@ describe("recoverable D1 game-session transitions", () => {
         "durable",
       );
       await expect(
-        coordinator(state, { prepareMatchPresentations: undefined }).commit(
-          createUpdates(),
-          await leases(),
-        ),
+        coordinator(state, {}, false).commit(createUpdates(), await leases()),
       ).rejects.toThrow("match-presentation-capture-required");
       expect((await source.read(INVITE)).revision).toBe(0);
       expect(await pendingCount()).toBe(1);
@@ -352,7 +365,7 @@ describe("recoverable D1 game-session transitions", () => {
             matchId: INVITE,
             actorUid: HOST,
             emojiId: 1,
-            aura: "",
+            aura: "none" as const,
             revision: 0,
           },
         },
@@ -371,8 +384,8 @@ describe("recoverable D1 game-session transitions", () => {
         async prepareMatchPresentations(creations) {
           expect(await state.getPath(MATCH_PATH)).toMatchObject({
             emojiId: 1,
-            aura: "",
-            sessionCreation: creations[0].sourceId,
+            aura: "none" as const,
+            sessionCreation: creations[0]!.sourceId,
           });
           expect((await source.read(INVITE)).revision).toBe(0);
           expect(await presentationRegistrationCount()).toBe(0);
@@ -392,7 +405,10 @@ describe("recoverable D1 game-session transitions", () => {
           `gameplayMutationReceipts/${OPERATION}`,
         ),
       ).toBeNull();
-      capture.current.set(`${INVITE}/${HOST}`, { emojiId: 8, aura: "edited" });
+      capture.current.set(`${INVITE}/${HOST}`, {
+        emojiId: 8,
+        aura: "none" as const,
+      });
       failAppearance = false;
       await transitions.recoverResource(INVITE);
       expect(capture.prepared).toHaveLength(2);
@@ -403,13 +419,13 @@ describe("recoverable D1 game-session transitions", () => {
           matchId: INVITE,
           actorUid: HOST,
           emojiId: 1,
-          aura: "",
+          aura: "none" as const,
           sourceId: expect.stringMatching(/^[a-f0-9]{64}$/),
         },
       ]);
       expect(capture.current.get(`${INVITE}/${HOST}`)).toEqual({
         emojiId: 8,
-        aura: "edited",
+        aura: "none" as const,
       });
       expect(await presentationRegistrationCount()).toBe(1);
       expect((await source.read(INVITE)).revision).toBe(1);
@@ -425,7 +441,7 @@ describe("recoverable D1 game-session transitions", () => {
         prepareMatchPresentations: capture.prepare,
       });
       await db.exec(
-        "CREATE TRIGGER test_presentation_publication_failure BEFORE INSERT ON invite_sources BEGIN SELECT RAISE(ABORT, 'presentation-publication-unavailable'); END;",
+        "CREATE TRIGGER test_presentation_publication_failure BEFORE INSERT ON invite_sources_canonical BEGIN SELECT RAISE(ABORT, 'presentation-publication-unavailable'); END;",
       );
       try {
         await expect(
@@ -474,7 +490,9 @@ describe("recoverable D1 game-session transitions", () => {
         ).toBeNull();
         expect(
           await db
-            .prepare("SELECT COUNT(*) AS count FROM login_match_discovery")
+            .prepare(
+              "SELECT COUNT(*) AS count FROM login_match_discovery_canonical",
+            )
             .first("count"),
         ).toBe(0);
       };
@@ -482,11 +500,11 @@ describe("recoverable D1 game-session transitions", () => {
       expect(await source.read(INVITE)).toEqual({
         inviteId: INVITE,
         revision: 1,
-        value: {
+        value: inviteDocumentFixture({
           hostId: HOST,
           hostColor: "white",
           automatchStateHint: "pending",
-        },
+        }),
       });
       expect(
         await store.getPath(`gameplayMutationReceipts/${OPERATION}`),
@@ -494,17 +512,19 @@ describe("recoverable D1 game-session transitions", () => {
       expect(
         await db
           .prepare(
-            "SELECT login_uid, match_id, invite_id FROM login_match_discovery",
+            "SELECT login_uid, match_id, invite_id FROM login_match_discovery_canonical",
           )
           .first(),
       ).toEqual({ login_uid: HOST, match_id: INVITE, invite_id: INVITE });
       const payload = JSON.parse(
         (await db
-          .prepare("SELECT payload_json FROM game_session_transitions")
+          .prepare(
+            "SELECT payload_json FROM game_session_transitions_canonical",
+          )
           .first<string>("payload_json"))!,
       );
       expect(payload).toMatchObject({
-        version: 2,
+        version: 3,
         inviteSourceEpoch: 1,
         inviteMutations: [{ current: { inviteId: INVITE, revision: 0 } }],
       });
@@ -553,7 +573,7 @@ describe("recoverable D1 game-session transitions", () => {
         entered = resolve;
       });
       state.beforeWrite = async () => {
-        state.beforeWrite = undefined;
+        delete state.beforeWrite;
         entered();
         await blocked;
       };
@@ -574,7 +594,7 @@ describe("recoverable D1 game-session transitions", () => {
         await db.batch(
           source.buildCommitStatements(
             await source.preparePatch({
-              [`invites/${INVITE}/telegramDeliveryVersion`]: 3,
+              [`invites/${INVITE}/telegramDeliveryVersion`]: 2,
             }),
           ),
         );
@@ -584,7 +604,7 @@ describe("recoverable D1 game-session transitions", () => {
       await original;
       expect(await source.read(INVITE)).toMatchObject({
         revision: 2,
-        value: { telegramDeliveryVersion: 3 },
+        value: { telegramDeliveryVersion: 2 },
       });
       expect(await state.getPath(MATCH_PATH)).toMatchObject({
         fen: "newer-position",
@@ -600,7 +620,7 @@ describe("recoverable D1 game-session transitions", () => {
       const source = await activateInviteSource(state);
       const transitions = coordinator(state);
       await db.exec(
-        "CREATE TRIGGER test_invite_finalization_failure BEFORE INSERT ON invite_sources BEGIN SELECT RAISE(ABORT, 'test-source-unavailable'); END;",
+        "CREATE TRIGGER test_invite_finalization_failure BEFORE INSERT ON invite_sources_canonical BEGIN SELECT RAISE(ABORT, 'test-source-unavailable'); END;",
       );
       try {
         await expect(
@@ -608,9 +628,9 @@ describe("recoverable D1 game-session transitions", () => {
         ).rejects.toThrow("test-source-unavailable");
         expect((await source.read(INVITE)).revision).toBe(0);
         for (const table of [
-          "game_session_mutation_receipts",
-          "game_session_projection_outbox",
-          "login_match_discovery",
+          "game_session_mutation_receipts_canonical",
+          "game_session_projection_outbox_canonical",
+          "login_match_discovery_canonical",
         ]) {
           expect(
             await db
@@ -654,9 +674,9 @@ describe("recoverable D1 game-session transitions", () => {
         db: uncertainDb,
         inviteStore: {
           ...source,
-          buildRetainedCommitStatements(...args) {
+          buildCommitStatements(...args) {
             finalizing = true;
-            return source.buildRetainedCommitStatements(...args);
+            return source.buildCommitStatements(...args);
           },
         },
       }).commit(createUpdates(), await leases());
@@ -664,68 +684,6 @@ describe("recoverable D1 game-session transitions", () => {
       expect((await source.read(INVITE)).revision).toBe(1);
       expect(await pendingCount()).toBe(0);
       expect(await inviteAdmissionCount()).toBe(0);
-    });
-
-    it("preserves metadata and legacy provenance during rematch and match-only commits", async () => {
-      const state = new MemoryStateRepository();
-      const source = await activateInviteSource(state);
-      const legacyMarker = {
-        sequence: 8,
-        transitionId: "legacy",
-        digest: "a".repeat(64),
-      };
-      await db
-        .prepare(
-          "INSERT INTO invite_sources (invite_id, source_json, revision, updated_at_ms) VALUES (?, ?, 4, ?)",
-        )
-        .bind(
-          INVITE,
-          JSON.stringify({
-            hostId: HOST,
-            guestId: "guest",
-            hostRematches: "1",
-            guestRematches: "1",
-            password: "private",
-            sessionTransition: legacyMarker,
-          }),
-          NOW,
-        )
-        .run();
-      const proofs = await leases([INVITE]);
-      await coordinator(state).commit(
-        {
-          [`invites/${INVITE}/hostRematches`]: "12",
-          [`players/${HOST}/matches/${INVITE}2`]: {
-            fen: "rematch-seed",
-            color: "white",
-            gameVariant: "v1",
-          },
-          ...receiptUpdates(),
-        },
-        proofs,
-      );
-      await coordinator(state).commit(
-        {
-          [`players/guest/matches/${INVITE}2`]: {
-            fen: "guest-seed",
-            color: "black",
-            gameVariant: "v1",
-          },
-          ...receiptUpdates("ensure-operation"),
-        },
-        proofs,
-      );
-      expect(await source.read(INVITE)).toMatchObject({
-        revision: 6,
-        value: {
-          hostRematches: "12",
-          guestRematches: "1",
-          password: "private",
-          sessionTransition: legacyMarker,
-        },
-      });
-      expect(state.writes.get(`players/${HOST}/matches/${INVITE}2`)).toBe(1);
-      expect(state.writes.get(`players/guest/matches/${INVITE}2`)).toBe(1);
     });
 
     it("retries only preparation CAS conflicts with a stable identity and resolved timestamp", async () => {
@@ -760,7 +718,8 @@ describe("recoverable D1 game-session transitions", () => {
           ...updates,
           [INVITE_PATH]: {
             ...updates[INVITE_PATH],
-            automatchCanceledAt: SERVER_TIMESTAMP,
+            automatchStateHint: "canceled",
+            automatchCanceledAt: NOW,
           },
         },
         await leases(),
@@ -769,7 +728,7 @@ describe("recoverable D1 game-session transitions", () => {
       expect(ids).toBe(1);
       expect(await source.read(INVITE)).toMatchObject({
         revision: 2,
-        value: { telegramDeliveryVersion: 2, automatchCanceledAt: NOW },
+        value: { telegramDeliveryVersion: null, automatchCanceledAt: NOW },
       });
       expect(state.writes.get(MATCH_PATH)).toBe(1);
     });
@@ -823,8 +782,15 @@ describe("recoverable D1 game-session transitions", () => {
     });
 
     it.each([
-      { eventOwned: true },
-      { eventId: "event-one", eventOwned: false },
+      {
+        kind: "event",
+        eventOwned: true,
+        eventId: "event-one",
+        eventRoundIndex: 0,
+        eventMatchKey: "0_0",
+        guestId: "guest",
+        automatchStateHint: null,
+      },
     ])(
       "rejects existing and proposed event ownership %j before effects",
       async (ownership) => {
@@ -850,7 +816,7 @@ describe("recoverable D1 game-session transitions", () => {
                 matchId: INVITE,
                 actorUid,
                 emojiId: 1,
-                aura: "",
+                aura: "none" as const,
                 sourceId: "existing-event-match",
               })),
             ),
@@ -860,7 +826,7 @@ describe("recoverable D1 game-session transitions", () => {
         await db.batch(
           source.buildCommitStatements(
             await source.preparePatch({
-              [INVITE_PATH]: { hostId: HOST, guestId: "guest", ...ownership },
+              [INVITE_PATH]: { hostId: HOST, ...ownership },
             }),
           ),
         );
@@ -871,28 +837,6 @@ describe("recoverable D1 game-session transitions", () => {
         expect(await pendingCount()).toBe(0);
       },
     );
-
-    it("rejects legacy recovery after activation without touching RTDB invites or matches", async () => {
-      const state = new MemoryStateRepository();
-      state.beforeWriteFailure = MATCH_PATH;
-      const transitions = coordinator(state);
-      await expect(
-        transitions.commit(createUpdates(), await leases()),
-      ).rejects.toThrow("before-write");
-      await db
-        .prepare(
-          "UPDATE game_session_transitions SET payload_json = json_set(payload_json, '$.version', 1) WHERE status = 'pending'",
-        )
-        .run();
-      await expect(transitions.recoverResource(INVITE)).rejects.toThrow(
-        "invalid-intent",
-      );
-      expect(state.values.size).toBe(0);
-      expect(await pendingCount()).toBe(1);
-      await expect(transitions.assertResourceAvailable(INVITE)).rejects.toThrow(
-        "resource-pending",
-      );
-    });
 
     it("rejects the retired invite backend without reserving or materializing a session", async () => {
       await db
@@ -911,34 +855,6 @@ describe("recoverable D1 game-session transitions", () => {
       expect(state.values.size).toBe(0);
       expect(await pendingCount()).toBe(0);
       expect(await inviteAdmissionCount()).toBe(0);
-    });
-
-    it("retains completed legacy transition bytes during current recovery", async () => {
-      const payload = JSON.stringify({
-        version: 1,
-        invite: { marker: "retained" },
-      });
-      await db
-        .prepare(
-          `INSERT INTO game_session_transitions
-          (transition_id, invite_id, payload_json, status, created_at_ms, updated_at_ms)
-          VALUES ('completed-legacy', ?, ?, 'completed', ?, ?)`,
-        )
-        .bind(INVITE, payload, NOW, NOW)
-        .run();
-      const state = new MemoryStateRepository();
-      expect(await coordinator(state).sweep()).toEqual({
-        recovered: 0,
-        failed: 0,
-      });
-      expect(
-        await db
-          .prepare(
-            "SELECT payload_json FROM game_session_transitions WHERE transition_id = 'completed-legacy'",
-          )
-          .first("payload_json"),
-      ).toBe(payload);
-      expect(state.values.size).toBe(0);
     });
 
     it("leaves supplied admissions owned by the coordinator and rejects a revoked admission", async () => {
@@ -991,7 +907,7 @@ describe("recoverable D1 game-session transitions", () => {
     await db
       .prepare(
         `CREATE TRIGGER test_discovery_capture_failure
-      BEFORE INSERT ON login_match_discovery
+      BEFORE INSERT ON login_match_discovery_canonical
       BEGIN SELECT RAISE(ABORT, 'test-discovery-unavailable'); END;`,
       )
       .run();
@@ -1004,14 +920,14 @@ describe("recoverable D1 game-session transitions", () => {
       expect(
         await db
           .prepare(
-            "SELECT COUNT(*) AS count FROM game_session_mutation_receipts",
+            "SELECT COUNT(*) AS count FROM game_session_mutation_receipts_canonical",
           )
           .first("count"),
       ).toBe(0);
       expect(
         await db
           .prepare(
-            "SELECT COUNT(*) AS count FROM game_session_projection_outbox",
+            "SELECT COUNT(*) AS count FROM game_session_projection_outbox_canonical",
           )
           .first("count"),
       ).toBe(0);
@@ -1022,17 +938,23 @@ describe("recoverable D1 game-session transitions", () => {
     expect(await pendingCount()).toBe(0);
     expect(
       await db
-        .prepare("SELECT COUNT(*) AS count FROM login_match_discovery")
+        .prepare(
+          "SELECT COUNT(*) AS count FROM login_match_discovery_canonical",
+        )
         .first("count"),
     ).toBe(1);
     expect(
       await db
-        .prepare("SELECT COUNT(*) AS count FROM game_session_mutation_receipts")
+        .prepare(
+          "SELECT COUNT(*) AS count FROM game_session_mutation_receipts_canonical",
+        )
         .first("count"),
     ).toBe(1);
     expect(
       await db
-        .prepare("SELECT COUNT(*) AS count FROM game_session_projection_outbox")
+        .prepare(
+          "SELECT COUNT(*) AS count FROM game_session_projection_outbox_canonical",
+        )
         .first("count"),
     ).toBe(1);
     expect(state.writes.get(MATCH_PATH)).toBe(1);
@@ -1194,7 +1116,7 @@ describe("recoverable D1 game-session transitions", () => {
     expect(notifications).toEqual([INVITE]);
     const payloadJson = await db
       .prepare(
-        "SELECT payload_json FROM game_session_transitions WHERE transition_id = 'intent-1'",
+        "SELECT payload_json FROM game_session_transitions_canonical WHERE transition_id = 'intent-1'",
       )
       .first<string>("payload_json");
     const payload = JSON.parse(payloadJson!);
@@ -1206,11 +1128,10 @@ describe("recoverable D1 game-session transitions", () => {
         value: null,
         revision: 2,
       },
-      value: {
-        requestId: OPERATION,
-        status: "pending",
-        lastQueuedAtMs: NOW,
-      },
+      value: canonicalAutomatchFixture(
+        "profileGameProjectionOutbox/automatch",
+        { requestId: OPERATION, status: "pending", lastQueuedAtMs: NOW },
+      ),
     });
     expect(
       await store.getPath(`gameplayMutationReceipts/${OPERATION}`),
@@ -1365,7 +1286,7 @@ describe("recoverable D1 game-session transitions", () => {
     });
     state.beforeWrite = async (path) => {
       if (path !== MATCH_PATH) return;
-      state.beforeWrite = undefined;
+      delete state.beforeWrite;
       entered();
       await blocked;
     };
@@ -1401,7 +1322,7 @@ describe("recoverable D1 game-session transitions", () => {
             hostColor: "white",
             automatchStateHint: "pending",
             password: "private",
-            custom: { retained: true },
+            automatchOperationIds: { [HOST]: OPERATION },
           },
         }),
       ),
@@ -1419,14 +1340,14 @@ describe("recoverable D1 game-session transitions", () => {
       [`telegramAutomatches/${INVITE}/generation`]: { ".sv": { increment: 1 } },
       [`telegramAutomatches/${INVITE}/lifecycle`]: "canceled",
       [`invites/${INVITE}/automatchStateHint`]: "canceled",
-      [`invites/${INVITE}/automatchCanceledAt`]: SERVER_TIMESTAMP,
+      [`invites/${INVITE}/automatchCanceledAt`]: NOW,
       [`profileGameProjectionOutbox/automatch/${INVITE}`]: {
         requestId: OPERATION,
         lastQueuedAtMs: SERVER_TIMESTAMP,
       },
     };
     await db.exec(
-      "CREATE TRIGGER test_cancel_publication_failure BEFORE UPDATE ON invite_sources BEGIN SELECT RAISE(ABORT, 'cancel-publication-unavailable'); END;",
+      "CREATE TRIGGER test_cancel_publication_failure BEFORE UPDATE ON invite_sources_canonical BEGIN SELECT RAISE(ABORT, 'cancel-publication-unavailable'); END;",
     );
     try {
       await expect(transitions.commit(updates, await leases())).rejects.toThrow(
@@ -1452,7 +1373,7 @@ describe("recoverable D1 game-session transitions", () => {
       value: {
         automatchCanceledAt: NOW,
         password: "private",
-        custom: { retained: true },
+        automatchOperationIds: { [HOST]: OPERATION },
       },
     });
     expect(state.writes.has(INVITE_PATH)).toBe(false);
@@ -1464,7 +1385,11 @@ describe("recoverable D1 game-session transitions", () => {
     await db.batch(
       source.buildCommitStatements(
         await source.preparePatch({
-          [INVITE_PATH]: { hostId: HOST, guestId: "guest", hostRematches: "1" },
+          [INVITE_PATH]: {
+            hostId: HOST,
+            guestId: "guest",
+            hostRematches: { state: "open", indices: [1] },
+          },
         }),
       ),
     );
@@ -1482,7 +1407,7 @@ describe("recoverable D1 game-session transitions", () => {
     );
     expect(await source.read(INVITE)).toMatchObject({
       revision: 2,
-      value: { hostRematches: "1" },
+      value: { hostRematches: { state: "open", indices: [1] } },
     });
     expect(await state.getPath(MATCH_PATH)).toMatchObject({
       fen: "mirrored",
@@ -1491,7 +1416,7 @@ describe("recoverable D1 game-session transitions", () => {
     expect(
       await db
         .prepare(
-          "SELECT login_uid, match_id, invite_id FROM login_match_discovery",
+          "SELECT login_uid, match_id, invite_id FROM login_match_discovery_canonical",
         )
         .first(),
     ).toEqual({
@@ -1501,8 +1426,9 @@ describe("recoverable D1 game-session transitions", () => {
     });
   });
 
-  for (const matchId of [INVITE, `${INVITE}1`]) {
-    it(`captures the guest match path for ${matchId} independently of the caller login`, async () => {
+  for (const suffix of ["", "1"]) {
+    it(`captures the guest match path with suffix ${suffix} independently of the caller login`, async () => {
+      const matchId = `${INVITE}${suffix}`;
       const actorUid = "stored-guest-actor";
       const state = new MemoryStateRepository();
       const source = await activateInviteSource(state);
@@ -1527,7 +1453,7 @@ describe("recoverable D1 game-session transitions", () => {
       expect(
         await db
           .prepare(
-            "SELECT login_uid, match_id, invite_id FROM login_match_discovery",
+            "SELECT login_uid, match_id, invite_id FROM login_match_discovery_canonical",
           )
           .first(),
       ).toEqual({
@@ -1557,16 +1483,35 @@ describe("recoverable D1 game-session transitions", () => {
     await coordinator(state).commit(createUpdates(), await leases());
     const existingMarker = await state.getPath(MATCH_PATH);
     const future = NOW + GAME_SESSION_TRANSITION_RETENTION_MS + 1;
+    const completed = await db
+      .prepare("SELECT payload_json FROM game_session_transitions_canonical")
+      .first<string>("payload_json");
+    const payload = JSON.parse(completed!);
+    const heldPath = "players/held-host/matches/held-invite";
+    Object.assign(payload, {
+      transitionId: "held-intent",
+      inviteId: "held-invite",
+      resources: ["held-invite"],
+      createdAtMs: 0,
+      mutations: [],
+      inviteMutations: [
+        {
+          current: { inviteId: "held-invite", value: null, revision: 0 },
+          value: inviteDocumentFixture({ hostId: "held-host" }),
+        },
+      ],
+      creations: [{ ...payload.creations[0]!, path: heldPath }],
+    });
     await db
       .prepare(
-        `INSERT INTO game_session_transitions
-      (transition_id, invite_id, payload_json, status, created_at_ms, updated_at_ms)
-      VALUES ('held-intent', 'held-invite', '{}', 'pending', 0, 0)`,
+        `INSERT INTO game_session_transitions_canonical (transition_id, invite_id, payload_json, status, created_at_ms, updated_at_ms) VALUES ('held-intent', 'held-invite', ?, 'pending', 0, 0)`,
       )
+      .bind(JSON.stringify(payload))
       .run();
+    state.beforeWriteFailure = heldPath;
     await db
       .prepare(
-        "INSERT INTO game_session_transition_resources (resource_key, transition_id) VALUES ('held-invite', 'held-intent')",
+        "INSERT INTO game_session_transition_resources_canonical (resource_key, transition_id) VALUES ('held-invite', 'held-intent')",
       )
       .run();
     expect(await coordinator(state, { now: () => future }).sweep(1)).toEqual({
@@ -1576,7 +1521,7 @@ describe("recoverable D1 game-session transitions", () => {
     expect(
       await db
         .prepare(
-          "SELECT count(*) AS count FROM game_session_transitions WHERE status = 'completed'",
+          "SELECT count(*) AS count FROM game_session_transitions_canonical WHERE status = 'completed'",
         )
         .first("count"),
     ).toBe(0);

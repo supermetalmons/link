@@ -1,5 +1,8 @@
 import { isSafeRecordKey } from "../src/recordKeys.ts";
-import { PROFILE_GAME_PROJECTION_SCHEMA_VERSION } from "../src/profileGameProjectionTasks.ts";
+import {
+  AUTOMATCH_PROFILE_GAME_PROJECTION_SCHEMA_VERSION,
+  PROFILE_GAME_PROJECTION_SCHEMA_VERSION,
+} from "../src/profileGameProjectionTasks.ts";
 import type { HistoricalMatchDescriptor } from "../src/historicalMatches.ts";
 export * from "../src/profileGameProjectionOutbox.ts";
 
@@ -34,7 +37,9 @@ export function buildAutomatchProfileGameProjectionOutboxUpdates(input: {
 }): Record<string, unknown> {
   return {
     [getAutomatchProfileGameProjectionOutboxPath(input.inviteId)]: {
-      schemaVersion: PROFILE_GAME_PROJECTION_SCHEMA_VERSION,
+      schemaVersion: AUTOMATCH_PROFILE_GAME_PROJECTION_SCHEMA_VERSION,
+      historicalMatches: {},
+      archiveRetry: null,
       status: "pending",
       requestId: input.requestId,
       reason:
@@ -58,7 +63,9 @@ export function buildAutomatchProfileGameProjectionOutboxMergeUpdates(input: {
     input.inviteId,
   );
   const updates: Record<string, unknown> = {
-    [`${outboxPath}/schemaVersion`]: PROFILE_GAME_PROJECTION_SCHEMA_VERSION,
+    [`${outboxPath}/schemaVersion`]:
+      AUTOMATCH_PROFILE_GAME_PROJECTION_SCHEMA_VERSION,
+    [`${outboxPath}/archiveRetry`]: null,
     [`${outboxPath}/status`]: "pending",
     [`${outboxPath}/requestId`]: input.requestId,
     [`${outboxPath}/reason`]:
@@ -74,6 +81,7 @@ export function buildAutomatchProfileGameProjectionOutboxMergeUpdates(input: {
       guestPlayerId: descriptor.guestPlayerId,
       hostPlayerId: descriptor.hostPlayerId,
       source: descriptor.source,
+      retryNotBeforeMs: descriptor.retryNotBeforeMs ?? null,
     };
   }
   return updates;

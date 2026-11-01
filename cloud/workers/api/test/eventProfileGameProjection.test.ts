@@ -73,11 +73,12 @@ test("event projection preserves the payload and stale-owner cleanup", async () 
   const result = await core.projectEvent(
     "event-1",
     eventDocumentFixture({
-      status: "active",
+      status: "ended",
       startAtMs: 100,
       startedAtMs: 110,
       updatedAtMs: 120,
       endedAtMs: 130,
+      winnerProfileId: "source",
       winnerDisplayName: " Winner ",
       participants: {
         source: {
@@ -85,7 +86,7 @@ test("event projection preserves the payload and stale-owner cleanup", async () 
           loginUid: "login-1",
           displayName: "Player",
           emojiId: 7,
-          aura: "gold",
+          aura: "rainbow",
           joinedAtMs: 1,
         },
       },
@@ -98,22 +99,22 @@ test("event projection preserves the payload and stale-owner cleanup", async () 
     written: 1,
   });
   assert.deepEqual(
-    writes[0].map(({ type, profileId }) => ({ type, profileId })),
+    writes[0]!.map(({ type, profileId }) => ({ type, profileId })),
     [
       { type: "merge", profileId: "target" },
       { type: "delete", profileId: "source" },
       { type: "delete", profileId: "stale" },
     ],
   );
-  assert.deepEqual(writes[0][0].data, {
-    schemaVersion: 1,
+  assert.deepEqual(writes[0]![0]!.data, {
+    schemaVersion: 2,
     source: "event-projector",
     entityType: "event",
     id: "event_event-1",
     eventId: "event-1",
-    status: "active",
-    sortBucket: 40,
-    listSortAt: 110,
+    status: "ended",
+    sortBucket: 50,
+    listSortAt: 130,
     ownerProfileId: "target",
     startAt: 100,
     updatedAt: 120,
@@ -124,7 +125,7 @@ test("event projection preserves the payload and stale-owner cleanup", async () 
         profileId: "target",
         displayName: "Player",
         emojiId: 7,
-        aura: "gold",
+        aura: "rainbow",
       },
     ],
     winnerDisplayName: "Winner",
@@ -179,7 +180,7 @@ test("missing events delete every accumulated cleanup owner", async () => {
     status: "missing",
     written: 0,
   });
-  assert.deepEqual(writes[0], [
+  assert.deepEqual(writes[0]!, [
     { type: "delete", profileId: "a", eventId: "event-1" },
     { type: "delete", profileId: "b", eventId: "event-1" },
   ]);
@@ -218,7 +219,7 @@ test("live reconciliation projects one immutable event read", async () => {
   assert.equal(result.status, "projected");
   assert.equal(writes.length, 1);
   assert.deepEqual(
-    writes[0].map(({ type, profileId }) => ({ type, profileId })),
+    writes[0]!.map(({ type, profileId }) => ({ type, profileId })),
     [
       { type: "merge", profileId: "first" },
       { type: "delete", profileId: "stale" },
@@ -230,7 +231,7 @@ test("event preparation shares the projection snapshot and missing events skip i
   const first = { participants: {}, status: "active" };
   const second = { participants: {}, status: "ended" };
   const state = createRepository({ events: [first, second, null] });
-  const prepared: Array<Record<string, unknown>> = [];
+  const prepared: object[] = [];
   const core = createEventProfileGameProjectionCore({
     repository: state.repository,
     async prepareEventProjection(eventId, event) {
@@ -243,17 +244,23 @@ test("event preparation shares the projection snapshot and missing events skip i
     (await core.reconcileEventProjection("event-1")).status,
     "projected",
   );
-  assert.deepEqual(prepared, [first]);
+  assert.deepEqual(prepared, [eventDocumentFixture(first)]);
   assert.equal(
     (await core.reconcileEventProjection("event-1")).status,
     "projected",
   );
-  assert.deepEqual(prepared, [first, second]);
+  assert.deepEqual(prepared, [
+    eventDocumentFixture(first),
+    eventDocumentFixture(second),
+  ]);
   assert.equal(
     (await core.reconcileEventProjection("event-1")).status,
     "missing",
   );
-  assert.deepEqual(prepared, [first, second]);
+  assert.deepEqual(prepared, [
+    eventDocumentFixture(first),
+    eventDocumentFixture(second),
+  ]);
 });
 
 test("failed event preparation retries the event read before projecting", async () => {
@@ -268,7 +275,7 @@ test("failed event preparation retries the event read before projecting", async 
     canonicalProfileIds: { first: "first", second: "second" },
     loginProfileIds: { "login-first": "first", "login-second": "second" },
   });
-  const prepared: Array<Record<string, unknown>> = [];
+  const prepared: object[] = [];
   const core = createEventProfileGameProjectionCore({
     repository: state.repository,
     async prepareEventProjection(_eventId, event) {
@@ -283,9 +290,12 @@ test("failed event preparation retries the event read before projecting", async 
     (await core.reconcileEventProjection("event-1")).status,
     "projected",
   );
-  assert.deepEqual(prepared, [first, second]);
+  assert.deepEqual(prepared, [
+    eventDocumentFixture(first),
+    eventDocumentFixture(second),
+  ]);
   assert.deepEqual(
-    state.writes[0].map((write) => write.profileId),
+    state.writes[0]!.map((write) => write.profileId),
     ["second"],
   );
 });

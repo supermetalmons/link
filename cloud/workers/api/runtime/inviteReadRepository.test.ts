@@ -1,5 +1,8 @@
+import { applyCanonicalTestMigrations } from "./canonicalTestMigrations.ts";
+import { APPLICATION_DATA_SOCKET_PROTOCOL } from "@mons/shared/data-contract";
+import { inviteDocumentFixture } from "../test/inviteDocumentFixture.ts";
 import { env } from "cloudflare:workers";
-import { applyD1Migrations, type D1Migration } from "cloudflare:test";
+import type { D1Migration } from "cloudflare:test";
 import { beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { REACTION_SOCKET_PROTOCOL } from "@mons/shared/reactions";
 import { createInviteReadRepository } from "../src/inviteReadRepository.ts";
@@ -16,7 +19,11 @@ import { socketTestIdentity } from "../test/socketTestSession.ts";
 const testEnv = env as Env & { TEST_D1_MIGRATIONS: D1Migration[] };
 const db = env.PROFILE_GAMES_DB;
 const inviteId = "focused-invite";
-const source = { hostId: "host", guestId: "guest", hostColor: "white" };
+const source = inviteDocumentFixture({
+  hostId: "host",
+  guestId: "guest",
+  hostColor: "white",
+});
 const ctx = { waitUntil() {} };
 
 function observe(
@@ -66,7 +73,7 @@ function observe(
                   return result.map((entry, index) => ({
                     ...entry,
                     results:
-                      rewriteRows?.(executedQueries[index], entry.results) ??
+                      rewriteRows?.(executedQueries[index]!, entry.results) ??
                       entry.results,
                   }));
                 };
@@ -103,12 +110,26 @@ async function pendingTransition() {
   await db.batch([
     db
       .prepare(
-        "INSERT INTO game_session_transitions (transition_id, invite_id, payload_json, status, created_at_ms, updated_at_ms) VALUES ('focused-transition', ?, '{}', 'pending', 1, 1)",
+        "INSERT INTO game_session_transitions_canonical (transition_id, invite_id, payload_json, status, created_at_ms, updated_at_ms) VALUES ('focused-transition', ?, ?, 'pending', 1, 1)",
       )
-      .bind(inviteId),
+      .bind(
+        inviteId,
+        JSON.stringify({
+          version: 3,
+          inviteId,
+          inviteSourceEpoch: 1,
+          inviteMutations: [],
+          transitionId: "focused-transition",
+          operationDigest: "a".repeat(64),
+          resources: [inviteId],
+          mutations: [],
+          creations: [],
+          createdAtMs: 1,
+        }),
+      ),
     db
       .prepare(
-        "INSERT INTO game_session_transition_resources (resource_key, transition_id) VALUES (?, 'focused-transition')",
+        "INSERT INTO game_session_transition_resources_canonical (resource_key, transition_id) VALUES (?, 'focused-transition')",
       )
       .bind(inviteId),
   ]);
@@ -121,12 +142,12 @@ function metadata() {
 }
 
 describe("focused invite read repository", () => {
-  beforeAll(() => applyD1Migrations(db, testEnv.TEST_D1_MIGRATIONS));
+  beforeAll(() => applyCanonicalTestMigrations(db, testEnv.TEST_D1_MIGRATIONS));
   beforeEach(async () => {
     await db.batch([
-      db.prepare("DELETE FROM game_session_transition_resources"),
-      db.prepare("DELETE FROM game_session_transitions"),
-      db.prepare("DELETE FROM invite_sources"),
+      db.prepare("DELETE FROM game_session_transition_resources_canonical"),
+      db.prepare("DELETE FROM game_session_transitions_canonical"),
+      db.prepare("DELETE FROM invite_sources_canonical"),
       db.prepare("DELETE FROM automatch_runtime_control"),
       db.prepare(
         "INSERT INTO automatch_runtime_control (singleton, backend, state, epoch, freeze_generation) VALUES (1, 'd1', 'active', 1, 0)",
@@ -136,7 +157,7 @@ describe("focused invite read repository", () => {
       ),
       db
         .prepare(
-          "INSERT INTO invite_sources (invite_id, source_json, revision, updated_at_ms) VALUES (?, ?, 1, 1)",
+          "INSERT INTO invite_sources_canonical (invite_id, source_json, revision, updated_at_ms) VALUES (?, ?, 1, 1)",
         )
         .bind(inviteId, JSON.stringify(source)),
     ]);
@@ -165,8 +186,8 @@ describe("focused invite read repository", () => {
     expect(narrow.queries).toHaveLength(4);
     for (const [index, table] of [
       "automatch_runtime_control",
-      "game_session_transition_resources",
-      "invite_sources",
+      "game_session_transition_resources_canonical",
+      "invite_sources_canonical",
       "invite_source_control",
     ].entries())
       expect(narrow.queries[index]).toContain(`FROM ${table}`);
@@ -185,7 +206,7 @@ describe("focused invite read repository", () => {
   it("retains pending transitions and checks them before decoding a corrupt source", async () => {
     await pendingTransition();
     await db
-      .prepare("UPDATE invite_sources SET source_json = ?")
+      .prepare("UPDATE invite_sources_canonical SET source_json = ?")
       .bind(JSON.stringify({ ...source, wagers: {} }))
       .run();
     const observed = observe();
@@ -197,10 +218,12 @@ describe("focused invite read repository", () => {
     expect(observed.batches).toEqual([4]);
     expect(
       await db
-        .prepare("SELECT status FROM game_session_transitions")
+        .prepare("SELECT status FROM game_session_transitions_canonical")
         .first<string>("status"),
     ).toBe("pending");
-    await db.prepare("DELETE FROM game_session_transition_resources").run();
+    await db
+      .prepare("DELETE FROM game_session_transition_resources_canonical")
+      .run();
     await expect(
       createInviteReadRepository(restrictedEnv()).readInviteMetadata(inviteId),
     ).rejects.toThrow("invite-source-corrupt");
@@ -222,7 +245,7 @@ describe("focused invite read repository", () => {
       restrictedEnv(observed.database),
     );
     await expect(repository.readInviteMetadata(inviteId)).rejects.toThrow(
-      "automatch-persistence-backend-retired",
+      "automatch-control-unavailable",
     );
     retiredAutomatch = false;
     await expect(repository.readInviteMetadata(inviteId)).rejects.toThrow(
@@ -315,7 +338,7 @@ describe("focused invite read repository", () => {
             matchId: inviteId,
             actorUid: "host",
             emojiId: 1,
-            aura: "",
+            aura: "none" as const,
             revision: 0,
           },
         },
@@ -356,7 +379,7 @@ describe("focused invite read repository", () => {
           headers: {
             Origin: "https://mons.link",
             Upgrade: "websocket",
-            "Sec-WebSocket-Protocol": REACTION_SOCKET_PROTOCOL,
+            "Sec-WebSocket-Protocol": `${REACTION_SOCKET_PROTOCOL}, ${APPLICATION_DATA_SOCKET_PROTOCOL}`,
           },
         },
       ),
@@ -366,7 +389,7 @@ describe("focused invite read repository", () => {
     );
     expect(socket.status).toBe(200);
     expect(upgrades).toHaveLength(1);
-    expect(upgrades[0].headers.get("X-Mons-Reaction-Role")).toBe("spectator");
+    expect(upgrades[0]!.headers.get("X-Mons-Reaction-Role")).toBe("spectator");
     expect(published).toHaveLength(1);
   });
 
@@ -378,14 +401,14 @@ describe("focused invite read repository", () => {
         matchId: inviteId,
         actorUid: "host",
         emojiId: 1,
-        aura: "",
+        aura: "none" as const,
         revision: 0,
       };
       const update = {
         operationId: "00000000-0000-4000-8000-000000000001",
         expectedRevision: 0,
         emojiId: 1,
-        aura: "",
+        aura: "none" as const,
       };
       const response = await handleMatchPresentationRoute(
         new Request(

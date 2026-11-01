@@ -5,6 +5,7 @@ import {
   validateEventCreateSchedule,
 } from "../src/ui/event/eventCreateSchedule.ts";
 
+/** @type {Parameters<typeof validateEventCreateSchedule>[0]} */
 const fields = {
   mode: "minutes",
   startsInMinutes: "5",
@@ -16,23 +17,32 @@ const fields = {
 test("event scheduling retains minute rounding and server-side upper-bound validation", () => {
   for (const input of ["", "0", "-1", "NaN", "Infinity"]) {
     assert.deepEqual(
-      validateEventCreateSchedule({ ...fields, startsInMinutes: input }),
+      validateEventCreateSchedule(
+        { ...fields, startsInMinutes: input },
+        undefined,
+      ),
       { ok: false, error: "Enter at least 1 minute." },
     );
   }
-  for (const [input, expected] of [
+  /** @type {Array<[string, number]>} */
+  const cases = [
     ["1.9", 1],
     [" 15 ", 15],
     ["100000000", 100000000],
-  ]) {
+  ];
+  for (const [input, expected] of cases) {
     assert.deepEqual(
-      validateEventCreateSchedule({ ...fields, startsInMinutes: input }),
+      validateEventCreateSchedule(
+        { ...fields, startsInMinutes: input },
+        undefined,
+      ),
       { ok: true, schedule: expected },
     );
   }
 });
 
 test("datetime validation preserves messages and includes the IANA zone only for local scheduling", () => {
+  /** @type {Parameters<typeof validateEventCreateSchedule>[0]} */
   const datetime = { ...fields, mode: "datetime" };
   assert.deepEqual(
     validateEventCreateSchedule({ ...datetime, scheduledDate: "" }, "UTC"),
@@ -58,7 +68,10 @@ test("datetime validation preserves messages and includes the IANA zone only for
     },
   });
   assert.deepEqual(
-    validateEventCreateSchedule({ ...datetime, scheduledTimezone: "ET" }),
+    validateEventCreateSchedule(
+      { ...datetime, scheduledTimezone: "ET" },
+      undefined,
+    ),
     {
       ok: true,
       schedule: {

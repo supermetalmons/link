@@ -1,4 +1,6 @@
+import { browserServerOrigin } from "./browserViteServer.mjs";
 import assert from "node:assert/strict";
+import { rm } from "node:fs/promises";
 import { createRequire } from "node:module";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -6,8 +8,13 @@ import test from "node:test";
 import { createServer } from "vite";
 
 const require = createRequire(import.meta.url);
+/** @type {typeof import("playwright")} */
 const { chromium } = require(process.env.MONS_PLAYWRIGHT_PATH || "playwright");
 const repository = fileURLToPath(new URL("../", import.meta.url));
+const cacheDir = `node_modules/.vite-wallet-auth-${process.pid}`;
+test.after(() =>
+  rm(path.join(repository, cacheDir), { recursive: true, force: true }),
+);
 const environmentPath = path.join(
   repository,
   "test/fixtures/walletAuthEnvironment.ts",
@@ -37,6 +44,13 @@ const mockedModules = new Set(
   ].map((name) => path.join(repository, "src", name)),
 );
 
+/**
+ * @typedef {"signin" | "settings"} Screen
+ * @typedef {{page: import("playwright").Page, wallet: (method: "eth" | "sol") => import("playwright").Locator, press: (locator: import("playwright").Locator) => Promise<void>}} FixtureContext
+ * @param {Screen} screen
+ * @param {(context: FixtureContext) => Promise<void>} run
+ * @param {{mobile?: boolean, openSignIn?: boolean, query?: Record<string, string>}} [options]
+ */
 async function fixture(
   screen,
   run,
@@ -46,7 +60,7 @@ async function fixture(
     root: repository,
     configFile: false,
     logLevel: "error",
-    cacheDir: `node_modules/.vite-wallet-auth-${process.pid}`,
+    cacheDir,
     optimizeDeps: {
       include: [
         "react",
@@ -54,6 +68,8 @@ async function fixture(
         "react-dom",
         "styled-components",
         "@mons/shared/auth",
+        "@mons/shared/api-errors",
+        "@mons/shared/appearance",
         "@mons/shared/profiles",
       ],
     },
@@ -70,7 +86,7 @@ async function fixture(
         enforce: "pre",
         configureServer(server) {
           server.middlewares.use((request, response, next) => {
-            if (!request.url.startsWith("/__wallet-auth?")) return next();
+            if (!request.url?.startsWith("/__wallet-auth?")) return next();
             response.setHeader("Content-Type", "text/html");
             response.end(
               '<meta name="viewport" content="width=device-width,initial-scale=1"><style>body { margin: 32px; } #root { width: 360px; }</style><div id="root"></div><script type="module" src="/test/fixtures/walletAuthHarness.tsx"></script>',
@@ -88,10 +104,11 @@ async function fixture(
       },
     ],
   });
+  /** @type {import("playwright").Browser | undefined} */
   let browser;
   try {
     await server.listen();
-    const origin = `http://127.0.0.1:${server.httpServer.address().port}`;
+    const origin = browserServerOrigin(server);
     browser = await chromium.launch({
       headless: true,
       ...(process.env.MONS_BROWSER_EXECUTABLE
@@ -109,6 +126,7 @@ async function fixture(
         : route.abort(),
     );
     const page = await context.newPage();
+    /** @type {string[]} */
     const errors = [];
     page.on("pageerror", (error) => {
       errors.push(error.message);
@@ -117,7 +135,7 @@ async function fixture(
     const search = new URLSearchParams({ screen, ...query });
     if (mobile) search.set("mobile", "");
     await page.goto(`${origin}/__wallet-auth?${search}`);
-    await page.waitForFunction(() => window.harness !== undefined);
+    await page.waitForFunction(() => window.walletAuthHarness !== undefined);
     if (screen === "signin" && openSignIn) {
       const signIn = page.getByRole("button", { name: "Sign In", exact: true });
       if (mobile) await signIn.dispatchEvent("touchstart");
@@ -127,7 +145,7 @@ async function fixture(
         .getByRole("button", { name: "+", exact: true })
         .first()
         .waitFor();
-    const wallet = (method) =>
+    const wallet = (/** @type {"eth" | "sol"} */ method) =>
       screen === "signin"
         ? page.getByRole("button", {
             name: method === "eth" ? "Ethereum" : "Solana",
@@ -139,7 +157,9 @@ async function fixture(
             })
             .locator("../..")
             .getByRole("button");
-    const press = async (locator) => {
+    const press = async (
+      /** @type {import("playwright").Locator} */ locator,
+    ) => {
       if (mobile)
         await locator.dispatchEvent(
           screen === "signin" ? "touchstart" : "touchend",
@@ -154,14 +174,16 @@ async function fixture(
   }
 }
 
+/** @param {import("playwright").Page} page @param {"connectCalls" | "verificationCalls" | "xIntentCalls" | "xRedirectCalls"} type @param {number} count */
 async function waitForCalls(page, type, count) {
   await page.waitForFunction(
-    ({ type, count }) => window.harness.environment[type].length === count,
+    ({ type, count }) =>
+      window.walletAuthHarness.environment[type].length === count,
     { type, count },
   );
 }
 
-for (const screen of ["signin", "settings"]) {
+for (const screen of /** @type {const} */ (["signin", "settings"])) {
   test(
     `${screen}: wallet picker cancellation restores availability and duplicate presses do not start another request`,
     { timeout: 30_000 },
@@ -172,7 +194,7 @@ for (const screen of ["signin", "settings"]) {
         await page.getByRole("button", { name: "Cancel", exact: true }).click();
         assert.equal(
           await page.evaluate(
-            () => window.harness.environment.connectCalls.length,
+            () => window.walletAuthHarness.environment.connectCalls.length,
           ),
           0,
         );
@@ -182,19 +204,25 @@ for (const screen of ["signin", "settings"]) {
           .click();
         await waitForCalls(page, "connectCalls", 1);
         await wallet("eth").evaluate((button) => {
+          if (!(button instanceof HTMLElement))
+            throw new Error("expected button");
           button.click();
+          if (!(button instanceof HTMLElement))
+            throw new Error("expected button");
           button.click();
         });
         assert.deepEqual(
           await page.evaluate(() =>
-            window.harness.environment.connectCalls.map(
+            window.walletAuthHarness.environment.connectCalls.map(
               ({ method, wallet }) => ({ method, wallet }),
             ),
           ),
           [{ method: "eth", wallet: "Wallet Two" }],
         );
         assert.equal(
-          await page.evaluate(() => window.harness.environment.providerReads),
+          await page.evaluate(
+            () => window.walletAuthHarness.environment.providerReads,
+          ),
           2,
         );
         assert.equal(await wallet("sol").isDisabled(), screen === "settings");
@@ -202,7 +230,9 @@ for (const screen of ["signin", "settings"]) {
           await press(wallet("sol"));
           await waitForCalls(page, "connectCalls", 2);
         }
-        await page.evaluate(() => window.harness.resolveConnection(0));
+        await page.evaluate(() =>
+          window.walletAuthHarness.resolveConnection(0),
+        );
         await waitForCalls(page, "verificationCalls", 1);
         if (screen === "signin")
           await page
@@ -211,11 +241,16 @@ for (const screen of ["signin", "settings"]) {
         else assert.equal(await wallet("eth").textContent(), "+");
         assert.deepEqual(
           await page.evaluate(
-            () => window.harness.environment.verificationCalls[0].args,
+            () =>
+              window.walletAuthHarness.requireValue(
+                window.walletAuthHarness.environment.verificationCalls[0],
+              ).args,
           ),
           ["signed-message", "signature", "eth-intent"],
         );
-        await page.evaluate(() => window.harness.rejectVerification(0));
+        await page.evaluate(() =>
+          window.walletAuthHarness.rejectVerification(0),
+        );
         await wallet("eth").waitFor();
         if (screen === "settings")
           await page.waitForFunction(() =>
@@ -224,7 +259,9 @@ for (const screen of ["signin", "settings"]) {
               .every((button) => !button.disabled),
           );
         assert.equal(
-          await page.evaluate(() => window.harness.environment.logins.length),
+          await page.evaluate(
+            () => window.walletAuthHarness.environment.logins.length,
+          ),
           0,
         );
       });
@@ -239,32 +276,34 @@ for (const screen of ["signin", "settings"]) {
         await press(wallet("sol"));
         await waitForCalls(page, "connectCalls", 1);
         await page.evaluate(() =>
-          window.harness.rejectConnection(0, "not found"),
+          window.walletAuthHarness.rejectConnection(0, "not found"),
         );
         await page
           .getByRole("button", { name: "Not Found", exact: true })
           .waitFor();
         assert.deepEqual(
           await page.evaluate(() =>
-            [...window.harness.environment.timers.values()].map(
+            [...window.walletAuthHarness.environment.timers.values()].map(
               (timer) => timer.delay,
             ),
           ),
           [screen === "signin" ? 500 : 650],
         );
-        await page.evaluate(() => window.harness.advanceTimers());
+        await page.evaluate(() => window.walletAuthHarness.advanceTimers());
         await wallet("sol").waitFor();
         await press(wallet("sol"));
         await waitForCalls(page, "connectCalls", 2);
         await page.evaluate(() =>
-          window.harness.rejectConnection(1, "not found"),
+          window.walletAuthHarness.rejectConnection(1, "not found"),
         );
         await page
           .getByRole("button", { name: "Not Found", exact: true })
           .waitFor();
-        await page.evaluate(() => window.harness.dispose());
+        await page.evaluate(() => window.walletAuthHarness.dispose());
         assert.equal(
-          await page.evaluate(() => window.harness.environment.timers.size),
+          await page.evaluate(
+            () => window.walletAuthHarness.environment.timers.size,
+          ),
           0,
         );
         assert.equal(await page.locator("#root").textContent(), "");
@@ -281,20 +320,29 @@ for (const screen of ["signin", "settings"]) {
         async ({ page, wallet, press }) => {
           await press(wallet("sol"));
           await waitForCalls(page, "connectCalls", 1);
-          await page.evaluate(() => window.harness.resolveConnection(0));
+          await page.evaluate(() =>
+            window.walletAuthHarness.resolveConnection(0),
+          );
           await waitForCalls(page, "verificationCalls", 1);
           assert.deepEqual(
             await page.evaluate(
-              () => window.harness.environment.verificationCalls[0].args,
+              () =>
+                window.walletAuthHarness.requireValue(
+                  window.walletAuthHarness.environment.verificationCalls[0],
+                ).args,
             ),
             ["public-key", "signature", "sol-intent"],
           );
-          await page.evaluate(() => window.harness.resolveVerification(0));
+          await page.evaluate(() =>
+            window.walletAuthHarness.resolveVerification(0),
+          );
           await page.waitForFunction(
-            () => window.harness.environment.logins.length === 1,
+            () => window.walletAuthHarness.environment.logins.length === 1,
           );
           assert.deepEqual(
-            await page.evaluate(() => window.harness.environment.authStatuses),
+            await page.evaluate(
+              () => window.walletAuthHarness.environment.authStatuses,
+            ),
             ["authenticated"],
           );
           if (screen === "signin")
@@ -321,22 +369,28 @@ for (const screen of ["signin", "settings"]) {
       await fixture(screen, async ({ page, wallet, press }) => {
         await press(wallet("sol"));
         await waitForCalls(page, "connectCalls", 1);
-        await page.evaluate(() => window.harness.resolveConnection(0));
+        await page.evaluate(() =>
+          window.walletAuthHarness.resolveConnection(0),
+        );
         await waitForCalls(page, "verificationCalls", 1);
         const reads = await page.evaluate(
-          () => window.harness.environment.linkedReads,
+          () => window.walletAuthHarness.environment.linkedReads,
         );
         await page.evaluate(async () => {
-          window.harness.dispose();
-          window.harness.resolveVerification(0);
+          window.walletAuthHarness.dispose();
+          window.walletAuthHarness.resolveVerification(0);
           await new Promise((resolve) => requestAnimationFrame(resolve));
         });
         assert.equal(
-          await page.evaluate(() => window.harness.environment.logins.length),
+          await page.evaluate(
+            () => window.walletAuthHarness.environment.logins.length,
+          ),
           screen === "signin" ? 1 : 0,
         );
         assert.equal(
-          await page.evaluate(() => window.harness.environment.linkedReads),
+          await page.evaluate(
+            () => window.walletAuthHarness.environment.linkedReads,
+          ),
           reads,
         );
         assert.equal(await page.locator("#root").textContent(), "");
@@ -352,7 +406,11 @@ test(
     await fixture("signin", async ({ page }) => {
       const xButton = page.getByRole("button", { name: "X", exact: true });
       await xButton.evaluate((button) => {
+        if (!(button instanceof HTMLElement))
+          throw new Error("expected button");
         button.click();
+        if (!(button instanceof HTMLElement))
+          throw new Error("expected button");
         button.click();
       });
       await waitForCalls(page, "xIntentCalls", 1);
@@ -361,7 +419,7 @@ test(
         true,
       );
       await page.evaluate(() =>
-        window.harness.rejectXIntent(0, "auth-cooldown", {
+        window.walletAuthHarness.rejectXIntent(0, "auth-cooldown", {
           reason: "method-reuse-cooldown",
           method: "x",
         }),
@@ -373,23 +431,27 @@ test(
         .waitFor();
       await xButton.click();
       await waitForCalls(page, "xIntentCalls", 2);
-      await page.evaluate(() => window.harness.resolveXIntent(1));
+      await page.evaluate(() => window.walletAuthHarness.resolveXIntent(1));
       await waitForCalls(page, "xRedirectCalls", 1);
       assert.deepEqual(
         await page.evaluate(() => {
           const { intentId, consentSource } =
-            window.harness.environment.xRedirectCalls[0];
+            window.walletAuthHarness.requireValue(
+              window.walletAuthHarness.environment.xRedirectCalls[0],
+            );
           return { intentId, consentSource };
         }),
         { intentId: "x-intent-1", consentSource: "signin" },
       );
       await page.evaluate(() =>
-        window.harness.rejectXRedirect(0, "x-oauth-access_denied"),
+        window.walletAuthHarness.rejectXRedirect(0, "x-oauth-access_denied"),
       );
       await page.getByText("X sign in was canceled.").waitFor();
       assert.equal(await xButton.isDisabled(), false);
       assert.equal(
-        await page.evaluate(() => window.harness.environment.timers.size),
+        await page.evaluate(
+          () => window.walletAuthHarness.environment.timers.size,
+        ),
         0,
       );
     });
@@ -403,28 +465,30 @@ test(
     await fixture("signin", async ({ page }) => {
       await page.getByRole("button", { name: "X", exact: true }).click();
       await waitForCalls(page, "xIntentCalls", 1);
-      await page.evaluate(() => window.harness.resolveXIntent(0));
+      await page.evaluate(() => window.walletAuthHarness.resolveXIntent(0));
       await waitForCalls(page, "xRedirectCalls", 1);
       await page.evaluate(() =>
-        window.harness.rejectXRedirect(0, "x-redirect-started"),
+        window.walletAuthHarness.rejectXRedirect(0, "x-redirect-started"),
       );
       await page.waitForFunction(() =>
-        [...window.harness.environment.timers.values()].some(
+        [...window.walletAuthHarness.environment.timers.values()].some(
           (timer) => timer.delay === 1500,
         ),
       );
       await page.evaluate(() => {
-        window.harness.setVisibilityState("hidden");
-        window.harness.advanceTimers(1500);
+        window.walletAuthHarness.setVisibilityState("hidden");
+        window.walletAuthHarness.advanceTimers(1500);
       });
       assert.equal(
         await page.getByRole("button", { name: "Connecting..." }).isDisabled(),
         true,
       );
-      await page.evaluate(() => window.harness.setVisibilityState("visible"));
+      await page.evaluate(() =>
+        window.walletAuthHarness.setVisibilityState("visible"),
+      );
       await page.getByRole("button", { name: "X", exact: true }).waitFor();
       await page.evaluate(() =>
-        window.harness.setPendingXRedirectResult({
+        window.walletAuthHarness.setPendingXRedirectResult({
           flowId: "pending-flow",
           status: "ready",
           errorCode: "",
@@ -432,19 +496,21 @@ test(
         }),
       );
       await page.getByRole("button", { name: "Verifying..." }).waitFor();
-      await page.evaluate(() => window.harness.dispose());
+      await page.evaluate(() => window.walletAuthHarness.dispose());
       assert.deepEqual(
         await page.evaluate(() => ({
-          timers: window.harness.environment.timers.size,
-          pendingListeners: window.harness.environment.xPendingListeners.size,
-          feedbackListeners: window.harness.environment.xFeedbackListeners.size,
+          timers: window.walletAuthHarness.environment.timers.size,
+          pendingListeners:
+            window.walletAuthHarness.environment.xPendingListeners.size,
+          feedbackListeners:
+            window.walletAuthHarness.environment.xFeedbackListeners.size,
         })),
         { timers: 0, pendingListeners: 0, feedbackListeners: 0 },
       );
       await page.evaluate(() => {
-        window.harness.setVisibilityState("hidden");
-        window.harness.setVisibilityState("visible");
-        window.harness.publishXAuthUiFeedback({
+        window.walletAuthHarness.setVisibilityState("hidden");
+        window.walletAuthHarness.setVisibilityState("visible");
+        window.walletAuthHarness.publishXAuthUiFeedback({
           target: "signin",
           kind: "error",
           message: "Late callback",
@@ -470,7 +536,9 @@ test(
           await page.getByRole("button", { name: "X", exact: true }).count(),
           0,
         );
-        await page.evaluate(() => window.harness.advanceTimers(20_000));
+        await page.evaluate(() =>
+          window.walletAuthHarness.advanceTimers(20_000),
+        );
         await page.getByRole("button", { name: "Try Again" }).click();
         await page
           .getByText("X sign in took too long. Please try again.")
@@ -478,11 +546,15 @@ test(
         await page.getByRole("button", { name: "X", exact: true }).click();
         await waitForCalls(page, "xIntentCalls", 1);
         assert.equal(
-          await page.evaluate(() => window.harness.environment.xClearedResults),
+          await page.evaluate(
+            () => window.walletAuthHarness.environment.xClearedResults,
+          ),
           1,
         );
         assert.equal(
-          await page.evaluate(() => window.harness.environment.xPending),
+          await page.evaluate(
+            () => window.walletAuthHarness.environment.xPending,
+          ),
           null,
         );
       },
@@ -499,7 +571,7 @@ test(
       "signin",
       async ({ page }) => {
         await page.evaluate(() =>
-          window.harness.publishXAuthUiFeedback({
+          window.walletAuthHarness.publishXAuthUiFeedback({
             target: "signin",
             kind: "error",
             message: "Inline callback error",
@@ -511,8 +583,8 @@ test(
           0,
         );
         await page.evaluate(() => {
-          window.harness.setEventModalState(true);
-          window.harness.publishXAuthUiFeedback({
+          window.walletAuthHarness.setEventModalState(true);
+          window.walletAuthHarness.publishXAuthUiFeedback({
             target: "signin",
             kind: "error",
             message: "Event callback error",
@@ -520,13 +592,15 @@ test(
         });
         const eventDialog = page.getByRole("dialog", { name: "Sign In" });
         await eventDialog.getByText("Event callback error").waitFor();
-        await page.evaluate(() => window.harness.setEventModalState(false));
+        await page.evaluate(() =>
+          window.walletAuthHarness.setEventModalState(false),
+        );
         await eventDialog.waitFor({ state: "detached" });
         await page
           .getByRole("button", { name: "Sign In", exact: true })
           .waitFor();
         await page.evaluate(() =>
-          window.harness.publishXAuthUiFeedback({
+          window.walletAuthHarness.publishXAuthUiFeedback({
             target: "signin",
             kind: "error",
             message: "Current inline error",
@@ -536,7 +610,7 @@ test(
         assert.equal(await eventDialog.count(), 0);
         assert.equal(
           await page.evaluate(
-            () => window.harness.environment.xFeedbackDeliveries,
+            () => window.walletAuthHarness.environment.xFeedbackDeliveries,
           ),
           3,
         );
@@ -546,7 +620,7 @@ test(
   },
 );
 
-for (const kind of ["success", "error"]) {
+for (const kind of /** @type {const} */ (["success", "error"])) {
   test(
     `X settings return ${kind} reopens Settings and preserves callback feedback`,
     { timeout: 30_000 },
@@ -556,20 +630,20 @@ for (const kind of ["success", "error"]) {
         async ({ page }) => {
           await page.evaluate((kind) => {
             if (kind === "success") {
-              window.harness.environment.linkedMethods.x = true;
-              window.harness.setPendingXRedirectResult(null);
-              window.harness.publishXAuthUiFeedback({
+              window.walletAuthHarness.environment.linkedMethods.x = true;
+              window.walletAuthHarness.setPendingXRedirectResult(null);
+              window.walletAuthHarness.publishXAuthUiFeedback({
                 target: "settings",
                 kind,
                 message: "X linked",
               });
             } else {
-              window.harness.publishXAuthUiFeedback({
+              window.walletAuthHarness.publishXAuthUiFeedback({
                 target: "settings",
                 kind,
                 message: "Settings callback error",
               });
-              window.harness.setPendingXRedirectResult(null);
+              window.walletAuthHarness.setPendingXRedirectResult(null);
             }
           }, kind);
           const settings = page.getByRole("dialog", { name: "Settings" });
@@ -584,8 +658,10 @@ for (const kind of ["success", "error"]) {
           }
           assert.deepEqual(
             await page.evaluate(() => ({
-              subscribers: window.harness.environment.xFeedbackListeners.size,
-              deliveries: window.harness.environment.xFeedbackDeliveries,
+              subscribers:
+                window.walletAuthHarness.environment.xFeedbackListeners.size,
+              deliveries:
+                window.walletAuthHarness.environment.xFeedbackDeliveries,
             })),
             { subscribers: 1, deliveries: 1 },
           );
@@ -611,13 +687,14 @@ test(
         await settings.getByText("Persisted callback error").waitFor();
         assert.deepEqual(
           await page.evaluate(() => ({
-            consumed: window.harness.environment.xFeedbackConsumed,
-            subscribers: window.harness.environment.xFeedbackListeners.size,
+            consumed: window.walletAuthHarness.environment.xFeedbackConsumed,
+            subscribers:
+              window.walletAuthHarness.environment.xFeedbackListeners.size,
           })),
           { consumed: 1, subscribers: 1 },
         );
         await page.evaluate(() =>
-          window.harness.publishXAuthUiFeedback({
+          window.walletAuthHarness.publishXAuthUiFeedback({
             target: "settings",
             kind: "error",
             message: "Updated callback error",
@@ -630,14 +707,14 @@ test(
         );
         assert.equal(
           await page.evaluate(
-            () => window.harness.environment.xFeedbackDeliveries,
+            () => window.walletAuthHarness.environment.xFeedbackDeliveries,
           ),
           1,
         );
-        await page.evaluate(() => window.harness.dispose());
+        await page.evaluate(() => window.walletAuthHarness.dispose());
         assert.equal(
           await page.evaluate(
-            () => window.harness.environment.xFeedbackListeners.size,
+            () => window.walletAuthHarness.environment.xFeedbackListeners.size,
           ),
           0,
         );
@@ -672,7 +749,7 @@ for (const eventOpen of [false, true]) {
           );
           assert.equal(
             await page.evaluate(
-              () => window.harness.environment.xFeedbackConsumed,
+              () => window.walletAuthHarness.environment.xFeedbackConsumed,
             ),
             1,
           );
@@ -700,32 +777,37 @@ test(
         .locator("../..")
         .getByRole("button");
       const reads = await page.evaluate(
-        () => window.harness.environment.linkedReads,
+        () => window.walletAuthHarness.environment.linkedReads,
       );
       await xButton.click();
       await waitForCalls(page, "xIntentCalls", 1);
       assert.equal(await wallet("eth").isDisabled(), true);
       await page.evaluate(() =>
-        window.harness.rejectXIntent(0, "x-auth-disabled"),
+        window.walletAuthHarness.rejectXIntent(0, "x-auth-disabled"),
       );
       await page.getByText("Linking X is temporarily unavailable.").waitFor();
       assert.equal(await wallet("eth").isDisabled(), false);
       assert.equal(
-        await page.evaluate(() => window.harness.environment.linkedReads),
+        await page.evaluate(
+          () => window.walletAuthHarness.environment.linkedReads,
+        ),
         reads + 1,
       );
       await xButton.click();
       await waitForCalls(page, "xIntentCalls", 2);
-      await page.evaluate(() => window.harness.resolveXIntent(1));
+      await page.evaluate(() => window.walletAuthHarness.resolveXIntent(1));
       await waitForCalls(page, "xRedirectCalls", 1);
       assert.equal(
         await page.evaluate(
-          () => window.harness.environment.xRedirectCalls[0].consentSource,
+          () =>
+            window.walletAuthHarness.requireValue(
+              window.walletAuthHarness.environment.xRedirectCalls[0],
+            ).consentSource,
         ),
         "settings",
       );
       await page.evaluate(() =>
-        window.harness.rejectXRedirect(0, "x-redirect-started"),
+        window.walletAuthHarness.rejectXRedirect(0, "x-redirect-started"),
       );
       await page.waitForFunction(() =>
         [...document.querySelectorAll("button")]
@@ -733,12 +815,14 @@ test(
           .every((button) => !button.disabled),
       );
       assert.equal(
-        await page.evaluate(() => window.harness.environment.linkedReads),
+        await page.evaluate(
+          () => window.walletAuthHarness.environment.linkedReads,
+        ),
         reads + 1,
       );
       assert.equal(
         await page.evaluate(
-          () => window.harness.environment.xFeedbackListeners.size,
+          () => window.walletAuthHarness.environment.xFeedbackListeners.size,
         ),
         0,
       );
@@ -757,7 +841,7 @@ for (const target of ["settings", "signin"]) {
           await page.getByText("Restored callback error").waitFor();
           assert.ok(
             await page.evaluate(
-              () => window.harness.environment.hiddenCards > 0,
+              () => window.walletAuthHarness.environment.hiddenCards > 0,
             ),
           );
           if (target === "settings") {
@@ -769,13 +853,14 @@ for (const target of ["settings", "signin"]) {
           }
           assert.equal(
             await page.evaluate(
-              () => window.harness.environment.xFeedbackConsumed,
+              () => window.walletAuthHarness.environment.xFeedbackConsumed,
             ),
             1,
           );
           assert.equal(
             await page.evaluate(
-              () => window.harness.environment.xFeedbackListeners.size,
+              () =>
+                window.walletAuthHarness.environment.xFeedbackListeners.size,
             ),
             1,
           );

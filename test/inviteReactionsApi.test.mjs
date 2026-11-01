@@ -1,8 +1,10 @@
+import { required } from "./fixtures/canonicalData.mjs";
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
   createInviteReactionSocketProtocols,
   getInviteReactionSocketUrl,
+  InviteReactionApiError,
   REACTION_SEND_TIMEOUT_MS,
   sendInviteReactionViaApi,
 } from "../src/services/inviteReactionsApi.ts";
@@ -15,11 +17,19 @@ const reaction = (overrides = {}) => ({
   variation: 1,
   ...overrides,
 });
+/**
+ * @param {unknown} [value]
+ * @param {number} [status]
+ */
 const response = (value = { ok: true }, status = 200) =>
   new Response(JSON.stringify(value), { status });
+/**
+ * @template [T=void]
+ * @returns {Pick<PromiseWithResolvers<T>, "promise" | "resolve">}
+ */
 const deferred = () => {
-  let resolve;
-  const promise = new Promise((done) => (resolve = done));
+  /** @type {PromiseWithResolvers<T>} */
+  const { promise, resolve } = Promise.withResolvers();
   return { promise, resolve };
 };
 const flush = () => new Promise((resolve) => setImmediate(resolve));
@@ -31,7 +41,7 @@ test.afterEach(() => {
 test("formats participant authentication as WebSocket subprotocols and rejects unsafe tokens without exposing them", () => {
   assert.deepEqual(
     createInviteReactionSocketProtocols("header.payload.signature"),
-    ["mons-reactions-v2", "bearer.header.payload.signature"],
+    ["mons-reactions-v2", "bearer.header.payload.signature", "mons-data-v1"],
   );
   for (const token of [
     "",
@@ -45,8 +55,10 @@ test("formats participant authentication as WebSocket subprotocols and rejects u
     null,
   ]) {
     assert.throws(
-      () => createInviteReactionSocketProtocols(token),
+      () =>
+        Reflect.apply(createInviteReactionSocketProtocols, undefined, [token]),
       (error) => {
+        assert.ok(error instanceof InviteReactionApiError);
         assert.equal(error.code, "invalid-reaction-socket-token");
         assert.equal(error.message, "invalid-reaction-socket-token");
         return true;
@@ -56,6 +68,9 @@ test("formats participant authentication as WebSocket subprotocols and rejects u
 });
 
 test("sends voice and sticker payloads using authenticated HTTP independent of a socket", async () => {
+  /**
+   * @type {{ url: RequestInfo | URL; options: RequestInit | undefined; }[]}
+   */
   const calls = [];
   globalThis.fetch = async (url, options) => {
     calls.push({ url, options });
@@ -71,13 +86,27 @@ test("sends voice and sticker payloads using authenticated HTTP independent of a
       { ok: true },
     );
     const call = calls.at(-1);
-    assert.equal(call.url, "https://api.mons.link/invites/invite/reactions");
-    assert.equal(call.options.method, "POST");
-    assert.equal(call.options.headers.Authorization, "Bearer token");
-    assert.equal(call.options.cache, "no-store");
-    assert.deepEqual(JSON.parse(call.options.body), value);
     assert.equal(
-      Object.hasOwn(JSON.parse(call.options.body), "actorUid"),
+      required(call).url,
+      "https://api.mons.link/invites/invite/reactions",
+    );
+    assert.equal(required(required(call).options).method, "POST");
+    assert.equal(
+      new Headers(required(required(call).options).headers).get(
+        "Authorization",
+      ),
+      "Bearer token",
+    );
+    assert.equal(required(required(call).options).cache, "no-store");
+    assert.deepEqual(
+      parseRequestJson(required(required(call).options).body),
+      value,
+    );
+    assert.equal(
+      Object.hasOwn(
+        parseRequestJson(required(required(call).options).body),
+        "actorUid",
+      ),
       false,
     );
   }
@@ -88,13 +117,15 @@ test("sends voice and sticker payloads using authenticated HTTP independent of a
 });
 
 test("refreshes auth exactly once after a 401 and reuses the same reaction UUID", async () => {
+  /** @type {boolean[]} */
   const refreshes = [];
+  /** @type {Array<BodyInit | null | undefined>} */
   const bodies = [];
   globalThis.fetch = async (_url, options) => {
-    bodies.push(options.body);
+    bodies.push(required(options).body);
     return bodies.length === 1 ? response({}, 401) : response();
   };
-  const tokenProvider = async (refresh) => {
+  const tokenProvider = async (/** @type {boolean} */ refresh) => {
     refreshes.push(refresh);
     return refresh ? "fresh" : "old";
   };
@@ -149,6 +180,7 @@ test("rejects invalid payloads and foreign matches before obtaining a token", as
 });
 
 test("aborts while waiting for a token and never sends after that token resolves", async () => {
+  /** @type {Pick<PromiseWithResolvers<string>, "promise" | "resolve">} */
   const token = deferred();
   const controller = new AbortController();
   let fetches = 0;
@@ -176,6 +208,7 @@ test("aborts while waiting for a token and never sends after that token resolves
 });
 
 test("rejects auth-user replacement during token acquisition", async () => {
+  /** @type {Pick<PromiseWithResolvers<string>, "promise" | "resolve">} */
   const token = deferred();
   let current = true;
   let fetches = 0;
@@ -197,7 +230,10 @@ test("rejects auth-user replacement during token acquisition", async () => {
 
 test("one five-second deadline covers token lookup and the refresh attempt", async (t) => {
   t.mock.timers.enable({ apis: ["setTimeout"] });
+  /** @type {Pick<PromiseWithResolvers<string>, "promise" | "resolve">} */
   const token = deferred();
+  /** @type {Array<boolean>} */
+  /** @type {boolean[]} */
   const refreshes = [];
   globalThis.fetch = async () => response({}, 401);
   const pending = sendInviteReactionViaApi("invite", reaction(), (refresh) => {
@@ -216,6 +252,7 @@ test("one five-second deadline covers token lookup and the refresh attempt", asy
 test("does not send after the deadline when the timeout callback is delayed", async (t) => {
   let now = Date.now();
   t.mock.method(Date, "now", () => now);
+  /** @type {Pick<PromiseWithResolvers<string>, "promise" | "resolve">} */
   const token = deferred();
   let fetches = 0;
   globalThis.fetch = async () => {
@@ -235,6 +272,7 @@ test("does not send after the deadline when the timeout callback is delayed", as
 });
 
 test("cancels a response that arrives after the auth user changes", async () => {
+  /** @type {Pick<PromiseWithResolvers<Response>, "promise" | "resolve">} */
   const request = deferred();
   let current = true;
   let canceled = false;
@@ -262,9 +300,10 @@ test("cancels a response that arrives after the auth user changes", async () => 
 
 test("context teardown cancels an active HTTP send", async () => {
   const controller = new AbortController();
+  /** @type {AbortSignal | null | undefined} */
   let requestSignal;
   globalThis.fetch = async (_url, options) => {
-    requestSignal = options.signal;
+    requestSignal = required(options).signal;
     return new Promise(() => {});
   };
   const pending = sendInviteReactionViaApi(
@@ -276,7 +315,7 @@ test("context teardown cancels an active HTTP send", async () => {
   await flush();
   controller.abort();
   await assert.rejects(pending, { code: "aborted" });
-  assert.equal(requestSignal.aborted, true);
+  assert.equal(required(requestSignal).aborted, true);
 });
 
 test("bounds streamed responses and rejects malformed successful responses", async () => {
@@ -305,3 +344,14 @@ test("bounds streamed responses and rejects malformed successful responses", asy
   }
   assert.equal(canceled, true);
 });
+
+/** @param {unknown} body @returns {Record<string, unknown>} */
+function parseRequestJson(body) {
+  assert.ok(typeof body === "string");
+  /** @type {unknown} */
+  const value = JSON.parse(body);
+  assert.ok(
+    value !== null && typeof value === "object" && !Array.isArray(value),
+  );
+  return Object.fromEntries(Object.entries(value));
+}

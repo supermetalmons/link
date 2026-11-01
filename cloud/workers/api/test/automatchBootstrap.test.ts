@@ -1,3 +1,4 @@
+import { publicMatchFixture } from "./matchRecordFixture.ts";
 import { retainedInviteSourceFixture } from "./inviteDocumentFixture.ts";
 import type { ReadGameBootstrapResponse } from "@mons/shared/game-bootstrap";
 import {
@@ -25,17 +26,17 @@ const response: Extract<StartAutomatchResponse, { mode: "matched" }> = {
 };
 
 function bootstrap(revision = 1): ReadGameBootstrapResponse {
-  const match = {
+  const match = publicMatchFixture({
     version: 2,
     color: "white" as const,
     emojiId: 1,
-    aura: "",
+    aura: "none" as const,
     gameVariant: "Classic",
     fen: "initial",
     status: "",
     flatMovesString: "",
     timer: "",
-  };
+  });
   return {
     ok: true,
     schemaVersion: 1,
@@ -45,8 +46,8 @@ function bootstrap(revision = 1): ReadGameBootstrapResponse {
       hostId: identity.uid,
       guestId: "g".repeat(28),
       hostColor: "white",
-      hostRematches: "",
-      guestRematches: "",
+      hostRematches: { state: "open", indices: [] },
+      guestRematches: { state: "open", indices: [] },
       automatchStateHint: "matched",
       eventId: null,
       eventOwned: false,
@@ -77,7 +78,7 @@ function context(
   return {
     request: new Request(
       `https://api.mons.link/automatch/start?operationId=${operationId}${query}`,
-      { signal },
+      signal === undefined ? {} : { signal },
     ),
     identity,
     repository,
@@ -115,10 +116,15 @@ test("only a matched opted-in response triggers enrichment", async () => {
 
 test("enrichment reuses the authorized bootstrap reader without changing stored response", async () => {
   const result = bootstrap();
-  const source = {
-    ...result.metadata,
+  const source = retainedInviteSourceFixture({
+    hostId: result.metadata.hostId,
+    guestId: result.metadata.guestId,
+    hostColor: result.metadata.hostColor,
+    hostRematches: result.metadata.hostRematches,
+    guestRematches: result.metadata.guestRematches,
+    automatchStateHint: "matched",
     automatchOperationIds: { [identity.uid]: operationId },
-  };
+  });
   const metadata = normalizeInviteMetadata(inviteId, source);
   assert.equal(metadata.status, "ok");
   if (metadata.status !== "ok") throw new Error("invalid-fixture");

@@ -189,7 +189,7 @@ export class FrozenMaterialsPoller {
               this.consecutiveFailures - 1,
               FROZEN_MATERIALS_BACKOFF_MS.length - 1,
             )
-          ];
+          ]!;
         this.dependencies.onError(
           error,
           this.lastConfirmed,

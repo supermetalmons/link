@@ -15,6 +15,8 @@ const {
   renderMatchedAutomatchTelegramText,
 } = require("../runtime/telegram/projectionCore");
 
+const { invite } = require("./fixtures/canonicalProfileGames");
+
 const inviteId = "auto_example";
 const waitingText =
   '<tg-emoji emoji-id="1">&#11088;</tg-emoji> Alice (1512) is looking for a match https://mons.link <tg-emoji emoji-id="5355002036817525409">&#11088;</tg-emoji>';
@@ -23,7 +25,13 @@ const matchedText =
 const canceledText =
   '<i><tg-emoji emoji-id="1">&#11088;</tg-emoji> Alice (1512) canceled an automatch</i>';
 
+/**
+ * @typedef {import("../runtime/automatchRecords").AutomatchTelegramSourceRecord} Source
+ * @typedef {Partial<Omit<Source, "results">> & {results?: Record<string, {text: string, completedAtMs?: number}>}} SourcePatch
+ */
+/** @param {SourcePatch} [overrides] @returns {Source} */
 const makeSource = (overrides = {}) => ({
+  schemaVersion: 1,
   version: TELEGRAM_AUTOMATCH_VERSION,
   lifecycle: "matched",
   waitingText,
@@ -32,11 +40,19 @@ const makeSource = (overrides = {}) => ({
   waitingInstanceKey: `waiting:${inviteId}`,
   matchedInstanceKey: `matched:${inviteId}`,
   generation: 2,
+  createdAtMs: 1,
+  updatedAtMs: 1,
   ...overrides,
+  results: Object.fromEntries(
+    Object.entries(overrides.results ?? {}).map(([key, value]) => [
+      key,
+      { completedAtMs: 1, ...value },
+    ]),
+  ),
 });
 
 test("pending source stores exact waiting and canceled messages", () => {
-  const timestamp = { ".sv": "timestamp" };
+  const timestamp = /** @type {const} */ ({ kind: "timestamp" });
   assert.deepEqual(
     buildPendingAutomatchTelegramSource({
       inviteId,
@@ -45,8 +61,12 @@ test("pending source stores exact waiting and canceled messages", () => {
       timestamp,
     }),
     {
+      schemaVersion: 1,
       version: 2,
       generation: 1,
+      matchedText: null,
+      matchedInstanceKey: null,
+      results: {},
       lifecycle: "pending",
       waitingText,
       canceledText,
@@ -59,7 +79,7 @@ test("pending source stores exact waiting and canceled messages", () => {
 
 test("matched and canceled lifecycle builders only update source state", () => {
   const timestamp = 123;
-  const generation = { ".sv": { increment: 1 } };
+  const generation = /** @type {const} */ ({ kind: "increment", delta: 1 });
   assert.deepEqual(
     buildMatchedAutomatchTelegramChanges({
       inviteId,
@@ -104,26 +124,32 @@ test("matched and canceled lifecycle builders only update source state", () => {
 
 test("guest presence always resolves the lifecycle to matched", () => {
   assert.equal(
-    resolveAutomatchTelegramLifecycle(makeSource({ lifecycle: "canceled" }), {
-      guestId: "guest",
-    }),
+    resolveAutomatchTelegramLifecycle(
+      makeSource({ lifecycle: "canceled" }),
+      invite({ guestId: "guest" }),
+    ),
     "matched",
   );
   assert.equal(
-    resolveAutomatchTelegramLifecycle(makeSource({ lifecycle: "canceled" }), {
-      guestId: null,
-    }),
+    resolveAutomatchTelegramLifecycle(
+      makeSource({ lifecycle: "canceled" }),
+      invite({ guestId: null }),
+    ),
     "canceled",
   );
   assert.equal(
-    resolveAutomatchTelegramLifecycle({ version: 1, lifecycle: "pending" }, {}),
+    Reflect.apply(resolveAutomatchTelegramLifecycle, undefined, [
+      { version: 1, lifecycle: "pending" },
+      {},
+    ]),
     null,
   );
   const projection = buildAutomatchTelegramProjection({
     inviteId,
     source: makeSource({ lifecycle: "canceled" }),
-    inviteData: { guestId: "guest" },
+    inviteData: invite({ guestId: "guest" }),
   });
+  assert.ok(projection);
   assert.equal(projection.operation, "send");
   assert.equal(projection.instanceKey, `matched:${inviteId}`);
   assert.equal(projection.text, matchedText);
@@ -168,8 +194,9 @@ test("pending projection builds the existing HTML message as a send", () => {
   const projection = buildAutomatchTelegramProjection({
     inviteId,
     source: makeSource({ lifecycle: "pending" }),
-    inviteData: { guestId: null },
+    inviteData: invite({ guestId: null }),
   });
+  assert.ok(projection);
   assert.deepEqual(
     {
       ...projection,
@@ -199,8 +226,9 @@ test("matched results edit the fresh matched instance and send if missing", () =
         [inviteId]: { text: "Alice 1523↑ Bob 1476↓ (7 - 3)" },
       },
     }),
-    inviteData: { guestId: "guest" },
+    inviteData: invite({ guestId: "guest" }),
   });
+  assert.ok(projection);
   assert.equal(projection.operation, "edit");
   assert.equal(projection.instanceKey, `matched:${inviteId}`);
   assert.equal(projection.ifMissing, "send");
@@ -214,8 +242,9 @@ test("cancellation edits only the waiting instance and skips if missing", () => 
   const projection = buildAutomatchTelegramProjection({
     inviteId,
     source: makeSource({ lifecycle: "canceled" }),
-    inviteData: { guestId: null },
+    inviteData: invite({ guestId: null }),
   });
+  assert.ok(projection);
   assert.equal(projection.operation, "edit");
   assert.equal(projection.instanceKey, `waiting:${inviteId}`);
   assert.equal(projection.text, canceledText);
@@ -224,11 +253,13 @@ test("cancellation edits only the waiting instance and skips if missing", () => 
 
 test("v1 sources are never projected", () => {
   assert.equal(
-    buildAutomatchTelegramProjection({
-      inviteId,
-      source: { ...makeSource(), version: 1 },
-      inviteData: { guestId: "guest" },
-    }),
+    Reflect.apply(buildAutomatchTelegramProjection, undefined, [
+      {
+        inviteId,
+        source: { ...makeSource(), version: 1 },
+        inviteData: invite({ guestId: "guest" }),
+      },
+    ]),
     null,
   );
 });
@@ -237,9 +268,10 @@ test("stale pending projection cannot replace a matched applied instance", () =>
   const pendingProjection = buildAutomatchTelegramProjection({
     inviteId,
     source: makeSource({ lifecycle: "pending", generation: 99 }),
-    inviteData: { guestId: null },
+    inviteData: invite({ guestId: null }),
   });
-  const decision = evaluateAutomatchProjectionUpdate(
+  assert.ok(pendingProjection);
+  const decision = Reflect.apply(evaluateAutomatchProjectionUpdate, undefined, [
     {
       applied: {
         messageId: 42,
@@ -248,7 +280,7 @@ test("stale pending projection cannot replace a matched applied instance", () =>
       delivery: { status: "delivered" },
     },
     pendingProjection,
-  );
+  ]);
 
   assert.deepEqual(decision, {
     allowed: false,
@@ -260,8 +292,9 @@ test("projection guards retain matched lifecycle and source generation", () => {
   const matchedProjection = buildAutomatchTelegramProjection({
     inviteId,
     source: makeSource({ generation: 2 }),
-    inviteData: { guestId: "guest" },
+    inviteData: invite({ guestId: "guest" }),
   });
+  assert.ok(matchedProjection);
   const guard = buildAutomatchProjectionGuard(matchedProjection);
 
   assert.equal(guard.lifecycle, "matched");
@@ -273,19 +306,21 @@ test("stale cancellation cannot replace matched desired state", () => {
   const matchedProjection = buildAutomatchTelegramProjection({
     inviteId,
     source: makeSource({ generation: 5 }),
-    inviteData: { guestId: "guest" },
+    inviteData: invite({ guestId: "guest" }),
   });
+  assert.ok(matchedProjection);
   const canceledProjection = buildAutomatchTelegramProjection({
     inviteId,
     source: makeSource({ lifecycle: "canceled", generation: 6 }),
-    inviteData: { guestId: null },
+    inviteData: invite({ guestId: null }),
   });
-  const decision = evaluateAutomatchProjectionUpdate(
+  assert.ok(canceledProjection);
+  const decision = Reflect.apply(evaluateAutomatchProjectionUpdate, undefined, [
     {
       automatchProjection: buildAutomatchProjectionGuard(matchedProjection),
     },
     canceledProjection,
-  );
+  ]);
 
   assert.deepEqual(decision, {
     allowed: false,
@@ -297,9 +332,10 @@ test("pending projection cannot replace canceled desired state", () => {
   const pendingProjection = buildAutomatchTelegramProjection({
     inviteId,
     source: makeSource({ lifecycle: "pending", generation: 3 }),
-    inviteData: { guestId: null },
+    inviteData: invite({ guestId: null }),
   });
-  const decision = evaluateAutomatchProjectionUpdate(
+  assert.ok(pendingProjection);
+  const decision = Reflect.apply(evaluateAutomatchProjectionUpdate, undefined, [
     {
       desired: {
         operation: "edit",
@@ -308,7 +344,7 @@ test("pending projection cannot replace canceled desired state", () => {
       },
     },
     pendingProjection,
-  );
+  ]);
 
   assert.deepEqual(decision, {
     allowed: false,
@@ -326,8 +362,9 @@ test("matched projection cannot drop result fragments already guarded", () => {
         [`${inviteId}1`]: { text: "first rematch" },
       },
     }),
-    inviteData: { guestId: "guest" },
+    inviteData: invite({ guestId: "guest" }),
   });
+  assert.ok(moreResultsProjection);
   const fewerResultsProjection = buildAutomatchTelegramProjection({
     inviteId,
     source: makeSource({
@@ -336,14 +373,15 @@ test("matched projection cannot drop result fragments already guarded", () => {
         [inviteId]: { text: "first game" },
       },
     }),
-    inviteData: { guestId: "guest" },
+    inviteData: invite({ guestId: "guest" }),
   });
-  const decision = evaluateAutomatchProjectionUpdate(
+  assert.ok(fewerResultsProjection);
+  const decision = Reflect.apply(evaluateAutomatchProjectionUpdate, undefined, [
     {
       automatchProjection: buildAutomatchProjectionGuard(moreResultsProjection),
     },
     fewerResultsProjection,
-  );
+  ]);
 
   assert.deepEqual(decision, {
     allowed: false,

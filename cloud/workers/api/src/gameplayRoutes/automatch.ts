@@ -60,11 +60,11 @@ export function readAutomatchOperationId(
   );
   if (
     values.length !== 1 ||
-    !GAME_SESSION_OPERATION_ID_PATTERN.test(values[0])
+    !GAME_SESSION_OPERATION_ID_PATTERN.test(values[0]!)
   ) {
     throw new AuthApiFailure(400, "invalid-argument", "invalid-request");
   }
-  return values[0];
+  return values[0]!;
 }
 
 export async function cancelAutomatch(

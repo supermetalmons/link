@@ -36,7 +36,9 @@ export function profileProjectionRepairWriterFixture(
         eventId,
         (current) =>
           repairEventProfileProjectionRecord(
-            retainEventProjectionOutbox("profile-game", current),
+            current === null
+              ? null
+              : retainEventProjectionOutbox("profile-game", current),
             input,
           ),
         signal,
@@ -63,7 +65,9 @@ export function telegramProjectionRepairWriterFixture(
         eventId,
         (current) =>
           markInvalidEventTelegramProjectionRecord(
-            retainEventProjectionOutbox("telegram", current),
+            current === null
+              ? null
+              : retainEventProjectionOutbox("telegram", current),
             eventId,
             nowMs,
           ),

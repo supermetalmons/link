@@ -1,3 +1,5 @@
+import { requiredFixture } from "../test/requiredFixture.ts";
+import { eventDocumentFixture } from "../test/eventCompatibilityFixture.ts";
 import { retainEventProgressRecord } from "../../../runtime/eventProgressRecords.js";
 import { env } from "cloudflare:workers";
 import type { D1Migration } from "cloudflare:test";
@@ -49,7 +51,7 @@ function observeCommitResults() {
   const db: EventD1Connection = {
     prepare: (query) => {
       const statement = testEnv.EVENT_DB.prepare(query);
-      return /^\s*INSERT INTO event_progress_outboxes\b/.test(query)
+      return /^\s*INSERT INTO event_progress_outboxes_canonical\b/.test(query)
         ? observeWrite(statement)
         : statement;
     },
@@ -75,9 +77,9 @@ describe("event progress outbox writer", () => {
 
   beforeEach(async () => {
     await testEnv.EVENT_DB.batch([
-      testEnv.EVENT_DB.prepare("DELETE FROM event_progress_outboxes"),
+      testEnv.EVENT_DB.prepare("DELETE FROM event_progress_outboxes_canonical"),
       testEnv.EVENT_DB.prepare("DELETE FROM event_write_admissions"),
-      testEnv.EVENT_DB.prepare("DELETE FROM event_records"),
+      testEnv.EVENT_DB.prepare("DELETE FROM event_records_canonical"),
       testEnv.EVENT_DB.prepare(
         "UPDATE event_runtime_control SET storage_mode = 'd1' WHERE singleton = 1",
       ),
@@ -90,8 +92,8 @@ describe("event progress outbox writer", () => {
           {
             kind: "event",
             eventId,
-            value: {
-              schemaVersion: 2,
+            value: eventDocumentFixture({
+              schemaVersion: 3,
               eventId,
               status: "active",
               createdAtMs: 100,
@@ -101,8 +103,7 @@ describe("event progress outbox writer", () => {
               createdByLoginUid: "login-one",
               createdByUsername: "ivan",
               participants: {},
-              rounds: {},
-            },
+            }),
           },
         ],
         { admission },
@@ -181,8 +182,10 @@ describe("event progress outbox writer", () => {
         observed.batches.map((batch) => batch.at(-1)!.meta.changes),
       ).toEqual([1, 0, 1, 0, 1, 1, 1]);
       for (const index of [1, 3]) {
-        expect(observed.batches[index]).toHaveLength(3);
-        expect(observed.batches[index].at(-1)!.meta.rows_written).toBe(0);
+        expect(requiredFixture(observed.batches[index])).toHaveLength(3);
+        expect(
+          requiredFixture(observed.batches[index]).at(-1)!.meta.rows_written,
+        ).toBe(0);
       }
       expect(await listDueEventProgressOutboxes(testEnv.EVENT_DB, 400)).toEqual(
         [
@@ -206,7 +209,7 @@ describe("event progress outbox writer", () => {
     ["run_at_ms", 500],
     ["last_queued_at_ms", 500],
   ] as const)(
-    "repairs %s even when the JSON is unchanged",
+    "rejects indexed %s drift before changing canonical JSON",
     async (column, value) => {
       const { outboxId, outbox } = await buildEventProgressPlan(
         {
@@ -224,30 +227,25 @@ describe("event progress outbox writer", () => {
             {
               kind: "event",
               eventId: "other-event",
-              value: {
+              value: eventDocumentFixture({
                 ...(await readEvent(testEnv.EVENT_DB, eventId)),
                 eventId: "other-event",
-              },
+              }),
             },
             { kind: "progress-outbox", outboxId, value: outbox },
           ],
           { admission },
         );
-        await testEnv.EVENT_DB.prepare(
-          `UPDATE event_progress_outboxes SET ${column} = ? WHERE outbox_id = ? AND status = 'pending'`,
-        )
-          .bind(value, outboxId)
-          .run();
-        const observed = observeCommitResults();
-        await commitEventMutations(
-          observed.db,
-          [{ kind: "progress-outbox", outboxId, value: outbox }],
-          { admission },
-        );
-        expect(observed.batches[0].at(-1)!.meta.changes).toBe(1);
+        await expect(
+          testEnv.EVENT_DB.prepare(
+            `UPDATE event_progress_outboxes_canonical SET ${column} = ? WHERE outbox_id = ? AND status = 'pending'`,
+          )
+            .bind(value, outboxId)
+            .run(),
+        ).rejects.toThrow();
         expect(
           await testEnv.EVENT_DB.prepare(
-            "SELECT event_id, run_at_ms, last_queued_at_ms, record_json FROM event_progress_outboxes WHERE outbox_id = ? AND status = 'pending'",
+            "SELECT event_id, run_at_ms, last_queued_at_ms, record_json FROM event_progress_outboxes_canonical WHERE outbox_id = ? AND status = 'pending'",
           )
             .bind(outboxId)
             .first(),
@@ -304,7 +302,7 @@ describe("event progress outbox writer", () => {
       const observed = observeD1FailureDatabase(testEnv.EVENT_DB, {
         beforeWriteBatch: async () => {
           await testEnv.EVENT_DB.prepare(
-            "UPDATE event_progress_outboxes SET last_queued_at_ms = 300, record_json = ? WHERE outbox_id = ? AND status = 'pending'",
+            "UPDATE event_progress_outboxes_canonical SET last_queued_at_ms = 300, record_json = ? WHERE outbox_id = ? AND status = 'pending'",
           )
             .bind(JSON.stringify(concurrent), outboxId)
             .run();
@@ -366,7 +364,7 @@ describe("event progress outbox writer", () => {
     );
     await testEnv.EVENT_DB.prepare(
       `CREATE TRIGGER event_progress_outbox_write_failure
-       BEFORE INSERT ON event_progress_outboxes
+       BEFORE INSERT ON event_progress_outboxes_canonical
        BEGIN
          SELECT RAISE(ABORT, 'outbox-write-failed');
        END`,

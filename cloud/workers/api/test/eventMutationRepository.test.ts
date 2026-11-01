@@ -6,7 +6,7 @@ import type {
   EventCommand,
   EventCommitPlan,
 } from "../../../runtime/eventCommands.js";
-import { encodeEventUpdates } from "../src/eventCompatibilityCodec.ts";
+import { encodeEventUpdates } from "./eventLegacyFixtureCodec.ts";
 import {
   commitPreparedEventMutation,
   createEventMutationReads,
@@ -20,10 +20,11 @@ import { TELEGRAM_TEST_ENV } from "./testEnv.ts";
 const EVENT_ID = "z3oj52Iiime";
 const NOW_MS = 1_000_000;
 const EVENT = eventDocumentFixture({
+  eventId: EVENT_ID,
   status: "scheduled",
   isSundayMons: true,
   startAtMs: 30_000_000,
-  participants: { owner: { profileId: "previous-owner" } },
+  participants: { "previous-owner": { profileId: "previous-owner" } },
 });
 const UPDATES: EventCommitPlan = [
   {
@@ -98,11 +99,16 @@ test("the coordinator commits all outboxes before dispatch and shares only each 
   const allowCommit = Promise.withResolvers<void>();
   let snapshot = 0;
   const memory = fixture({
-    readEvent: async () => ({
-      ...EVENT,
-      startAtMs: EVENT.startAtMs + ++snapshot * 1_000,
-      participants: { owner: { profileId: `previous-owner-${snapshot}` } },
-    }),
+    readEvent: async () =>
+      eventDocumentFixture({
+        ...EVENT,
+        startAtMs: EVENT.startAtMs + ++snapshot * 1_000,
+        participants: {
+          [`previous-owner-${snapshot}`]: {
+            profileId: `previous-owner-${snapshot}`,
+          },
+        },
+      }),
     beforeCommit: async () => {
       started.resolve();
       await allowCommit.promise;
@@ -126,9 +132,9 @@ test("the coordinator commits all outboxes before dispatch and shares only each 
     ["announcement", "announcement", "telegram", "profile"],
   );
   const committed = memory.commits[0];
-  assert.deepEqual(committed.slice(0, UPDATES.length), UPDATES);
+  assert.deepEqual(committed!.slice(0, UPDATES.length), UPDATES);
   assert.deepEqual(
-    committed.filter(
+    committed!.filter(
       (command) => command.kind === "profile-game-outbox-cleanup",
     ),
     [
@@ -141,12 +147,12 @@ test("the coordinator commits all outboxes before dispatch and shares only each 
     ],
   );
   assert.equal(
-    committed.filter((command) => command.kind === "telegram-generation")
+    committed!.filter((command) => command.kind === "telegram-generation")
       .length,
     1,
   );
   assert.deepEqual(
-    committed.flatMap((command) =>
+    committed!.flatMap((command) =>
       command.kind === "progress-outbox"
         ? [(command.value as { sourceKey?: unknown } | null)?.sourceKey]
         : [],
@@ -157,7 +163,7 @@ test("the coordinator commits all outboxes before dispatch and shares only each 
   assert.deepEqual(memory.reads, [EVENT_ID, EVENT_ID]);
   assert.equal(memory.commits.length, 2);
   assert.ok(
-    memory.commits[1].some(
+    memory.commits[1]!.some(
       (command) =>
         command.kind === "profile-game-outbox-cleanup" &&
         command.profileId === "previous-owner-2",
@@ -179,7 +185,7 @@ test("coordinated commands preserve exact serialization, ID order and clock plac
     eventRepository: coordinated.repository,
   }).commitEventPlan(UPDATES);
   assert.equal(coordinated.commits.length, 1);
-  const encoded = encodeEventUpdates(coordinated.commits[0]);
+  const encoded = encodeEventUpdates(coordinated.commits[0]!);
   const expected = {
     [`events/${EVENT_ID}/status`]: "scheduled",
     [`profileGameProjectionOutbox/event/${EVENT_ID}/schemaVersion`]: 1,
@@ -203,7 +209,8 @@ test("coordinated commands preserve exact serialization, ID order and clock plac
     },
     "eventProgressOutbox/ep_67737a96acccfc1a890b7fbd6695cbc66af23eb9acd2cb4528abbfcfc9f0e227":
       {
-        schemaVersion: 1,
+        schemaVersion: 2,
+        dataEpoch: 1,
         eventId: EVENT_ID,
         sourceKey: `prizes:${EVENT_ID}:30000000`,
         reason: "event-prize-announcement",
@@ -213,7 +220,8 @@ test("coordinated commands preserve exact serialization, ID order and clock plac
       },
     "eventProgressOutbox/ep_e145147ed02fcd4752fed1c63ed4caafa3616e778823ae71b453f1eb34cba11f":
       {
-        schemaVersion: 1,
+        schemaVersion: 2,
+        dataEpoch: 1,
         eventId: EVENT_ID,
         sourceKey: `reminder:${EVENT_ID}:30000000`,
         reason: "sunday-mons-reminder",
@@ -306,7 +314,7 @@ test("a failed channel keeps committed markers and does not suppress other dispa
     ["announcement", "announcement", "telegram", "profile"],
   );
   assert.ok(
-    memory.commits[0].some((command) => command.kind === "telegram-outbox"),
+    memory.commits[0]!.some((command) => command.kind === "telegram-outbox"),
   );
   assert.deepEqual(logs, [
     JSON.stringify({
@@ -395,7 +403,7 @@ test("combined scheduled work tracks remaining channels after an unexpected disp
     (work) => scheduled.push(work),
   );
   let settled = false;
-  const result = scheduled[0].then(
+  const result = scheduled[0]!.then(
     () => {
       settled = true;
       return null;

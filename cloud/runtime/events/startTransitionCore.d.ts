@@ -139,7 +139,7 @@ declare const reconcileThirdPlaceMatchReadiness: ({
     }
   | {
       didChange: boolean;
-      thirdPlaceMatch: EventMatch;
+      thirdPlaceMatch: import("@mons/shared/events").EventMatchRecord;
     }
 >;
 declare const reconcileBracketMatchReadiness: ({
@@ -162,7 +162,7 @@ declare const recomputeRoundStatuses: ({
   didChange: boolean;
   finalRoundIndex: number | null;
   earliestUnresolvedRoundIndex: number | null;
-  finalRoundWinnerProfileId: string | null;
+  finalRoundWinnerProfileId: string | null | undefined;
 };
 declare const buildFixedBracketState: ({
   eventId,
@@ -178,7 +178,7 @@ declare const buildFixedBracketState: ({
   roundCount: number;
   currentRoundIndex: number;
   rounds: EventRounds;
-  thirdPlaceMatch: EventMatch | null;
+  thirdPlaceMatch: import("@mons/shared/events").EventMatchRecord | null;
   inviteUpdates: EventCommitPlan;
 }>;
 declare const buildScheduledEventDueUpdatesCore: ({

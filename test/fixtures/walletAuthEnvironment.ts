@@ -1,3 +1,42 @@
+import type {
+  AuthIntentResponse,
+  AuthMethodKey,
+  AuthVerificationResponse,
+  LinkedAuthMethodsResponse,
+} from "@mons/shared/auth";
+import type { EIP6963ProviderDetail } from "../../src/connection/injectedEthereumProviders";
+
+type Connection = typeof import("../../src/connection/connection").connection;
+type Pending<Value, Data extends object> = Data & {
+  resolve: (value: Value) => void;
+  reject: (reason: unknown) => void;
+};
+type SignedProof = Awaited<
+  ReturnType<
+    typeof import("../../src/connection/ethereumConnection").connectToEthereumAndSign
+  >
+> &
+  Awaited<
+    ReturnType<
+      typeof import("../../src/connection/solanaConnection").connectToSolana
+    >
+  >;
+type ConnectCall = Pending<
+  SignedProof,
+  { method: "eth" | "sol"; wallet?: string }
+>;
+type VerificationCall = Pending<
+  AuthVerificationResponse,
+  { method: "eth" | "sol"; args: [string, string, string] }
+>;
+type IntentCall = Pending<AuthIntentResponse, { method: AuthMethodKey }>;
+type RedirectCall = Pending<
+  never,
+  Parameters<
+    typeof import("../../src/connection/xConnection").startXRedirectAuth
+  >[0]
+>;
+
 const noop = () => {};
 const subscribe = () => noop;
 const params = new URLSearchParams(location.search);
@@ -16,29 +55,31 @@ export type XAuthUiFeedback = {
 type EventModalState = { isOpen: boolean; eventId: string | null };
 
 export const environment = {
-  connectCalls: [] as any[],
-  verificationCalls: [] as any[],
-  logins: [] as any[],
+  connectCalls: [] as ConnectCall[],
+  verificationCalls: [] as VerificationCall[],
+  logins: [] as AuthVerificationResponse[],
   authStatuses: [] as string[],
   linkedReads: 0,
   linkedMethods: { eth: false, sol: false, apple: false, x: false },
   hiddenCards: 0,
   providerReads: 0,
-  xIntentCalls: [] as any[],
-  xRedirectCalls: [] as any[],
+  xIntentCalls: [] as IntentCall[],
+  xRedirectCalls: [] as RedirectCall[],
   xPending: params.has("xPendingSource")
     ? ({
         flowId: "pending-flow",
         status: "ready",
         errorCode: "",
-        consentSource: params.get("xPendingSource"),
+        consentSource:
+          params.get("xPendingSource") === "settings" ? "settings" : "signin",
       } as XRedirectResult)
     : null,
   xPendingListeners: new Set<(result: XRedirectResult | null) => void>(),
   xFeedback: params.has("xFeedbackTarget")
     ? ({
-        target: params.get("xFeedbackTarget"),
-        kind: params.get("xFeedbackKind") || "error",
+        target:
+          params.get("xFeedbackTarget") === "settings" ? "settings" : "signin",
+        kind: params.get("xFeedbackKind") === "success" ? "success" : "error",
         message: params.get("xFeedbackMessage") || "X callback failed.",
       } as XAuthUiFeedback)
     : null,
@@ -54,11 +95,19 @@ export const environment = {
   wallets: [
     {
       info: { uuid: "one", rdns: "wallet.one", name: "Wallet One", icon: "" },
-      provider: {},
+      provider: {
+        request: async () => {
+          throw new Error("unexpected wallet provider request");
+        },
+      },
     },
     {
       info: { uuid: "two", rdns: "wallet.two", name: "Wallet Two", icon: "" },
-      provider: {},
+      provider: {
+        request: async () => {
+          throw new Error("unexpected wallet provider request");
+        },
+      },
     },
   ],
   timers: new Map<number, { callback: () => void; delay: number }>(),
@@ -67,53 +116,67 @@ export const environment = {
 const timeout = window.setTimeout.bind(window);
 const clearTimeout = window.clearTimeout.bind(window);
 let nextTimer = -1;
-window.setTimeout = ((
-  callback: TimerHandler,
-  delay?: number,
-  ...args: any[]
-) => {
-  if (
-    [500, 650, 1500, 20_000].includes(delay ?? 0) &&
-    typeof callback === "function"
-  ) {
-    const id = nextTimer--;
-    environment.timers.set(id, {
-      callback: () => callback(...args),
-      delay: delay!,
-    });
-    return id;
-  }
-  return timeout(callback, delay, ...args);
-}) as typeof window.setTimeout;
+Reflect.set(
+  window,
+  "setTimeout",
+  (callback: TimerHandler, delay?: number, ...args: unknown[]) => {
+    if (
+      [500, 650, 1500, 20_000].includes(delay ?? 0) &&
+      typeof callback === "function"
+    ) {
+      const id = nextTimer--;
+      environment.timers.set(id, {
+        callback: () => callback(...args),
+        delay: delay ?? 0,
+      });
+      return id;
+    }
+    return timeout(callback, delay, ...args);
+  },
+);
 window.clearTimeout = (id) => {
-  if (id !== undefined && id < 0) environment.timers.delete(id);
+  if (typeof id === "number" && id < 0) environment.timers.delete(id);
   else clearTimeout(id);
 };
 
-function defer(calls: any[], data: object) {
-  return new Promise<any>((resolve, reject) =>
+function defer<Value, Data extends object>(
+  calls: Pending<Value, Data>[],
+  data: Data,
+): Promise<Value> {
+  return new Promise<Value>((resolve, reject) =>
     calls.push({ ...data, resolve, reject }),
   );
 }
 
-export const connectToEthereumAndSign = (wallet: any) =>
-  defer(environment.connectCalls, { method: "eth", wallet: wallet?.info.name });
+export const connectToEthereumAndSign = (
+  wallet: EIP6963ProviderDetail | null,
+) =>
+  defer(environment.connectCalls, {
+    method: "eth",
+    ...(wallet ? { wallet: wallet.info.name } : {}),
+  });
 export const connectToSolana = () =>
   defer(environment.connectCalls, { method: "sol" });
 export const connection = {
-  beginAuthIntent: (method: string) =>
+  beginAuthIntent: (method: AuthMethodKey) =>
     defer(environment.xIntentCalls, { method }),
-  verifyEthAddress: (...args: any[]) =>
+  verifyEthAddress: (...args: Parameters<Connection["verifyEthAddress"]>) =>
     defer(environment.verificationCalls, { method: "eth", args }),
-  verifySolanaAddress: (...args: any[]) =>
-    defer(environment.verificationCalls, { method: "sol", args }),
-  getLinkedAuthMethods: async () => {
+  verifySolanaAddress: (
+    ...args: Parameters<Connection["verifySolanaAddress"]>
+  ) => defer(environment.verificationCalls, { method: "sol", args }),
+  getLinkedAuthMethods: async (): Promise<LinkedAuthMethodsResponse> => {
     environment.linkedReads += 1;
-    return { linkedMethods: { ...environment.linkedMethods } };
+    return {
+      ok: true,
+      profileId: "profile",
+      appleLinked: environment.linkedMethods.apple,
+      linkedMethods: { ...environment.linkedMethods },
+    };
   },
   isCurrentAuthUser: () => true,
 };
-export const handleLoginSuccess = (result: unknown) => {
+export const handleLoginSuccess = (result: AuthVerificationResponse) => {
   environment.logins.push(result);
   return true;
 };
@@ -151,8 +214,11 @@ export const clearConsumedXRedirectResult = () => {
 export const isXRedirectStartedError = (error: unknown) =>
   error instanceof Error && error.message === "x-redirect-started";
 export const peekXRedirectResult = () => environment.xPending;
-export const startXRedirectAuth = (options: object) =>
-  defer(environment.xRedirectCalls, options);
+export const startXRedirectAuth = (
+  options: Parameters<
+    typeof import("../../src/connection/xConnection").startXRedirectAuth
+  >[0],
+) => defer(environment.xRedirectCalls, options);
 export const subscribeToPendingXRedirectResult = (
   listener: (result: XRedirectResult | null) => void,
 ) => {

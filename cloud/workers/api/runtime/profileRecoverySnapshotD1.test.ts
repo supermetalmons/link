@@ -1,7 +1,8 @@
+import { applyCanonicalTestMigrations } from "./canonicalTestMigrations.ts";
 import { projectionDocumentFixture } from "../test/profileDataBoundaryFixture.ts";
-import { materializeProfileCompatibility as materializeCanonicalProfile } from "../test/profileDataBoundaryFixture.ts";
+import { materializeProfileFixture as materializeCanonicalProfile } from "../test/profileDataBoundaryFixture.ts";
 import { env } from "cloudflare:workers";
-import { applyD1Migrations, type D1Migration } from "cloudflare:test";
+import type { D1Migration } from "cloudflare:test";
 import { beforeAll, describe, expect, it, vi } from "vitest";
 import {
   createAuthRecoveryService,
@@ -46,7 +47,6 @@ async function insertProfile(profileId: string) {
     },
     createdAtMs: 100,
     updatedAtMs: 100,
-    legacyFields: { imported: [null, { exact: "é" }] },
   });
   await commitCanonicalPlan(testEnv.PROFILE_DB, {
     expectations: [{ kind: "profile-absent", profileId }],
@@ -57,7 +57,7 @@ async function insertProfile(profileId: string) {
 
 async function withoutMergeTriggers(work: () => Promise<void>) {
   const triggers = await testEnv.PROFILE_DB.prepare(
-    "SELECT name, sql FROM sqlite_master WHERE type = 'trigger' AND tbl_name = 'profile_merge_targets'",
+    "SELECT name, sql FROM sqlite_master WHERE type = 'trigger' AND tbl_name = 'profile_merge_targets_canonical'",
   ).all<{ name: string; sql: string }>();
   await testEnv.PROFILE_DB.batch(
     triggers.results.map(({ name }) =>
@@ -78,9 +78,9 @@ async function insertMappings(mappings: Array<[string, string]>) {
     await testEnv.PROFILE_DB.batch(
       mappings.map(([source, target]) =>
         testEnv.PROFILE_DB.prepare(
-          `INSERT INTO profile_merge_targets
-           (source_profile_id, target_profile_id, merged_at_ms, op_id, source_legacy_fields_json)
-           VALUES (?, ?, 200, NULL, '{}')`,
+          `INSERT INTO profile_merge_targets_canonical
+           (source_profile_id, target_profile_id, merged_at_ms, op_id)
+           VALUES (?, ?, 200, NULL)`,
         ).bind(source, target),
       ),
     );
@@ -122,7 +122,6 @@ async function fixture({
             targetProfileId: targetId,
             mergedAtMs: 200,
             opId: null,
-            sourceLegacyFields: value.legacyFields,
           },
         },
       ],
@@ -133,7 +132,7 @@ async function fixture({
     );
   }
   await testEnv.PROFILE_DB.prepare(
-    `INSERT INTO profile_auth_recovery_jobs
+    `INSERT INTO profile_auth_recovery_jobs_canonical
      (profile_id, login_uids_json, source_profile_ids_json, source_phase, prize_cursor,
       phase_started_at_ms, last_enqueued_at_ms, created_at_ms, updated_at_ms, revision)
      VALUES (?, '[]', ?, 'finalize', NULL, 100, 0, 100, 100, 1)`,
@@ -235,7 +234,7 @@ describe("profile recovery finalization snapshot", () => {
       testEnv.TEST_PROFILE_D1_MIGRATIONS,
       "e".repeat(64),
     );
-    await applyD1Migrations(
+    await applyCanonicalTestMigrations(
       testEnv.PROFILE_GAMES_DB,
       testEnv.TEST_D1_MIGRATIONS,
     );
@@ -246,19 +245,19 @@ describe("profile recovery finalization snapshot", () => {
     await testEnv.PROFILE_DB.batch([
       ...["z", "é", "a"].map((suffix) =>
         testEnv.PROFILE_DB.prepare(
-          `INSERT INTO profile_login_owners (login_uid, profile_id, revision, created_at_ms, updated_at_ms)
+          `INSERT INTO profile_login_owners_canonical (login_uid, profile_id, revision, created_at_ms, updated_at_ms)
          VALUES (?, ?, 1, 100, 100)`,
         ).bind(`${f.targetId}-${suffix}`, f.targetId),
       ),
       ...["sol", "eth"].map((method) =>
         testEnv.PROFILE_DB.prepare(
-          `INSERT INTO profile_auth_methods (method, normalized_value, raw_value, profile_id, revision, created_at_ms, updated_at_ms)
+          `INSERT INTO profile_auth_methods_canonical (method, normalized_value, raw_value, profile_id, revision, created_at_ms, updated_at_ms)
          VALUES (?, ?, ?, ?, 1, 100, 100)`,
         ).bind(method, f.targetId, f.targetId, f.targetId),
       ),
       ...["z", "a"].map((opponent) =>
         testEnv.PROFILE_DB.prepare(
-          `INSERT INTO profile_february_opponents (profile_id, opponent_profile_id, recorded_at_ms)
+          `INSERT INTO profile_february_opponents_canonical (profile_id, opponent_profile_id, recorded_at_ms)
          VALUES (?, ?, 100)`,
         ).bind(f.targetId, opponent),
       ),
@@ -274,14 +273,14 @@ describe("profile recovery finalization snapshot", () => {
       f.sourceId,
     );
     expect([snapshot.target, snapshot.source]).toEqual(expected);
-    expect(snapshot.mergePath).toEqual([expected[1].mergeTarget]);
+    expect(snapshot.mergePath).toEqual([expected[1]!.mergeTarget]);
     expect(observed.batches.map((batch) => batch.length)).toEqual([7]);
     expect(
-      observed.batches[0].slice(0, 6).map((query) => query.values),
+      observed.batches[0]!.slice(0, 6).map((query) => query.values),
     ).toEqual(Array.from({ length: 6 }, () => [f.targetId, f.sourceId]));
     expect(observed.reads).toEqual([]);
     const plans = await testEnv.PROFILE_DB.batch<{ detail: string }>(
-      observed.batches[0].map(({ sql, values }) =>
+      observed.batches[0]!.map(({ sql, values }) =>
         testEnv.PROFILE_DB.prepare(`EXPLAIN QUERY PLAN ${sql}`).bind(...values),
       ),
     );
@@ -293,12 +292,12 @@ describe("profile recovery finalization snapshot", () => {
         ),
     ).toBe(true);
     expect(
-      plans[6].results.some(({ detail }) =>
-        detail.includes("SEARCH profile_merge_targets"),
+      plans[6]!.results.some(({ detail }) =>
+        detail.includes("SEARCH profile_merge_targets_canonical"),
       ),
     ).toBe(true);
     expect(
-      plans[6].results.some(({ detail }) => detail.includes("SEARCH target")),
+      plans[6]!.results.some(({ detail }) => detail.includes("SEARCH target")),
     ).toBe(true);
   });
 
@@ -328,7 +327,7 @@ describe("profile recovery finalization snapshot", () => {
     const f = await fixture({ sourcePresent: true });
     const observed = observeDatabase({
       mapSnapshot(results) {
-        results[4].results = results[4].results.filter(
+        results[4]!.results = results[4]!.results.filter(
           (row) => row.recovery_request_index !== 1,
         );
         return results;
@@ -346,7 +345,7 @@ describe("profile recovery finalization snapshot", () => {
 
   it.each([
     [0, "revision", 0],
-    [0, "legacy_fields_json", [123]],
+    [0, "payload_json", "[123]"],
     [4, "merged_at_ms", -1],
     [5, "source_phase", "invalid"],
   ])(
@@ -355,7 +354,7 @@ describe("profile recovery finalization snapshot", () => {
       const f = await fixture({ sourcePresent: true });
       const observed = observeDatabase({
         mapSnapshot(results) {
-          results[Number(table)].results[0][String(field)] = value;
+          results[Number(table)]!.results[0]![String(field)]! = value;
           return results;
         },
       });
@@ -375,7 +374,7 @@ describe("profile recovery finalization snapshot", () => {
       const f = await fixture({ sourcePresent: true });
       const observed = observeDatabase({
         mapSnapshot(results) {
-          results[0].results[0].recovery_request_index = requestIndex;
+          results[0]!.results[0]!.recovery_request_index = requestIndex;
           return results;
         },
       });
@@ -444,7 +443,8 @@ describe("profile recovery finalization snapshot", () => {
       const f = await fixture({ edges: 2 });
       const observed = observeDatabase({
         mapSnapshot(results) {
-          results[6].results[1][field] = field === "merged_at_ms" ? -1 : false;
+          results[6]!.results[1]![field]! =
+            field === "merged_at_ms" ? -1 : false;
           return results;
         },
       });
@@ -462,7 +462,7 @@ describe("profile recovery finalization snapshot", () => {
     const f = await fixture();
     const observed = observeDatabase({
       mapSnapshot(results) {
-        results[6].results.push({ depth: 1, source_profile_id: false });
+        results[6]!.results.push({ depth: 1, source_profile_id: false });
         return results;
       },
     });
@@ -482,7 +482,7 @@ describe("profile recovery finalization snapshot", () => {
     ]);
     const cycleObserved = observeDatabase({
       mapSnapshot(results) {
-        results[6].results[2].merged_at_ms = -1;
+        results[6]!.results[2]!.merged_at_ms = -1;
         return results;
       },
     });
@@ -501,8 +501,8 @@ describe("profile recovery finalization snapshot", () => {
     const f = await fixture();
     const observed = observeDatabase({
       mapSnapshot(results) {
-        results[5].results = [];
-        results[6].results[0].op_id = false;
+        results[5]!.results = [];
+        results[6]!.results[0]!.op_id = false;
         return results;
       },
     });
@@ -525,14 +525,14 @@ describe("profile recovery finalization snapshot", () => {
         const observed = observeDatabase({
           mapSnapshot(results) {
             const omitted =
-              missing === "target" ? results.slice(0, 6) : [results[5]];
+              missing === "target" ? results.slice(0, 6) : [results[5]!];
             for (const result of omitted) {
               result.results = result.results.filter(
                 (row) => row.recovery_request_index !== 0,
               );
             }
             if (corruptSource) {
-              const source = results[0].results.find(
+              const source = results[0]!.results.find(
                 (row) => row.recovery_request_index === 1,
               );
               if (!source) throw new Error("missing-source-fixture");
@@ -570,12 +570,12 @@ describe("profile recovery finalization snapshot", () => {
         kind === "target" ? f.targetId.replace("�", "\ud800") : f.targetId;
       const [profileRow, recoveryRow] = await Promise.all([
         testEnv.PROFILE_DB.prepare(
-          "SELECT * FROM profile_records WHERE profile_id = ?",
+          "SELECT * FROM profile_records_canonical WHERE profile_id = ?",
         )
           .bind(f.targetId)
           .first<Record<string, unknown>>(),
         testEnv.PROFILE_DB.prepare(
-          "SELECT * FROM profile_auth_recovery_jobs WHERE profile_id = ?",
+          "SELECT * FROM profile_auth_recovery_jobs_canonical WHERE profile_id = ?",
         )
           .bind(f.targetId)
           .first<Record<string, unknown>>(),
@@ -583,8 +583,10 @@ describe("profile recovery finalization snapshot", () => {
       const observed = observeDatabase({
         mapSnapshot(results) {
           if (kind === "target") {
-            results[0].results = [{ ...profileRow, recovery_request_index: 0 }];
-            results[5].results = [
+            results[0]!.results = [
+              { ...profileRow, recovery_request_index: 0 },
+            ];
+            results[5]!.results = [
               { ...recoveryRow, recovery_request_index: 0 },
             ];
           }
@@ -601,7 +603,7 @@ describe("profile recovery finalization snapshot", () => {
         ).mergePath,
       ).toBeNull();
       expect(observed.reads[0]?.values).toEqual([sourceId]);
-      expect(observed.batches[0][0].values).toEqual([targetId, sourceId]);
+      expect(observed.batches[0]![0]!.values).toEqual([targetId, sourceId]);
     },
   );
 
@@ -615,13 +617,13 @@ describe("profile recovery finalization snapshot", () => {
     await withoutMergeTriggers(async () => {
       await testEnv.PROFILE_DB.batch([
         testEnv.PROFILE_DB.prepare(
-          `INSERT INTO profile_merge_targets VALUES (?, CAST(X'${invalidHex}' AS TEXT), 200, NULL, '{}')`,
+          `INSERT INTO profile_merge_targets_canonical VALUES (?, CAST(X'${invalidHex}' AS TEXT), 200, NULL)`,
         ).bind(f.sourceId),
         testEnv.PROFILE_DB.prepare(
-          `INSERT INTO profile_merge_targets VALUES (CAST(X'${invalidHex}' AS TEXT), 'wrong-target', 200, NULL, '{}')`,
+          `INSERT INTO profile_merge_targets_canonical VALUES (CAST(X'${invalidHex}' AS TEXT), 'wrong-target', 200, NULL)`,
         ),
         testEnv.PROFILE_DB.prepare(
-          "INSERT INTO profile_merge_targets VALUES (?, ?, 200, NULL, '{}')",
+          "INSERT INTO profile_merge_targets_canonical VALUES (?, ?, 200, NULL)",
         ).bind(decodedId, f.targetId),
       ]);
     });
@@ -665,7 +667,7 @@ describe("profile recovery finalization snapshot", () => {
         mapSnapshot(results) {
           if (failure === "incomplete") return results.slice(0, 6);
           const index = failure === "unsuccessful aggregate" ? 0 : 6;
-          Object.assign(results[index], { success: false });
+          Object.assign(results[index]!, { success: false });
           return results;
         },
       });
@@ -832,7 +834,9 @@ describe("profile recovery finalization snapshot", () => {
       const observed = observeDatabase({
         afterSnapshot: async () => {
           const table =
-            kind === "job" ? "profile_auth_recovery_jobs" : "profile_records";
+            kind === "job"
+              ? "profile_auth_recovery_jobs_canonical"
+              : "profile_records_canonical";
           await testEnv.PROFILE_DB.prepare(
             `UPDATE ${table} SET revision = revision + 1 WHERE profile_id = ?`,
           )
@@ -862,7 +866,7 @@ describe("profile recovery finalization snapshot", () => {
       afterSnapshot: () =>
         withoutMergeTriggers(async () => {
           await testEnv.PROFILE_DB.prepare(
-            "UPDATE profile_merge_targets SET target_profile_id = ? WHERE source_profile_id = ?",
+            "UPDATE profile_merge_targets_canonical SET target_profile_id = ? WHERE source_profile_id = ?",
           )
             .bind("changed-target", f.path[1])
             .run();
@@ -882,7 +886,7 @@ describe("profile recovery finalization snapshot", () => {
       .flat()
       .filter(
         (query) =>
-          query.sql.includes("FROM profile_merge_targets") &&
+          query.sql.includes("FROM profile_merge_targets_canonical") &&
           query.sql.includes("INSERT INTO profile_transaction_guards"),
       )
       .map((query) => query.values);

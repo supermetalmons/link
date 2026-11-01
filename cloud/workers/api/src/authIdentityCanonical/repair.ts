@@ -184,9 +184,9 @@ export function createCanonicalIdentityRepair({
     const upper = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
     const lower = "abcdefghijklmnopqrstuvwxyz";
     const randomUsername = () => {
-      let value = upper[randomInteger(upper.length)];
+      let value = upper[randomInteger(upper.length)]!;
       for (let index = 0; index < 3; index++)
-        value += lower[randomInteger(lower.length)];
+        value += lower[randomInteger(lower.length)]!;
       return `${value}${String(randomInteger(1_000)).padStart(3, "0")}`;
     };
     const repository = createUsernameRepository(env);

@@ -1,3 +1,4 @@
+import { createDefaultProfileAppearance } from "@mons/shared/appearance";
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import {
@@ -106,6 +107,11 @@ function model({ fresh = false, failFirstResolve = false } = {}) {
   let surrendered = false;
   let failedResolve = false;
   const proposal = (): PublicMatchWagerState => ({
+    schemaVersion: 1,
+    state: "proposed",
+    agreed: null,
+    resolved: null,
+    blocked: null,
     proposals: {
       [fixture.actors.host.uid!]: {
         material: "dust",
@@ -160,8 +166,8 @@ function model({ fresh = false, failFirstResolve = false } = {}) {
       hostId: fixture.actors.host.uid,
       guestId: joinedInvites.has(inviteId) ? fixture.actors.guest.uid : null,
       hostColor: "white",
-      hostRematches: "",
-      guestRematches: "",
+      hostRematches: { state: "open", indices: [] },
+      guestRematches: { state: "open", indices: [] },
       automatchStateHint: null,
       eventId: null,
       eventOwned: false,
@@ -186,7 +192,7 @@ function model({ fresh = false, failFirstResolve = false } = {}) {
       assert.equal(options.followRedirects, false);
       assert.equal(options.origin, "https://mons.link");
       assert.equal(protocols[0], "mons-invite-wagers-v1");
-      const socket = new FakeSocket(new URL(url).pathname.split("/")[2]);
+      const socket = new FakeSocket(new URL(url).pathname.split("/")[2]!);
       sockets.push(socket);
       queueMicrotask(() =>
         socket.emit(
@@ -261,18 +267,19 @@ function model({ fresh = false, failFirstResolve = false } = {}) {
           playerId,
           matchId,
           match: {
+            schemaVersion: 1,
             version: 2,
             color: role === "host" ? "white" : "black",
             emojiId: 1,
-            aura: "",
+            aura: "none",
             gameVariant: "Classic",
             fen: "seed",
             status:
               role === "guest" && matchId === id && surrendered
                 ? "surrendered"
-                : "",
+                : "active",
             flatMovesString: "",
-            timer: "",
+            timer: { state: "idle" },
           },
         });
       }
@@ -323,8 +330,7 @@ function model({ fresh = false, failFirstResolve = false } = {}) {
           sol: address,
           linkedMethods: { apple: false, eth: false, sol: true, x: false },
           appleLinked: false,
-          emoji: 1,
-          aura: "",
+          ...createDefaultProfileAppearance(1),
           mining: mining(role),
           opId: "intent:test",
         });
@@ -354,7 +360,9 @@ function model({ fresh = false, failFirstResolve = false } = {}) {
             rating: 0,
             totalManaPoints: 0,
             win: false,
-            emoji: 1,
+            ...createDefaultProfileAppearance(1),
+            completedProblemIds: [],
+            isTutorialCompleted: false,
             username: null,
             eth: null,
             sol: bs58.encode(key.publicKey),
@@ -363,7 +371,7 @@ function model({ fresh = false, failFirstResolve = false } = {}) {
         });
       }
       if (url.pathname.endsWith("/metadata")) {
-        const inviteId = url.pathname.split("/")[2];
+        const inviteId = url.pathname.split("/")[2]!;
         return createdInvites.has(inviteId)
           ? response(metadata(inviteId, role))
           : response({ error: "invite-not-found" }, 404);
@@ -371,7 +379,7 @@ function model({ fresh = false, failFirstResolve = false } = {}) {
       if (url.pathname.endsWith("/wagers"))
         return response({
           ok: true,
-          snapshot: clone(states.get(url.pathname.split("/")[2])!),
+          snapshot: clone(states.get(url.pathname.split("/")[2]!)!),
         });
       if (url.pathname === "/wagers/frozen/read") {
         assert.ok(role);
@@ -429,7 +437,7 @@ function model({ fresh = false, failFirstResolve = false } = {}) {
       assert.equal(headers.get("X-Mons-Wager-Storage-Version"), "1");
       assert.equal(data.matchId, inviteId);
       const snapshot = states.get(inviteId)!;
-      const wager = snapshot.wagers[inviteId];
+      const wager = snapshot.wagers[inviteId]!;
       if (url.pathname === "/wagers/proposals/send") {
         assert.equal(role, "host");
         if (removed.has(inviteId))
@@ -453,6 +461,12 @@ function model({ fresh = false, failFirstResolve = false } = {}) {
           frozen.host--;
           removed.add(inviteId);
           snapshot.wagers[inviteId] = {
+            schemaVersion: 1,
+            state: "proposed",
+            proposals: {},
+            agreed: null,
+            resolved: null,
+            blocked: null,
             proposedBy: { [fixture.actors.host.uid!]: true },
           };
           publish(inviteId);
@@ -464,6 +478,12 @@ function model({ fresh = false, failFirstResolve = false } = {}) {
         if (!wager.agreed) {
           frozen.guest++;
           snapshot.wagers[inviteId] = {
+            schemaVersion: 1,
+            state: "agreed",
+            proposals: {},
+            proposedBy: {},
+            resolved: null,
+            blocked: null,
             agreed: {
               material: "dust",
               count: 1,
@@ -487,6 +507,7 @@ function model({ fresh = false, failFirstResolve = false } = {}) {
           frozen.host = 0;
           frozen.guest = 0;
           transfers++;
+          wager.state = "settled";
           wager.resolved = {
             material: "dust",
             count: 1,
@@ -737,7 +758,7 @@ test("preparation reuses owned invites after create receipts expire and joins on
   );
   assert.equal(joins.length, 1);
   assert.equal(
-    (joins[0].body as { inviteId: string }).inviteId,
+    (joins[0]!.body as { inviteId: string }).inviteId,
     h.fixture.invites.decline.id,
   );
   assert.equal(h.signups, 0);
@@ -750,7 +771,7 @@ test("preparation rejects foreign, event, advanced, or unreadable invites before
     { eventId: "other-event" },
     { eventOwned: true },
     { automatchStateHint: "matched" },
-    { hostRematches: "1" },
+    { hostRematches: { state: "open", indices: [1] } },
     "terminal-wager",
     "played-match",
     "unreadable",
@@ -763,6 +784,12 @@ test("preparation rejects foreign, event, advanced, or unreadable invites before
     if (altered === "terminal-wager")
       h.states.get(h.fixture.invites.cancel.id)!.wagers = {
         [h.fixture.invites.cancel.id]: {
+          schemaVersion: 1,
+          state: "proposed",
+          proposals: {},
+          agreed: null,
+          resolved: null,
+          blocked: null,
           proposedBy: { [h.fixture.actors.host.uid!]: true },
         },
       };
@@ -854,7 +881,7 @@ test("frozen reads prove imported proposal and balance parity without a gameplay
   assert.equal(h.sockets.length, 6);
   h.fixture.preparedSnapshots.cancel!.wagers[
     h.fixture.invites.cancel.id
-  ].proposals![h.fixture.actors.host.uid!].count = 2;
+  ]!.proposals![h.fixture.actors.host.uid!]!.count = 2;
   await assert.rejects(
     frozenRead(h.fixture, h.dependencies),
     /Imported wager snapshot/,
@@ -951,7 +978,9 @@ test("long lifecycle runs renew HTTP and socket credentials without repeating se
   const originalConnect = h.dependencies.connect;
   h.dependencies.now = () => now;
   h.dependencies.connect = (url, protocols, options) => {
-    const bearer = protocols[1]?.slice("bearer.".length);
+    const bearer = protocols
+      .find((protocol) => protocol.startsWith("bearer."))
+      ?.slice("bearer.".length);
     const expires = bearer ? issued.get(bearer) : undefined;
     assert.ok(
       expires !== undefined && expires > now,
@@ -1016,7 +1045,7 @@ test("long lifecycle runs renew HTTP and socket credentials without repeating se
       (request) => request.url.pathname === path,
     );
     assert.equal(requests.length, 2);
-    assert.deepEqual(requests[0].body, requests[1].body);
+    assert.deepEqual(requests[0]!.body, requests[1]!.body);
   }
   assert.ok(h.sockets.every((socket) => socket.terminated));
 });
@@ -1089,7 +1118,7 @@ test("renewed sockets reject invalid initial snapshots before a later valid fram
         return result;
       };
       h.dependencies.connect = (url, protocols, options) => {
-        const inviteId = new URL(url).pathname.split("/")[2];
+        const inviteId = new URL(url).pathname.split("/")[2]!;
         if (!expired || injected || inviteId !== h.fixture.invites.cancel.id)
           return originalConnect(url, protocols, options);
         injected = true;
@@ -1100,6 +1129,11 @@ test("renewed sockets reject invalid initial snapshots before a later valid fram
         if (failure === "regressed-revision") initial.revision--;
         else
           initial.wagers[inviteId] = {
+            schemaVersion: 1,
+            state: "proposed",
+            agreed: null,
+            resolved: null,
+            blocked: null,
             proposals: {
               [h.fixture.actors.host.uid!]: {
                 material: "dust",
@@ -1170,7 +1204,7 @@ test("an uncertain API surrender resumes the same fixture using only Worker endp
   assert.ok(
     surrenders.every(
       (request) =>
-        JSON.stringify(request.body) === JSON.stringify(surrenders[0].body),
+        JSON.stringify(request.body) === JSON.stringify(surrenders[0]!.body),
     ),
   );
   assert.ok(
@@ -1214,7 +1248,7 @@ test("surrender checks the canonical public match fields before resolving the wa
       const payload = await result.json();
       return response({
         ...payload,
-        match: { ...payload.match, aura: "changed" },
+        match: { ...payload.match, aura: "rainbow" },
       });
     }
     return result;
@@ -1295,7 +1329,7 @@ test("journaled cancellation and decline still require retained terminal history
   await activeLifecycle(h.fixture, () => undefined, h.dependencies);
   for (const scenario of ["cancel", "decline"] as const) {
     const snapshot = h.states.get(h.fixture.invites[scenario].id)!;
-    const wager = snapshot.wagers[snapshot.inviteId];
+    const wager = snapshot.wagers[snapshot.inviteId]!;
     wager.proposals = {
       [h.fixture.actors.host.uid!]: {
         material: "dust",
@@ -1308,7 +1342,7 @@ test("journaled cancellation and decline still require retained terminal history
       activeLifecycle(h.fixture, () => undefined, h.dependencies),
       new RegExp(`${scenario} final proposals did not match`),
     );
-    delete wager.proposals;
+    wager.proposals = {};
     snapshot.revision++;
     delete snapshot.wagers[snapshot.inviteId];
     await assert.rejects(

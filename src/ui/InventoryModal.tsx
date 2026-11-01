@@ -1,3 +1,4 @@
+import { isEventPrizeId } from "@mons/shared/event-prizes";
 import React, {
   useCallback,
   useEffect,
@@ -558,7 +559,7 @@ export const InventoryModal = React.forwardRef<
   const isPreviewItemCurrent =
     previewItem?.kind === "avatar"
       ? activeItemSelection.avatarId === previewItem.item.id &&
-        storage.getPlayerEmojiAura("") === desiredPreviewAvatarAura
+        storage.getPlayerEmojiAura("none") === desiredPreviewAvatarAura
       : previewItem?.kind === "special"
         ? activeItemSelection.specialIds.has(previewItem.item.id)
         : false;
@@ -596,7 +597,7 @@ export const InventoryModal = React.forwardRef<
     if (item.kind === "avatar") {
       setOwnershipVerifiedIdCardEmoji(
         item.item.id + SWAGPACK_ID_OFFSET,
-        item.item.count >= 3 ? "rainbow" : "",
+        item.item.count >= 3 ? "rainbow" : "none",
       );
     } else {
       setOwnershipVerifiedSpecialItem(item.item.id);
@@ -611,6 +612,9 @@ export const InventoryModal = React.forwardRef<
   ): Promise<void> => {
     if (!isAuthenticated) {
       throw new Error("Prize withdrawal requires authentication.");
+    }
+    if (!isEventPrizeId(prize.eventId, prize.prizeId)) {
+      throw new Error("This prize is not available for withdrawal.");
     }
     const response = await withdrawProfileEventPrize(
       prize.eventId,
@@ -661,7 +665,7 @@ export const InventoryModal = React.forwardRef<
                 <ShopImageFrame>
                   <ShopImage
                     src={`${SWAGPACK_THUMB_IMAGE_BASE_URL}/${
-                      SHOP_ITEM_IDS[index] + SWAGPACK_ID_OFFSET
+                      SHOP_ITEM_IDS[index]! + SWAGPACK_ID_OFFSET
                     }.webp`}
                     alt=""
                     loading="eager"

@@ -1,3 +1,4 @@
+import { applicationStorageKey } from "../session/applicationDataStorage.ts";
 import { GAME_SESSION_OPERATION_ID_PATTERN } from "@mons/shared/game-sessions";
 import { isSafeRecordKey } from "@mons/shared/ids";
 import { parseInviteMatchIndex } from "@mons/shared/rematches";
@@ -25,7 +26,9 @@ type Dependencies = {
   clearTimer?: (timer: Timer) => void;
 };
 
-export const REMATCH_END_STORAGE_PREFIX = "mons:pending-rematch-ends:v1:";
+export const REMATCH_END_STORAGE_PREFIX = applicationStorageKey(
+  "pending-rematch-ends:",
+);
 
 export function rematchEndDeliveryStorageKey(scope: RematchEndScope): string {
   return `${REMATCH_END_STORAGE_PREFIX}${JSON.stringify([
@@ -49,7 +52,13 @@ function hasRematchEndIdentifiers(
 }
 
 function isPendingRematchEnd(value: unknown): value is PendingRematchEnd {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  if (
+    !value ||
+    typeof value !== "object" ||
+    Array.isArray(value) ||
+    Object.keys(value).length !== 5
+  )
+    return false;
   const record = value as RematchEndFields;
   return (
     hasRematchEndIdentifiers(record) &&
@@ -59,11 +68,18 @@ function isPendingRematchEnd(value: unknown): value is PendingRematchEnd {
   );
 }
 
-function storedRematchEndOperationId(text: string): unknown {
+function storedRematchEndOperationId(text: string): string | null {
   const parsed: unknown = JSON.parse(text);
-  return (
-    parsed as { record?: { operationId?: unknown } | null } | null | undefined
-  )?.record?.operationId;
+  return parsed &&
+    typeof parsed === "object" &&
+    !Array.isArray(parsed) &&
+    Object.keys(parsed).length === 2 &&
+    "version" in parsed &&
+    parsed.version === 1 &&
+    "record" in parsed &&
+    isPendingRematchEnd(parsed.record)
+    ? parsed.record.operationId
+    : null;
 }
 
 export function readPendingRematchEnd(
@@ -74,6 +90,14 @@ export function readPendingRematchEnd(
   const text = persistence?.getItem(key);
   if (!text) return null;
   const parsed: unknown = JSON.parse(text);
+  if (
+    !parsed ||
+    typeof parsed !== "object" ||
+    Array.isArray(parsed) ||
+    Object.keys(parsed).length !== 2
+  ) {
+    throw new Error("invalid-stored-rematch-end");
+  }
   const stored = parsed as StoredRematchEndFields | null | undefined;
   if (
     stored?.version !== 1 ||

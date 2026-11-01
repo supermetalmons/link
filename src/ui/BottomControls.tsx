@@ -279,8 +279,8 @@ function buildEventCloudPath(): string {
     const aE = a + step;
     const x0 = cx + rx * Math.cos(a);
     const y0 = cy + ry * Math.sin(a);
-    const cpx = cx + (rx + bumps[i]) * Math.cos(aM);
-    const cpy = cy + (ry + bumps[i]) * Math.sin(aM);
+    const cpx = cx + (rx + bumps[i]!) * Math.cos(aM);
+    const cpy = cy + (ry + bumps[i]!) * Math.sin(aM);
     const x1 = cx + rx * Math.cos(aE);
     const y1 = cy + ry * Math.sin(aE);
     if (i === 0) parts.push(`M${x0.toFixed(1)},${y0.toFixed(1)}`);
@@ -428,6 +428,7 @@ const BottomControls: React.FC<BottomControlsProps> = ({ authState }) => {
 
   const {
     canSubmitWager,
+    wagerRequiresManualReview,
     handleWagerModeToggle,
     pickerProps: wagerPickerProps,
   } = useWagerProposal({
@@ -1057,13 +1058,10 @@ const BottomControls: React.FC<BottomControlsProps> = ({ authState }) => {
                 {(
                   CLOUD_AVATAR_LAYOUTS[
                     Math.min(eventCloudAvatars.length, EVENT_CLOUD_MAX_AVATARS)
-                  ] ?? CLOUD_AVATAR_LAYOUTS[0]
+                  ] ?? CLOUD_AVATAR_LAYOUTS[0]!
                 ).map((slot, i) => {
                   const participant = eventCloudAvatars[i];
-                  const emojiId =
-                    participant?.emojiId != null
-                      ? Number(participant.emojiId)
-                      : NaN;
+                  const emojiId = participant?.emojiId ?? null;
                   const posStyle = {
                     width: CLOUD_AVATAR_SIZE,
                     height: CLOUD_AVATAR_SIZE,
@@ -1079,11 +1077,11 @@ const BottomControls: React.FC<BottomControlsProps> = ({ authState }) => {
                       CLOUD_INSET,
                     transform: `rotate(${slot.r}deg)`,
                   };
-                  if (Number.isFinite(emojiId) && emojiId > 0) {
+                  if (emojiId !== null) {
                     return (
                       <EventCloudAvatar
                         key={i}
-                        src={emojis.getEmojiUrl(Math.trunc(emojiId).toString())}
+                        src={emojis.getEmojiUrl(emojiId)}
                         alt=""
                         style={posStyle}
                       />
@@ -1289,8 +1287,15 @@ const BottomControls: React.FC<BottomControlsProps> = ({ authState }) => {
         {isReactionPickerVisible && (
           <ReactionPillsContainer
             ref={pickerRef}
-            $animatedMaxHeight={pickerMaxHeight}
+            {...(pickerMaxHeight === undefined
+              ? {}
+              : { $animatedMaxHeight: pickerMaxHeight })}
           >
+            {wagerRequiresManualReview && (
+              <span role="status">
+                Wager awaiting manual review. Reserved materials remain held.
+              </span>
+            )}
             {isWagerMode ? (
               <WagerPicker {...wagerPickerProps} />
             ) : (

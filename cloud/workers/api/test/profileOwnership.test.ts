@@ -13,7 +13,7 @@ import {
 } from "../src/profileOwnership.ts";
 
 const presentation = {
-  aura: "blue",
+  aura: "rainbow" as const,
   emoji: 7,
   eth: "0x1",
   profileId: "profile-1",

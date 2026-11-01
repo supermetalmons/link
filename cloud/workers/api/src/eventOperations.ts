@@ -114,9 +114,9 @@ function createRuntime(env: Env, dependencies: EventControlDependencies) {
       await ensureEventProgressWorkflow(env, plan);
       return { outboxId: plan.outboxId, outbox: plan.outbox };
     },
-    now: dependencies.now,
-    random: dependencies.random,
-    sleep: dependencies.sleep,
+    ...(dependencies.now ? { now: dependencies.now } : {}),
+    ...(dependencies.random ? { random: dependencies.random } : {}),
+    ...(dependencies.sleep ? { sleep: dependencies.sleep } : {}),
   });
 }
 

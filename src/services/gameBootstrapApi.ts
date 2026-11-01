@@ -17,8 +17,8 @@ export const GAME_BOOTSTRAP_REQUEST_TIMEOUT_MS = 10_000;
 
 export class GameBootstrapApiError extends Error {
   readonly code: string;
-  readonly status?: number;
-  readonly retryAfterMs?: number;
+  readonly status: number | undefined;
+  readonly retryAfterMs: number | undefined;
 
   constructor(code: string, status?: number, retryAfterMs?: number) {
     super(code);
@@ -47,8 +47,8 @@ export async function readGameBootstrapViaApi(
   const path = bootstrapPath(inviteId, options.selection ?? "current");
   return readSnapshotJson({
     url: `${GAME_BOOTSTRAP_API_ROOT}${path}`,
-    tokenProvider,
-    signal: options.signal,
+    ...(tokenProvider ? { tokenProvider } : {}),
+    ...(options.signal ? { signal: options.signal } : {}),
     timeoutMs: GAME_BOOTSTRAP_REQUEST_TIMEOUT_MS,
     maxResponseBytes: GAME_BOOTSTRAP_MAX_RESPONSE_BYTES,
     validate: (payload): payload is ReadGameBootstrapResponse =>

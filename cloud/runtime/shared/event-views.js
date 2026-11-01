@@ -1,273 +1,500 @@
 // Generated from src/shared/event-views.ts. Run npm run generate:runtime.
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.decodeEventView =
-  exports.decodeEventPrizeAssignmentsView =
-  exports.decodeEventPrizeAssignmentView =
-  exports.normalizeEventPrizeId =
-  exports.decodeEventRoundView =
-  exports.decodeEventMatchView =
-  exports.decodeEventParticipantView =
-    void 0;
-const event_prizes_js_1 = require("./event-prizes.js");
-const event_types_js_1 = require("./event-types.js");
-const normalizeStringOrNull = (value) => {
-  return typeof value === "string" && value !== "" ? value : null;
-};
-const normalizeString = (value) => {
-  return typeof value === "string" ? value : "";
-};
-const normalizeFiniteNumber = (value, fallback = 0) => {
-  if (typeof value === "number" && Number.isFinite(value)) {
-    return Math.floor(value);
-  }
-  if (
-    typeof value === "string" &&
-    value !== "" &&
-    Number.isFinite(Number(value))
-  ) {
-    return Math.floor(Number(value));
-  }
-  return fallback;
-};
-const decodeEventParticipantView = (rawData, fallbackProfileId) => ({
-  profileId: normalizeString(rawData.profileId) || fallbackProfileId,
-  loginUid: normalizeString(rawData.loginUid),
-  username: normalizeString(rawData.username),
-  displayName: normalizeString(rawData.displayName),
-  emojiId: normalizeFiniteNumber(rawData.emojiId, 0),
-  aura: normalizeString(rawData.aura),
-  joinedAtMs: normalizeFiniteNumber(rawData.joinedAtMs, 0),
-  state:
-    rawData.state === "eliminated" || rawData.state === "winner"
-      ? rawData.state
-      : "active",
-  eliminatedRoundIndex: Number.isFinite(
-    normalizeFiniteNumber(rawData.eliminatedRoundIndex, NaN),
-  )
-    ? normalizeFiniteNumber(rawData.eliminatedRoundIndex, NaN)
-    : null,
-  eliminatedByProfileId: normalizeStringOrNull(rawData.eliminatedByProfileId),
-});
+exports.isEventAnnouncements = isEventAnnouncements;
+exports.isEventParticipantRecord = isEventParticipantRecord;
+exports.isEventParticipants = isEventParticipants;
+exports.isEventMatchRecord = isEventMatchRecord;
+exports.isEventMatches = isEventMatches;
+exports.isEventRoundRecord = isEventRoundRecord;
+exports.isEventRounds = isEventRounds;
+exports.isEventPrizeAssignments = isEventPrizeAssignments;
+exports.isEventRecord = isEventRecord;
+exports.parseEventRecord = parseEventRecord;
 exports.decodeEventParticipantView = decodeEventParticipantView;
-const decodeEventMatchView = (rawData, fallbackMatchKey) => ({
-  matchKey: normalizeString(rawData.matchKey) || fallbackMatchKey,
-  inviteId: normalizeStringOrNull(rawData.inviteId),
-  status:
-    rawData.status === "upcoming" ||
-    rawData.status === "host" ||
-    rawData.status === "guest" ||
-    rawData.status === "bye"
-      ? rawData.status
-      : "pending",
-  resolvedAtMs: Number.isFinite(
-    normalizeFiniteNumber(rawData.resolvedAtMs, NaN),
-  )
-    ? normalizeFiniteNumber(rawData.resolvedAtMs, NaN)
-    : null,
-  winnerDisqualified: rawData.winnerDisqualified === true,
-  winnerProfileId: normalizeStringOrNull(rawData.winnerProfileId),
-  loserProfileId: normalizeStringOrNull(rawData.loserProfileId),
-  hostSlotBlocked: rawData.hostSlotBlocked === true,
-  hostProfileId: normalizeStringOrNull(rawData.hostProfileId),
-  hostLoginUid: normalizeStringOrNull(rawData.hostLoginUid),
-  hostDisplayName: normalizeStringOrNull(rawData.hostDisplayName),
-  hostEmojiId: Number.isFinite(normalizeFiniteNumber(rawData.hostEmojiId, NaN))
-    ? normalizeFiniteNumber(rawData.hostEmojiId, NaN)
-    : null,
-  hostAura: normalizeStringOrNull(rawData.hostAura),
-  guestProfileId: normalizeStringOrNull(rawData.guestProfileId),
-  guestLoginUid: normalizeStringOrNull(rawData.guestLoginUid),
-  guestDisplayName: normalizeStringOrNull(rawData.guestDisplayName),
-  guestEmojiId: Number.isFinite(
-    normalizeFiniteNumber(rawData.guestEmojiId, NaN),
-  )
-    ? normalizeFiniteNumber(rawData.guestEmojiId, NaN)
-    : null,
-  guestAura: normalizeStringOrNull(rawData.guestAura),
-  guestSlotBlocked: rawData.guestSlotBlocked === true,
-});
 exports.decodeEventMatchView = decodeEventMatchView;
-const decodeEventRoundView = (rawData, fallbackRoundIndex) => {
-  const matchesInput =
-    rawData.matches && typeof rawData.matches === "object"
-      ? rawData.matches
-      : {};
-  const matches = {};
-  Object.keys(matchesInput).forEach((matchKey) => {
-    const matchValue = matchesInput[matchKey];
-    if (!matchValue || typeof matchValue !== "object") {
-      return;
-    }
-    matches[matchKey] = (0, exports.decodeEventMatchView)(matchValue, matchKey);
-  });
-  const completedAtMs = normalizeFiniteNumber(rawData.completedAtMs, NaN);
-  return {
-    roundIndex: normalizeFiniteNumber(rawData.roundIndex, fallbackRoundIndex),
-    status:
-      rawData.status === "completed" || rawData.status === "upcoming"
-        ? rawData.status
-        : "active",
-    createdAtMs: normalizeFiniteNumber(rawData.createdAtMs, 0),
-    completedAtMs: Number.isFinite(completedAtMs) ? completedAtMs : null,
-    matches,
-  };
-};
 exports.decodeEventRoundView = decodeEventRoundView;
-const normalizeEventPrizeId = (value, eventId) => {
-  const normalizedValue = normalizeString(value).trim();
-  const normalizedEventId = eventId.trim();
-  return (0, event_prizes_js_1.isEventPrizeId)(
-    normalizedEventId,
-    normalizedValue,
-  )
-    ? normalizedValue
-    : null;
-};
 exports.normalizeEventPrizeId = normalizeEventPrizeId;
-const decodeEventPrizeAssignmentView = (rawValue, fallbackEventId) => {
-  if (!rawValue || typeof rawValue !== "object") {
-    return null;
-  }
-  const rawData = rawValue;
-  const eventId = normalizeString(rawData.eventId) || fallbackEventId;
-  const profileId = normalizeString(rawData.profileId);
-  const prizeId = (0, exports.normalizeEventPrizeId)(rawData.prizeId, eventId);
-  const placeValue = normalizeFiniteNumber(rawData.place, NaN);
-  const place =
-    placeValue === 1 || placeValue === 2 || placeValue === 3
-      ? placeValue
-      : null;
-  const assignedAtMs = normalizeFiniteNumber(rawData.assignedAtMs, NaN);
-  if (
-    !eventId ||
-    !profileId ||
-    !prizeId ||
-    place === null ||
-    !Number.isFinite(assignedAtMs)
-  ) {
-    return null;
-  }
-  return {
-    eventId,
-    profileId,
-    prizeId,
-    place,
-    assignedAtMs: Math.floor(assignedAtMs),
-  };
-};
 exports.decodeEventPrizeAssignmentView = decodeEventPrizeAssignmentView;
-const decodeEventPrizeAssignmentsView = (rawValue, fallbackEventId) => {
-  if (!rawValue || typeof rawValue !== "object") {
-    return {};
-  }
-  const rawAssignments = rawValue;
-  const assignments = {};
-  for (const place of [1, 2, 3]) {
-    const assignment = (0, exports.decodeEventPrizeAssignmentView)(
-      rawAssignments[String(place)],
-      fallbackEventId,
-    );
-    if (assignment?.place === place) {
-      assignments[`${place}`] = assignment;
-    }
-  }
-  return assignments;
-};
 exports.decodeEventPrizeAssignmentsView = decodeEventPrizeAssignmentsView;
-const decodeEventView = (rawValue, fallbackEventId) => {
-  if (!rawValue || typeof rawValue !== "object") {
-    return null;
-  }
-  const rawData = rawValue;
-  const eventId = normalizeString(rawData.eventId) || fallbackEventId;
-  if (!eventId) {
-    return null;
-  }
-  const participantsInput =
-    rawData.participants && typeof rawData.participants === "object"
-      ? rawData.participants
-      : {};
-  const roundsInput =
-    rawData.rounds && typeof rawData.rounds === "object" ? rawData.rounds : {};
-  const thirdPlaceMatchInput =
-    rawData.thirdPlaceMatch && typeof rawData.thirdPlaceMatch === "object"
-      ? rawData.thirdPlaceMatch
-      : null;
-  const prizeSelectionsLockedAtMs = normalizeFiniteNumber(
-    rawData.prizeSelectionsLockedAtMs,
-    NaN,
-  );
-  const participants = {};
-  const rounds = {};
-  Object.keys(participantsInput).forEach((profileId) => {
-    const participantValue = participantsInput[profileId];
-    if (!participantValue || typeof participantValue !== "object") {
-      return;
-    }
-    participants[profileId] = (0, exports.decodeEventParticipantView)(
-      participantValue,
-      profileId,
-    );
-  });
-  Object.keys(roundsInput).forEach((roundKey) => {
-    const roundValue = roundsInput[roundKey];
-    if (!roundValue || typeof roundValue !== "object") {
-      return;
-    }
-    rounds[roundKey] = (0, exports.decodeEventRoundView)(
-      roundValue,
-      normalizeFiniteNumber(roundKey, 0),
-    );
-  });
-  return {
-    schemaVersion: normalizeFiniteNumber(rawData.schemaVersion, 1),
-    eventId,
-    status:
-      rawData.status === "active" ||
-      rawData.status === "ended" ||
-      rawData.status === "dismissed"
-        ? rawData.status
-        : "scheduled",
-    isSundayMons: rawData.isSundayMons === true,
-    createdAtMs: normalizeFiniteNumber(rawData.createdAtMs, 0),
-    updatedAtMs: normalizeFiniteNumber(rawData.updatedAtMs, 0),
-    startAtMs: normalizeFiniteNumber(rawData.startAtMs, 0),
-    startedAtMs: Number.isFinite(
-      normalizeFiniteNumber(rawData.startedAtMs, NaN),
-    )
-      ? normalizeFiniteNumber(rawData.startedAtMs, NaN)
-      : null,
-    endedAtMs: Number.isFinite(normalizeFiniteNumber(rawData.endedAtMs, NaN))
-      ? normalizeFiniteNumber(rawData.endedAtMs, NaN)
-      : null,
-    createdByProfileId: normalizeString(rawData.createdByProfileId),
-    createdByLoginUid: normalizeString(rawData.createdByLoginUid),
-    createdByUsername: normalizeString(rawData.createdByUsername),
-    winnerProfileId: normalizeStringOrNull(rawData.winnerProfileId),
-    winnerDisplayName: normalizeStringOrNull(rawData.winnerDisplayName),
-    currentRoundIndex: Number.isFinite(
-      normalizeFiniteNumber(rawData.currentRoundIndex, NaN),
-    )
-      ? normalizeFiniteNumber(rawData.currentRoundIndex, NaN)
-      : null,
-    bracketSize: normalizeFiniteNumber(rawData.bracketSize, 0),
-    roundCount: normalizeFiniteNumber(rawData.roundCount, 0),
-    thirdPlaceMatch: thirdPlaceMatchInput
-      ? (0, exports.decodeEventMatchView)(
-          thirdPlaceMatchInput,
-          event_types_js_1.THIRD_PLACE_MATCH_KEY,
-        )
-      : null,
-    prizeSelectionsLockedAtMs: Number.isFinite(prizeSelectionsLockedAtMs)
-      ? prizeSelectionsLockedAtMs
-      : null,
-    prizeAssignments: (0, exports.decodeEventPrizeAssignmentsView)(
-      rawData.prizeAssignments,
-      eventId,
-    ),
-    participants,
-    rounds,
-  };
-};
 exports.decodeEventView = decodeEventView;
+const event_prizes_js_1 = require("./event-prizes.js");
+const ids_js_1 = require("./ids.js");
+const appearance_js_1 = require("./appearance.js");
+const event_types_js_1 = require("./event-types.js");
+const isRecord = (value) =>
+  value !== null && typeof value === "object" && !Array.isArray(value);
+const exactRecord = (value, keys) =>
+  isRecord(value) &&
+  Object.keys(value).length === keys.length &&
+  keys.every((key) => Object.hasOwn(value, key));
+const key = (value) =>
+  typeof value === "string" &&
+  value.trim() === value &&
+  (0, ids_js_1.isSafeRecordKey)(value);
+const integer = (value) =>
+  typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
+const nullableInteger = (value) => value === null || integer(value);
+const nullableKey = (value) => value === null || key(value);
+const text = (value) =>
+  typeof value === "string" &&
+  new TextEncoder().encode(value).byteLength <= 256;
+const nullableText = (value) => value === null || text(value);
+function isEventAnnouncements(value) {
+  return (
+    exactRecord(value, ["invite", "matches", "results"]) &&
+    typeof value.invite === "boolean" &&
+    typeof value.matches === "boolean" &&
+    typeof value.results === "boolean"
+  );
+}
+function isEventParticipantRecord(value) {
+  if (
+    !exactRecord(value, [
+      "profileId",
+      "loginUid",
+      "username",
+      "displayName",
+      "emojiId",
+      "aura",
+      "joinedAtMs",
+      "state",
+      "eliminatedRoundIndex",
+      "eliminatedByProfileId",
+    ]) ||
+    !key(value.profileId) ||
+    !nullableKey(value.loginUid) ||
+    !text(value.username) ||
+    !text(value.displayName) ||
+    !(0, appearance_js_1.isEmojiId)(value.emojiId) ||
+    !(0, appearance_js_1.isAura)(value.aura) ||
+    !integer(value.joinedAtMs)
+  )
+    return false;
+  if (value.state === "active" || value.state === "winner") {
+    return (
+      value.eliminatedRoundIndex === null &&
+      value.eliminatedByProfileId === null
+    );
+  }
+  return (
+    value.state === "eliminated" &&
+    integer(value.eliminatedRoundIndex) &&
+    value.eliminatedRoundIndex < 5 &&
+    nullableKey(value.eliminatedByProfileId)
+  );
+}
+function isEventParticipants(value) {
+  return (
+    isRecord(value) &&
+    Object.keys(value).length <= 32 &&
+    Object.entries(value).every(
+      ([profileId, participant]) =>
+        key(profileId) &&
+        isEventParticipantRecord(participant) &&
+        participant.profileId === profileId,
+    )
+  );
+}
+function matchSlot(value, slot) {
+  const profileId = value[`${slot}ProfileId`];
+  const loginUid = value[`${slot}LoginUid`];
+  const displayName = value[`${slot}DisplayName`];
+  const emojiId = value[`${slot}EmojiId`];
+  const aura = value[`${slot}Aura`];
+  if (profileId === null) {
+    return (
+      loginUid === null &&
+      displayName === null &&
+      emojiId === null &&
+      aura === null
+    );
+  }
+  return (
+    key(profileId) &&
+    key(loginUid) &&
+    text(displayName) &&
+    (0, appearance_js_1.isEmojiId)(emojiId) &&
+    (0, appearance_js_1.isAura)(aura)
+  );
+}
+function isEventMatchRecord(value) {
+  if (
+    !exactRecord(value, [
+      "matchKey",
+      "inviteId",
+      "status",
+      "resolvedAtMs",
+      "winnerDisqualified",
+      "winnerProfileId",
+      "loserProfileId",
+      "hostSlotBlocked",
+      "hostProfileId",
+      "hostLoginUid",
+      "hostDisplayName",
+      "hostEmojiId",
+      "hostAura",
+      "guestSlotBlocked",
+      "guestProfileId",
+      "guestLoginUid",
+      "guestDisplayName",
+      "guestEmojiId",
+      "guestAura",
+    ]) ||
+    !(
+      typeof value.matchKey === "string" &&
+      (value.matchKey === event_types_js_1.THIRD_PLACE_MATCH_KEY ||
+        /^(0|[1-4])_(0|[1-9]|1[0-5])$/.test(value.matchKey))
+    ) ||
+    !nullableKey(value.inviteId) ||
+    !nullableInteger(value.resolvedAtMs) ||
+    typeof value.winnerDisqualified !== "boolean" ||
+    !nullableKey(value.winnerProfileId) ||
+    !nullableKey(value.loserProfileId) ||
+    typeof value.hostSlotBlocked !== "boolean" ||
+    typeof value.guestSlotBlocked !== "boolean" ||
+    !matchSlot(value, "host") ||
+    !matchSlot(value, "guest")
+  )
+    return false;
+  if (
+    value.hostProfileId !== null &&
+    value.hostProfileId === value.guestProfileId
+  )
+    return false;
+  if (value.hostLoginUid !== null && value.hostLoginUid === value.guestLoginUid)
+    return false;
+  if (value.status === "upcoming" || value.status === "pending") {
+    return (
+      value.resolvedAtMs === null &&
+      value.winnerProfileId === null &&
+      value.loserProfileId === null &&
+      (value.status === "upcoming"
+        ? value.inviteId === null
+        : value.winnerDisqualified ||
+          (key(value.inviteId) &&
+            key(value.hostProfileId) &&
+            key(value.guestProfileId)))
+    );
+  }
+  if (!integer(value.resolvedAtMs)) return false;
+  if (value.status === "host" || value.status === "guest") {
+    return (
+      key(value.winnerProfileId) &&
+      value.winnerProfileId ===
+        (value.status === "host"
+          ? value.hostProfileId
+          : value.guestProfileId) &&
+      value.loserProfileId ===
+        (value.status === "host" ? value.guestProfileId : value.hostProfileId)
+    );
+  }
+  return (
+    value.status === "bye" &&
+    value.loserProfileId === null &&
+    (value.winnerProfileId === null ||
+      value.winnerProfileId === value.hostProfileId ||
+      value.winnerProfileId === value.guestProfileId)
+  );
+}
+function isEventMatches(value) {
+  return (
+    isRecord(value) &&
+    Object.keys(value).length <= 16 &&
+    Object.entries(value).every(
+      ([matchKey, match]) =>
+        isEventMatchRecord(match) &&
+        match.matchKey === matchKey &&
+        matchKey !== event_types_js_1.THIRD_PLACE_MATCH_KEY,
+    )
+  );
+}
+function isEventRoundRecord(value) {
+  if (
+    !exactRecord(value, [
+      "roundIndex",
+      "status",
+      "createdAtMs",
+      "completedAtMs",
+      "matches",
+    ]) ||
+    !integer(value.roundIndex) ||
+    value.roundIndex >= 5 ||
+    !integer(value.createdAtMs) ||
+    !nullableInteger(value.completedAtMs) ||
+    !isEventMatches(value.matches) ||
+    !Object.keys(value.matches).every((matchKey) =>
+      matchKey.startsWith(`${value.roundIndex}_`),
+    )
+  )
+    return false;
+  if (value.status === "upcoming" || value.status === "active")
+    return value.completedAtMs === null;
+  return (
+    value.status === "completed" &&
+    integer(value.completedAtMs) &&
+    Object.keys(value.matches).length > 0 &&
+    Object.values(value.matches).every(
+      (match) =>
+        match.status === "host" ||
+        match.status === "guest" ||
+        match.status === "bye" ||
+        match.winnerDisqualified,
+    )
+  );
+}
+function isEventRounds(value) {
+  return (
+    isRecord(value) &&
+    Object.keys(value).length <= 5 &&
+    Object.entries(value).every(
+      ([roundKey, round]) =>
+        isEventRoundRecord(round) && String(round.roundIndex) === roundKey,
+    )
+  );
+}
+function isEventPrizeAssignments(value, eventId) {
+  if (!isRecord(value)) return false;
+  const profileIds = new Set();
+  const prizeIds = new Set();
+  for (const [place, assignment] of Object.entries(value)) {
+    if (
+      !["1", "2", "3"].includes(place) ||
+      !(0, event_prizes_js_1.isEventPrizeAssignmentWireRecord)(assignment) ||
+      assignment.eventId !== eventId ||
+      String(assignment.place) !== place ||
+      profileIds.has(assignment.profileId) ||
+      prizeIds.has(assignment.prizeId)
+    )
+      return false;
+    profileIds.add(assignment.profileId);
+    prizeIds.add(assignment.prizeId);
+  }
+  return true;
+}
+function isRoundByes(value) {
+  return (
+    isRecord(value) &&
+    Object.entries(value).every(
+      ([round, bye]) =>
+        /^[0-4]$/.test(round) &&
+        exactRecord(bye, ["profileId", "reason"]) &&
+        key(bye.profileId) &&
+        (bye.reason === "preferred" || bye.reason === "random"),
+    )
+  );
+}
+function isEventRecord(value) {
+  if (
+    !exactRecord(value, [
+      "schemaVersion",
+      "eventId",
+      "isSundayMons",
+      "status",
+      "createdAtMs",
+      "updatedAtMs",
+      "startAtMs",
+      "startedAtMs",
+      "endedAtMs",
+      "createdByProfileId",
+      "createdByLoginUid",
+      "createdByUsername",
+      "winnerProfileId",
+      "winnerDisplayName",
+      "currentRoundIndex",
+      "bracketFormat",
+      "bracketSize",
+      "roundCount",
+      "roundByes",
+      "telegramAnnouncements",
+      "telegramDeliveryVersion",
+      "supportsThirdPlaceMatch",
+      "thirdPlaceMatch",
+      "prizeSelectionsLockedAtMs",
+      "prizeAssignments",
+      "participants",
+      "rounds",
+    ]) ||
+    value.schemaVersion !== 3 ||
+    !key(value.eventId) ||
+    typeof value.isSundayMons !== "boolean" ||
+    !integer(value.createdAtMs) ||
+    !integer(value.updatedAtMs) ||
+    !integer(value.startAtMs) ||
+    !nullableInteger(value.startedAtMs) ||
+    !nullableInteger(value.endedAtMs) ||
+    !key(value.createdByProfileId) ||
+    !key(value.createdByLoginUid) ||
+    !text(value.createdByUsername) ||
+    !nullableKey(value.winnerProfileId) ||
+    !nullableText(value.winnerDisplayName) ||
+    !nullableInteger(value.currentRoundIndex) ||
+    (value.bracketFormat !== "fixed" &&
+      value.bracketFormat !== "archived-rolling") ||
+    !integer(value.bracketSize) ||
+    !integer(value.roundCount) ||
+    !isRoundByes(value.roundByes) ||
+    !isEventAnnouncements(value.telegramAnnouncements) ||
+    value.telegramDeliveryVersion !== 2 ||
+    typeof value.supportsThirdPlaceMatch !== "boolean" ||
+    !(
+      value.thirdPlaceMatch === null ||
+      (isEventMatchRecord(value.thirdPlaceMatch) &&
+        value.thirdPlaceMatch.matchKey ===
+          event_types_js_1.THIRD_PLACE_MATCH_KEY)
+    ) ||
+    !nullableInteger(value.prizeSelectionsLockedAtMs) ||
+    !isEventPrizeAssignments(value.prizeAssignments, value.eventId) ||
+    !isEventParticipants(value.participants) ||
+    !isEventRounds(value.rounds)
+  )
+    return false;
+  if (!value.supportsThirdPlaceMatch && value.thirdPlaceMatch !== null)
+    return false;
+  if (value.winnerProfileId === null && value.winnerDisplayName !== null)
+    return false;
+  if (value.bracketFormat === "archived-rolling") {
+    const roundCount = value.roundCount;
+    if (
+      value.status !== "ended" ||
+      value.bracketSize !== 0 ||
+      value.roundCount < 1 ||
+      value.roundCount > 5 ||
+      !integer(value.startedAtMs) ||
+      !integer(value.endedAtMs) ||
+      value.currentRoundIndex !== value.roundCount - 1 ||
+      value.winnerProfileId === null ||
+      Object.keys(value.rounds).length !== value.roundCount ||
+      Object.keys(value.roundByes).some((round) => Number(round) >= roundCount)
+    )
+      return false;
+    let advancing = new Set(Object.keys(value.participants));
+    if (advancing.size < 2 || advancing.size > 32) return false;
+    for (let index = 0; index < value.roundCount; index++) {
+      const round = value.rounds[String(index)],
+        bye = value.roundByes[String(index)];
+      if (
+        !round ||
+        round.status !== "completed" ||
+        Object.keys(round.matches).length !== Math.floor(advancing.size / 2) ||
+        Boolean(bye) !== (advancing.size % 2 === 1)
+      )
+        return false;
+      const competing = new Set(),
+        next = new Set();
+      for (const match of Object.values(round.matches)) {
+        if (
+          (match.status !== "host" && match.status !== "guest") ||
+          match.winnerDisqualified ||
+          match.hostProfileId === null ||
+          match.guestProfileId === null ||
+          match.winnerProfileId === null ||
+          !advancing.has(match.hostProfileId) ||
+          !advancing.has(match.guestProfileId) ||
+          competing.has(match.hostProfileId) ||
+          competing.has(match.guestProfileId)
+        )
+          return false;
+        competing.add(match.hostProfileId);
+        competing.add(match.guestProfileId);
+        next.add(match.winnerProfileId);
+      }
+      if (bye) {
+        if (!advancing.has(bye.profileId) || competing.has(bye.profileId))
+          return false;
+        competing.add(bye.profileId);
+        next.add(bye.profileId);
+      }
+      if (competing.size !== advancing.size) return false;
+      advancing = next;
+    }
+    return advancing.size === 1 && advancing.has(value.winnerProfileId);
+  }
+  if (Object.keys(value.roundByes).length !== 0) return false;
+  if (value.status === "scheduled" || value.status === "dismissed") {
+    return (
+      value.startedAtMs === null &&
+      (value.status === "scheduled"
+        ? value.endedAtMs === null
+        : integer(value.endedAtMs)) &&
+      value.currentRoundIndex === null &&
+      value.bracketSize === 0 &&
+      value.roundCount === 0 &&
+      value.winnerProfileId === null &&
+      value.winnerDisplayName === null &&
+      value.thirdPlaceMatch === null &&
+      Object.keys(value.rounds).length === 0 &&
+      Object.values(value.participants).every(
+        (participant) => participant.state === "active",
+      )
+    );
+  }
+  if (
+    (value.status !== "active" && value.status !== "ended") ||
+    !integer(value.startedAtMs) ||
+    !integer(value.currentRoundIndex) ||
+    ![2, 4, 8, 16, 32].includes(value.bracketSize) ||
+    value.roundCount !== Math.log2(value.bracketSize) ||
+    value.currentRoundIndex >= value.roundCount ||
+    Object.keys(value.rounds).length !== value.roundCount
+  )
+    return false;
+  for (let index = 0; index < value.roundCount; index += 1) {
+    const round = value.rounds[String(index)];
+    if (
+      !round ||
+      Object.keys(round.matches).length !== value.bracketSize / 2 ** (index + 1)
+    )
+      return false;
+  }
+  if (value.status === "active") {
+    return (
+      value.endedAtMs === null &&
+      value.winnerProfileId === null &&
+      value.winnerDisplayName === null
+    );
+  }
+  return integer(value.endedAtMs);
+}
+function parseEventRecord(value) {
+  if (!isEventRecord(value)) throw new TypeError("invalid-canonical-event");
+  return value;
+}
+function decodeEventParticipantView(value, profileId) {
+  if (!isEventParticipantRecord(value) || value.profileId !== profileId) {
+    throw new TypeError("invalid-canonical-event-participant");
+  }
+  return value;
+}
+function decodeEventMatchView(value, matchKey) {
+  if (!isEventMatchRecord(value) || value.matchKey !== matchKey) {
+    throw new TypeError("invalid-canonical-event-match");
+  }
+  return value;
+}
+function decodeEventRoundView(value, roundIndex) {
+  if (!isEventRoundRecord(value) || value.roundIndex !== roundIndex) {
+    throw new TypeError("invalid-canonical-event-round");
+  }
+  return value;
+}
+function normalizeEventPrizeId(value, eventId) {
+  return typeof value === "string" &&
+    (0, event_prizes_js_1.isEventPrizeId)(eventId, value)
+    ? value
+    : null;
+}
+function decodeEventPrizeAssignmentView(value, eventId) {
+  return (0, event_prizes_js_1.isEventPrizeAssignmentWireRecord)(value) &&
+    value.eventId === eventId
+    ? value
+    : null;
+}
+function decodeEventPrizeAssignmentsView(value, eventId) {
+  if (!isEventPrizeAssignments(value, eventId))
+    throw new TypeError("invalid-canonical-event-prizes");
+  return value;
+}
+function decodeEventView(value, eventId) {
+  return isEventRecord(value) && value.eventId === eventId ? value : null;
+}

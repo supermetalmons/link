@@ -1,5 +1,9 @@
 import { parseEventProfileGameProjectionOutbox } from "../profileGameProjectionOutbox.ts";
 import { parseEventProjectionOutbox } from "../telegramProjectionOutbox.ts";
+import {
+  retainEventProjectionOutbox,
+  type EventProjectionOutboxDocument,
+} from "../../../../runtime/eventProjectionOutboxRecords.js";
 import { runOptimisticTransaction } from "../optimisticTransaction.ts";
 import {
   eventLeaseGuard,
@@ -27,7 +31,7 @@ import {
 type ProjectionClaim = { expectedTimestamp: number; nowMs: number };
 type ProjectionOutboxWrite = {
   recordJson: string;
-  raw: unknown;
+  raw: EventProjectionOutboxDocument<ProjectionOutboxKind>;
   parsed:
     | NonNullable<ReturnType<typeof parseEventProfileGameProjectionOutbox>>
     | NonNullable<ReturnType<typeof parseEventProjectionOutbox>>;
@@ -45,12 +49,12 @@ async function mutateProjectionOutbox(
 ): Promise<boolean> {
   const table =
     kind === "profile-game"
-      ? "event_profile_game_projection_outboxes"
-      : "event_telegram_projection_outboxes";
+      ? "event_profile_game_projection_outboxes_canonical"
+      : "event_telegram_projection_outboxes_canonical";
   let seededRecordJson = initialRecordJson;
   const transaction = await runOptimisticTransaction({
     maxAttempts: MAX_EVENT_TRANSACTION_ATTEMPTS,
-    signal: options.signal,
+    ...(options.signal ? { signal: options.signal } : {}),
     async read() {
       if (seededRecordJson !== undefined) {
         const record_json = seededRecordJson;
@@ -63,12 +67,14 @@ async function mutateProjectionOutbox(
     },
     getValue: (row) => row,
     decide(row): { commit: false } | { value: ProjectionOutboxWrite } {
-      const raw = row ? decodeJson(row.record_json) : null;
+      const raw = row
+        ? retainEventProjectionOutbox(kind, decodeJson(row.record_json))
+        : null;
       const parsed =
         kind === "profile-game"
           ? parseEventProfileGameProjectionOutbox(raw)
           : parseEventProjectionOutbox(raw);
-      if (!row || !parsed || parsed.requestId !== requestId)
+      if (!row || !raw || !parsed || parsed.requestId !== requestId)
         return { commit: false };
       const timestamp =
         "lastQueuedAtMs" in parsed ? parsed.lastQueuedAtMs : parsed.updatedAtMs;
@@ -85,7 +91,7 @@ async function mutateProjectionOutbox(
       let mutation: D1PreparedStatement;
       if (claim) {
         const next = validateProjectionOutbox(kind, eventId, {
-          ...(raw as Record<string, unknown>),
+          ...raw,
           ...(kind === "profile-game"
             ? { lastQueuedAtMs: claim.nowMs }
             : {
@@ -101,7 +107,7 @@ async function mutateProjectionOutbox(
           kind === "profile-game"
             ? db
                 .prepare(
-                  `UPDATE event_profile_game_projection_outboxes
+                  `UPDATE event_profile_game_projection_outboxes_canonical
                  SET request_id = ?, status = 'pending', last_queued_at_ms = ?,
                    record_json = ${canonical ? "json_set(record_json, '$.lastQueuedAtMs', CAST(? AS INTEGER))" : "?"}
                  WHERE event_id = ? AND status = 'pending' AND record_json = ?`,
@@ -115,7 +121,7 @@ async function mutateProjectionOutbox(
                 )
             : db
                 .prepare(
-                  `UPDATE event_telegram_projection_outboxes
+                  `UPDATE event_telegram_projection_outboxes_canonical
                  SET request_id = ?, status = 'pending', first_queued_at_ms = ?,
                    updated_at_ms = ?, record_json = ${canonical ? "json_set(record_json, '$.firstQueuedAtMs', CAST(? AS INTEGER), '$.updatedAtMs', CAST(? AS INTEGER))" : "?"}
                  WHERE event_id = ? AND status = 'pending' AND record_json = ?`,
@@ -148,7 +154,7 @@ async function mutateProjectionOutbox(
           .batch(statements)
           .catch((error) => rethrowEventBatchFailure(db, error, options));
         return {
-          applied: results[results.length - 1].meta.changes === 1,
+          applied: results[results.length - 1]!.meta.changes === 1,
           value: row,
         };
       } catch (error) {

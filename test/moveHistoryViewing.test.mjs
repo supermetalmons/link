@@ -1,3 +1,4 @@
+import { canonicalMatch, required } from "./fixtures/canonicalData.mjs";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
@@ -51,28 +52,33 @@ function gameWithMoves() {
 function harness({ historical = true, online = true, flipped = true } = {}) {
   const liveGame = gameWithMoves();
   const historicalGame = gameWithMoves();
-  const earlierGame = MonsRules.Game.fromFen(
-    historicalGame.trackingEntries[0].fen,
+  const earlierGame = required(
+    MonsRules.Game.fromFen(required(historicalGame.trackingEntries[0]).fen),
   );
+  /** @type {import("@mons/shared/game-sessions").HistoricalMatchPair} */
   const pair = {
     matchId: "match-0",
     hostPlayerId: "host",
     guestPlayerId: "guest",
-    hostMatch: {
+    hostMatch: canonicalMatch({
       color: "white",
       emojiId: 1,
-      aura: "",
+      aura: "none",
       fen: historicalGame.toFen(),
-    },
-    guestMatch: {
+    }),
+    guestMatch: canonicalMatch({
       color: "black",
       emojiId: 2,
-      aura: "",
+      aura: "none",
       fen: historicalGame.toFen(),
-    },
+    }),
   };
+  /**
+   * @type {import("@mons/shared/game-sessions").HistoricalMatchPair | PromiseLike<import("@mons/shared/game-sessions").HistoricalMatchPair | null> | null}
+   */
   let archivedPair = null;
   let nextTimeoutId = 0;
+  /** @type {Map<number, () => void>} */
   const timeouts = new Map();
   const viewer = createRematchViewingHarness({
     selection: historical
@@ -87,7 +93,9 @@ function harness({ historical = true, online = true, flipped = true } = {}) {
     },
     clearTimeout: (id) => timeouts.delete(id),
   });
+  /** @type {Array<[string, ...unknown[]]>} */
   const events = [];
+  /** @type {{boardViewMode: "historicalView" | "activeLive"; boardRenderSessionId: number; moveHistoryFlipOverrideEnabled: boolean; moveHistoryFlipOverrideSessionId: number | null; moveHistoryFlipOverrideBaseBoardFlipped: boolean | null; playerSideColor: MonsRules.Color; isMoveHistoryPopupOpen: boolean; flashbackMode: boolean; flashbackStateGame: MonsRules.Game | null; game: MonsRules.Game; currentInputs: string[]; isOnlineGame: boolean; isWatchOnly: boolean; puzzleMode: boolean; isGameWithBot: boolean}} */
   const initial = {
     boardViewMode: historical ? "historicalView" : "activeLive",
     boardRenderSessionId: 1,
@@ -108,10 +116,16 @@ function harness({ historical = true, online = true, flipped = true } = {}) {
   const board = {
     isFlipped: flipped,
     metadataSwapped: false,
+    /**
+     * @param {boolean} value
+     */
     setBoardFlipped(value) {
       board.isFlipped = value;
       events.push(["flip", value]);
     },
+    /**
+     * @param {boolean} value
+     */
     setBoardMetadataDisplaySwapped(value) {
       board.metadataSwapped = value;
       events.push(["metadata", value]);
@@ -120,6 +134,8 @@ function harness({ historical = true, online = true, flipped = true } = {}) {
     hideItemSelectionOrConfirmationOverlay: () =>
       events.push(["clearSelection"]),
   };
+  /** @typedef {{state(): typeof initial & {selection: ReturnType<typeof viewer.getSelection>}; setState(values: Partial<typeof initial>): void; flip: typeof import("../src/game/gameController.ts").didToggleMoveHistoryBoardFlip; dismiss: typeof import("../src/game/gameController.ts").didDismissMoveHistoryPopup; selectMove: typeof import("../src/game/gameController.ts").didSelectVerboseTrackingEntity; open: typeof import("../src/game/gameController.ts").didOpenMoveHistoryPopup; orientation(matchId: string, pair: import("@mons/shared/game-sessions").HistoricalMatchPair): boolean; navigator: typeof import("../src/game/gameController.ts").getRematchSeriesNavigatorItems; refreshArchive(): void; nextRender(): void}} HistoryApi */
+  /** @type {HistoryApi} */
   let api;
   const dependencies = {
     initial,
@@ -142,16 +158,18 @@ function harness({ historical = true, online = true, flipped = true } = {}) {
     },
     isCreateInviteRoute: () => true,
     getViewedMatchPlayerColor: () => "black",
-    setNewBoard: (flashback) =>
+    setNewBoard: (/** @type {boolean} */ flashback) =>
       events.push(["board", flashback, api.state().flashbackStateGame]),
-    updateWagerDisplayForMoveNavigation: (...args) =>
-      events.push(["wagerMove", ...args]),
+    updateWagerDisplayForMoveNavigation: (
+      /** @type {[number, number]} */ ...args
+    ) => events.push(["wagerMove", ...args]),
     applyWagerState: () => events.push(["wager"]),
     triggerMoveHistoryPopupReload: () => events.push(["reload"]),
     syncInviteBotIntoLocalGameButton: () => events.push(["inviteBot"]),
-    updateBoardMoveStatuses: (...args) => events.push(["statuses", ...args]),
+    updateBoardMoveStatuses: (/** @type {unknown[]} */ ...args) =>
+      events.push(["statuses", ...args]),
     refreshDisplayedMatchPresentation: () =>
-      events.push(["appearance", viewer.getSelection().pair]),
+      events.push(["appearance", required(viewer.getSelection()).pair]),
   };
   const keys = Object.keys(initial);
   const { outputText } = ts.transpileModule(
@@ -171,8 +189,10 @@ function harness({ historical = true, online = true, flipped = true } = {}) {
     };`,
     { compilerOptions: { target: ts.ScriptTarget.ES2022 } },
   );
-  api = new Function(...Object.keys(dependencies), outputText)(
-    ...Object.values(dependencies),
+  api = /** @type {HistoryApi} */ (
+    new Function(...Object.keys(dependencies), outputText)(
+      ...Object.values(dependencies),
+    )
   );
   return {
     ...api,
@@ -183,11 +203,11 @@ function harness({ historical = true, online = true, flipped = true } = {}) {
     historicalGame,
     earlierGame,
     events,
-    archive: (value) => {
+    archive: (/** @type {typeof archivedPair} */ value) => {
       archivedPair = value;
     },
     runArchive: async () => {
-      const [id, callback] = timeouts.entries().next().value;
+      const [id, callback] = required(timeouts.entries().next().value);
       timeouts.delete(id);
       callback();
       await new Promise((resolve) => setImmediate(resolve));
@@ -200,7 +220,7 @@ test("dismissing historical move history restores the selected complete game and
   h.dismiss();
   const state = h.state();
   assert.equal(state.boardViewMode, "historicalView");
-  assert.equal(state.selection.game, h.historicalGame);
+  assert.equal(required(state.selection).game, h.historicalGame);
   assert.equal(state.flashbackStateGame, h.historicalGame);
   assert.equal(state.flashbackMode, true);
   assert.equal(state.isMoveHistoryPopupOpen, false);
@@ -210,7 +230,7 @@ test("dismissing historical move history restores the selected complete game and
     h.events.map(([name]) => name),
     ["clearHighlights", "clearSelection", "board", "wager", "inviteBot"],
   );
-  assert.equal(h.events[2][1], true);
+  assert.equal(required(h.events[2])[1], true);
 });
 
 test("dismissing live flashback restores live orientation and board without entering historical view", () => {
@@ -224,7 +244,7 @@ test("dismissing live flashback restores live orientation and board without ente
     h.events.map(([name]) => name),
     ["flip", "board", "wager", "inviteBot"],
   );
-  assert.equal(h.events[1][1], false);
+  assert.equal(required(h.events[1])[1], false);
 });
 
 test("flip toggles restore the original orientation and metadata while retaining a scrubbed game", () => {
@@ -233,7 +253,7 @@ test("flip toggles restore the original orientation and metadata while retaining
   h.flip(0);
   assert.equal(h.board.isFlipped, false);
   assert.equal(h.board.metadataSwapped, true);
-  assert.equal(h.state().selection.game, h.historicalGame);
+  assert.equal(required(h.state().selection).game, h.historicalGame);
   assert.equal(h.state().flashbackStateGame, h.earlierGame);
   assert.deepEqual(
     h.events.map(([name]) => name),
@@ -307,7 +327,7 @@ test("archival appearance refresh preserves the selected and scrubbed gameplay m
   h.archive({
     ...h.pair,
     hostMatch: {
-      ...h.pair.hostMatch,
+      ...required(h.pair.hostMatch),
       emojiId: 7,
       aura: "rainbow",
       fen: "new-fen",
@@ -315,9 +335,15 @@ test("archival appearance refresh preserves the selected and scrubbed gameplay m
   });
   await h.runArchive();
   assert.equal(h.state().flashbackStateGame, scrubbed);
-  assert.equal(h.state().selection.game, h.historicalGame);
-  assert.equal(h.state().selection.pair.hostMatch.fen, h.pair.hostMatch.fen);
-  assert.equal(h.state().selection.pair.hostMatch.emojiId, 7);
+  assert.equal(required(h.state().selection).game, h.historicalGame);
+  assert.equal(
+    required(required(h.state().selection).pair.hostMatch).fen,
+    required(h.pair.hostMatch).fen,
+  );
+  assert.equal(
+    required(required(h.state().selection).pair.hostMatch).emojiId,
+    7,
+  );
   assert.deepEqual(
     h.events.map(([name]) => name),
     ["appearance", "reload"],

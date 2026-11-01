@@ -7,15 +7,16 @@ import {
   readDelivery,
   readPendingDelete,
   DeliverySnapshot,
-  PendingDeleteSnapshot,
   deliveryDocument,
-  pendingDeleteDocument,
 } from "./deliveryState.js";
 import { normalizeTimestamp } from "./deliveryPolicy.js";
 
 import { readProperty } from "./values.js";
 import type { TelegramMessageDocument } from "./records.js";
-type RawRecord = Record<string, unknown>;
+import {
+  requireTelegramMessageDocument,
+  requireTelegramTransaction,
+} from "./recordCodec.js";
 
 type ClearRateLimitProofRecordInput = {
   owner: string;
@@ -25,7 +26,7 @@ export function clearRateLimitProofRecord(
   input: ClearRateLimitProofRecordInput,
 ): TransactionDecision<TelegramMessageDocument> {
   const { owner } = input;
-  const apply = (record: RawRecord) => {
+  const apply = (record: TelegramMessageDocument) => {
     const delivery = readDelivery(record.delivery);
     const pendingDelete = readPendingDelete(delivery.pendingDelete);
     const clearsDesired =
@@ -57,8 +58,7 @@ export function clearRateLimitProofRecord(
       decision: "rate-limit-proof-marker-cleared",
     };
   };
-  const output: unknown = apply(asObject(current));
-  return output as TransactionDecision<TelegramMessageDocument>;
+  return requireTelegramTransaction(apply(current));
 }
 
 type PrepareDesiredGateRecordInput = {
@@ -73,7 +73,7 @@ export function prepareDesiredGateRecord(
   input: PrepareDesiredGateRecordInput,
 ): TelegramMessageDocument {
   const { generation, messageKey, preparedAtMs, revision } = input;
-  const apply = (record: RawRecord) => {
+  const apply = (record: TelegramMessageDocument) => {
     const existingOwner = normalizeString(delivery.apiGateOwner);
     return {
       ...record,
@@ -89,8 +89,7 @@ export function prepareDesiredGateRecord(
       },
     };
   };
-  const output: unknown = apply(asObject(current));
-  return output as TelegramMessageDocument;
+  return requireTelegramMessageDocument(apply(current));
 }
 
 type SettleApiGateRecordInput = {
@@ -102,7 +101,7 @@ export function settleApiGateRecord(
   input: SettleApiGateRecordInput,
 ): TransactionDecision<TelegramMessageDocument> {
   const { field, settleOwner } = input;
-  const apply = (record: RawRecord) => {
+  const apply = (record: TelegramMessageDocument) => {
     const delivery = readDelivery(record.delivery);
     if (delivery.settlementOwner(field) !== settleOwner) {
       return { commit: false, decision: "api-gate-settle-stale" };
@@ -115,18 +114,5 @@ export function settleApiGateRecord(
       decision: "api-gate-settled",
     };
   };
-  const output: unknown = apply(asObject(current));
-  return output as TransactionDecision<TelegramMessageDocument>;
+  return requireTelegramTransaction(apply(current));
 }
-
-const asObject = (value: unknown): Record<string, unknown> => {
-  const retained =
-    value instanceof DeliverySnapshot
-      ? deliveryDocument(value)
-      : value instanceof PendingDeleteSnapshot
-        ? pendingDeleteDocument(value)
-        : value;
-  return retained && typeof retained === "object" && !Array.isArray(retained)
-    ? (retained as Record<string, unknown>)
-    : {};
-};

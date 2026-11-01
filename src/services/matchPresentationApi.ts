@@ -1,3 +1,4 @@
+import { fetchApplicationData } from "./applicationTransport.ts";
 import type {
   ApiUrlPath,
   ApiRequest,
@@ -26,7 +27,7 @@ export const PRESENTATION_REQUEST_TIMEOUT_MS = 5_000;
 
 export class MatchPresentationApiError extends Error {
   readonly code: string;
-  readonly presentation?: MatchPresentation;
+  readonly presentation: MatchPresentation | undefined;
 
   constructor(code: string, presentation?: MatchPresentation) {
     super(code);
@@ -122,18 +123,21 @@ async function requestPresentation(
       assertCurrent();
       const token = tokenProvider ? await tokenProvider(attempt === 1) : null;
       assertCurrent();
-      const response = await fetch(`${PRESENTATION_API_ROOT}${path}`, {
-        method: body ? "POST" : "GET",
-        headers: {
-          Accept: "application/json",
-          ...(token ? { Authorization: `Bearer ${token}` } : {}),
-          ...(body ? { "Content-Type": "application/json" } : {}),
+      const response = await fetchApplicationData(
+        `${PRESENTATION_API_ROOT}${path}`,
+        {
+          method: body ? "POST" : "GET",
+          headers: {
+            Accept: "application/json",
+            ...(token ? { Authorization: `Bearer ${token}` } : {}),
+            ...(body ? { "Content-Type": "application/json" } : {}),
+          },
+          ...(body ? { body: JSON.stringify(body) } : {}),
+          cache: "no-store",
+          redirect: "error",
+          signal: controller.signal,
         },
-        ...(body ? { body: JSON.stringify(body) } : {}),
-        cache: "no-store",
-        redirect: "error",
-        signal: controller.signal,
-      });
+      );
       try {
         assertCurrent();
       } catch (error) {

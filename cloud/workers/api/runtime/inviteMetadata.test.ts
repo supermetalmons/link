@@ -1,3 +1,10 @@
+import { inviteDocumentFixture } from "../test/inviteDocumentFixture.ts";
+import {
+  canonicalMatchEnvironment,
+  runInCanonicalMatchRoom,
+  evictCanonicalMatchRoom,
+  runCanonicalMatchAlarm,
+} from "./canonicalMatchTestFixture.ts";
 import {
   INVITE_METADATA_REFRESH_MS,
   INVITE_METADATA_SOCKET_PROTOCOL,
@@ -7,12 +14,7 @@ import {
   REACTION_HEARTBEAT_REQUEST,
   REACTION_HEARTBEAT_RESPONSE,
 } from "@mons/shared/reactions";
-import {
-  evictDurableObject,
-  runDurableObjectAlarm,
-  runInDurableObject,
-} from "cloudflare:test";
-import { env } from "cloudflare:workers";
+import { env as rawEnv } from "cloudflare:workers";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { InviteChannelsRoom } from "../src/inviteChannelsRoom.ts";
 import { socketTestSessionHeaders } from "../test/socketTestSession.ts";
@@ -30,11 +32,12 @@ type Source = {
 
 const rooms: Room[] = [];
 const sockets: WebSocket[] = [];
-const invite = {
+const env = canonicalMatchEnvironment(rawEnv);
+const invite = inviteDocumentFixture({
   hostId: "host-login",
   hostColor: "white",
   guestId: "guest-login",
-};
+});
 
 function deferred() {
   let resolve!: () => void;
@@ -45,7 +48,7 @@ function deferred() {
 }
 
 async function advanceToAlarm(room: Room): Promise<void> {
-  const scheduled = await runInDurableObject(room, (_instance, state) =>
+  const scheduled = await runInCanonicalMatchRoom(room, (_instance, state) =>
     state.storage.getAlarm(),
   );
   if (scheduled !== null)
@@ -54,11 +57,11 @@ async function advanceToAlarm(room: Room): Promise<void> {
 
 async function runScheduledAlarm(room: Room): Promise<boolean> {
   await advanceToAlarm(room);
-  return runDurableObjectAlarm(room);
+  return runCanonicalMatchAlarm(room);
 }
 
 async function installSource(room: Room, source: Source) {
-  await runInDurableObject(room, (instance) => {
+  await runInCanonicalMatchRoom(room, (instance) => {
     const target = instance as unknown as {
       inviteReader: (inviteId: string) => Promise<unknown>;
       wagerReader: () => Promise<never>;
@@ -153,7 +156,7 @@ afterEach(async () => {
     rooms
       .splice(0)
       .map((room) =>
-        runInDurableObject(room, (_instance, state) =>
+        runInCanonicalMatchRoom(room, (_instance, state) =>
           state.storage.deleteAlarm(),
         ),
       ),
@@ -169,25 +172,45 @@ describe("durable invite metadata", () => {
     expect(await room.readMetadata(inviteId)).toMatchObject({ status: "ok" });
     const client = acceptSocket(await metadataResponse(room, inviteId));
     await client.read();
-    source.value = { ...invite, hostRematches: "1" };
+    source.value = {
+      ...invite,
+      hostRematches: { state: "open", indices: [1] },
+    };
     await room.notifyMetadataChanged(inviteId);
     await runScheduledAlarm(room);
-    expect(JSON.parse(await client.read()).snapshot.hostRematches).toBe("1");
-    await evictDurableObject(room);
+    expect(JSON.parse(await client.read()).snapshot.hostRematches).toEqual({
+      state: "open",
+      indices: [1],
+    });
+    await evictCanonicalMatchRoom(room);
     await installSource(room, source);
-    source.value = { ...invite, hostRematches: "1;2" };
+    source.value = {
+      ...invite,
+      hostRematches: { state: "open", indices: [1, 2] },
+    };
     await runScheduledAlarm(room);
-    expect(JSON.parse(await client.read()).snapshot.hostRematches).toBe("1;2");
+    expect(JSON.parse(await client.read()).snapshot.hostRematches).toEqual({
+      state: "open",
+      indices: [1, 2],
+    });
     expect(source.wagerReads).toBe(0);
-    expect(digest).not.toHaveBeenCalled();
+    const alarmWriterPayload = JSON.stringify({
+      kind: "alarm",
+      request: { objectId: room.id.toString() },
+    });
+    expect(
+      digest.mock.calls.filter(
+        ([, value]) => new TextDecoder().decode(value) !== alarmWriterPayload,
+      ),
+    ).toEqual([]);
   });
 
   it("persists monotonic sanitized snapshots while private-only changes leave the public revision unchanged", async () => {
     const { room, inviteId, source } = await fixture({
       ...invite,
+      kind: "automatch",
       password: "do-not-publish",
       automatchOperationIds: { "host-login": crypto.randomUUID() },
-      wagers: { secret: true },
     });
     const first = await room.readMetadata(inviteId);
     expect(first.status).toBe("ok");
@@ -196,25 +219,29 @@ describe("durable invite metadata", () => {
     expect(first.snapshot).not.toHaveProperty("password");
     expect(first.snapshot).not.toHaveProperty("wagers");
     expect(first.snapshot).not.toHaveProperty("automatchOperationIds");
-    source.value = { ...invite, wagers: { other: true } };
+    source.value = invite;
     const unchanged = await room.readMetadata(inviteId);
     expect(unchanged.status).toBe("ok");
     if (unchanged.status !== "ok") return;
     expect(unchanged.snapshot).toEqual(first.snapshot);
     expect(unchanged.passwordProtected).toBe(false);
-    source.value = { ...invite, hostRematches: "1", guestRematches: "1" };
-    await evictDurableObject(room);
+    source.value = {
+      ...invite,
+      hostRematches: { state: "open", indices: [1] },
+      guestRematches: { state: "open", indices: [1] },
+    };
+    await evictCanonicalMatchRoom(room);
     await installSource(room, source);
     const changed = await room.readMetadata(inviteId);
     expect(changed.status).toBe("ok");
     if (changed.status !== "ok") return;
     expect(changed.snapshot).toMatchObject({
       revision: 2,
-      hostRematches: "1",
-      guestRematches: "1",
+      hostRematches: { state: "open", indices: [1] },
+      guestRematches: { state: "open", indices: [1] },
     });
     expect(
-      await runInDurableObject(room, (_instance, state) =>
+      await runInCanonicalMatchRoom(room, (_instance, state) =>
         state.storage.getAlarm(),
       ),
     ).toBeNull();
@@ -222,7 +249,7 @@ describe("durable invite metadata", () => {
 
   it("coalesces concurrent reads and rejects stale admission instead of sending an old welcome snapshot", async () => {
     const { room, inviteId, source } = await fixture();
-    const result = await runInDurableObject(room, async (instance) => {
+    const result = await runInCanonicalMatchRoom(room, async (instance) => {
       const began = deferred();
       const release = deferred();
       source.read = async () => {
@@ -231,15 +258,22 @@ describe("durable invite metadata", () => {
         await release.promise;
         return captured;
       };
+      const channels = (
+        instance as unknown as { inviteChannels: InviteChannelsRoom }
+      ).inviteChannels;
       const reads = Promise.all([
-        instance.readMetadata(inviteId),
-        instance.readMetadata(inviteId),
-        instance.readMetadata(inviteId),
+        channels.readMetadata(inviteId),
+        channels.readMetadata(inviteId),
+        channels.readMetadata(inviteId),
       ]);
       await began.promise;
-      const admission = instance.fetch(metadataRequest(inviteId));
-      source.value = { ...invite, hostRematches: "1", guestRematches: "1" };
-      source.read = undefined;
+      const admission = channels.fetch(metadataRequest(inviteId), "metadata");
+      source.value = {
+        ...invite,
+        hostRematches: { state: "open", indices: [1] },
+        guestRematches: { state: "open", indices: [1] },
+      };
+      delete source.read;
       release.resolve();
       return { results: await reads, status: (await admission).status };
     });
@@ -255,8 +289,8 @@ describe("durable invite metadata", () => {
     );
     expect(JSON.parse(await client.read()).snapshot).toMatchObject({
       revision: 2,
-      hostRematches: "1",
-      guestRematches: "1",
+      hostRematches: { state: "open", indices: [1] },
+      guestRematches: { state: "open", indices: [1] },
     });
   });
 
@@ -273,7 +307,7 @@ describe("durable invite metadata", () => {
         }),
       );
       await client.read();
-      const results = await runInDurableObject(room, async (instance) => {
+      const results = await runInCanonicalMatchRoom(room, async (instance) => {
         const mutable = instance as unknown as {
           inviteChannels: Pick<
             InviteChannelsRoom,
@@ -304,7 +338,10 @@ describe("durable invite metadata", () => {
         await notifying.promise;
         const generation = mutable.inviteChannels.invalidationGeneration();
         const reads = source.reads;
-        source.value = { ...invite, hostRematches: "1" };
+        source.value = {
+          ...invite,
+          hostRematches: { state: "open", indices: [1] },
+        };
         source.read = async () => {
           const captured = source.value;
           reading.resolve();
@@ -329,8 +366,11 @@ describe("durable invite metadata", () => {
             return pending;
           });
         try {
-          source.value = { ...invite, hostRematches: "1;2" };
-          source.read = undefined;
+          source.value = {
+            ...invite,
+            hostRematches: { state: "open", indices: [1, 2] },
+          };
+          delete source.read;
           continueNotification.resolve();
           await refreshing.promise;
           expect(source.reads - reads).toBe(1);
@@ -358,11 +398,17 @@ describe("durable invite metadata", () => {
       });
       const original = {
         status: "ok",
-        snapshot: { hostRematches: "1", revision: 2 },
+        snapshot: {
+          hostRematches: { state: "open", indices: [1] },
+          revision: 2,
+        },
       };
       const committed = {
         status: "ok",
-        snapshot: { hostRematches: "1;2", revision: 3 },
+        snapshot: {
+          hostRematches: { state: "open", indices: [1, 2] },
+          revision: 3,
+        },
       };
       expect(results.original).toMatchObject(
         channel === "metadata"
@@ -374,11 +420,11 @@ describe("durable invite metadata", () => {
       expect(results.reads).toBe(channel === "wagers" ? 3 : 2);
       expect(source.wagerReads).toBe(channel === "wagers" ? 2 : 0);
       expect(JSON.parse(await client.read()).snapshot).toMatchObject({
-        hostRematches: "1",
+        hostRematches: { state: "open", indices: [1] },
         revision: 2,
       });
       expect(JSON.parse(await client.read()).snapshot).toMatchObject({
-        hostRematches: "1;2",
+        hostRematches: { state: "open", indices: [1, 2] },
         revision: 3,
       });
       client.socket.send(REACTION_HEARTBEAT_REQUEST);
@@ -389,10 +435,13 @@ describe("durable invite metadata", () => {
 
   it("shares a fresh canonical read across simultaneous socket admissions", async () => {
     const { room, inviteId, source } = await fixture();
-    const result = await runInDurableObject(room, async (instance) => {
+    const result = await runInCanonicalMatchRoom(room, async (instance) => {
+      const channels = (
+        instance as unknown as { inviteChannels: InviteChannelsRoom }
+      ).inviteChannels;
       const responses = await Promise.all(
         Array.from({ length: 8 }, () =>
-          instance.fetch(metadataRequest(inviteId)),
+          channels.fetch(metadataRequest(inviteId), "metadata"),
         ),
       );
       const clients = responses.flatMap((response) =>
@@ -410,7 +459,7 @@ describe("durable invite metadata", () => {
 
   it("arms recovery before admission and catches up cumulative rematch state after a missed notification and eviction", async () => {
     const { room, inviteId, source } = await fixture();
-    await runInDurableObject(room, (instance, state) => {
+    await runInCanonicalMatchRoom(room, (instance, state) => {
       const target = instance as unknown as {
         inviteReader: (id: string) => Promise<unknown>;
       };
@@ -424,18 +473,22 @@ describe("durable invite metadata", () => {
     await installSource(room, source);
     expect(isInviteMetadataMessage(JSON.parse(await client.read()))).toBe(true);
     const before = source.reads;
-    source.value = { ...invite, hostRematches: "1;2x", guestRematches: "1;2" };
-    await evictDurableObject(room);
+    source.value = {
+      ...invite,
+      hostRematches: { state: "ended", indices: [1, 2] },
+      guestRematches: { state: "open", indices: [1, 2] },
+    };
+    await evictCanonicalMatchRoom(room);
     await installSource(room, source);
     expect(await runScheduledAlarm(room)).toBe(true);
     expect(source.reads).toBe(before + 1);
     expect(JSON.parse(await client.read()).snapshot).toMatchObject({
       revision: 2,
-      hostRematches: "1;2x",
-      guestRematches: "1;2",
+      hostRematches: { state: "ended", indices: [1, 2] },
+      guestRematches: { state: "open", indices: [1, 2] },
     });
     expect(
-      await runInDurableObject(room, (_instance, state) =>
+      await runInCanonicalMatchRoom(room, (_instance, state) =>
         state.storage.getAlarm(),
       ),
     ).not.toBeNull();
@@ -450,7 +503,7 @@ describe("durable invite metadata", () => {
       await client.read();
       now += INVITE_METADATA_REFRESH_MS;
       clock.mockReturnValue(now);
-      const nextAlarm = await runInDurableObject(
+      const nextAlarm = await runInCanonicalMatchRoom(
         room,
         async (instance, state) => {
           const began = deferred();
@@ -463,20 +516,26 @@ describe("durable invite metadata", () => {
           };
           const reading = instance.alarm();
           await began.promise;
-          source.value = { ...invite, hostRematches: "1" };
+          source.value = {
+            ...invite,
+            hostRematches: { state: "open", indices: [1] },
+          };
           await instance.notifyMetadataChanged(inviteId);
           const scheduled = await state.storage.getAlarm();
-          source.read = undefined;
+          delete source.read;
           release.resolve();
           await reading;
           return scheduled;
         },
       );
       expect(nextAlarm).toBe(now);
-      expect(JSON.parse(await client.read()).snapshot.hostRematches).toBe("1");
+      expect(JSON.parse(await client.read()).snapshot.hostRematches).toEqual({
+        state: "open",
+        indices: [1],
+      });
       expect(await runScheduledAlarm(room)).toBe(true);
       expect(
-        await runInDurableObject(room, (_instance, state) =>
+        await runInCanonicalMatchRoom(room, (_instance, state) =>
           state.storage.getAlarm(),
         ),
       ).toBe(now + INVITE_METADATA_REFRESH_MS);
@@ -505,14 +564,20 @@ describe("durable invite metadata", () => {
     expect(await runScheduledAlarm(room)).toBe(true);
     expect(errors).toHaveBeenCalledOnce();
     expect(
-      await runInDurableObject(room, (_instance, state) =>
+      await runInCanonicalMatchRoom(room, (_instance, state) =>
         state.storage.getAlarm(),
       ),
     ).not.toBeNull();
-    source.read = undefined;
-    source.value = { ...invite, guestRematches: "1" };
+    delete source.read;
+    source.value = {
+      ...invite,
+      guestRematches: { state: "open", indices: [1] },
+    };
     expect(await runScheduledAlarm(room)).toBe(true);
-    expect(JSON.parse(await client.read()).snapshot.guestRematches).toBe("1");
+    expect(JSON.parse(await client.read()).snapshot.guestRematches).toEqual({
+      state: "open",
+      indices: [1],
+    });
     await closeSocket(client.socket);
     const reads = source.reads;
     expect(await runScheduledAlarm(room)).toBe(true);
@@ -535,14 +600,19 @@ describe("durable invite metadata", () => {
       }),
     );
     await host.read();
-    source.value = { ...invite, password: "private" };
+    source.value = { ...invite, kind: "automatch", password: "private" };
     expect((await metadataResponse(room, inviteId)).status).toBe(409);
     const closed = new Promise<number>((resolve) =>
       watcher.socket.addEventListener("close", (event) => resolve(event.code), {
         once: true,
       }),
     );
-    source.value = { ...invite, guestId: null, password: "private" };
+    source.value = {
+      ...invite,
+      kind: "automatch",
+      guestId: null,
+      password: "private",
+    };
     await runScheduledAlarm(room);
     expect(await closed).toBe(1008);
     expect(JSON.parse(await host.read()).snapshot.guestId).toBeNull();
@@ -578,12 +648,15 @@ describe("durable invite metadata", () => {
       matchId: inviteId,
     });
     expect(JSON.parse(await reactions.read()).type).toBe("reaction");
-    source.value = { ...invite, hostRematches: "1" };
+    source.value = {
+      ...invite,
+      hostRematches: { state: "open", indices: [1] },
+    };
     await runScheduledAlarm(room);
     expect(JSON.parse(await metadata.read()).type).toBe("snapshot");
     expect(metadata.messages).toEqual([]);
     expect(reactions.messages).toEqual([]);
-    await evictDurableObject(room);
+    await evictCanonicalMatchRoom(room);
     metadata.socket.send(REACTION_HEARTBEAT_REQUEST);
     expect(await metadata.read()).toBe(REACTION_HEARTBEAT_RESPONSE);
     const closed = new Promise<number>((resolve) =>
@@ -659,7 +732,7 @@ describe("durable invite metadata", () => {
       ),
     );
     expect(
-      await runInDurableObject(
+      await runInCanonicalMatchRoom(
         room,
         (_instance, state) => state.getWebSockets().length,
       ),
@@ -676,9 +749,9 @@ describe("durable invite metadata", () => {
     ).toBe(429);
     expect((await metadataResponse(room, inviteId)).status).toBe(429);
     expect(
-      await runInDurableObject(room, (_instance, state) =>
+      await runInCanonicalMatchRoom(room, (_instance, state) =>
         state.storage.getAlarm(),
       ),
     ).toBeLessThanOrEqual(Date.now() + INVITE_METADATA_REFRESH_MS);
-  });
+  }, 30_000);
 });

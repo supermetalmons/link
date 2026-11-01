@@ -1,3 +1,5 @@
+import { required } from "./fixtures/canonicalData.mjs";
+import { browserServerOrigin } from "./browserViteServer.mjs";
 import assert from "node:assert/strict";
 import { createRequire } from "node:module";
 import path from "node:path";
@@ -6,6 +8,7 @@ import test from "node:test";
 import { createServer } from "vite";
 
 const require = createRequire(import.meta.url);
+/** @type {typeof import("playwright")} */
 const { chromium } = require(process.env.MONS_PLAYWRIGHT_PATH || "playwright");
 const repository = fileURLToPath(new URL("../", import.meta.url));
 const recipientAddress = "11111111111111111111111111111111";
@@ -19,7 +22,7 @@ export const environment = {
   now: 1000000,
   owner: identity('a'),
   selection: { avatarId: null, specialIds: new Set() },
-  aura: '',
+  aura: 'none',
   writes: [],
   nftRequests: [],
   nftResponses: [],
@@ -85,7 +88,8 @@ const root = createRoot(document.getElementById('root'));
 document.addEventListener('keydown', event => {
   if (event.key === 'Escape') environment.bubbledEscapes += 1;
 });
-window.harness = {
+window.inventoryHarness = {
+  required(value) { if (value === null || value === undefined) throw new Error("picker-fixture-value-missing"); return value; },
   environment,
   render(profileId = 'a') {
     const authState = identity(profileId);
@@ -113,9 +117,10 @@ window.harness = {
   },
   dispose() { flushSync(() => root.unmount()); },
 };
-window.harness.render();
+window.inventoryHarness.render();
 `;
 
+/** @param {(page: import("playwright").Page) => Promise<void>} run @param {{eventPrizes?: boolean}} [options] */
 async function fixture(run, { eventPrizes = true } = {}) {
   const stubbedModules = new Set(
     [
@@ -176,10 +181,11 @@ async function fixture(run, { eventPrizes = true } = {}) {
       },
     ],
   });
+  /** @type {import("playwright").Browser | undefined} */
   let browser;
   try {
     await server.listen();
-    const origin = `http://127.0.0.1:${server.httpServer.address().port}`;
+    const origin = browserServerOrigin(server);
     browser = await chromium.launch({
       headless: true,
       ...(process.env.MONS_BROWSER_EXECUTABLE
@@ -209,6 +215,7 @@ async function fixture(run, { eventPrizes = true } = {}) {
       return route.abort();
     });
     const page = await context.newPage();
+    /** @type {string[]} */
     const errors = [];
     page.on("pageerror", (error) => errors.push(error.message));
     await page.goto(`${origin}/__inventory`);
@@ -228,14 +235,17 @@ async function fixture(run, { eventPrizes = true } = {}) {
   }
 }
 
+/** @param {import("playwright").Page} page */
 const preview = (page, name = previewLabel) =>
   page.getByRole("dialog", { name, exact: true });
+/** @param {import("playwright").Page} page */
 const openPrize = async (page) => {
   await page.getByRole("button", { name: prizeTileLabel, exact: true }).click();
   await page.getByRole("button", { name: "Withdraw", exact: true }).click();
   await page.getByRole("textbox", { name: "Solana address" }).waitFor();
 };
 
+/** @param {{id: number, count: number}[]} avatars @returns {import("./fixtures/pickerBrowserGlobals.ts").FixtureNftSnapshot} */
 const nftSnapshot = (avatars, expiresAtMs = 1010000) => ({
   data: {
     ok: true,
@@ -276,7 +286,7 @@ test(
         .getByRole("button", { name: "Set avatar", exact: true })
         .waitFor({ state: "hidden" });
       assert.deepEqual(
-        await page.evaluate(() => window.harness.environment.writes),
+        await page.evaluate(() => window.inventoryHarness.environment.writes),
         [["avatar", 1009, "rainbow"]],
       );
       await page.keyboard.press("Escape");
@@ -288,8 +298,8 @@ test(
       );
       assert.deepEqual(
         await page.evaluate(() => [
-          window.harness.environment.bubbledEscapes,
-          window.harness.environment.inventoryDismissals,
+          window.inventoryHarness.environment.bubbledEscapes,
+          window.inventoryHarness.environment.inventoryDismissals,
         ]),
         [0, 0],
       );
@@ -310,7 +320,9 @@ test(
         .click({ force: true });
       await preview(page, "Collectible 1").waitFor({ state: "hidden" });
       assert.equal(
-        await page.evaluate(() => window.harness.environment.outsideDismissals),
+        await page.evaluate(
+          () => window.inventoryHarness.environment.outsideDismissals,
+        ),
         1,
       );
       assert.equal(
@@ -332,8 +344,8 @@ test(
         .getByRole("button", { name: "View avatar 1009", exact: true })
         .click();
       await page.evaluate(() => {
-        window.harness.environment.owner = {
-          ...window.harness.environment.owner,
+        window.inventoryHarness.environment.owner = {
+          ...window.inventoryHarness.environment.owner,
           profileId: "b",
         };
       });
@@ -341,23 +353,24 @@ test(
         .getByRole("button", { name: "Set avatar", exact: true })
         .click();
       assert.deepEqual(
-        await page.evaluate(() => window.harness.environment.writes),
+        await page.evaluate(() => window.inventoryHarness.environment.writes),
         [],
       );
       const requests = await page.evaluate(() => {
-        window.harness.environment.owner.profileId = "a";
-        window.harness.environment.now += 10001;
-        return window.harness.environment.nftRequests.length;
+        window.inventoryHarness.environment.owner.profileId = "a";
+        window.inventoryHarness.environment.now += 10001;
+        return window.inventoryHarness.environment.nftRequests.length;
       });
       await page
         .getByRole("button", { name: "Set avatar", exact: true })
         .click();
       await page.waitForFunction(
-        (count) => window.harness.environment.nftRequests.length > count,
+        (count) =>
+          window.inventoryHarness.environment.nftRequests.length > count,
         requests,
       );
       assert.deepEqual(
-        await page.evaluate(() => window.harness.environment.writes),
+        await page.evaluate(() => window.inventoryHarness.environment.writes),
         [],
       );
       await page
@@ -367,7 +380,7 @@ test(
         .getByRole("button", { name: "Set avatar", exact: true })
         .click();
       assert.deepEqual(
-        await page.evaluate(() => window.harness.environment.writes),
+        await page.evaluate(() => window.inventoryHarness.environment.writes),
         [["avatar", 1009, "rainbow"]],
       );
     });
@@ -414,14 +427,13 @@ test(
       );
       assert.equal(
         await page.evaluate(
-          () => window.harness.environment.withdrawals.length,
+          () => window.inventoryHarness.environment.withdrawals.length,
         ),
         0,
       );
       await address.fill(`  ${recipientAddress}  `);
-      await page
-        .getByRole("button", { name: "Send", exact: true })
-        .evaluate((button) => {
+      await page.getByRole("button", { name: "Send", exact: true }).evaluate(
+        /** @param {HTMLButtonElement} button */ (button) => {
           button.click();
           button.click();
           document.dispatchEvent(
@@ -431,22 +443,29 @@ test(
               cancelable: true,
             }),
           );
-          document
-            .querySelector('[data-inventory-item-preview="true"]')
-            .click();
-        });
+          const preview = document.querySelector(
+            '[data-inventory-item-preview="true"]',
+          );
+          if (!(preview instanceof HTMLElement))
+            throw new Error("preview-missing");
+          preview.click();
+        },
+      );
       await page
         .getByRole("button", { name: "Sending...", exact: true })
         .waitFor();
       assert.equal(
         await page.evaluate(
-          () => window.harness.environment.withdrawals.length,
+          () => window.inventoryHarness.environment.withdrawals.length,
         ),
         1,
       );
       assert.equal(
         await page.evaluate(
-          () => window.harness.environment.withdrawals[0].address,
+          () =>
+            window.inventoryHarness.required(
+              window.inventoryHarness.environment.withdrawals[0],
+            ).address,
         ),
         recipientAddress,
       );
@@ -454,15 +473,19 @@ test(
       await page.mouse.click(5, 5);
       assert.equal(await preview(page).isVisible(), true);
       assert.equal(
-        await page.evaluate(() => window.harness.environment.outsideDismissals),
+        await page.evaluate(
+          () => window.inventoryHarness.environment.outsideDismissals,
+        ),
         0,
       );
       assert.equal(
-        await page.evaluate(() => window.harness.environment.bubbledEscapes),
+        await page.evaluate(
+          () => window.inventoryHarness.environment.bubbledEscapes,
+        ),
         0,
       );
       await page.evaluate(() =>
-        window.harness.reject(
+        window.inventoryHarness.reject(
           0,
           "functions/failed-precondition",
           "Use the original destination",
@@ -485,9 +508,11 @@ test(
       );
       await address.press("Enter");
       await page.waitForFunction(
-        () => window.harness.environment.withdrawals.length === 2,
+        () => window.inventoryHarness.environment.withdrawals.length === 2,
       );
-      await page.evaluate(() => window.harness.resolve(1, "processing"));
+      await page.evaluate(() =>
+        window.inventoryHarness.resolve(1, "processing"),
+      );
       await page
         .getByText("Could not send the prize. Please try again.")
         .waitFor();
@@ -499,11 +524,11 @@ test(
       );
       await page.getByRole("button", { name: "Send", exact: true }).click();
       await page.waitForFunction(
-        () => window.harness.environment.withdrawals.length === 3,
+        () => window.inventoryHarness.environment.withdrawals.length === 3,
       );
       await page.clock.install({ time: new Date("2026-01-01T00:00:00Z") });
       await page.clock.pauseAt(new Date("2026-01-01T00:00:01Z"));
-      await page.evaluate(() => window.harness.resolve(2));
+      await page.evaluate(() => window.inventoryHarness.resolve(2));
       await page
         .getByRole("button", { name: "Success", exact: true })
         .waitFor();
@@ -532,7 +557,9 @@ test(
         true,
       );
       assert.equal(
-        await page.evaluate(() => window.harness.environment.outsideDismissals),
+        await page.evaluate(
+          () => window.inventoryHarness.environment.outsideDismissals,
+        ),
         0,
       );
     });
@@ -546,7 +573,7 @@ test(
     await fixture(async (page) => {
       await openPrize(page);
       const address = page.getByRole("textbox", { name: "Solana address" });
-      const cases = [
+      const cases = /** @type {const} */ ([
         [
           { code: "functions/invalid-argument" },
           "Enter a valid Solana address.",
@@ -576,14 +603,16 @@ test(
           "Could not send the prize. Please try again.",
         ],
         [null, "Could not send the prize. Please try again."],
-      ];
+      ]);
       for (const [index, [error, message]] of cases.entries()) {
         await address.fill(`${recipientAddress}${" ".repeat(index + 1)}`);
         assert.equal(await preview(page).getByRole("status").textContent(), "");
         await page.getByRole("button", { name: "Send", exact: true }).click();
         await page.evaluate(
           ({ index, error }) =>
-            window.harness.environment.withdrawals[index].reject(error),
+            window.inventoryHarness
+              .required(window.inventoryHarness.environment.withdrawals[index])
+              .reject(error),
           { index, error },
         );
         await page.getByText(message, { exact: true }).waitFor();
@@ -617,10 +646,13 @@ test(
       const address = page.getByRole("textbox", { name: "Solana address" });
       await page.waitForFunction(
         () =>
-          getComputedStyle(document.querySelector('[aria-modal="true"]'))
-            .display === "grid",
+          getComputedStyle(
+            window.inventoryHarness.required(
+              document.querySelector('[aria-modal="true"]'),
+            ),
+          ).display === "grid",
       );
-      const bounds = await address.boundingBox();
+      const bounds = required(await address.boundingBox());
       assert.ok(bounds.y >= 0 && bounds.y + bounds.height <= 430);
       const viewport = await preview(page).boundingBox();
       assert.deepEqual(viewport, { x: 0, y: 0, width: 390, height: 430 });
@@ -643,8 +675,11 @@ test(
       await page.setViewportSize({ width: 1000, height: 760 });
       await page.waitForFunction(
         () =>
-          getComputedStyle(document.querySelector('[aria-modal="true"]'))
-            .display === "flex",
+          getComputedStyle(
+            window.inventoryHarness.required(
+              document.querySelector('[aria-modal="true"]'),
+            ),
+          ).display === "flex",
       );
     });
   },
@@ -658,12 +693,12 @@ test(
       await openPrize(page);
       await page.getByRole("button", { name: "Send", exact: true }).click();
       await page.waitForFunction(
-        () => window.harness.environment.withdrawals.length === 1,
+        () => window.inventoryHarness.environment.withdrawals.length === 1,
       );
-      await page.evaluate(() => window.harness.render("b"));
+      await page.evaluate(() => window.inventoryHarness.render("b"));
       await openPrize(page);
       await page.clock.install();
-      await page.evaluate(() => window.harness.resolve(0));
+      await page.evaluate(() => window.inventoryHarness.resolve(0));
       await page.clock.fastForward(2000);
       assert.equal(await preview(page).isVisible(), true);
       assert.equal(
@@ -685,11 +720,11 @@ test(
         true,
       );
       await page.getByRole("button", { name: "Send", exact: true }).click();
-      await page.evaluate(() => window.harness.resolve(1));
+      await page.evaluate(() => window.inventoryHarness.resolve(1));
       await page
         .getByRole("button", { name: "Success", exact: true })
         .waitFor();
-      await page.evaluate(() => window.harness.render("c"));
+      await page.evaluate(() => window.inventoryHarness.render("c"));
       await openPrize(page);
       await page.clock.fastForward(2000);
       assert.equal(await preview(page).isVisible(), true);
@@ -716,12 +751,12 @@ test(
     await fixture(async (page) => {
       await openPrize(page);
       await page.getByRole("button", { name: "Send", exact: true }).click();
-      await page.evaluate(() => window.harness.render("b"));
+      await page.evaluate(() => window.inventoryHarness.render("b"));
       await openPrize(page);
       const address = page.getByRole("textbox", { name: "Solana address" });
       await address.fill(` ${recipientAddress} `);
       await page.evaluate(async () => {
-        window.harness.reject(0, "functions/permission-denied");
+        window.inventoryHarness.reject(0, "functions/permission-denied");
         await new Promise((resolve) =>
           requestAnimationFrame(() => requestAnimationFrame(resolve)),
         );
@@ -747,8 +782,8 @@ test(
       );
       await address.press("Enter");
       await page.evaluate(async () => {
-        window.harness.dispose();
-        window.harness.reject(1, "functions/aborted");
+        window.inventoryHarness.dispose();
+        window.inventoryHarness.reject(1, "functions/aborted");
         await new Promise((resolve) =>
           requestAnimationFrame(() => requestAnimationFrame(resolve)),
         );
@@ -757,8 +792,8 @@ test(
       assert.equal(await preview(page).count(), 0);
       assert.deepEqual(
         await page.evaluate(() => [
-          window.harness.environment.outsideDismissals,
-          window.harness.environment.inventoryDismissals,
+          window.inventoryHarness.environment.outsideDismissals,
+          window.inventoryHarness.environment.inventoryDismissals,
         ]),
         [0, 0],
       );
@@ -773,25 +808,33 @@ test(
     await fixture(
       async (page) => {
         await page.evaluate(() => {
-          window.harness.environment.deferNfts = true;
-          window.harness.render();
+          window.inventoryHarness.environment.deferNfts = true;
+          window.inventoryHarness.render();
         });
         await page.waitForFunction(
-          () => window.harness.environment.pendingNftRequests.length === 1,
+          () =>
+            window.inventoryHarness.environment.pendingNftRequests.length === 1,
         );
         const olderRequest = await page.evaluate(
-          () => window.harness.environment.pendingNftRequests[0].requestId,
+          () =>
+            window.inventoryHarness.required(
+              window.inventoryHarness.environment.pendingNftRequests[0],
+            ).requestId,
         );
-        await page.evaluate(() => window.harness.render());
+        await page.evaluate(() => window.inventoryHarness.render());
         await page.waitForFunction(
-          () => window.harness.environment.pendingNftRequests.length === 2,
+          () =>
+            window.inventoryHarness.environment.pendingNftRequests.length === 2,
         );
         const newerRequest = await page.evaluate(
-          () => window.harness.environment.pendingNftRequests[1].requestId,
+          () =>
+            window.inventoryHarness.required(
+              window.inventoryHarness.environment.pendingNftRequests[1],
+            ).requestId,
         );
         await page.evaluate(
           ({ snapshot, requestId }) =>
-            window.harness.resolveNfts("a", snapshot, requestId),
+            window.inventoryHarness.resolveNfts("a", snapshot, requestId),
           {
             snapshot: nftSnapshot([{ id: 12, count: 1 }]),
             requestId: newerRequest,
@@ -802,7 +845,7 @@ test(
           .waitFor();
         await page.evaluate(
           ({ snapshot, requestId }) =>
-            window.harness.resolveNfts("a", snapshot, requestId),
+            window.inventoryHarness.resolveNfts("a", snapshot, requestId),
           {
             snapshot: nftSnapshot([{ id: 11, count: 1 }]),
             requestId: olderRequest,
@@ -833,30 +876,30 @@ test(
     await fixture(
       async (page) => {
         await page.evaluate(() => {
-          window.harness.environment.deferNfts = true;
-          window.harness.render();
+          window.inventoryHarness.environment.deferNfts = true;
+          window.inventoryHarness.render();
         });
         await page.getByText("LOADING...", { exact: true }).waitFor();
         await page.waitForFunction(() =>
-          window.harness.environment.pendingNftRequests.some(
+          window.inventoryHarness.environment.pendingNftRequests.some(
             (request) => request.identity.profileId === "a",
           ),
         );
-        await page.evaluate(() => window.harness.render("b"));
+        await page.evaluate(() => window.inventoryHarness.render("b"));
         await page.waitForFunction(() =>
-          window.harness.environment.pendingNftRequests.some(
+          window.inventoryHarness.environment.pendingNftRequests.some(
             (request) => request.identity.profileId === "b",
           ),
         );
         await page.evaluate(
-          (snapshot) => window.harness.resolveNfts("b", snapshot),
+          (snapshot) => window.inventoryHarness.resolveNfts("b", snapshot),
           nftSnapshot([{ id: 11, count: 1 }]),
         );
         await page
           .getByRole("button", { name: "View avatar 1011", exact: true })
           .waitFor();
         await page.evaluate(
-          (snapshot) => window.harness.resolveNfts("a", snapshot),
+          (snapshot) => window.inventoryHarness.resolveNfts("a", snapshot),
           nftSnapshot([{ id: 9, count: 3 }]),
         );
         assert.equal(
@@ -871,30 +914,30 @@ test(
             .count(),
           0,
         );
-        await page.evaluate(() => window.harness.render("b"));
+        await page.evaluate(() => window.inventoryHarness.render("b"));
         await page.getByText("LOADING...", { exact: true }).waitFor();
         await page.waitForFunction(() =>
-          window.harness.environment.pendingNftRequests.some(
+          window.inventoryHarness.environment.pendingNftRequests.some(
             (request) => request.identity.profileId === "b",
           ),
         );
         const requestsAtUnmount = await page.evaluate(() => {
-          window.harness.dispose();
-          return window.harness.environment.nftRequests.length;
+          window.inventoryHarness.dispose();
+          return window.inventoryHarness.environment.nftRequests.length;
         });
         await page.evaluate(
-          (snapshot) => window.harness.resolveNfts("b", snapshot),
+          (snapshot) => window.inventoryHarness.resolveNfts("b", snapshot),
           nftSnapshot([{ id: 12, count: 1 }], 999999),
         );
         assert.equal(
           await page.evaluate(
-            () => window.harness.environment.nftRequests.length,
+            () => window.inventoryHarness.environment.nftRequests.length,
           ),
           requestsAtUnmount,
         );
         assert.equal(await page.locator("#root").innerHTML(), "");
         assert.deepEqual(
-          await page.evaluate(() => window.harness.environment.writes),
+          await page.evaluate(() => window.inventoryHarness.environment.writes),
           [],
         );
       },
@@ -911,10 +954,10 @@ test(
       async (page) => {
         const requests = await page.evaluate(
           (responses) => {
-            const environment = window.harness.environment;
+            const environment = window.inventoryHarness.environment;
             const requests = environment.nftRequests.length;
-            environment.nftResponses = responses;
-            window.harness.render();
+            environment.nftResponses = [...responses];
+            window.inventoryHarness.render();
             return requests;
           },
           [
@@ -927,7 +970,7 @@ test(
           .waitFor();
         assert.equal(
           await page.evaluate(
-            () => window.harness.environment.nftRequests.length,
+            () => window.inventoryHarness.environment.nftRequests.length,
           ),
           requests + 2,
         );
@@ -951,22 +994,26 @@ test(
       async (page) => {
         const expired = nftSnapshot([{ id: 11, count: 1 }], 999999);
         const invalidated = nftSnapshot([{ id: 11, count: 1 }], 0);
-        for (const responses of [[expired, expired], [invalidated]]) {
+        for (const responses of /** @type {const} */ ([
+          [expired, expired],
+          [invalidated],
+        ])) {
           const requests = await page.evaluate((responses) => {
-            const environment = window.harness.environment;
+            const environment = window.inventoryHarness.environment;
             const requests = environment.nftRequests.length;
-            environment.nftResponses = responses;
-            window.harness.render();
+            environment.nftResponses = [...responses];
+            window.inventoryHarness.render();
             return requests;
           }, responses);
           await page.waitForFunction(
-            (count) => window.harness.environment.nftRequests.length >= count,
+            (count) =>
+              window.inventoryHarness.environment.nftRequests.length >= count,
             requests + responses.length,
           );
           await page.getByText("Failed to load.", { exact: true }).waitFor();
           assert.equal(
             await page.evaluate(
-              () => window.harness.environment.nftRequests.length,
+              () => window.inventoryHarness.environment.nftRequests.length,
             ),
             requests + responses.length,
           );
@@ -992,10 +1039,10 @@ test(
     await fixture(
       async (page) => {
         await page.evaluate(() => {
-          window.harness.environment.nftResponses = [
+          window.inventoryHarness.environment.nftResponses = [
             { error: "Inventory unavailable" },
           ];
-          window.harness.render();
+          window.inventoryHarness.render();
         });
         await page.getByText("Failed to load.", { exact: true }).waitFor();
         assert.equal(
@@ -1007,8 +1054,8 @@ test(
           0,
         );
         await page.evaluate((snapshot) => {
-          window.harness.environment.nftResponses = [snapshot];
-          window.harness.render();
+          window.inventoryHarness.environment.nftResponses = [snapshot];
+          window.inventoryHarness.render();
         }, nftSnapshot([]));
         await page.getByRole("link", { name: "Get Swag Pack" }).waitFor();
         assert.equal(

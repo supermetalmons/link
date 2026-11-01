@@ -1,31 +1,31 @@
+import { inviteDocumentFixture } from "./inviteDocumentFixture.ts";
 import { INVITE_METADATA_MAX_MESSAGE_BYTES } from "@mons/shared/invite-metadata";
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { normalizeInviteMetadata } from "../src/inviteMetadata.ts";
 
 const inviteId = "metadata-invite";
-const invite = {
+const invite = inviteDocumentFixture({
   hostId: "host-login",
   hostColor: "white",
   guestId: "guest-login",
-};
+});
 
 test("metadata normalization exposes only the public snapshot and separate viewer inputs", () => {
   const operationId = crypto.randomUUID();
-  const result = normalizeInviteMetadata(inviteId, {
-    ...invite,
-    hostRematches: "1;2x",
-    guestRematches: "1;2",
-    password: "private-password",
-    automatchOperationIds: {
-      "host-login": operationId,
-      "guest-login": "invalid operation",
-      "invalid/uid": operationId,
-    },
-    wagers: { secret: "wager" },
-    eventRoundIndex: 3,
-    unrelated: "not-public",
-  });
+  const result = normalizeInviteMetadata(
+    inviteId,
+    inviteDocumentFixture({
+      ...invite,
+      kind: "automatch",
+      hostRematches: { state: "ended", indices: [1, 2] },
+      guestRematches: { state: "open", indices: [1, 2] },
+      password: "private-password",
+      automatchOperationIds: {
+        "host-login": operationId,
+      },
+    }),
+  );
   assert.equal(result.status, "ok");
   if (result.status !== "ok") return;
   assert.deepEqual(result.snapshot, {
@@ -34,8 +34,8 @@ test("metadata normalization exposes only the public snapshot and separate viewe
     hostId: "host-login",
     guestId: "guest-login",
     hostColor: "white",
-    hostRematches: "1;2x",
-    guestRematches: "1;2",
+    hostRematches: { state: "ended", indices: [1, 2] },
+    guestRematches: { state: "open", indices: [1, 2] },
     automatchStateHint: null,
     eventId: null,
     eventOwned: false,

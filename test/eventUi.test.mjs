@@ -1,3 +1,4 @@
+import { required } from "./fixtures/canonicalData.mjs";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { registerHooks } from "node:module";
@@ -38,43 +39,81 @@ const { getEndedEventWinnerPodiumEntries } =
   await import("../src/ui/event/eventPresentation.ts");
 const modalController = await import("../src/ui/eventModalController.ts");
 
-const participant = (profileId, joinedAtMs) => ({
+/** @returns {import("@mons/shared/events").EventParticipantRecord} */
+const participant = (
+  /** @type {string} */ profileId,
+  /** @type {number} */ joinedAtMs,
+) => ({
   profileId,
   loginUid: `${profileId}-login`,
   username: profileId,
   displayName: profileId.toUpperCase(),
   emojiId: joinedAtMs,
-  aura: "",
+  aura: "none",
   joinedAtMs,
   state: "active",
   eliminatedRoundIndex: null,
   eliminatedByProfileId: null,
 });
 
-const match = (roundIndex, matchIndex, values = {}) => ({
-  matchKey: `${roundIndex}_${matchIndex}`,
-  inviteId: null,
-  status: "upcoming",
-  resolvedAtMs: null,
-  winnerDisqualified: false,
-  winnerProfileId: null,
-  loserProfileId: null,
-  hostSlotBlocked: false,
-  hostProfileId: null,
-  hostLoginUid: null,
-  hostDisplayName: null,
-  hostEmojiId: null,
-  hostAura: null,
-  guestSlotBlocked: false,
-  guestProfileId: null,
-  guestLoginUid: null,
-  guestDisplayName: null,
-  guestEmojiId: null,
-  guestAura: null,
-  ...values,
-});
+/** @param {number} roundIndex @param {number} matchIndex @param {Partial<import("@mons/shared/events").EventMatchFields>} [values] @returns {import("@mons/shared/events").EventMatchRecord} */
+const match = (
+  /** @type {number} */ roundIndex,
+  /** @type {number} */ matchIndex,
+  values = {},
+) => {
+  const value = {
+    matchKey: `${roundIndex}_${matchIndex}`,
+    inviteId: null,
+    status: "upcoming",
+    resolvedAtMs: null,
+    winnerDisqualified: false,
+    winnerProfileId: null,
+    loserProfileId: null,
+    hostSlotBlocked: false,
+    hostProfileId: null,
+    hostLoginUid: null,
+    hostDisplayName: null,
+    hostEmojiId: null,
+    hostAura: null,
+    guestSlotBlocked: false,
+    guestProfileId: null,
+    guestLoginUid: null,
+    guestDisplayName: null,
+    guestEmojiId: null,
+    guestAura: null,
+    ...values,
+  };
+  if (value.status === "host" || value.status === "guest")
+    return {
+      ...value,
+      status: value.status,
+      resolvedAtMs: value.resolvedAtMs ?? 1,
+      winnerProfileId: required(value.winnerProfileId),
+    };
+  if (value.status === "bye")
+    return {
+      ...value,
+      status: value.status,
+      resolvedAtMs: value.resolvedAtMs ?? 1,
+      loserProfileId: null,
+    };
+  return {
+    ...value,
+    status: value.status === "pending" ? "pending" : "upcoming",
+    resolvedAtMs: null,
+    winnerProfileId: null,
+    loserProfileId: null,
+    winnerDisqualified: value.winnerDisqualified,
+  };
+};
 
-const round = (roundIndex, matchCount, matchValues = {}) => ({
+/** @param {number} roundIndex @param {number} matchCount @param {Record<string, Partial<import("@mons/shared/events").EventMatchFields>>} [matchValues] @returns {import("@mons/shared/events").EventRoundRecord} */
+const round = (
+  /** @type {number} */ roundIndex,
+  /** @type {number} */ matchCount,
+  matchValues = {},
+) => ({
   roundIndex,
   status: "upcoming",
   createdAtMs: 1,
@@ -87,27 +126,73 @@ const round = (roundIndex, matchCount, matchValues = {}) => ({
   ),
 });
 
-const eventRecord = (values = {}) => ({
-  schemaVersion: 2,
-  eventId: "event-test",
-  status: "scheduled",
-  createdAtMs: 1,
-  updatedAtMs: 1,
-  startAtMs: 10_000,
-  startedAtMs: null,
-  endedAtMs: null,
-  createdByProfileId: "p1",
-  createdByLoginUid: "p1-login",
-  createdByUsername: "p1",
-  winnerProfileId: null,
-  winnerDisplayName: null,
-  currentRoundIndex: null,
-  bracketSize: 0,
-  roundCount: 0,
-  participants: {},
-  rounds: {},
-  ...values,
-});
+/** @param {Partial<import("@mons/shared/events").EventRecordFields>} [values] @returns {import("@mons/shared/events").EventRecord} */
+const eventRecord = (values = {}) => {
+  /** @type {import("@mons/shared/events").EventRecordFields} */
+  const value = {
+    schemaVersion: 3,
+    isSundayMons: false,
+    bracketFormat: "fixed",
+    roundByes: {},
+    telegramAnnouncements: { invite: false, matches: false, results: false },
+    telegramDeliveryVersion: 2,
+    supportsThirdPlaceMatch: false,
+    thirdPlaceMatch: null,
+    prizeSelectionsLockedAtMs: null,
+    prizeAssignments: {},
+    eventId: "event-test",
+    status: "scheduled",
+    createdAtMs: 1,
+    updatedAtMs: 1,
+    startAtMs: 10_000,
+    startedAtMs: null,
+    endedAtMs: null,
+    createdByProfileId: "p1",
+    createdByLoginUid: "p1-login",
+    createdByUsername: "p1",
+    winnerProfileId: null,
+    winnerDisplayName: null,
+    currentRoundIndex: null,
+    bracketSize: 0,
+    roundCount: 0,
+    participants: {},
+    rounds: {},
+    ...values,
+  };
+  if (value.status === "active")
+    return {
+      ...value,
+      status: "active",
+      bracketFormat: "fixed",
+      startedAtMs: value.startedAtMs ?? 1,
+      endedAtMs: null,
+      currentRoundIndex: value.currentRoundIndex ?? 0,
+      winnerProfileId: null,
+      winnerDisplayName: null,
+    };
+  if (value.status === "ended")
+    return {
+      ...value,
+      status: "ended",
+      bracketFormat: "fixed",
+      startedAtMs: value.startedAtMs ?? 1,
+      endedAtMs: value.endedAtMs ?? 2,
+      currentRoundIndex: value.currentRoundIndex ?? 0,
+    };
+  const unstarted = {
+    ...value,
+    bracketFormat: /** @type {const} */ ("fixed"),
+    startedAtMs: null,
+    currentRoundIndex: null,
+    bracketSize: /** @type {const} */ (0),
+    roundCount: /** @type {const} */ (0),
+    winnerProfileId: null,
+    winnerDisplayName: null,
+  };
+  return value.status === "dismissed"
+    ? { ...unstarted, status: "dismissed", endedAtMs: value.endedAtMs ?? 2 }
+    : { ...unstarted, status: "scheduled", endedAtMs: null };
+};
 
 test("preserves symmetrical bracket geometry and disqualification connectors", () => {
   const rounds = [
@@ -151,7 +236,7 @@ test("preserves symmetrical bracket geometry and disqualification connectors", (
 
 test("requires canonical bracket rounds and preserves bye and DQ side display", () => {
   const invalidRounds = [round(0, 2), round(1, 1)];
-  invalidRounds[0].matches["0_0"].matchKey = "0_1";
+  required(required(invalidRounds[0]).matches["0_0"]).matchKey = "0_1";
   assert.equal(canRenderSymmetricalBracket(invalidRounds), false);
 
   assert.deepEqual(
@@ -181,7 +266,11 @@ test("preserves event recovery reasons and retry timing", () => {
     p1: participant("p1", 1),
     p2: participant("p2", 2),
   };
-  for (const status of ["scheduled", "active", "ended"]) {
+  for (const status of /** @type {const} */ ([
+    "scheduled",
+    "active",
+    "ended",
+  ])) {
     assert.equal(
       getEventAutoRecoveryReason(
         eventRecord({ status, startAtMs: 100, participants }),
@@ -279,11 +368,18 @@ test("allows enrolled noncreators to leave only before the scheduled start", (t)
   assert.equal(canLeaveEvent(null, profileId, 999), false);
   assert.equal(canLeaveEvent(event, "", 999), false);
   assert.equal(canLeaveEvent(event, "p3", 999, "p3-login"), false);
-  for (const startAtMs of [NaN, Infinity, -Infinity]) {
+  for (const startAtMs of /** @type {const} */ ([NaN, Infinity, -Infinity])) {
     assert.equal(canLeaveEvent({ ...event, startAtMs }, profileId, 999), false);
   }
-  for (const status of ["active", "ended", "dismissed"]) {
-    assert.equal(canLeaveEvent({ ...event, status }, profileId, 999), false);
+  for (const status of /** @type {const} */ ([
+    "active",
+    "ended",
+    "dismissed",
+  ])) {
+    assert.equal(
+      canLeaveEvent(eventRecord({ ...event, status }), profileId, 999),
+      false,
+    );
   }
   profileId = "p1";
   assert.equal(canLeaveEvent(event, profileId, 999), false);
@@ -420,24 +516,37 @@ test("canonical ownership shows Leave without Join when public profile lookup is
   const loginUid = "alternate-login";
   t.mock.method(storage, "getProfileId", () => profileId);
   t.mock.method(storage, "getLoginId", () => loginUid);
+  /** @type {{path: string, body: {profileId: string}}[]} */
   const calls = [];
-  t.mock.method(globalThis, "fetch", async (input, init) => {
-    const path = new URL(String(input)).pathname;
-    const body = JSON.parse(init.body);
-    calls.push({ path, body });
-    const response =
-      path === "/profiles/lookup"
-        ? { ok: true, profile: null }
-        : {
-            ok: true,
-            profileId:
-              body.profileId === "retired-profile" ? profileId : body.profileId,
-          };
-    assert.ok(path === "/profiles/lookup" || path === "/profiles/canonical-id");
-    return new Response(JSON.stringify(response), {
-      headers: { "Content-Type": "application/json" },
-    });
-  });
+  t.mock.method(
+    globalThis,
+    "fetch",
+    /** @type {typeof fetch} */ (
+      async (input, init) => {
+        const path = new URL(String(input)).pathname;
+        assert.equal(typeof init?.body, "string");
+        /** @type {{profileId: string}} */
+        const body = JSON.parse(String(init?.body));
+        calls.push({ path, body });
+        const response =
+          path === "/profiles/lookup"
+            ? { ok: true, profile: null }
+            : {
+                ok: true,
+                profileId:
+                  body.profileId === "retired-profile"
+                    ? profileId
+                    : body.profileId,
+              };
+        assert.ok(
+          path === "/profiles/lookup" || path === "/profiles/canonical-id",
+        );
+        return new Response(JSON.stringify(response), {
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+    ),
+  );
   const event = eventRecord({
     startAtMs: 1000,
     participants: {
@@ -484,7 +593,10 @@ test("canonical creators cannot leave through another linked login", (t) => {
   t.mock.method(storage, "getProfileId", () => "canonical-profile");
   t.mock.method(storage, "getLoginId", () => "alternate-login");
   const profileIds = { "retired-profile": "canonical-profile" };
-  for (const participantId of ["retired-profile", "canonical-profile"]) {
+  for (const participantId of /** @type {const} */ ([
+    "retired-profile",
+    "canonical-profile",
+  ])) {
     const event = eventRecord({
       startAtMs: 1000,
       createdByProfileId: "retired-profile",
@@ -539,14 +651,14 @@ test("allows prize selection only during the reveal window for unlocked particip
     participants: { p1: participant("p1", 1) },
   });
 
-  for (const [offsetMs, expected] of [
+  for (const [offsetMs, expected] of /** @type {const} */ ([
     [1, false],
     [0, false],
     [-1, true],
-  ]) {
+  ])) {
     assert.equal(
       canSelectEventPrize(
-        { ...event, startAtMs: nowMs + hourMs + offsetMs },
+        { ...event, startAtMs: nowMs + hourMs + required(offsetMs) },
         "p1",
         nowMs,
       ),
@@ -575,20 +687,32 @@ test("allows prize selection only during the reveal window for unlocked particip
     true,
   );
   assert.equal(
-    canSelectEventPrize({ ...event, status: "active" }, "p1", nowMs),
+    canSelectEventPrize(
+      eventRecord({ ...event, status: "active" }),
+      "p1",
+      nowMs,
+    ),
     true,
   );
   assert.equal(
     canSelectEventPrize(
-      { ...event, status: "active", prizeSelectionsLockedAtMs: nowMs },
+      eventRecord({
+        ...event,
+        status: "active",
+        prizeSelectionsLockedAtMs: nowMs,
+      }),
       "p1",
       nowMs,
     ),
     false,
   );
-  for (const status of ["ended", "dismissed"]) {
+  for (const status of /** @type {const} */ (["ended", "dismissed"])) {
     assert.equal(
-      canSelectEventPrize({ ...revealedEvent, status }, "p1", nowMs),
+      canSelectEventPrize(
+        eventRecord({ ...revealedEvent, status }),
+        "p1",
+        nowMs,
+      ),
       false,
     );
   }
@@ -681,6 +805,7 @@ test("sizes event prize artwork from catalog image dimensions", () => {
 test("preserves the controller façade and modal state transitions", async (t) => {
   const previousWindow = Object.getOwnPropertyDescriptor(globalThis, "window");
   let location = new URL("https://mons.link/game-1");
+  /** @type {(string | URL | null | undefined)[]} */
   const paths = [];
   Object.defineProperty(globalThis, "window", {
     configurable: true,
@@ -689,7 +814,11 @@ test("preserves the controller façade and modal state transitions", async (t) =
         return location;
       },
       history: {
-        pushState(_state, _title, path) {
+        pushState(
+          /** @type {unknown} */ _state,
+          /** @type {string} */ _title,
+          /** @type {string} */ path,
+        ) {
           paths.push(path);
           location = new URL(path, location);
         },
@@ -700,7 +829,7 @@ test("preserves the controller façade and modal state transitions", async (t) =
     if (previousWindow) {
       Object.defineProperty(globalThis, "window", previousWindow);
     } else {
-      delete globalThis.window;
+      Reflect.deleteProperty(globalThis, "window");
     }
   });
   assert.deepEqual(Object.keys(modalController).sort(), [
@@ -717,6 +846,9 @@ test("preserves the controller façade and modal state transitions", async (t) =
     "syncEventModalToRoute",
   ]);
   await modalController.closeEventModal();
+  /**
+   * @type {import("../src/ui/eventModalController.ts").EventModalState[]}
+   */
   const states = [];
   const unsubscribe = modalController.subscribeToEventModalState((state) => {
     states.push(state);

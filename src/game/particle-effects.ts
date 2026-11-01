@@ -2,6 +2,24 @@ import * as SVG from "../utils/svg";
 import { Location } from "../utils/gameModels";
 import { getBoardEffectsRuntime } from "./boardEffectsPort";
 
+type ElectricPathCommand =
+  | { type: "M"; x: number; y: number }
+  | { type: "L"; x: number; y: number }
+  | { type: "Q"; cx: number; cy: number; x: number; y: number };
+
+type CloudPathCommand =
+  | { type: "M"; x: number; y: number }
+  | {
+      type: "C";
+      x1: number;
+      y1: number;
+      x2: number;
+      y2: number;
+      x3: number;
+      y3: number;
+    }
+  | { type: "Z" };
+
 type ParticleConfig = {
   numParticles: number;
   duration: number;
@@ -110,14 +128,14 @@ function spawnParticlesAt(
 
     particles.push({
       main,
-      extra,
+      ...(extra ? { extra } : {}),
       angle,
       maxDistance: distance,
       size,
       startTime: now,
       finished: false,
       update,
-      cleanup,
+      ...(cleanup ? { cleanup } : {}),
     });
   }
 
@@ -188,15 +206,15 @@ export function indicateElectricHit(at: Location) {
           py: number,
           cosr: number,
           sinr: number,
-        ) => {
+        ): [number, number] => {
           return [px * cosr - py * sinr, px * sinr + py * cosr];
         };
 
         const transformCommands = (
-          commands: any[],
+          commands: ElectricPathCommand[],
           cosr: number,
           sinr: number,
-        ) => {
+        ): ElectricPathCommand[] => {
           return commands.map((cmd) => {
             if (cmd.type === "M" || cmd.type === "L") {
               const [nx, ny] = rotatePoint(cmd.x, cmd.y, cosr, sinr);
@@ -211,7 +229,11 @@ export function indicateElectricHit(at: Location) {
           });
         };
 
-        const buildD = (rotatedCommands: any[], tx: number, ty: number) => {
+        const buildD = (
+          rotatedCommands: ElectricPathCommand[],
+          tx: number,
+          ty: number,
+        ) => {
           return rotatedCommands
             .map((cmd) => {
               if (cmd.type === "M")
@@ -269,7 +291,7 @@ export function indicateElectricHit(at: Location) {
         const branchProbability = 0.4;
         const maxBranches = 2 + Math.floor(Math.random() * 3);
 
-        const mainCommands: any[] = [];
+        const mainCommands: ElectricPathCommand[] = [];
         const mainPoints: Array<{ x: number; y: number }> = [{ x: 0, y: 0 }];
         mainCommands.push({ type: "M", x: 0, y: 0 });
 
@@ -286,7 +308,7 @@ export function indicateElectricHit(at: Location) {
           if (j === 1) {
             mainCommands.push({ type: "L", x, y });
           } else {
-            const prevPoint = mainPoints[j - 1];
+            const prevPoint = mainPoints[j - 1]!;
             const controlX =
               prevPoint.x +
               (x - prevPoint.x) * 0.6 +
@@ -314,16 +336,19 @@ export function indicateElectricHit(at: Location) {
         mainBolt.setAttribute("fill", "none");
         container.appendChild(mainBolt);
 
-        const branches: { element: any; rotatedCommands: any[] }[] = [];
+        const branches: {
+          element: SVGPathElement;
+          rotatedCommands: ElectricPathCommand[];
+        }[] = [];
         let branchCount = 0;
         for (let j = 2; j < segments - 2 && branchCount < maxBranches; j++) {
           if (Math.random() < branchProbability) {
-            const branchPoint = mainPoints[j];
+            const branchPoint = mainPoints[j]!;
             const branchLength = (30 + Math.random() * 40) * (1 - j / segments);
             const branchAngle = (Math.random() - 0.5) * Math.PI * 0.8;
             const branchSegments = 3 + Math.floor(Math.random() * 3);
 
-            const branchCommands: any[] = [];
+            const branchCommands: ElectricPathCommand[] = [];
             branchCommands.push({
               type: "M",
               x: branchPoint.x,
@@ -686,7 +711,7 @@ export function indicateFlameGround(at: Location) {
           "#FF4000",
           "#FF6600",
         ];
-        const coreColor = flameColors[i % flameColors.length];
+        const coreColor = flameColors[i % flameColors.length]!;
         const outerColor = i % 3 === 0 ? "#FF4500" : "#FF8C00";
 
         const flameGradientId = `flame-gradient-${i}-${now}`;
@@ -834,7 +859,7 @@ export function indicateSpiritAction(at: Location) {
           sinr: number,
           tx: number,
           ty: number,
-        ) => {
+        ): [number, number] => {
           px *= s;
           py *= s;
           const px2 = px * cosr - py * sinr;
@@ -843,12 +868,12 @@ export function indicateSpiritAction(at: Location) {
         };
 
         const transformCommands = (
-          commands: any[],
+          commands: CloudPathCommand[],
           scale: number,
           rotation: number,
           tx: number,
           ty: number,
-        ) => {
+        ): CloudPathCommand[] => {
           const rad = (rotation * Math.PI) / 180;
           const cosr = Math.cos(rad);
           const sinr = Math.sin(rad);
@@ -908,7 +933,7 @@ export function indicateSpiritAction(at: Location) {
           });
         };
 
-        const commandsToD = (commands: any[]) => {
+        const commandsToD = (commands: CloudPathCommand[]) => {
           return commands
             .map((cmd) => {
               if (cmd.type === "Z") return "Z";
@@ -922,7 +947,7 @@ export function indicateSpiritAction(at: Location) {
         };
 
         const addBlob = (
-          commands: any[],
+          commands: CloudPathCommand[],
           bx: number,
           by: number,
           radius: number,
@@ -969,7 +994,7 @@ export function indicateSpiritAction(at: Location) {
           commands.push({ type: "Z" });
         };
 
-        const commands: any[] = [];
+        const commands: CloudPathCommand[] = [];
         const cloudWidth = size * (1.8 + Math.random() * 0.9);
         const puffCount = 4 + Math.floor(Math.random() * 2);
         const puffSize = cloudWidth / (puffCount * 1.2);
@@ -1108,7 +1133,7 @@ export function indicateWaterSplash(at: Location) {
           "#35D2F8",
           "#B2F9FD",
         ];
-        const dropletColor = vibrantWaterColors[i % vibrantWaterColors.length];
+        const dropletColor = vibrantWaterColors[i % vibrantWaterColors.length]!;
         const isSpecialDroplet = size > 0.2;
         const gradientId = `water-droplet-gradient-${i}-${now}`;
         const gradient = document.createElementNS(SVG.ns, "radialGradient");
@@ -1189,7 +1214,7 @@ export function indicateWaterSplash(at: Location) {
 
         return {
           main: droplet,
-          extra: sparkle,
+          ...(sparkle ? { extra: sparkle } : {}),
           update: (x, y, currentSize, opacity, t) => {
             const currentVelX = velocityX * (1 - airResistance * t);
             const currentVelY = velocityY + gravity * t;

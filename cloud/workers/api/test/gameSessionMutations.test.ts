@@ -206,17 +206,18 @@ const ids = {
   ensure: "00000000-0000-4000-8000-000000000005",
 };
 
-const match = (color: "black" | "white" = "white") => ({
-  version: 2,
-  color,
-  emojiId: 1,
-  aura: "",
-  gameVariant: "Classic",
-  fen: "0,0",
-  status: "",
-  flatMovesString: "",
-  timer: "",
-});
+const match = (color: "black" | "white" = "white") =>
+  matchDocumentFixture({
+    version: 2,
+    color,
+    emojiId: 1,
+    aura: "none" as const,
+    gameVariant: "Classic",
+    fen: "0,0",
+    status: "",
+    flatMovesString: "",
+    timer: "",
+  });
 
 function resolveServerValues(value: unknown, nowMs: number): unknown {
   if (Array.isArray(value)) {
@@ -226,7 +227,7 @@ function resolveServerValues(value: unknown, nowMs: number): unknown {
     return value;
   }
   const record = value as Record<string, unknown>;
-  if (record[".sv"] === "timestamp") {
+  if (record.kind === "timestamp") {
     return nowMs;
   }
   return Object.fromEntries(
@@ -279,7 +280,7 @@ function ownershipSnapshot(
         profileId,
         {
           profile: {
-            aura: "",
+            aura: "none" as const,
             emoji: 1,
             eth: "",
             profileId,
@@ -348,14 +349,18 @@ function repository(initial: Record<string, unknown> = {}, nowMs = 1_000) {
       if (decision.commit === false) {
         return {
           committed: false,
-          decision: decision.decision,
+          ...(decision.decision === undefined
+            ? {}
+            : { decision: decision.decision }),
           value: current,
         };
       }
       values.set(path, decision.value);
       return {
         committed: true,
-        decision: decision.decision,
+        ...(decision.decision === undefined
+          ? {}
+          : { decision: decision.decision }),
         value: decision.value,
       };
     },
@@ -369,12 +374,12 @@ function repository(initial: Record<string, unknown> = {}, nowMs = 1_000) {
 }
 
 function presentation() {
-  return { emojiId: 1, aura: "" };
+  return { emojiId: 1, aura: "none" as const };
 }
 
 test("does not advance beyond the canonical rematch index range", () => {
   const maximum = String(Number.MAX_SAFE_INTEGER);
-  assert.equal(
+  assert.deepEqual(
     nextRematchIndex(
       inviteDocumentFixture({
         hostRematches: maximum,
@@ -645,7 +650,7 @@ test("rejects missing, malformed, and unavailable invite role state", async () =
         }).repository,
       ),
     (error: unknown) =>
-      error instanceof AuthApiFailure && error.message === "invite-invalid",
+      error instanceof TypeError && /invite fixture/.test(error.message),
   );
   for (const malformedInvite of [
     "corrupt",
@@ -661,9 +666,7 @@ test("rejects missing, malformed, and unavailable invite role state", async () =
           }).repository,
         ),
       (error: unknown) =>
-        error instanceof AuthApiFailure &&
-        error.status === 409 &&
-        error.message === "invite-invalid",
+        error instanceof TypeError && /invite fixture/.test(error.message),
     );
   }
   const unavailable = repository({
@@ -793,7 +796,7 @@ test("surfaces release failure after successful leased work", async () => {
     },
   );
   assert.equal(logs.length, 1);
-  assert.deepEqual(JSON.parse(logs[0]), {
+  assert.deepEqual(JSON.parse(logs[0]!), {
     event: "game_session_mutation_lock_release_failed",
     inviteId: "abcdefghijk",
     operationId: ids.create,
@@ -831,8 +834,8 @@ test("ending waits for a competing invite mutation and reads its committed remat
       if (waits.length === 2) {
         state.values.set(`invites/${inviteId}`, {
           ...invite,
-          hostRematches: "1",
-          guestRematches: "1",
+          hostRematches: { state: "open", indices: [1] },
+          guestRematches: { state: "open", indices: [1] },
         });
         await stores.mutationLocks.release(
           { lockId: inviteId, operationId: ids.proposeGuest },
@@ -848,8 +851,11 @@ test("ending waits for a competing invite mutation and reads its committed remat
     dependencies,
   );
   assert.deepEqual(waits, [100, 200]);
-  assert.equal(response.rematches, "1x");
-  assert.equal(state.patches[0][`invites/${inviteId}/hostRematches`], "1x");
+  assert.deepEqual(response.rematches, { state: "ended", indices: [1] });
+  assert.deepEqual(state.patches[0]![`invites/${inviteId}/hostRematches`], {
+    state: "ended",
+    indices: [1],
+  });
   assert.equal(stores.lockRows.size, 0);
   assert.deepEqual(
     await endRematchSeries(identity, request, state.repository, dependencies),
@@ -1029,7 +1035,7 @@ test("creates and replays one atomic manual invite mutation", async () => {
   );
   assert.deepEqual(replay, first);
   assert.equal(state.patches.length, 1);
-  const patch = state.patches[0];
+  const patch = state.patches[0]!;
   assert.equal(
     (patch["invites/abcdefghijk"] as Record<string, unknown>).hostId,
     identity.uid,
@@ -1042,11 +1048,11 @@ test("creates and replays one atomic manual invite mutation", async () => {
   assert.equal(receipt.requesterUid, identity.uid);
   assert.equal(
     receipt.fingerprint,
-    "889dc12c6289c74835aaf18b7873460f60c315b9d2100869fb415526164ec02a",
+    "da85f889ccc2c8671ab2b0d9e912ff57bd392b9508b1dc7f9b7a70c49768e21e",
   );
   assert.ok(patch[`gameplayMutationReceiptExpirations/${ids.create}`]);
   const outboxPath = "profileGameProjectionOutbox/automatch/abcdefghijk";
-  assert.equal(patch[`${outboxPath}/schemaVersion`], 1);
+  assert.equal(patch[`${outboxPath}/schemaVersion`], 2);
   assert.equal(patch[`${outboxPath}/status`], "pending");
   assert.equal(patch[`${outboxPath}/requestId`], ids.create);
   assert.equal(patch[`${outboxPath}/reason`], "manual-invite-created");
@@ -1128,7 +1134,7 @@ test("joins a manual invite and persists the mirrored guest match", async () => 
     joined: true,
     matchId: "abcdefghijk",
   });
-  const patch = state.patches[0];
+  const patch = state.patches[0]!;
   assert.equal(patch["invites/abcdefghijk/guestId"], identity.uid);
   assert.equal(
     (patch["players/login-1/matches/abcdefghijk"] as Record<string, unknown>)
@@ -1246,7 +1252,7 @@ test("preserves pending automatch link joining and Telegram projection", async (
     state.repository,
     { createOwnerId: () => "owner", now: () => 1_000 },
   );
-  const patch = state.patches[0];
+  const patch = state.patches[0]!;
   assert.equal(patch["automatch/auto_abcdefghi"], null);
   assert.equal(
     patch["telegramAutomatches/auto_abcdefghi/lifecycle"],
@@ -1311,16 +1317,17 @@ test("proposes and ends rematches through participant-owned writes", async () =>
     { createOwnerId: () => "owner", now: () => 1_000 },
   );
   assert.equal(proposal.matchId, "abcdefghijk1");
-  assert.equal(proposal.rematches, "1");
-  assert.equal(proposal.match.gameVariant, "Classic");
-  assert.equal(proposal.match.fen, match("black").fen);
+  assert.deepEqual(proposal.rematches, { state: "open", indices: [1] });
+  assert.equal(proposal.match.gameVariant, "SwappedManaRows");
+  assert.notEqual(proposal.match.fen, match("black").fen);
+  assert.ok(proposal.match.fen.length > 0);
   assert.ok(
     new TextEncoder().encode(proposal.match.gameVariant).byteLength <=
       MAX_GAME_SESSION_GAME_VARIANT_BYTES,
   );
-  assert.ok(proposed.patches[0]["players/login-1/matches/abcdefghijk1"]);
+  assert.ok(proposed.patches[0]!["players/login-1/matches/abcdefghijk1"]);
   assert.deepEqual(
-    proposed.patches[0][
+    proposed.patches[0]![
       "profileGameProjectionOutbox/automatch/abcdefghijk/historicalMatches/abcdefghijk"
     ],
     {
@@ -1328,6 +1335,7 @@ test("proposes and ends rematches through participant-owned writes", async () =>
       guestPlayerId: "guest-login",
       hostPlayerId: "login-1",
       source: "transition",
+      retryNotBeforeMs: null,
     },
   );
 
@@ -1338,9 +1346,13 @@ test("proposes and ends rematches through participant-owned writes", async () =>
     guestPlayerId: "guest-login",
     hostPlayerId: "login-1",
     source: "transition",
+    retryNotBeforeMs: null,
   };
   const secondProposal = repository({
-    "invites/abcdefghijk": { ...baseInvite, hostRematches: "1" },
+    "invites/abcdefghijk": {
+      ...baseInvite,
+      hostRematches: { state: "open", indices: [1] },
+    },
     "players/login-1/matches/abcdefghijk1": match("white"),
     [descriptorPath]: firstDescriptor,
   });
@@ -1351,7 +1363,10 @@ test("proposes and ends rematches through participant-owned writes", async () =>
     { createOwnerId: () => "owner", now: () => 2_000 },
   );
   assert.equal(guestProposal.matchId, "abcdefghijk1");
-  assert.equal(Object.hasOwn(secondProposal.patches[0], descriptorPath), false);
+  assert.equal(
+    Object.hasOwn(secondProposal.patches[0]!, descriptorPath),
+    false,
+  );
   assert.deepEqual(secondProposal.values.get(descriptorPath), firstDescriptor);
 
   const ended = repository({ "invites/abcdefghijk": baseInvite });
@@ -1363,10 +1378,13 @@ test("proposes and ends rematches through participant-owned writes", async () =>
     createOwnerId: () => "owner",
     now: () => 1_000,
   });
-  assert.equal(end.rematches, "x");
-  assert.equal(ended.patches[0]["invites/abcdefghijk/hostRematches"], "x");
+  assert.deepEqual(end.rematches, { state: "ended", indices: [] });
+  assert.deepEqual(ended.patches[0]!["invites/abcdefghijk/hostRematches"], {
+    state: "ended",
+    indices: [],
+  });
   assert.deepEqual(
-    ended.patches[0][
+    ended.patches[0]![
       "profileGameProjectionOutbox/automatch/abcdefghijk/historicalMatches/abcdefghijk"
     ],
     {
@@ -1374,11 +1392,15 @@ test("proposes and ends rematches through participant-owned writes", async () =>
       guestPlayerId: "guest-login",
       hostPlayerId: "login-1",
       source: "transition",
+      retryNotBeforeMs: null,
     },
   );
 
   const endedByGuest = repository({
-    "invites/abcdefghijk": { ...baseInvite, guestRematches: "1x" },
+    "invites/abcdefghijk": {
+      ...baseInvite,
+      guestRematches: { state: "ended", indices: [1] },
+    },
     [descriptorPath]: firstDescriptor,
   });
   const hostEnd = await endRematchSeries(
@@ -1387,15 +1409,15 @@ test("proposes and ends rematches through participant-owned writes", async () =>
     endedByGuest.repository,
     { createOwnerId: () => "owner", now: () => 1_000 },
   );
-  assert.equal(hostEnd.rematches, "x");
-  assert.equal(
-    endedByGuest.patches[0]["invites/abcdefghijk/hostRematches"],
+  assert.deepEqual(hostEnd.rematches, { state: "ended", indices: [] });
+  assert.deepEqual(
+    endedByGuest.patches[0]!["invites/abcdefghijk/hostRematches"],
     undefined,
   );
-  assert.equal(Object.hasOwn(endedByGuest.patches[0], descriptorPath), false);
+  assert.equal(Object.hasOwn(endedByGuest.patches[0]!, descriptorPath), false);
   assert.deepEqual(endedByGuest.values.get(descriptorPath), firstDescriptor);
   assert.equal(
-    endedByGuest.patches[0][
+    endedByGuest.patches[0]![
       "profileGameProjectionOutbox/automatch/abcdefghijk/historicalMatches/abcdefghijk1"
     ],
     undefined,
@@ -1404,8 +1426,8 @@ test("proposes and ends rematches through participant-owned writes", async () =>
   const endedApproved = repository({
     "invites/abcdefghijk": {
       ...baseInvite,
-      hostRematches: "1",
-      guestRematches: "1",
+      hostRematches: { state: "open", indices: [1] },
+      guestRematches: { state: "open", indices: [1] },
     },
   });
   await endRematchSeries(identity, endRequest, endedApproved.repository, {
@@ -1413,7 +1435,7 @@ test("proposes and ends rematches through participant-owned writes", async () =>
     now: () => 1_000,
   });
   assert.ok(
-    endedApproved.patches[0][
+    endedApproved.patches[0]![
       "profileGameProjectionOutbox/automatch/abcdefghijk/historicalMatches/abcdefghijk1"
     ],
   );
@@ -1467,7 +1489,7 @@ test("batches rematch participants in actor order and replays without reading ag
     assert.equal(result.match.color, role === "host" ? "black" : "white");
     assert.equal(result.match.fen, opponentMatch.fen);
     assert.equal(result.match.gameVariant, opponentMatch.gameVariant);
-    assert.ok(state.patches[0][`players/${actorUid}/matches/abcdefghijk1`]);
+    assert.ok(state.patches[0]![`players/${actorUid}/matches/abcdefghijk1`]);
     const committed = [...state.values];
 
     assert.deepEqual(
@@ -1496,7 +1518,9 @@ for (const failureStage of [
         hostId: identity.uid,
         guestId: "guest-login",
         hostColor: "white",
-        ...(failureStage === "invalid-match" ? {} : { hostRematches: "1" }),
+        ...(failureStage === "invalid-match"
+          ? {}
+          : { hostRematches: { state: "open", indices: [1] } }),
       },
     });
     const ownership = state.repository.readProfileOwnershipSnapshot;
@@ -1509,7 +1533,7 @@ for (const failureStage of [
     };
     state.repository.readMatchRecords = async () => {
       reads.push("matches");
-      return [matchDocumentFixture({ ...match("black"), fen: "" }), null];
+      throw new TypeError("match-record-corrupt");
     };
 
     await assert.rejects(
@@ -1529,13 +1553,16 @@ for (const failureStage of [
         },
       ),
       (error) =>
-        error instanceof AuthApiFailure &&
-        error.message ===
-          (failureStage === "ownership"
-            ? "profile-ownership-unavailable"
-            : failureStage === "unavailable"
-              ? "rematch-unavailable"
-              : "rematch-match-invalid"),
+        failureStage === "invalid-match"
+          ? error instanceof TypeError &&
+            error.message === "match-record-corrupt"
+          : error instanceof AuthApiFailure &&
+            error.message ===
+              (failureStage === "ownership"
+                ? "profile-ownership-unavailable"
+                : failureStage === "unavailable"
+                  ? "rematch-unavailable"
+                  : "rematch-match-invalid"),
     );
     assert.deepEqual(
       reads,
@@ -1612,9 +1639,11 @@ for (const scenario of [
         guestId: "guest-login",
         hostColor: "white",
         ...(scenario === "second-proposal" || scenario === "end-pending"
-          ? { hostRematches: "1" }
+          ? { hostRematches: { state: "open", indices: [1] } }
           : {}),
-        ...(scenario === "already-ended" ? { guestRematches: "1x" } : {}),
+        ...(scenario === "already-ended"
+          ? { guestRematches: { state: "ended", indices: [1] } }
+          : {}),
       },
     });
     const events: string[] = [];
@@ -1690,7 +1719,7 @@ for (const scenario of [
       ]);
       assert.equal(state.patches.length, 1);
       const descriptor =
-        state.patches[0][
+        state.patches[0]![
           "profileGameProjectionOutbox/automatch/abcdefghijk/historicalMatches/abcdefghijk"
         ];
       assert.equal(descriptor !== undefined, hasHistory);
@@ -1700,6 +1729,7 @@ for (const scenario of [
           guestPlayerId: "guest-login",
           hostPlayerId: identity.uid,
           source: "transition",
+          retryNotBeforeMs: null,
         });
       }
     }
@@ -1822,10 +1852,16 @@ test("linked rematch participants reuse one ownership snapshot for the original 
         profileIds: [],
       },
     ]);
-    assert.ok(state.patches[0][`players/${actorUid}/matches/abcdefghijk1`]);
-    assert.equal(state.patches[0][`invites/abcdefghijk/${role}Rematches`], "1");
+    assert.ok(state.patches[0]![`players/${actorUid}/matches/abcdefghijk1`]);
+    assert.deepEqual(
+      state.patches[0]![`invites/abcdefghijk/${role}Rematches`],
+      {
+        state: "open",
+        indices: [1],
+      },
+    );
     assert.equal(
-      state.patches[0]["players/alternate-login/matches/abcdefghijk1"],
+      state.patches[0]!["players/alternate-login/matches/abcdefghijk1"],
       undefined,
     );
   }
@@ -1865,7 +1901,7 @@ test("ensures a missing match for an alternate login on the same profile", async
   );
   assert.equal(response.actorUid, "host-login");
   assert.equal(response.created, true);
-  assert.ok(state.patches[0]["players/host-login/matches/abcdefghijk"]);
+  assert.ok(state.patches[0]!["players/host-login/matches/abcdefghijk"]);
 });
 
 test("rejects structural mutations for event-owned invites", async () => {

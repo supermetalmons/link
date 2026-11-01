@@ -703,7 +703,7 @@ export const Leaderboard: React.FC<LeaderboardProps> = ({
             </thead>
             <tbody>
               {data.map((row: LeaderboardEntry, index: number) => {
-                const emojiUrl = emojis.getEmojiUrl(row.emoji.toString());
+                const emojiUrl = emojis.getEmojiUrl(row.emoji);
                 const emojiKey = `${row.id}-${row.emoji}`;
                 const isEmojiLoaded = loadedEmojis.has(emojiKey);
                 const isCurrentPlayer = isCurrentProfile(row);
@@ -729,7 +729,7 @@ export const Leaderboard: React.FC<LeaderboardProps> = ({
                         <AvatarImage
                           src={emojiUrl}
                           alt=""
-                          rainbowAura={!!row.aura}
+                          rainbowAura={row.aura === "rainbow"}
                           loading="eager"
                           onLoad={() => handleEmojiLoad(emojiKey)}
                         />
@@ -772,11 +772,9 @@ export const Leaderboard: React.FC<LeaderboardProps> = ({
                 <FloatingRowEmoji>
                   <EmojiImage>
                     <AvatarImage
-                      src={emojis.getEmojiUrl(
-                        currentPlayerData.emoji.toString(),
-                      )}
+                      src={emojis.getEmojiUrl(currentPlayerData.emoji)}
                       alt=""
-                      rainbowAura={!!currentPlayerData.aura}
+                      rainbowAura={currentPlayerData.aura === "rainbow"}
                       loading="eager"
                     />
                   </EmojiImage>

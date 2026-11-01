@@ -149,7 +149,7 @@ const reconcileSubmittedAssetState = async ({
     assetOwner,
     recipientAddress,
     inspection: submittedInspection,
-    statusRetryDelaysMs,
+    ...(statusRetryDelaysMs === undefined ? {} : { statusRetryDelaysMs }),
   });
   if (recovery.kind === "completed" || recovery.kind === "blocked") {
     return { kind: recovery.kind, assetOwner, submitted: recovery.submitted };

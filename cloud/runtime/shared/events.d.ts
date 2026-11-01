@@ -1,6 +1,18 @@
 // Generated from src/shared/events.ts. Run npm run generate:runtime.
 import { THIRD_PLACE_MATCH_KEY } from "./event-types.js";
+import type { EventRecord, EventTelegramAnnouncements } from "./event-types.js";
+import { type Aura, type EmojiId } from "./appearance.js";
 export type {
+  EventRecord,
+  EventRecordFields,
+  EventParticipantRecord,
+  EventParticipantFields,
+  EventMatchRecord,
+  EventMatchFields,
+  EventRoundRecord,
+  EventRoundFields,
+  EventRoundBye,
+  EventTelegramAnnouncements,
   EventStatus,
   EventParticipantState,
   EventMatchStatus,
@@ -13,6 +25,16 @@ export type {
   EventView,
 } from "./event-types.js";
 export {
+  isEventRecord,
+  parseEventRecord,
+  isEventParticipantRecord,
+  isEventParticipants,
+  isEventMatchRecord,
+  isEventMatches,
+  isEventRoundRecord,
+  isEventRounds,
+  isEventPrizeAssignments,
+  isEventAnnouncements,
   decodeEventParticipantView,
   decodeEventMatchView,
   decodeEventRoundView,
@@ -30,11 +52,6 @@ export type EventCreateDateTimePayload = {
   localTimezoneIana?: string;
 };
 export type EventPostponeMinutes = 5 | 10 | 15;
-export type EventTelegramAnnouncements = {
-  invite: boolean;
-  matches: boolean;
-  results: boolean;
-};
 export type EventCreateOptions = {
   isSundayMons?: boolean;
   telegramAnnouncements?: EventTelegramAnnouncements;
@@ -57,12 +74,7 @@ export type DisqualifyEventMatchWinnersRequest = {
 export type SyncEventStateRequest = {
   eventId: string;
 };
-export type EventCompatibilityRecord = {
-  eventId: string;
-  status: string;
-  isSundayMons?: boolean;
-};
-export type EventApiRecord = EventCompatibilityRecord;
+export type EventApiRecord = EventRecord;
 export type CreateEventResponse = {
   ok: true;
   eventId: string;
@@ -108,8 +120,8 @@ export type EventParticipantSnapshot = {
   loginUid: string;
   username: string;
   displayName: string;
-  emojiId: number;
-  aura: string;
+  emojiId: EmojiId;
+  aura: Aura;
   joinedAtMs: number;
   state: "active";
   eliminatedRoundIndex: null;
@@ -120,8 +132,8 @@ export type EventParticipantProfile = Readonly<{
   username: string;
   eth: string;
   sol: string;
-  emoji: number | string;
-  aura: string;
+  emoji: EmojiId;
+  aura: Aura;
 }>;
 export type JoinEventRequest = {
   eventId: string;
@@ -165,7 +177,7 @@ declare function isMonsLinkAdmin(
   value: unknown,
 ): value is MonsLinkAdminUsername;
 declare function isEventOwnedInvite(value: unknown): boolean;
-declare const EVENT_SCHEMA_VERSION = 2;
+declare const EVENT_SCHEMA_VERSION = 3;
 declare const MIN_STARTS_IN_MINUTES = 1;
 declare const MAX_STARTS_IN_DAYS = 50;
 declare const MAX_STARTS_IN_MINUTES: 72000;
@@ -231,8 +243,7 @@ declare function isLeaveEventResponse(
   value: unknown,
 ): value is LeaveEventResponse;
 declare function resolveEventTelegramAnnouncements(input: {
-  announceOnTelegram?: unknown;
-  telegramAnnouncements?: unknown;
+  telegramAnnouncements?: EventTelegramAnnouncements;
 }): EventTelegramAnnouncements;
 declare function isCreateEventRequest(
   value: unknown,

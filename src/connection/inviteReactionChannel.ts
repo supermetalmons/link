@@ -13,6 +13,8 @@ import {
 } from "@mons/shared/match-presentation";
 import { getInviteReactionSocketUrl } from "../services/inviteReactionsApi";
 import { socketSessionRefreshDelay } from "./socketSession";
+import { applicationSocketProtocols } from "../services/applicationTransport.ts";
+import { applicationDataGate } from "../session/applicationDataLifecycle.ts";
 
 export const REACTION_RECONNECT_DELAYS_MS = [
   500, 1_000, 2_000, 4_000, 8_000, 15_000,
@@ -57,6 +59,7 @@ export class InviteReactionChannel {
   private readonly dependencies: InviteReactionChannelDependencies;
   private readonly controller = new AbortController();
   private readonly removeWakeListener: () => void;
+  private readonly removeApplicationListener: () => void;
   private socket: ReactionSocket | null = null;
   private reconnectTimer: Timer | null = null;
   private heartbeatTimer: Timer | null = null;
@@ -75,6 +78,13 @@ export class InviteReactionChannel {
     this.removeWakeListener = dependencies.addWakeListener(() =>
       this.refresh(),
     );
+    this.removeApplicationListener = applicationDataGate.subscribe(() =>
+      this.stop(),
+    );
+    if (applicationDataGate.blocked) {
+      this.stop();
+      return;
+    }
     this.scheduleReconnect(0);
   }
 
@@ -99,10 +109,15 @@ export class InviteReactionChannel {
     this.clearTimer("reconnectTimer");
     this.disconnect();
     this.removeWakeListener();
+    this.removeApplicationListener();
   }
 
   private isActive(): boolean {
-    return !this.signal.aborted && this.dependencies.isActive();
+    return (
+      !this.signal.aborted &&
+      !applicationDataGate.blocked &&
+      this.dependencies.isActive()
+    );
   }
 
   private now(): number {
@@ -162,7 +177,7 @@ export class InviteReactionChannel {
     const baseDelay =
       REACTION_RECONNECT_DELAYS_MS[
         Math.min(this.failures++, REACTION_RECONNECT_DELAYS_MS.length - 1)
-      ];
+      ]!;
     const delay = Math.round(
       baseDelay * (0.8 + this.dependencies.random() * 0.2),
     );
@@ -208,7 +223,7 @@ export class InviteReactionChannel {
         url.searchParams.set("matchId", this.dependencies.matchId);
         const socket = this.dependencies.createSocket(
           url.toString(),
-          protocols ?? [REACTION_SOCKET_PROTOCOL],
+          applicationSocketProtocols(protocols ?? [REACTION_SOCKET_PROTOCOL]),
         );
         if (!isPreparing()) {
           socket.close();

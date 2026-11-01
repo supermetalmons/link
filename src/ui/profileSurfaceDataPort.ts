@@ -3,7 +3,7 @@ import type {
   EventCreateOptions,
 } from "@mons/shared/events";
 import type {
-  EventPrizeAssignment,
+  EventPrizeId,
   EventPrizeWithdrawalResponse,
   EventRecord,
   PlayerProfile,
@@ -26,7 +26,7 @@ export type ProfileSurfaceDataPort = {
   ): () => void;
   withdrawEventPrize(
     eventId: string,
-    prizeId: EventPrizeAssignment["prizeId"],
+    prizeId: EventPrizeId,
     solanaAddress: string,
   ): Promise<EventPrizeWithdrawalResponse>;
 };
@@ -62,6 +62,6 @@ export const subscribeToProfileEventPrizes = (
 
 export const withdrawProfileEventPrize = (
   eventId: string,
-  prizeId: EventPrizeAssignment["prizeId"],
+  prizeId: EventPrizeId,
   solanaAddress: string,
 ) => getPort().withdrawEventPrize(eventId, prizeId, solanaAddress);

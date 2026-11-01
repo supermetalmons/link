@@ -1,5 +1,9 @@
 import { applyD1Migrations, type D1Migration } from "cloudflare:test";
 import {
+  applyCanonicalCleanupTestMigrations,
+  preCleanupTestMigrations,
+} from "./canonicalTestMigrations.ts";
+import {
   EventD1Conflict,
   readEventRuntimeControl,
   type EventStorageMode,
@@ -7,8 +11,9 @@ import {
 
 export async function applyEventTestMigrations(
   db: D1Database,
-  migrations: D1Migration[],
+  allMigrations: D1Migration[],
 ): Promise<void> {
+  const migrations = preCleanupTestMigrations(allMigrations);
   const finalization = migrations.findIndex((migration) =>
     migration.name.startsWith("0003_"),
   );
@@ -48,6 +53,7 @@ export async function applyEventTestMigrations(
     next: { storageMode: "d1" },
     nowMs: 6,
   });
+  await applyCanonicalCleanupTestMigrations(db, allMigrations);
 }
 
 export async function transitionEventStorageMode(

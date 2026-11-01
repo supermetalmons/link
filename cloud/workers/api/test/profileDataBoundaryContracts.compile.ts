@@ -12,7 +12,7 @@ import type { EventStore } from "../src/eventStoreContracts.ts";
 import type { ProjectionOutboxSnapshot } from "../src/eventD1/reads.ts";
 import type { EventProjectionRecoveryWriter } from "../src/eventProjectionRecoveryD1.ts";
 import type * as Canonical from "../src/profileCanonical/types.ts";
-import type * as Documents from "../src/profileCanonical/retainedRecords.ts";
+import type * as Documents from "../src/profileCanonical/contracts.ts";
 import type * as Operations from "../src/authIdentityCanonical/operationRecords.ts";
 import type { createCanonicalAuthOperations } from "../src/authIdentityCanonical/operations.ts";
 import type { VerifyOperationMeta } from "../src/authOperationReplay.ts";
@@ -59,35 +59,17 @@ export type DocumentsBoundaryContracts = [
       ? true
       : false
   >,
+  Assert<Rejects<Record<string, unknown>, Documents.StoredPlayerProfile>>,
+  Assert<HasIndex<Documents.StoredPlayerProfile> extends false ? true : false>,
+  Assert<Rejects<Record<string, unknown>, Documents.VerifyOperationMetadata>>,
   Assert<
-    Rejects<Record<string, unknown>, Documents.CanonicalProfileLegacyDocument>
+    HasIndex<Documents.VerifyOperationMetadata> extends false ? true : false
   >,
+  Assert<Rejects<Record<string, unknown>, Documents.AuthOperationReceipt>>,
+  Assert<HasIndex<Documents.AuthOperationReceipt> extends false ? true : false>,
+  Assert<Rejects<Record<string, unknown>, Documents.CanonicalRatingPayload>>,
   Assert<
-    HasIndex<Documents.CanonicalProfileLegacyDocument> extends false
-      ? true
-      : false
-  >,
-  Assert<
-    Rejects<Record<string, unknown>, Documents.CanonicalAuthMetadataDocument>
-  >,
-  Assert<
-    HasIndex<Documents.CanonicalAuthMetadataDocument> extends false
-      ? true
-      : false
-  >,
-  Assert<
-    Rejects<Record<string, unknown>, Documents.CanonicalAuthResultDocument>
-  >,
-  Assert<
-    HasIndex<Documents.CanonicalAuthResultDocument> extends false ? true : false
-  >,
-  Assert<
-    Rejects<Record<string, unknown>, Documents.CanonicalRatingPayloadDocument>
-  >,
-  Assert<
-    HasIndex<Documents.CanonicalRatingPayloadDocument> extends false
-      ? true
-      : false
+    HasIndex<Documents.CanonicalRatingPayload> extends false ? true : false
   >,
   Assert<
     Rejects<
@@ -114,39 +96,24 @@ export type DocumentsBoundaryContracts = [
     >
   >,
   Assert<
-    Rejects<
-      Documents.CanonicalProfileLegacyDocument,
-      Documents.CanonicalAuthMetadataDocument
-    >
+    Rejects<Documents.StoredPlayerProfile, Documents.VerifyOperationMetadata>
   >,
   Assert<
-    Rejects<
-      Documents.CanonicalAuthMetadataDocument,
-      Documents.CanonicalProfileLegacyDocument
-    >
+    Rejects<Documents.VerifyOperationMetadata, Documents.StoredPlayerProfile>
   >,
   Assert<
-    Rejects<
-      Documents.CanonicalAuthMetadataDocument,
-      Documents.CanonicalAuthResultDocument
-    >
+    Rejects<Documents.VerifyOperationMetadata, Documents.AuthOperationReceipt>
   >,
   Assert<
-    Rejects<
-      Documents.CanonicalAuthResultDocument,
-      Documents.CanonicalAuthMetadataDocument
-    >
+    Rejects<Documents.AuthOperationReceipt, Documents.VerifyOperationMetadata>
   >,
   Assert<
-    Rejects<
-      Documents.CanonicalAuthResultDocument,
-      Documents.CanonicalRatingPayloadDocument
-    >
+    Rejects<Documents.AuthOperationReceipt, Documents.CanonicalRatingPayload>
   >,
   Assert<
     Rejects<
       Projection.ProfileGameProjectionDocument,
-      Documents.CanonicalRatingPayloadDocument
+      Documents.CanonicalRatingPayload
     >
   >,
   Assert<Rejects<Record<string, unknown>, ProjectionRecord["data"]>>,
@@ -524,10 +491,7 @@ export type EventOutboxesBoundaryContracts = [
 
 export type AuthOperationsBoundaryContracts = [
   Assert<
-    Rejects<
-      Record<string, unknown>,
-      Canonical.CanonicalProfileValue["legacyFields"]
-    >
+    Rejects<Record<string, unknown>, Canonical.CanonicalProfileValue["profile"]>
   >,
   Assert<
     Rejects<
@@ -542,10 +506,12 @@ export type AuthOperationsBoundaryContracts = [
     >
   >,
   Assert<
-    Rejects<
-      Record<string, unknown>,
-      Canonical.CanonicalMergeTargetValue["sourceLegacyFields"]
-    >
+    "sourceLegacyFields" extends keyof Canonical.CanonicalMergeTargetValue
+      ? false
+      : true
+  >,
+  Assert<
+    "legacyFields" extends keyof Canonical.CanonicalProfileValue ? false : true
   >,
   Assert<
     Rejects<
@@ -561,7 +527,7 @@ export type AuthOperationsBoundaryContracts = [
       Omit<
         Extract<Canonical.CanonicalAuthOperationStartWrite, { kind: "verify" }>,
         "result"
-      > & { result: Documents.CanonicalAuthResultDocument },
+      > & { result: Documents.AuthOperationReceipt },
       Canonical.CanonicalAuthOperationStartWrite
     >
   >,
@@ -570,7 +536,7 @@ export type AuthOperationsBoundaryContracts = [
       Omit<
         Extract<Canonical.CanonicalAuthOperationStartWrite, { kind: "unlink" }>,
         "meta"
-      > & { meta: Documents.CanonicalAuthMetadataDocument },
+      > & { meta: Documents.VerifyOperationMetadata },
       Canonical.CanonicalAuthOperationStartWrite
     >
   >,
@@ -603,14 +569,14 @@ export type AuthOperationsBoundaryContracts = [
           { status: "failed" }
         >,
         "result"
-      > & { result: Documents.CanonicalAuthResultDocument },
+      > & { result: Documents.AuthOperationReceipt },
       Canonical.CanonicalAuthOperationUpdateWrite
     >
   >,
   Assert<
     Rejects<
       {
-        result: Parameters<typeof Operations.authOperationResult>[0];
+        result: Parameters<typeof Operations.authOperationResult>[1];
         error: Error;
       },
       Operations.AuthOperationOutcome
@@ -619,7 +585,7 @@ export type AuthOperationsBoundaryContracts = [
   Assert<
     Rejects<
       Record<string, unknown>,
-      Parameters<typeof Operations.authOperationResult>[0]
+      Parameters<typeof Operations.authOperationResult>[1]
     >
   >,
   Assert<
@@ -641,7 +607,10 @@ export type RatingsBoundaryContracts = [
     >
   >,
   Assert<
-    Rejects<Record<string, unknown>, Parameters<typeof Rating.ratingValue>[1]>
+    Rejects<
+      Record<string, unknown>,
+      Parameters<typeof Rating.validateRatingValue>[0]
+    >
   >,
   Assert<
     Rejects<
@@ -705,14 +674,20 @@ export type RatingsBoundaryContracts = [
   >,
   Assert<
     Rejects<
-      Omit<Rating.RatingLeasePayloadWrite, "status"> & { status: "done" },
-      Rating.RatingLeasePayloadWrite
+      Omit<
+        Extract<Canonical.CanonicalRatingUpdateValue, { status: "processing" }>,
+        "status"
+      > & { status: "done" },
+      Extract<Canonical.CanonicalRatingUpdateValue, { status: "processing" }>
     >
   >,
   Assert<
     Rejects<
-      Omit<Rating.RatingLeasePayloadWrite, "ownerToken">,
-      Rating.RatingLeasePayloadWrite
+      Omit<
+        Extract<Canonical.CanonicalRatingUpdateValue, { status: "processing" }>,
+        "ownerToken"
+      >,
+      Extract<Canonical.CanonicalRatingUpdateValue, { status: "processing" }>
     >
   >,
 ];
@@ -824,8 +799,8 @@ export type PositiveBoundaryContracts = [
   >,
   Assert<
     Accepts<
-      ReturnType<typeof Rating.ratingLeasePayload>,
-      Parameters<typeof Rating.ratingValue>[1]
+      ReturnType<typeof Rating.ratingLeaseValue>,
+      Parameters<typeof Rating.validateRatingValue>[0]
     >
   >,
   Assert<
@@ -842,12 +817,14 @@ export type PositiveBoundaryContracts = [
         method: "eth";
         loginUid: string;
         status: "started";
-        meta: Documents.CanonicalAuthMetadataDocument;
+        meta: Documents.VerifyOperationMetadata;
         result: null;
         errorCode: null;
         errorMessage: null;
         startedAtMs: number;
         updatedAtMs: number;
+        cancelledAtMs: null;
+        cancellationReason: null;
       },
       Canonical.CanonicalAuthOperationStartWrite
     >
@@ -866,6 +843,8 @@ export type PositiveBoundaryContracts = [
         errorMessage: null;
         startedAtMs: number;
         updatedAtMs: number;
+        cancelledAtMs: null;
+        cancellationReason: null;
       },
       Canonical.CanonicalAuthOperationStartWrite
     >
@@ -878,12 +857,14 @@ export type PositiveBoundaryContracts = [
         method: "eth";
         loginUid: string;
         status: "success";
-        meta: Documents.CanonicalAuthMetadataDocument;
-        result: Documents.CanonicalAuthResultDocument;
+        meta: Documents.VerifyOperationMetadata;
+        result: Documents.VerifyOperationReceipt;
         errorCode: null;
         errorMessage: null;
         startedAtMs: number;
         updatedAtMs: number;
+        cancelledAtMs: null;
+        cancellationReason: null;
       },
       Canonical.CanonicalAuthOperationUpdateWrite
     >
@@ -896,12 +877,14 @@ export type PositiveBoundaryContracts = [
         method: "eth";
         loginUid: string;
         status: "failed";
-        meta: Documents.CanonicalAuthMetadataDocument;
+        meta: Documents.VerifyOperationMetadata;
         result: null;
-        errorCode: string;
+        errorCode: "unavailable";
         errorMessage: string;
         startedAtMs: number;
         updatedAtMs: number;
+        cancelledAtMs: null;
+        cancellationReason: null;
       },
       Canonical.CanonicalAuthOperationUpdateWrite
     >

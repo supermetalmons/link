@@ -3,7 +3,10 @@ import {
   canonicalEventRepositoryJson as canonicalJson,
   sha256Hex,
 } from "./canonicalJson.ts";
-import { isEventMutation } from "../../../runtime/eventCommands.js";
+import {
+  isEventMutation,
+  eventCommandIdentity,
+} from "../../../runtime/eventCommands.js";
 import type { EventCommand } from "../../../runtime/eventCommands.js";
 import type { EventCommitOptions, EventStore } from "./eventStoreContracts.ts";
 import type { MatchStatePort } from "./repositoryContracts.ts";
@@ -17,7 +20,6 @@ import {
   sameTransitionIntent,
 } from "./eventTransitionCodec.ts";
 import type { EventIntentEffects } from "./eventD1/types.ts";
-import { STATE_EFFECTS_FIELD } from "./stateCompatibility.ts";
 import { withEventWriteAdmission } from "./eventWriteAdmission.ts";
 import {
   EventD1Conflict,
@@ -75,8 +77,13 @@ async function transitionId(
   revision: number,
   stateEffects: EventIntentEffects,
 ): Promise<string> {
+  const identityEffects = [...stateEffects].sort((left, right) => {
+    const a = eventCommandIdentity(left);
+    const b = eventCommandIdentity(right);
+    return a < b ? -1 : a > b ? 1 : 0;
+  });
   const digest = await sha256Hex(
-    `${eventId}\n${revision}\n${canonicalJson(stateEffects)}`,
+    `${eventId}\n${revision}\n${canonicalJson(identityEffects)}`,
   );
   return `et_${digest}`;
 }
@@ -193,9 +200,6 @@ async function applyIntent(
     if (!sameTransitionIntent(currentIntent, intent)) {
       throw new Error("event-transition-identity-conflict");
     }
-    if (currentIntent.schemaVersion !== 2) {
-      throw new Error("event-transition-legacy-source-disabled");
-    }
     const canonicalChanges = eventIntentCanonicalChanges(currentIntent);
     const effectsStartedAt = Date.now();
     await withInviteEffectsAdmission(discoveryDb, async () => {
@@ -277,7 +281,7 @@ async function commitD1EventPlan(
   if (eventIds.length !== 1)
     throw new Error("event-transition-must-target-one-event");
   return withInviteEffectsAdmission(discoveryDb, async () => {
-    const eventId = eventIds[0];
+    const eventId = eventIds[0]!;
     const revision = (await readEventSnapshot(db, eventId)).revision;
     if (revision < 1)
       throw new Error("event-match-creation-requires-transition");
@@ -286,12 +290,12 @@ async function commitD1EventPlan(
     const id = await transitionId(eventId, revision, stateEffects);
     const nowMs = Date.now();
     const intent = createEventTransitionDraft({
-      schemaVersion: 1,
+      schemaVersion: 3,
       transitionId: id,
       eventId,
       expectedRevision: revision,
       canonicalUpdates,
-      [STATE_EFFECTS_FIELD]: stateEffects,
+      effects: stateEffects,
       createdAtMs: nowMs,
       updatedAtMs: nowMs,
     });
@@ -327,7 +331,6 @@ async function notifyEventInviteEffects(
   env: Env,
   intent: EventTransitionIntent,
 ): Promise<void> {
-  if (intent.schemaVersion !== 2) return;
   const { effects, metadataInviteIds, matchInviteIds } =
     eventIntentNotificationTargets(intent);
   await Promise.all([

@@ -1,3 +1,4 @@
+import { required } from "./fixtures/canonicalData.mjs";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { registerHooks } from "node:module";
@@ -36,8 +37,9 @@ const source = ts.createSourceFile(
   true,
   ts.ScriptKind.TSX,
 );
+/** @type {Map<string, string>} */
 const callbacks = new Map();
-const collectCallbacks = (node) => {
+const collectCallbacks = (/** @type {ts.Node} */ node) => {
   if (
     ts.isVariableDeclaration(node) &&
     ts.isIdentifier(node.name) &&
@@ -50,17 +52,26 @@ const collectCallbacks = (node) => {
 collectCallbacks(source);
 assert.equal(callbacks.size, callbackNames.length);
 
+/** @param {Record<string, unknown>} dependencies @returns {{startWalkingAnimation(): void}} */
 const createCallbacks = (dependencies) => {
   const { outputText } = ts.transpileModule(
-    callbackNames.map((name) => callbacks.get(name)).join("\n"),
+    callbackNames.map((name) => required(callbacks.get(name))).join("\n"),
     { compilerOptions: { target: ts.ScriptTarget.ES2022 } },
   );
-  return new Function(
-    ...Object.keys(dependencies),
-    `${outputText}; return { startWalkingAnimation };`,
-  )(...Object.values(dependencies));
+  const load =
+    /** @type {(...values: unknown[]) => {startWalkingAnimation(): void}} */ (
+      new Function(
+        ...Object.keys(dependencies),
+        `${outputText}; return { startWalkingAnimation };`,
+      )
+    );
+  return load(...Object.values(dependencies));
 };
 
+/** @typedef {{style: Record<string, string>; isConnected: boolean; src?: string;
+ * setAttribute(): void; appendChild(): void; remove(): void; querySelector?: () => null;
+ * getBoundingClientRect(): {left: number; top: number; right: number; bottom: number; width: number; height: number}}} TestNode */
+/** @returns {TestNode} */
 const createNode = () => ({
   style: {},
   isConnected: true,
@@ -89,33 +100,41 @@ test("retained walking animation collects a material recovered after an image-lo
   t.mock.method(URL, "createObjectURL", () => "blob:recovered-dust");
   assert.equal(await imageResources.getMaterialImageUrl("dust"), null);
 
+  /** @type {FrameRequestCallback[]} */
   const frames = [];
+  /** @type {(() => void) | undefined} */
   let walkingStep;
   let displayedAmount = 0;
+  /** @type {TestNode[]} */
   const pullImages = [];
   const host = createNode();
   host.querySelector = () => null;
+  /** @type {{current: Array<{name: import("@mons/shared/mining").MiningMaterialName; el: TestNode; shadow: TestNode}>}} */
   const materialDropsRef = { current: [] };
   const dependencies = {
+    /** @template T @param {T} callback @returns {T} */
     useCallback: (callback) => callback,
     materialUrls: imageResources.getCachedMaterialImageUrls(),
-    getCachedMaterialImageUrl: (name) =>
-      imageResources.getCachedMaterialImageUrl(name),
+    getCachedMaterialImageUrl: (
+      /** @type {Parameters<typeof imageResources.getCachedMaterialImageUrl>[0]} */ name,
+    ) => imageResources.getCachedMaterialImageUrl(name),
     materialItemRefs: { current: { dust: host } },
     fxContainerRef: { current: null },
     amountsDecoupledRef: { current: true },
-    setMaterialAmounts: (update) => {
-      displayedAmount = update({ dust: displayedAmount }).dust;
+    setMaterialAmounts: (
+      /** @type {(previous: Record<string, number>) => Record<string, number>} */ update,
+    ) => {
+      displayedAmount = required(update({ dust: displayedAmount }).dust);
     },
     materialPullFlushRef: { current: null },
     materialPullQueueRef: { current: [] },
-    requestAnimationFrame: (callback) => {
+    requestAnimationFrame: (/** @type {FrameRequestCallback} */ callback) => {
       frames.push(callback);
       return frames.length;
     },
     document: {
       body: { appendChild() {} },
-      createElement: (tag) => {
+      createElement: (/** @type {string} */ tag) => {
         const element = createNode();
         if (tag === "img") pullImages.push(element);
         return element;
@@ -134,12 +153,18 @@ test("retained walking animation collects a material recovered after an image-lo
       },
     },
     getDudeBounds: () => ({ left: 0, top: 0, right: 1, bottom: 1 }),
-    computeOverlapArea: (a, b) =>
+    computeOverlapArea: (
+      /** @type {{ right: number; left: number; bottom: number; top: number; }} */ a,
+      /** @type {{ right: number; left: number; bottom: number; top: number; }} */ b,
+    ) =>
       Math.max(0, Math.min(a.right, b.right) - Math.max(a.left, b.left)) *
       Math.max(0, Math.min(a.bottom, b.bottom) - Math.max(a.top, b.top)),
     playSounds() {},
     Sound: { CollectingMaterials: "collect" },
-    playSheetAnimation: (_kind, options) => {
+    playSheetAnimation: (
+      /** @type {string} */ _kind,
+      /** @type {{onStep: () => void}} */ options,
+    ) => {
       walkingStep = options.onStep;
     },
   };
@@ -153,18 +178,22 @@ test("retained walking animation collects a material recovered after an image-lo
     ...dependencies,
     materialUrls: imageResources.getCachedMaterialImageUrls(),
   });
-  const drop = { name: "dust", el: createNode(), shadow: createNode() };
+  const drop = {
+    name: /** @type {const} */ ("dust"),
+    el: createNode(),
+    shadow: createNode(),
+  };
   materialDropsRef.current.push(drop);
 
-  walkingStep();
+  required(walkingStep)();
   assert.equal(materialDropsRef.current.length, 0);
   assert.equal(drop.el.isConnected, false);
   assert.equal(drop.shadow.isConnected, false);
   assert.equal(displayedAmount, 0);
-  frames.shift()(0);
+  required(frames.shift())(0);
 
   assert.equal(displayedAmount, 1);
   assert.equal(pullImages.length, 1);
-  assert.equal(pullImages[0].src, "blob:recovered-dust");
+  assert.equal(required(pullImages[0]).src, "blob:recovered-dust");
   assert.equal(requests, 2);
 });

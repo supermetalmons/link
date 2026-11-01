@@ -56,8 +56,8 @@ export function readProfileEventPrizesViaApi(
     for (let attempt = 0; attempt < 2; attempt++) {
       let cursor: NonNullable<ApiQuery<"GET /events/prizes">["cursor"]> | null =
         null;
-      let bookmark = attempt === 0 ? options.bookmark : null;
-      const requestedEtag = attempt === 0 ? options.etag : null;
+      let bookmark = attempt === 0 ? (options.bookmark ?? null) : null;
+      const requestedEtag = attempt === 0 ? (options.etag ?? null) : null;
       let snapshot: { revision: number; etag: string; epoch: string } | null =
         null;
       const prizes = new Map<string, EventPrizeAssignmentWireRecord>();

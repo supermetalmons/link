@@ -1,3 +1,5 @@
+import { required } from "./fixtures/canonicalData.mjs";
+import { canonicalAppearance } from "./fixtures/canonicalData.mjs";
 import assert from "node:assert/strict";
 import { registerHooks } from "node:module";
 import test from "node:test";
@@ -32,6 +34,10 @@ const {
 
 const originalFetch = globalThis.fetch;
 
+/**
+ * @param {unknown} body
+ * @param {number} [status]
+ */
 const jsonResponse = (body, status = 200) =>
   new Response(JSON.stringify(body), {
     status,
@@ -43,6 +49,9 @@ test.afterEach(() => {
 });
 
 test("auth API clients send exact bearer requests and validate responses", async () => {
+  /**
+   * @type {Array<{ input: string; init: RequestInit | undefined }>}
+   */
   const calls = [];
   const intentId = "abcdefghijklmnopqrstuvwx";
   const responses = [
@@ -76,7 +85,7 @@ test("auth API clients send exact bearer requests and validate responses", async
     calls.push({ input: String(input), init });
     return jsonResponse(responses.shift());
   };
-  const tokenProvider = async (forceRefresh) =>
+  const tokenProvider = async (/** @type {boolean} */ forceRefresh) =>
     forceRefresh ? "fresh-token" : "session-token";
 
   assert.equal(
@@ -103,7 +112,7 @@ test("auth API clients send exact bearer requests and validate responses", async
   );
 
   assert.deepEqual(
-    calls.map((call) => [call.input, call.init.method]),
+    calls.map((call) => [call.input, required(call.init).method]),
     [
       ["https://api.mons.link/auth/intents", "POST"],
       ["https://api.mons.link/auth/methods", "GET"],
@@ -112,28 +121,38 @@ test("auth API clients send exact bearer requests and validate responses", async
     ],
   );
   for (const call of calls) {
-    const headers = new Headers(call.init.headers);
+    const headers = new Headers(required(call.init).headers);
     assert.equal(headers.get("Authorization"), "Bearer session-token");
     assert.equal(headers.get("Accept"), "application/json");
-    assert.equal(call.init.cache, "no-store");
-    assert.ok(call.init.signal instanceof AbortSignal);
+    assert.equal(required(call.init).cache, "no-store");
+    assert.ok(required(call.init).signal instanceof AbortSignal);
   }
-  assert.equal(new Headers(calls[1].init.headers).get("Content-Type"), null);
-  assert.deepEqual(JSON.parse(calls[0].init.body), { method: "eth" });
-  assert.deepEqual(JSON.parse(calls[2].init.body), {});
+  assert.equal(
+    new Headers(required(required(calls[1]).init).headers).get("Content-Type"),
+    null,
+  );
+  assert.deepEqual(parseRequestJson(required(required(calls[0]).init).body), {
+    method: "eth",
+  });
+  assert.deepEqual(
+    parseRequestJson(required(required(calls[2]).init).body),
+    {},
+  );
 });
 
 test("auth mutation clients use exact Worker routes and preserve typed responses", async () => {
+  /**
+   * @type {Array<{ input: string; init: RequestInit | undefined }>}
+   */
   const calls = [];
   const profile = {
     ok: true,
     uid: "login-1",
     profileId: "profile-1",
     username: "Mons123",
-    emoji: 1,
     linkedMethods: { apple: true, eth: true, sol: true, x: true },
     appleLinked: true,
-    profileMons: "x".repeat(70 * 1024),
+    ...canonicalAppearance(),
     opId: "operation-1",
   };
   const responses = [
@@ -159,7 +178,7 @@ test("auth mutation clients use exact Worker routes and preserve typed responses
       address: "11111111111111111111111111111111",
       signature: "signature",
       emoji: 1,
-      aura: "",
+      aura: "none",
     },
     token,
   );
@@ -169,7 +188,7 @@ test("auth mutation clients use exact Worker routes and preserve typed responses
       message: "message",
       signature: "signature",
       emoji: 1,
-      aura: null,
+      aura: "none",
     },
     token,
   );
@@ -179,12 +198,12 @@ test("auth mutation clients use exact Worker routes and preserve typed responses
       idToken: "apple-token",
       consentSource: "signin",
       emoji: 1,
-      aura: "",
+      aura: "none",
     },
     token,
   );
   await completeXRedirectAuthViaApi(
-    { flowId: "flow-1", emoji: 1, aura: "" },
+    { flowId: "flow-1", emoji: 1, aura: "none" },
     token,
   );
   await unlinkAuthMethodViaApi("apple", token);
@@ -199,22 +218,25 @@ test("auth mutation clients use exact Worker routes and preserve typed responses
     ],
   );
   for (const call of calls) {
-    assert.equal(call.init.method, "POST");
+    assert.equal(required(call.init).method, "POST");
     assert.equal(
-      new Headers(call.init.headers).get("Authorization"),
+      new Headers(required(call.init).headers).get("Authorization"),
       "Bearer session-token",
     );
   }
-  const unlinkBody = JSON.parse(calls[4].init.body);
+  const unlinkBody = parseRequestJson(required(required(calls[4]).init).body);
   assert.equal(unlinkBody.method, "apple");
+  assert.ok(typeof unlinkBody.opId === "string");
   assert.match(unlinkBody.opId, /^[0-9a-f-]{36}$/);
 });
 
 test("retries exactly once with a forced token refresh after 401", async () => {
+  /** @type {Array<boolean>} */
   const refreshes = [];
+  /** @type {Array<string | null>} */
   const tokens = [];
   globalThis.fetch = async (_input, init) => {
-    tokens.push(new Headers(init.headers).get("Authorization"));
+    tokens.push(new Headers(required(init).headers).get("Authorization"));
     if (tokens.length === 1) {
       return jsonResponse(
         {
@@ -242,9 +264,10 @@ test("retries exactly once with a forced token refresh after 401", async () => {
 });
 
 test("keeps one unlink operation ID across a forced token refresh", async () => {
+  /** @type {Record<string, unknown>[]} */
   const bodies = [];
   globalThis.fetch = async (_input, init) => {
-    bodies.push(JSON.parse(init.body));
+    bodies.push(parseRequestJson(required(init).body));
     if (bodies.length === 1) {
       return jsonResponse(
         {
@@ -266,16 +289,20 @@ test("keeps one unlink operation ID across a forced token refresh", async () => 
     refresh ? "fresh" : "stale",
   );
   assert.equal(bodies.length, 2);
-  assert.equal(bodies[0].opId, bodies[1].opId);
-  assert.match(bodies[0].opId, /^[0-9a-f-]{36}$/);
+  const firstBody = required(bodies[0]);
+  assert.equal(firstBody.opId, required(bodies[1]).opId);
+  assert.ok(typeof firstBody.opId === "string");
+  assert.match(firstBody.opId, /^[0-9a-f-]{36}$/);
 });
 
 test("serializes auth input before acquiring a token and reuses it after 401", async () => {
   const request = { intentId: "original-intent" };
+  /** @type {Record<string, unknown>[]} */
   const bodies = [];
+  /** @type {Array<boolean>} */
   const refreshes = [];
   globalThis.fetch = async (_input, init) => {
-    bodies.push(JSON.parse(init.body));
+    bodies.push(parseRequestJson(required(init).body));
     return bodies.length === 1
       ? jsonResponse({ ok: false }, 401)
       : jsonResponse({
@@ -308,7 +335,6 @@ test("preserves auth token errors and masks unrelated token failures", async () 
   const authError = new AuthApiError(
     "unauthenticated",
     "authentication-changed",
-    { reason: "session-replaced" },
   );
   await assert.rejects(
     getLinkedAuthMethodsViaApi(async () => {
@@ -331,17 +357,18 @@ test("preserves auth token errors and masks unrelated token failures", async () 
 });
 
 test("does not retry unlink after the authenticated user changes", async () => {
+  /** @type {Array<[string, boolean]>} */
   const tokenRequests = [];
   const userA = {
     uid: "user-a",
-    async getIdToken(forceRefresh) {
+    async getIdToken(/** @type {boolean} */ forceRefresh) {
       tokenRequests.push([this.uid, forceRefresh]);
       return "user-a-token";
     },
   };
   const userB = {
     uid: "user-b",
-    async getIdToken(forceRefresh) {
+    async getIdToken(/** @type {boolean} */ forceRefresh) {
       tokenRequests.push([this.uid, forceRefresh]);
       return "user-b-token";
     },
@@ -376,10 +403,8 @@ test("does not retry unlink after the authenticated user changes", async () => {
 });
 
 test("does not send unlink after the user changes during token acquisition", async () => {
-  let resolveToken;
-  const token = new Promise((resolve) => {
-    resolveToken = resolve;
-  });
+  /** @type {PromiseWithResolvers<string>} */
+  const { promise: token, resolve: resolveToken } = Promise.withResolvers();
   const userA = {
     uid: "user-a",
     getIdToken() {
@@ -409,7 +434,7 @@ test("does not send unlink after the user changes during token acquisition", asy
     createUserBoundAuthTokenProvider(userA, () => currentUser),
   );
   currentUser = userB;
-  resolveToken("user-a-token");
+  required(resolveToken)("user-a-token");
 
   await assert.rejects(
     unlink,
@@ -422,10 +447,8 @@ test("does not send unlink after the user changes during token acquisition", asy
 });
 
 test("rechecks the user in the microtask between token acquisition and fetch", async () => {
-  let resolveToken;
-  const token = new Promise((resolve) => {
-    resolveToken = resolve;
-  });
+  /** @type {PromiseWithResolvers<string>} */
+  const { promise: token, resolve: resolveToken } = Promise.withResolvers();
   const userA = {
     uid: "user-a",
     getIdToken() {
@@ -454,7 +477,7 @@ test("rechecks the user in the microtask between token acquisition and fetch", a
     "apple",
     createUserBoundAuthTokenProvider(userA, () => currentUser),
   );
-  resolveToken("user-a-token");
+  required(resolveToken)("user-a-token");
   queueMicrotask(() => {
     currentUser = userB;
   });
@@ -470,14 +493,13 @@ test("rechecks the user in the microtask between token acquisition and fetch", a
 });
 
 test("rejects a successful unlink response after the user changes", async () => {
-  let resolveResponse;
-  const response = new Promise((resolve) => {
-    resolveResponse = resolve;
-  });
-  let markRequestStarted;
-  const requestStarted = new Promise((resolve) => {
-    markRequestStarted = resolve;
-  });
+  /** @type {PromiseWithResolvers<Response>} */
+  const { promise: response, resolve: resolveResponse } =
+    Promise.withResolvers();
+
+  /** @type {PromiseWithResolvers<void>} */
+  const { promise: requestStarted, resolve: markRequestStarted } =
+    Promise.withResolvers();
   const userA = {
     uid: "user-a",
     async getIdToken() {
@@ -502,7 +524,7 @@ test("rejects a successful unlink response after the user changes", async () => 
   );
   await requestStarted;
   currentUser = userB;
-  resolveResponse(
+  required(resolveResponse)(
     jsonResponse({
       ok: true,
       profileId: "profile-a",
@@ -521,10 +543,9 @@ test("rejects a successful unlink response after the user changes", async () => 
 });
 
 test("session-bound results reject an auth change before caller mutations", async () => {
-  let resolveResponse;
-  const response = new Promise((resolve) => {
-    resolveResponse = resolve;
-  });
+  /** @type {PromiseWithResolvers<{ ok: boolean }>} */
+  const { promise: response, resolve: resolveResponse } =
+    Promise.withResolvers();
   const userA = {
     uid: "user-a",
     async getIdToken() {
@@ -553,7 +574,7 @@ test("session-bound results reject an auth change before caller mutations", asyn
     return result;
   })();
 
-  resolveResponse({ ok: true });
+  required(resolveResponse)({ ok: true });
   queueMicrotask(() => {
     currentUser = userB;
   });
@@ -601,8 +622,16 @@ test("does not wait for a stalled 401 body cancellation", async () => {
 
 test("applies the request deadline to session token acquisition", async () => {
   const originalSetTimeout = globalThis.setTimeout;
-  globalThis.setTimeout = (callback, _delay, ...args) =>
-    originalSetTimeout(callback, 0, ...args);
+  Object.defineProperty(globalThis, "setTimeout", {
+    configurable: true,
+    writable: true,
+    value:
+      /** @param {(...args: unknown[]) => void} callback @param {number | undefined} _delay @param {...unknown} args */ (
+        callback,
+        _delay,
+        ...args
+      ) => originalSetTimeout(callback, 0, ...args),
+  });
   try {
     await assert.rejects(
       getLinkedAuthMethodsViaApi(() => new Promise(() => undefined)),
@@ -618,11 +647,21 @@ test("applies the request deadline to session token acquisition", async () => {
 
 test("allows canonical profile synchronization a longer request deadline", async () => {
   const originalSetTimeout = globalThis.setTimeout;
+  /** @type {(number | undefined)[]} */
   const delays = [];
-  globalThis.setTimeout = (callback, delay, ...args) => {
-    delays.push(delay);
-    return originalSetTimeout(callback, 60_000, ...args);
-  };
+  Object.defineProperty(globalThis, "setTimeout", {
+    configurable: true,
+    writable: true,
+    value:
+      /** @param {(...args: unknown[]) => void} callback @param {number | undefined} delay @param {...unknown} args */ (
+        callback,
+        delay,
+        ...args
+      ) => {
+        delays.push(delay);
+        return originalSetTimeout(callback, 60_000, ...args);
+      },
+  });
   globalThis.fetch = async () =>
     jsonResponse({
       ok: true,
@@ -649,7 +688,13 @@ test("maps server errors without retrying writes and preserves details", async (
         ok: false,
         error: "failed-precondition",
         message: "x-auth-disabled",
-        details: { reason: "disabled" },
+        details: {
+          reason: "method-reuse-cooldown",
+          scope: "method",
+          method: "x",
+          retryAtMs: 0,
+          cooldownMs: 86400000,
+        },
       },
       409,
     );
@@ -663,7 +708,13 @@ test("maps server errors without retrying writes and preserves details", async (
       assert.ok(error instanceof AuthApiError);
       assert.equal(error.code, "failed-precondition");
       assert.equal(error.message, "x-auth-disabled");
-      assert.deepEqual(error.details, { reason: "disabled" });
+      assert.deepEqual(error.details, {
+        reason: "method-reuse-cooldown",
+        scope: "method",
+        method: "x",
+        retryAtMs: 0,
+        cooldownMs: 86400000,
+      });
       return true;
     },
   );
@@ -694,3 +745,14 @@ test("rejects malformed, oversized, and transport-failed responses safely", asyn
     );
   }
 });
+
+/** @param {unknown} body @returns {Record<string, unknown>} */
+function parseRequestJson(body) {
+  assert.ok(typeof body === "string");
+  /** @type {unknown} */
+  const value = JSON.parse(body);
+  assert.ok(
+    value !== null && typeof value === "object" && !Array.isArray(value),
+  );
+  return Object.fromEntries(Object.entries(value));
+}

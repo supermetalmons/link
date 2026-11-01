@@ -1,8 +1,6 @@
-import {
-  inviteRatingWager,
-  type InviteDocument,
-} from "@mons/shared/invite-records";
-import { MATCH_TIMER_TERMINAL } from "@mons/shared/timers";
+import type { MatchTimer } from "@mons/shared/timers";
+import type { EmojiId } from "@mons/shared/appearance";
+import type { WagerAgreement } from "@mons/shared/wagers";
 import {
   getDisplayNameFromAddress,
   getTelegramEmojiTag,
@@ -22,8 +20,11 @@ const matchStatusTelegramEmojiIds = {
   whiteFlag: "5228702136862282659",
 };
 
-function wagerSuffix(invite: InviteDocument, matchId: string): string {
-  const { material, count } = inviteRatingWager(invite, matchId);
+function wagerSuffix(
+  wager: Pick<WagerAgreement, "material" | "count"> | null,
+): string {
+  if (wager === null) return "";
+  const { material, count } = wager;
   const emojiId = materialTelegramEmojiIds[material] || "";
   const icon = getTelegramEmojiTag(emojiId);
   if (!icon || !Number.isFinite(count) || count <= 0) {
@@ -41,13 +42,14 @@ export function buildRatingDisplayNames({
 }: {
   player: RatingProfile;
   opponent: RatingProfile;
-  playerMatch: { emojiId: unknown };
-  opponentMatch: { emojiId: unknown };
+  playerMatch: { emojiId: EmojiId };
+  opponentMatch: { emojiId: EmojiId };
   result: "gg" | "win";
 }): { winnerDisplayName: string; loserDisplayName: string } {
-  const playerEmoji = player.emoji === "" ? playerMatch.emojiId : player.emoji;
+  const playerEmoji =
+    player.profileId === "" ? playerMatch.emojiId : player.emoji;
   const opponentEmoji =
-    opponent.emoji === "" ? opponentMatch.emojiId : opponent.emoji;
+    opponent.profileId === "" ? opponentMatch.emojiId : opponent.emoji;
   const playerDisplayName = getDisplayNameFromAddress(
     player.username,
     player.eth,
@@ -81,8 +83,7 @@ export function buildRatingMessage({
   shouldApplyRatingDelta,
   playerMatch,
   opponentMatch,
-  invite,
-  matchId,
+  wager,
 }: {
   winnerDisplayName: string;
   loserDisplayName: string;
@@ -91,10 +92,9 @@ export function buildRatingMessage({
   winnerScore: number;
   loserScore: number;
   shouldApplyRatingDelta: boolean;
-  playerMatch: { status: string; timer: string };
-  opponentMatch: { status: string; timer: string };
-  invite: InviteDocument;
-  matchId: string;
+  playerMatch: { status: "active" | "surrendered"; timer: MatchTimer };
+  opponentMatch: { status: "active" | "surrendered"; timer: MatchTimer };
+  wager: Pick<WagerAgreement, "material" | "count"> | null;
 }): string {
   let suffix = ` (${winnerScore} - ${loserScore})`;
   if (
@@ -106,17 +106,17 @@ export function buildRatingMessage({
       suffix += ` ${icon}`;
     }
   } else if (
-    playerMatch.timer === MATCH_TIMER_TERMINAL ||
-    opponentMatch.timer === MATCH_TIMER_TERMINAL
+    playerMatch.timer.state === "finished" ||
+    opponentMatch.timer.state === "finished"
   ) {
     const icon = getTelegramEmojiTag(matchStatusTelegramEmojiIds.timer);
     if (icon) {
       suffix += ` ${icon}`;
     }
   }
-  const wager = wagerSuffix(invite, matchId);
-  if (wager) {
-    suffix += ` ${wager}`;
+  const wagerText = wagerSuffix(wager);
+  if (wagerText) {
+    suffix += ` ${wagerText}`;
   }
   return shouldApplyRatingDelta
     ? `${winnerDisplayName} ${winnerNewRating}↑ ${loserDisplayName} ${loserNewRating}↓${suffix}`

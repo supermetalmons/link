@@ -1,4 +1,4 @@
-import { decodeAutomatchEntries } from "../../../runtime/automatchRecords.js";
+import { retainedAutomatchRecordsFixture } from "./automatchRecordFixture.ts";
 import type { AutomatchPersistence } from "../src/automatchPersistence.ts";
 import type { StateRepository } from "../test/stateRepositoryTestTypes.ts";
 import { gameplayTestPort } from "./gameSessionTestPorts.ts";
@@ -24,7 +24,7 @@ export function createAutomatchQueueLookup(
       if (row && typeof row === "object" && !Array.isArray(row))
         Object.assign(result, row);
     }
-    return decodeAutomatchEntries(result)!;
+    return retainedAutomatchRecordsFixture("automatch", result)!;
   };
 }
 

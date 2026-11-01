@@ -1,3 +1,8 @@
+import {
+  required,
+  canonicalNavigationGame,
+} from "./fixtures/canonicalData.mjs";
+import { applicationStorageKey } from "../src/session/applicationDataStorage.ts";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { registerHooks } from "node:module";
@@ -68,78 +73,81 @@ const {
 } = await import("../src/services/navigationGamesCache.ts");
 
 const timerConfig = { duration: 60, progress: 12, requestDate: 4000 };
+/** @type {{name: string, run: () => void, prepare?: () => void, presentation?: Partial<ReturnType<typeof getGameControlsSnapshot>["presentation"]>, gameControls?: Partial<ReturnType<typeof getGameControlsSnapshot>["presentation"]["gameControls"]>}[]} */
 const pureControlCommands = [
   {
     name: "showMoveHistoryButton",
-    args: [true],
+    run: () => bottomControlsPort.showMoveHistoryButton(true),
     presentation: { moveHistoryVisible: true },
   },
   {
     name: "showResignButton",
+    run: () => bottomControlsPort.showResignButton(),
     gameControls: { resignVisible: true },
   },
   {
     name: "setBotGameOptionVisible",
-    args: [true],
+    run: () => bottomControlsPort.setBotGameOptionVisible(true),
     presentation: { botGameVisible: true },
   },
   {
     name: "setPlaySamePuzzleAgainButtonVisible",
-    args: [true],
+    run: () => bottomControlsPort.setPlaySamePuzzleAgainButtonVisible(true),
     presentation: { replayPuzzleVisible: true },
   },
   {
     name: "setBrushAndNavigationButtonDimmed",
-    args: [true],
+    run: () => bottomControlsPort.setBrushAndNavigationButtonDimmed(true),
     presentation: { navigationDimmed: true, appearanceDimmed: true },
   },
   {
     name: "showWaitingStateText",
-    args: ["Waiting for opponent"],
+    run: () => bottomControlsPort.showWaitingStateText("Waiting for opponent"),
     presentation: { waitingText: "Waiting for opponent" },
   },
   {
     name: "setHomeVisible",
-    args: [true],
+    run: () => bottomControlsPort.setHomeVisible(true),
     presentation: { homeVisible: true },
   },
   {
     name: "setEndMatchVisible",
-    args: [true],
+    run: () => bottomControlsPort.setEndMatchVisible(true),
     presentation: { endMatchVisible: true },
   },
   {
     name: "setEndMatchConfirmed",
-    args: [true],
+    run: () => bottomControlsPort.setEndMatchConfirmed(true),
     presentation: { endMatchConfirmed: true },
   },
   {
     name: "setUndoVisible",
-    args: [true],
+    run: () => bottomControlsPort.setUndoVisible(true),
     gameControls: { undo: { visible: true, enabled: false } },
   },
   {
     name: "setAutomoveActionEnabled",
-    args: [false],
+    run: () => bottomControlsPort.setAutomoveActionEnabled(false),
     gameControls: { automove: { visible: false, enabled: false } },
   },
   {
     name: "setAutomoveActionVisible",
-    args: [true],
+    run: () => bottomControlsPort.setAutomoveActionVisible(true),
     gameControls: { automove: { visible: true, enabled: true } },
   },
   {
     name: "setWatchOnlyVisible",
-    args: [true],
+    run: () => bottomControlsPort.setWatchOnlyVisible(true),
     presentation: { watchOnlyVisible: true },
   },
   {
     name: "setUndoEnabled",
-    args: [true],
+    run: () => bottomControlsPort.setUndoEnabled(true),
     gameControls: { undo: { visible: false, enabled: true } },
   },
   {
     name: "disableAndHideUndoResignAndTimerControls",
+    run: () => bottomControlsPort.disableAndHideUndoResignAndTimerControls(),
     prepare: () => {
       dispatchGameControls({ type: "showTimerProgress", config: timerConfig });
       dispatchGameControls({ type: "enableTimer" });
@@ -167,10 +175,12 @@ const pureControlCommands = [
   },
   {
     name: "setIsReadyToCopyExistingInviteLink",
+    run: () => bottomControlsPort.setIsReadyToCopyExistingInviteLink(),
     presentation: { inviteReadyToCopy: true },
   },
   {
     name: "enableTimerVictoryClaim",
+    run: () => bottomControlsPort.enableTimerVictoryClaim(),
     gameControls: {
       timer: {
         mode: "claim",
@@ -182,26 +192,29 @@ const pureControlCommands = [
   },
   {
     name: "showPrimaryAction",
-    args: [PrimaryActionType.Rematch],
+    run: () => bottomControlsPort.showPrimaryAction(PrimaryActionType.Rematch),
     gameControls: { primaryAction: "rematch" },
   },
 ];
 
 test("bottom controls port preserves current binding ownership for effects and presentation", () => {
+  /** @type {[string, boolean][]} */
   const events = [];
   resetGameControlsPresentation(timerConfig);
   const first = {
-    setAutomatchEnabled: (enabled) => events.push(["first", enabled]),
+    setAutomatchEnabled: (/** @type {boolean} */ enabled) =>
+      events.push(["first", enabled]),
   };
   const second = {
-    setAutomatchEnabled: (enabled) => events.push(["second", enabled]),
+    setAutomatchEnabled: (/** @type {boolean} */ enabled) =>
+      events.push(["second", enabled]),
     hasBottomPopupsVisible: () => true,
     hasNavigationPopupVisible: () => true,
   };
 
-  bindBottomControlsApi(first);
-  bindBottomControlsApi(second);
-  unbindBottomControlsApi(first);
+  Reflect.apply(bindBottomControlsApi, undefined, [first]);
+  Reflect.apply(bindBottomControlsApi, undefined, [second]);
+  Reflect.apply(unbindBottomControlsApi, undefined, [first]);
   setAutomatchEnabled(false);
   showPrimaryAction(PrimaryActionType.Rematch);
 
@@ -213,14 +226,15 @@ test("bottom controls port preserves current binding ownership for effects and p
   assert.equal(hasBottomPopupsVisible(), true);
   assert.equal(hasNavigationPopupVisible(), true);
 
-  unbindBottomControlsApi(second);
+  Reflect.apply(unbindBottomControlsApi, undefined, [second]);
   assert.equal(hasBottomPopupsVisible(), false);
   assert.equal(hasNavigationPopupVisible(), false);
   assert.doesNotThrow(() => setAutomatchEnabled(true));
 });
 
 test("all pure control commands update only their intended state while bound", () => {
-  const owner = bindBottomControlsApi({});
+  const owner = {};
+  Reflect.apply(bindBottomControlsApi, undefined, [owner]);
   try {
     for (const command of pureControlCommands) {
       resetGameControlsPresentation(timerConfig);
@@ -235,7 +249,7 @@ test("all pure control commands update only their intended state while bound", (
       let notifications = 0;
       const unsubscribe = subscribeGameControls(() => notifications++);
       try {
-        bottomControlsPort[command.name](...(command.args ?? []));
+        command.run();
         const after = getGameControlsSnapshot();
         assert.equal(after.context, before.context, command.name);
         assert.deepEqual(
@@ -256,7 +270,7 @@ test("all pure control commands update only their intended state while bound", (
           command.name,
         );
         assert.equal(notifications, 1, command.name);
-        bottomControlsPort[command.name](...(command.args ?? []));
+        command.run();
         assert.equal(getGameControlsSnapshot(), after, command.name);
         assert.equal(notifications, 1, command.name);
       } finally {
@@ -264,7 +278,7 @@ test("all pure control commands update only their intended state while bound", (
       }
     }
   } finally {
-    unbindBottomControlsApi(owner);
+    Reflect.apply(unbindBottomControlsApi, undefined, [owner]);
   }
 });
 
@@ -278,7 +292,7 @@ test("all pure control commands remain no-ops before binding and after unbinding
       command.prepare?.();
       const before = getGameControlsSnapshot();
       const notificationsBefore = notifications;
-      bottomControlsPort[command.name](...(command.args ?? []));
+      command.run();
       assert.equal(getGameControlsSnapshot(), before, command.name);
       assert.equal(notifications, notificationsBefore, command.name);
     }
@@ -291,10 +305,11 @@ test("all pure control commands remain no-ops before binding and after unbinding
   try {
     assertUnmountedCommandsDoNothing();
     notifications = 0;
-    const owner = bindBottomControlsApi({});
+    const owner = {};
+    Reflect.apply(bindBottomControlsApi, undefined, [owner]);
     showPrimaryAction(PrimaryActionType.JoinGame);
     assert.equal(notifications, 1);
-    unbindBottomControlsApi(owner);
+    Reflect.apply(unbindBottomControlsApi, undefined, [owner]);
     assertUnmountedCommandsDoNothing();
   } finally {
     unsubscribe();
@@ -304,7 +319,10 @@ test("all pure control commands remain no-ops before binding and after unbinding
 test("wager outside-tap registration remains independently replaceable", () => {
   resetWagerPanelApi();
   assert.equal(isWagerPanelVisible(), false);
-  assert.equal(handleWagerPanelOutsideTap({}), false);
+  assert.equal(
+    Reflect.apply(handleWagerPanelOutsideTap, undefined, [{}]),
+    false,
+  );
 
   let handled = 0;
   setWagerPanelVisibilityChecker(() => true);
@@ -313,12 +331,18 @@ test("wager outside-tap registration remains independently replaceable", () => {
     return true;
   });
   assert.equal(isWagerPanelVisible(), true);
-  assert.equal(handleWagerPanelOutsideTap({}), true);
+  assert.equal(
+    Reflect.apply(handleWagerPanelOutsideTap, undefined, [{}]),
+    true,
+  );
   assert.equal(handled, 1);
 
   setWagerPanelOutsideTapHandler(null);
   assert.equal(isWagerPanelVisible(), true);
-  assert.equal(handleWagerPanelOutsideTap({}), false);
+  assert.equal(
+    Reflect.apply(handleWagerPanelOutsideTap, undefined, [{}]),
+    false,
+  );
   resetWagerPanelApi();
 });
 
@@ -377,14 +401,21 @@ test("navigation cache stays profile-scoped, sanitized, cloned, and bounded", ()
     globalThis,
     "localStorage",
   );
+  /** @type {Map<string, string>} */
   const values = new Map();
+  /** @type {Pick<Storage, "getItem" | "setItem" | "removeItem">} */
+  const localStorage = {
+    getItem: (key) => values.get(key) ?? null,
+    setItem: (key, value) => {
+      values.set(key, value);
+    },
+    removeItem: (key) => {
+      values.delete(key);
+    },
+  };
   Object.defineProperty(globalThis, "localStorage", {
     configurable: true,
-    value: {
-      getItem: (key) => values.get(key) ?? null,
-      setItem: (key, value) => values.set(key, value),
-      removeItem: (key) => values.delete(key),
-    },
+    value: localStorage,
   });
 
   const scope = resolveNavigationGamesCacheScope("profile-1");
@@ -399,7 +430,7 @@ test("navigation cache stays profile-scoped, sanitized, cloned, and bounded", ()
     pagedGames: [],
   });
 
-  const game = {
+  const game = canonicalNavigationGame({
     id: "game-1",
     entityType: "game",
     inviteId: "invite-1",
@@ -407,7 +438,14 @@ test("navigation cache stays profile-scoped, sanitized, cloned, and bounded", ()
     status: "waiting",
     sortBucket: 30,
     listSortAtMs: 9,
-  };
+    hostLoginId: null,
+    guestLoginId: null,
+    opponentProfileId: null,
+    opponentName: null,
+    opponentEmoji: null,
+    automatchStateHint: null,
+    isPendingAutomatch: false,
+  });
   const fallbackGame = {
     ...game,
     id: "fallback-game",
@@ -415,14 +453,14 @@ test("navigation cache stays profile-scoped, sanitized, cloned, and bounded", ()
     isFallback: true,
   };
   try {
-    writeNavigationGamesRuntimeCache(
+    Reflect.apply(writeNavigationGamesRuntimeCache, undefined, [
       scope,
       [game, game, fallbackGame, { id: "invalid" }],
       [],
-    );
+    ]);
     const runtimeSnapshot = readNavigationGamesCacheSnapshot(scope);
     assert.equal(runtimeSnapshot.topGames.length, 1);
-    assert.equal("isFallback" in runtimeSnapshot.topGames[0], false);
+    assert.equal("isFallback" in required(runtimeSnapshot.topGames[0]), false);
     runtimeSnapshot.topGames.length = 0;
     assert.equal(readNavigationGamesCacheSnapshot(scope).topGames.length, 1);
 
@@ -439,7 +477,7 @@ test("navigation cache stays profile-scoped, sanitized, cloned, and bounded", ()
     );
 
     values.set(
-      "navigationGamesTopCache:v3:profile:profile-1",
+      applicationStorageKey("navigationGamesTopCache:profile:profile-1"),
       JSON.stringify({
         version: 3,
         updatedAtMs: Date.now(),
@@ -456,7 +494,7 @@ test("navigation cache stays profile-scoped, sanitized, cloned, and bounded", ()
     if (previousLocalStorage) {
       Object.defineProperty(globalThis, "localStorage", previousLocalStorage);
     } else {
-      delete globalThis.localStorage;
+      Reflect.deleteProperty(globalThis, "localStorage");
     }
   }
 });
@@ -506,7 +544,7 @@ test("toolbar delegates automatch state, deadlines, and requests to its feature 
 });
 
 test("control domains use neutral ports and contain no disabled badge path", () => {
-  const readSource = (path) =>
+  const readSource = (/** @type {string | URL} */ path) =>
     readFileSync(new URL(path, import.meta.url), "utf8");
   const controller = readSource("../src/game/gameController.ts");
   const board = readSource("../src/game/board.ts");

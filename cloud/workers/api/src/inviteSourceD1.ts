@@ -1,21 +1,13 @@
+import { isRematchSeries, type RematchSeries } from "@mons/shared/rematches";
 import {
   readInviteDocument,
   type InviteDocument,
+  type InviteFieldChanges,
 } from "@mons/shared/invite-records";
 import { RETIRED_STATE_BACKEND } from "./stateCompatibility.ts";
-import {
-  evaluateStateValueMarker,
-  STATE_VALUE_FIELD,
-} from "./stateCompatibility.ts";
 import { isSafeRecordKey } from "./recordKeys.ts";
 import { classifyD1Failure } from "./d1Failure.ts";
 import { runD1AdmissionAcquire, runD1AdmissionRelease } from "./d1Admission.ts";
-
-const RETIRED_FIELDS = new Set([
-  "reactions",
-  "wagers",
-  "matchesWagerResolutions",
-]);
 
 export type InviteSourceControl = {
   backend: typeof RETIRED_STATE_BACKEND | "d1";
@@ -27,7 +19,6 @@ export type InviteSourceControl = {
   importDigest: string | null;
   verifiedAtMs: number | null;
   activatedAtMs: number | null;
-  metadata: unknown;
 };
 
 export type InviteSourceAdmission = Pick<
@@ -50,22 +41,18 @@ export type InviteSourceChange = {
 export type InviteSourcePersistenceChange = Omit<
   InviteSourceChange,
   "value"
-> & { value: unknown };
-
+> & {
+  value:
+    | InviteDocument
+    | InviteFieldChanges
+    | { hostRematches: RematchSeries }
+    | { guestRematches: RematchSeries };
+};
 export type InviteSourceMutation = {
   current: InviteSourceSnapshot;
   value: InviteDocument;
 };
-
-type InviteMutationEvidence = {
-  current: { inviteId: string; value: unknown; revision: number };
-  value: unknown;
-};
-
-declare const retainedInviteMutations: unique symbol;
-export type RetainedInviteMutationBatch = {
-  readonly [retainedInviteMutations]: true;
-};
+export type RetainedInviteMutationBatch = readonly InviteSourceMutation[];
 
 type ControlRow = {
   backend: string;
@@ -77,7 +64,6 @@ type ControlRow = {
   import_digest: string | null;
   verified_at_ms: number | null;
   activated_at_ms: number | null;
-  metadata_json: string | null;
 };
 
 export class InviteSourceFailure extends Error {
@@ -107,54 +93,17 @@ export function isEventOwnedInviteSource(value: unknown): boolean {
 }
 
 export function normalizeInviteSource(value: unknown): InviteDocument {
-  if (!record(value)) throw new TypeError("invalid-invite-source-json");
-  const active = new Set<object>();
-  const copy = (entry: unknown, depth: number): unknown => {
-    if (depth > 64) throw new TypeError("invalid-invite-source-json");
-    if (
-      entry === null ||
-      typeof entry === "string" ||
-      typeof entry === "boolean" ||
-      (typeof entry === "number" && Number.isFinite(entry))
-    )
-      return entry;
-    if (!entry || typeof entry !== "object" || active.has(entry))
-      throw new TypeError("invalid-invite-source-json");
-    const prototype = Object.getPrototypeOf(entry);
-    if (
-      !Array.isArray(entry) &&
-      prototype !== Object.prototype &&
-      prototype !== null
-    )
-      throw new TypeError("invalid-invite-source-json");
-    active.add(entry);
-    const result = Array.isArray(entry)
-      ? entry.map((child) => copy(child, depth + 1))
-      : Object.fromEntries(
-          Object.entries(entry).map(([key, child]) => {
-            requireId(key);
-            return [key, copy(child, depth + 1)];
-          }),
-        );
-    active.delete(entry);
-    return result;
-  };
-  return readInviteDocument(
-    Object.fromEntries(
-      Object.entries(value)
-        .filter(([key]) => !RETIRED_FIELDS.has(key))
-        .map(([key, child]) => {
-          requireId(key);
-          return [key, copy(child, 1)];
-        }),
-    ),
-  )!;
+  const invite = readInviteDocument(value);
+  if (!invite) throw new TypeError("invalid-invite-source-json");
+  return structuredClone(invite);
 }
 
 export function prepareInviteSourceControlRead(
   db: Pick<D1Database, "prepare">,
 ): D1PreparedStatement {
-  return db.prepare("SELECT * FROM invite_source_control WHERE singleton = 1");
+  return db.prepare(
+    "SELECT backend, state, epoch, freeze_generation, candidate_version_id, source_digest, import_digest, verified_at_ms, activated_at_ms FROM invite_source_control WHERE singleton = 1",
+  );
 }
 
 export function parseInviteSourceControlRow(
@@ -177,16 +126,6 @@ export function parseInviteSourceControlRow(
   ) {
     throw new InviteSourceFailure("invite-source-control-unavailable");
   }
-  let metadata: unknown = null;
-  if (row.metadata_json !== null) {
-    try {
-      metadata = JSON.parse(row.metadata_json);
-    } catch (error) {
-      throw new InviteSourceFailure("invite-source-control-unavailable", {
-        cause: error,
-      });
-    }
-  }
   return {
     backend: row.backend,
     state: row.state,
@@ -197,7 +136,6 @@ export function parseInviteSourceControlRow(
     importDigest: row.import_digest,
     verifiedAtMs: row.verified_at_ms,
     activatedAtMs: row.activated_at_ms,
-    metadata,
   };
 }
 
@@ -368,81 +306,6 @@ export function inviteSourceAdmissionGuardStatements(
   ];
 }
 
-function getNested(value: unknown, parts: readonly string[]): unknown {
-  let current = value;
-  for (const key of parts) {
-    if (!current || typeof current !== "object" || !Object.hasOwn(current, key))
-      return null;
-    current = Reflect.get(current, key);
-  }
-  return current ?? null;
-}
-
-function setNested(
-  target: Record<string, unknown>,
-  parts: readonly string[],
-  value: unknown,
-): void {
-  let current = target;
-  for (const key of parts.slice(0, -1)) {
-    const existing = Object.hasOwn(current, key) ? current[key] : null;
-    const nested = record(existing) ? { ...existing } : {};
-    Object.defineProperty(current, key, {
-      value: nested,
-      enumerable: true,
-      configurable: true,
-      writable: true,
-    });
-    current = nested;
-  }
-  const key = parts.at(-1)!;
-  if (value === null) delete current[key];
-  else
-    Object.defineProperty(current, key, {
-      value,
-      enumerable: true,
-      configurable: true,
-      writable: true,
-    });
-}
-
-function resolveValue(
-  value: unknown,
-  current: unknown,
-  nowMs: number,
-): unknown {
-  if (Array.isArray(value))
-    return value.map((child, index) =>
-      resolveValue(
-        child,
-        Array.isArray(current) ? current[index] : null,
-        nowMs,
-      ),
-    );
-  if (!record(value)) return value;
-  if (Object.hasOwn(value, STATE_VALUE_FIELD)) {
-    if (Object.keys(value).length !== 1)
-      throw new TypeError("invalid-invite-source-server-value");
-    const result = evaluateStateValueMarker(
-      value[STATE_VALUE_FIELD],
-      current,
-      nowMs,
-    );
-    if (result.ok) return result.value;
-    throw new TypeError("invalid-invite-source-server-value");
-  }
-  return Object.fromEntries(
-    Object.entries(value).map(([key, child]) => [
-      key,
-      resolveValue(
-        child,
-        record(current) && Object.hasOwn(current, key) ? current[key] : null,
-        nowMs,
-      ),
-    ]),
-  );
-}
-
 export function isInviteSourceRevisionConflict(error: unknown): boolean {
   return classifyD1Failure(error) === "invite-source-conflict";
 }
@@ -454,7 +317,7 @@ export function prepareInviteSourceSnapshotRead(
   requireId(inviteId);
   return db
     .prepare(
-      "SELECT source_json, revision FROM invite_sources WHERE invite_id = ?",
+      "SELECT source_json, revision FROM invite_sources_canonical WHERE invite_id = ?",
     )
     .bind(inviteId);
 }
@@ -486,11 +349,6 @@ export function decodeInviteSourceSnapshot(
     throw new InviteSourceFailure("invite-source-corrupt");
   try {
     const decoded: unknown = JSON.parse(row.source_json);
-    if (
-      !record(decoded) ||
-      Object.keys(decoded).some((key) => RETIRED_FIELDS.has(key))
-    )
-      throw new TypeError("invalid-invite-source-json");
     return {
       inviteId,
       value: normalizeInviteSource(decoded),
@@ -535,22 +393,22 @@ export function createInviteSourceD1Store(
       ...inviteIds.map((inviteId) =>
         session
           .prepare(
-            "SELECT source_json, revision FROM invite_sources WHERE invite_id = ?",
+            "SELECT source_json, revision FROM invite_sources_canonical WHERE invite_id = ?",
           )
           .bind(inviteId),
       ),
     ]);
     signal?.throwIfAborted();
-    const control = parseInviteSourceControlRow(controlRows.results[0]);
+    const control = parseInviteSourceControlRow(controlRows!.results[0]);
     if (control.backend !== "d1")
       throw new InviteSourceFailure("invite-source-not-activated");
     return inviteIds.map((inviteId, index) =>
-      decodeInviteSourceSnapshot(inviteId, snapshots[index].results[0]),
+      decodeInviteSourceSnapshot(inviteId, snapshots[index]!.results[0]),
     );
   }
 
   const revisionGuards = (
-    mutations: readonly InviteMutationEvidence[],
+    mutations: readonly InviteSourceMutation[],
   ): D1PreparedStatement[] =>
     mutations.map(({ current }) => {
       requireId(current.inviteId);
@@ -562,13 +420,13 @@ export function createInviteSourceD1Store(
       return db
         .prepare(
           `INSERT INTO invite_source_revision_guards (singleton)
-        SELECT 0 WHERE COALESCE((SELECT revision FROM invite_sources WHERE invite_id = ?), 0) != ?`,
+        SELECT 0 WHERE COALESCE((SELECT revision FROM invite_sources_canonical WHERE invite_id = ?), 0) != ?`,
         )
         .bind(current.inviteId, current.revision);
     });
 
   const commitStatements = (
-    mutations: readonly InviteMutationEvidence[],
+    mutations: readonly InviteSourceMutation[],
     nowMs = now(),
   ): D1PreparedStatement[] => {
     if (!integer(nowMs)) throw new TypeError("invalid-invite-source-timestamp");
@@ -577,14 +435,11 @@ export function createInviteSourceD1Store(
       ...revisionGuards(mutations),
       ...mutations.map(({ current, value }) => {
         const normalized = normalizeInviteSource(value);
-        if (
-          Object.keys(value as object).some((key) => RETIRED_FIELDS.has(key)) ||
-          !Number.isSafeInteger(current.revision + 1)
-        )
+        if (!Number.isSafeInteger(current.revision + 1))
           throw new TypeError("invalid-invite-source-mutation");
         return db
           .prepare(
-            `INSERT INTO invite_sources (invite_id, source_json, revision, updated_at_ms)
+            `INSERT INTO invite_sources_canonical (invite_id, source_json, revision, updated_at_ms)
         VALUES (?, ?, ?, ?) ON CONFLICT (invite_id) DO UPDATE SET
           source_json = excluded.source_json, revision = excluded.revision, updated_at_ms = excluded.updated_at_ms`,
           )
@@ -612,18 +467,13 @@ export function createInviteSourceD1Store(
     buildRetainedRevisionGuardStatements(
       mutations: RetainedInviteMutationBatch,
     ) {
-      const evidence: unknown = mutations;
-      return revisionGuards(evidence as readonly InviteMutationEvidence[]);
+      return revisionGuards(mutations);
     },
     buildRetainedCommitStatements(
       mutations: RetainedInviteMutationBatch,
       nowMs: number,
     ) {
-      const evidence: unknown = mutations;
-      return commitStatements(
-        evidence as readonly InviteMutationEvidence[],
-        nowMs,
-      );
+      return commitStatements(mutations, nowMs);
     },
     async prepareChanges(
       changes: readonly InviteSourcePersistenceChange[],
@@ -635,16 +485,33 @@ export function createInviteSourceD1Store(
       const grouped = new Map<string, InviteSourcePersistenceChange[]>();
       for (const change of changes) {
         requireId(change.inviteId);
-        if (!record(change.value))
+        const value = change.value;
+        if (!record(value))
           throw new TypeError("invite-source-deletion-unsupported");
-        if (
-          Object.keys(change.value).some(
-            (field) =>
-              RETIRED_FIELDS.has(field) || field === "sessionTransition",
+        const complete = readInviteDocument(value);
+        if (!complete) {
+          const allowed = new Set([
+            "guestId",
+            "hostId",
+            "hostColor",
+            "password",
+            "automatchStateHint",
+            "automatchCanceledAt",
+            "telegramDeliveryVersion",
+            "hostRematches",
+            "guestRematches",
+          ]);
+          if (Object.keys(value).some((field) => !allowed.has(field)))
+            throw new TypeError("reserved-invite-source-field");
+          if (
+            ("hostRematches" in value &&
+              !isRematchSeries(value.hostRematches)) ||
+            ("guestRematches" in value &&
+              !isRematchSeries(value.guestRematches))
           )
-        )
-          throw new TypeError("reserved-invite-source-field");
-        const group = grouped.get(change.inviteId) || [];
+            throw new TypeError("invalid-invite-rematches");
+        }
+        const group = grouped.get(change.inviteId) ?? [];
         group.push(change);
         grouped.set(change.inviteId, group);
       }
@@ -654,29 +521,29 @@ export function createInviteSourceD1Store(
         signal,
       );
       return snapshots.map((current, index) => {
-        const next = structuredClone(current.value || {}) as Record<
-          string,
-          unknown
-        >;
-        for (const change of groups[index]) {
-          for (const [key, value] of Object.entries(
-            change.value as Record<string, unknown>,
-          )) {
-            requireId(key);
-            setNested(
-              next,
-              [key],
-              resolveValue(value, getNested(next, [key]), nowMs),
-            );
-          }
-          for (const [loginUid, operationId] of Object.entries(
-            change.operationIds || {},
-          )) {
-            requireId(loginUid);
-            setNested(next, ["automatchOperationIds", loginUid], operationId);
-          }
+        let next = current.value;
+        for (const change of groups[index]!) {
+          const complete = readInviteDocument(change.value);
+          const operationIds = {
+            ...next?.automatchOperationIds,
+            ...complete?.automatchOperationIds,
+            ...change.operationIds,
+          };
+          const candidate = {
+            ...next,
+            ...change.value,
+            automatchOperationIds: operationIds,
+            ...(next
+              ? {
+                  sessionTransition: next.sessionTransition,
+                  automatchMessage: next.automatchMessage,
+                }
+              : {}),
+          };
+          next = normalizeInviteSource(candidate);
         }
-        return { current, value: normalizeInviteSource(next) };
+        if (!next) throw new TypeError("invite-source-creation-required");
+        return { current, value: next };
       });
     },
   };

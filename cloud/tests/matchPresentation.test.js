@@ -29,11 +29,11 @@ const update = {
   aura: "rainbow",
 };
 
-test("presentation responses preserve bounded legacy appearances and reject malformed ownership or revisions", () => {
+test("presentation responses require canonical appearances and reject malformed ownership or revisions", () => {
   assert.equal(isMatchPresentation(presentation), true);
   assert.equal(
     isMatchPresentation({ ...presentation, emojiId: -10, aura: "legacy" }),
-    true,
+    false,
   );
   for (const value of [
     { ...presentation, revision: -1 },
@@ -100,12 +100,13 @@ test("presentation responses preserve bounded legacy appearances and reject malf
 test("presentation writes reuse profile cosmetic constraints and require exact UUID/CAS payloads", () => {
   for (const value of [
     update,
-    { ...update, emojiId: 155, aura: "" },
+    { ...update, emojiId: 155, aura: "none" },
     { ...update, emojiId: 1466 },
+    { ...update, emojiId: 0, aura: "none" },
   ])
     assert.equal(isUpdateMatchPresentationRequest(value), true);
   for (const value of [
-    { ...update, emojiId: 0 },
+    { ...update, emojiId: -1 },
     { ...update, emojiId: 156, aura: "" },
     { ...update, emojiId: 1467 },
     { ...update, aura: "legacy" },
@@ -167,7 +168,7 @@ test("bounded v2 envelopes fit the largest record keys including JSON escaping a
     const players = Object.fromEntries(
       actors.map((actorUid) => [
         actorUid,
-        { ...presentation, matchId, actorUid, aura: '"\\'.repeat(16) },
+        { ...presentation, matchId, actorUid, aura: "rainbow" },
       ]),
     );
     const reactions = Object.fromEntries(
@@ -193,7 +194,10 @@ test("bounded v2 envelopes fit the largest record keys including JSON escaping a
       new TextEncoder().encode(serialized).byteLength <=
         PRESENTATION_MAX_MESSAGE_BYTES,
     );
-    assert.equal(isInviteRoomMessage(JSON.parse(serialized)), true);
+    assert.equal(
+      isInviteRoomMessage(/** @type {unknown} */ (JSON.parse(serialized))),
+      true,
+    );
     const response = JSON.stringify({
       ok: true,
       presentation: message.presentation,
@@ -202,6 +206,11 @@ test("bounded v2 envelopes fit the largest record keys including JSON escaping a
       new TextEncoder().encode(response).byteLength <=
         PRESENTATION_MAX_MESSAGE_BYTES,
     );
-    assert.equal(isReadMatchPresentationResponse(JSON.parse(response)), true);
+    assert.equal(
+      isReadMatchPresentationResponse(
+        /** @type {unknown} */ (JSON.parse(response)),
+      ),
+      true,
+    );
   }
 });

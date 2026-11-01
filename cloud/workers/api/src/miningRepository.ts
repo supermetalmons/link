@@ -1,6 +1,6 @@
 import {
   MATERIAL_KEYS,
-  normalizeMiningSnapshot,
+  parseMiningSnapshot,
   type MiningSnapshot,
 } from "@mons/shared/mining";
 import {
@@ -36,9 +36,11 @@ export function createMiningRepository(
       const snapshot = await readMutableProfileMutationByLogin(d1, loginUid);
       if (!snapshot) return null;
       const { owner, profile } = snapshot;
+      const mining = parseMiningSnapshot(profile.profile.mining);
+      if (!mining) throw new TypeError("invalid-mining-snapshot");
       return {
         profileId: profile.profileId,
-        mining: normalizeMiningSnapshot(profile.profile.mining),
+        mining,
         async commitMining(mining) {
           const mutation = buildMutableProfileMutation(
             profile,

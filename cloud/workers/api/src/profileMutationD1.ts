@@ -1,7 +1,7 @@
 import {
   MATERIAL_KEYS,
-  normalizeMiningSnapshot,
   type MiningMaterialName,
+  type MiningSnapshot,
 } from "@mons/shared/mining";
 import {
   CanonicalProfileCorruption,
@@ -15,6 +15,8 @@ import {
   type CanonicalProfileValue,
   type CanonicalSortKey,
 } from "./profileCanonicalD1.ts";
+import type { EmojiId } from "@mons/shared/appearance";
+import { parseStoredMining } from "./profileCanonical/contracts.ts";
 import {
   prepareCanonicalOwnedProfileRead,
   parseCanonicalOwnedProfileRow,
@@ -42,14 +44,13 @@ export function materializeCanonicalProfileUpdate(
     sortUpdates?: Partial<Record<CanonicalSortKey, number>>;
     winPresent?: boolean;
     emojiPresent?: boolean;
-    gameplayEmoji?: string | number;
+    gameplayEmoji?: EmojiId;
   } = {},
 ): CanonicalProfileValue {
   return materializeCanonicalProfile({
     profile,
     createdAtMs: snapshot.createdAtMs,
     updatedAtMs,
-    legacyFields: snapshot.legacyFields,
     mergedAtMs: snapshot.mergedAtMs,
     mergedIntoProfileId: snapshot.mergedIntoProfileId,
     state: snapshot.state,
@@ -70,7 +71,7 @@ type CanonicalGameplayProfilePatch = {
   win?: boolean;
   totalManaPoints?: number;
   feb2026UniqueOpponentsCount?: number;
-  mining?: unknown;
+  mining?: MiningSnapshot;
 };
 
 export function prepareCanonicalGameplayProfileUpdate(
@@ -111,7 +112,7 @@ export function prepareCanonicalGameplayProfileUpdate(
     profile.feb2026UniqueOpponentsCount = patch.feb2026UniqueOpponentsCount;
   }
   if (patch.mining !== undefined) {
-    profile.mining = normalizeMiningSnapshot(patch.mining);
+    profile.mining = parseStoredMining(patch.mining);
     for (const material of miningSortKeys) {
       sortUpdates[material] = profile.mining.materials[material];
     }
@@ -202,20 +203,20 @@ function canonicalChallengeReplayProfileStatement(
               mapping.op_id AS canonical_merge_op_id,
               CASE WHEN profile.profile_id IS NULL THEN
                 EXISTS (
-                  SELECT 1 FROM profile_login_owners
+                  SELECT 1 FROM profile_login_owners_canonical
                   WHERE profile_id = requested.profile_id
                 ) OR EXISTS (
-                  SELECT 1 FROM profile_auth_methods
+                  SELECT 1 FROM profile_auth_methods_canonical
                   WHERE profile_id = requested.profile_id
                 ) OR EXISTS (
-                  SELECT 1 FROM profile_auth_recovery_jobs
+                  SELECT 1 FROM profile_auth_recovery_jobs_canonical
                   WHERE profile_id = requested.profile_id
                 )
               ELSE 0 END AS canonical_orphaned_dependents
        FROM (SELECT ? AS profile_id) AS requested
-       LEFT JOIN profile_records AS profile
+       LEFT JOIN profile_records_canonical AS profile
          ON profile.profile_id = requested.profile_id
-       LEFT JOIN profile_merge_targets AS mapping
+       LEFT JOIN profile_merge_targets_canonical AS mapping
          ON mapping.source_profile_id = requested.profile_id`,
     )
     .bind(profileId);
@@ -278,7 +279,7 @@ export async function readCanonicalChallengeReplayProfiles(
       canonicalChallengeReplayProfileStatement(db, profileId),
       db
         .prepare(
-          `SELECT opponent_profile_id FROM profile_february_opponents
+          `SELECT opponent_profile_id FROM profile_february_opponents_canonical
          WHERE profile_id = ? ORDER BY opponent_profile_id ASC`,
         )
         .bind(profileId),
@@ -288,13 +289,13 @@ export async function readCanonicalChallengeReplayProfiles(
     await db.batch<Record<string, unknown>>(statements);
   return {
     player: parseCanonicalChallengeReplayProfile(
-      player.results[0],
-      playerOpponents.results,
+      player!.results[0],
+      playerOpponents!.results,
       playerProfileId,
     ),
     opponent: parseCanonicalChallengeReplayProfile(
-      opponent.results[0],
-      opponentOpponents.results,
+      opponent!.results[0],
+      opponentOpponents!.results,
       opponentProfileId,
     ),
   };

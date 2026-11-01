@@ -1,3 +1,5 @@
+import { createDefaultProfileAppearance } from "@mons/shared/appearance";
+import { applicationRequest } from "./testEnv.ts";
 import assert from "node:assert/strict";
 import test from "node:test";
 import { AuthApiFailure } from "../src/authErrors.ts";
@@ -33,7 +35,7 @@ const profile = {
   rating: 1500,
   totalManaPoints: 0,
   win: true,
-  emoji: "1",
+  ...createDefaultProfileAppearance(1),
   username: null,
   eth: null,
   sol: null,
@@ -81,7 +83,7 @@ function request(
   method = "POST",
   origin = "https://mons.link",
 ): Request {
-  return new Request(`https://api.mons.link${path}`, {
+  return applicationRequest(`https://api.mons.link${path}`, {
     method,
     headers: {
       ...(origin ? { Origin: origin } : {}),

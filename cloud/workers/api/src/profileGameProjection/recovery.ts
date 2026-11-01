@@ -247,8 +247,9 @@ export async function sweepRatingProfileGameProjections(
           source: "rating",
           phase,
           itemIndex,
-          operationId:
-            entry.kind === "candidate" ? entry.value.operationId : undefined,
+          ...(entry.kind === "candidate"
+            ? { operationId: entry.value.operationId }
+            : {}),
         },
         error,
       ),
@@ -556,8 +557,9 @@ export async function sweepProfileLinkProfileGameProjections(
           source: "profile-link",
           phase,
           itemIndex,
-          loginUid:
-            entry.kind === "candidate" ? entry.value.loginUid : undefined,
+          ...(entry.kind === "candidate"
+            ? { loginUid: entry.value.loginUid }
+            : {}),
         },
         error,
       ),

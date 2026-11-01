@@ -34,14 +34,16 @@ import type {
 } from "./types.ts";
 
 export function automatchSweepCandidates(
-  value: unknown,
+  value: Parameters<typeof readAutomatchTelegramRecoveryEntries>[0],
 ): AutomatchTelegramRecoveryCandidate[] {
   return readAutomatchTelegramRecoveryEntries(value).flatMap((entry) =>
     entry.kind === "candidate" ? [entry.value] : [],
   );
 }
 
-export function automatchSweepTasks(value: unknown): TelegramProjectionTask[] {
+export function automatchSweepTasks(
+  value: Parameters<typeof readAutomatchTelegramRecoveryEntries>[0],
+): TelegramProjectionTask[] {
   return automatchSweepCandidates(value).map(({ task }) => task);
 }
 
@@ -217,8 +219,9 @@ export async function sweepRatingProjections(
             source: "rating",
             phase,
             itemIndex,
-            operationId:
-              entry.kind === "candidate" ? entry.value.operationId : undefined,
+            ...(entry.kind === "candidate"
+              ? { operationId: entry.value.operationId }
+              : {}),
           },
           error,
         ),

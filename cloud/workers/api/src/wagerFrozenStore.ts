@@ -1,5 +1,9 @@
 import type { MiningMaterials } from "@mons/shared/mining";
-import type { FrozenOperationState } from "./wagerFrozenRecords.ts";
+import {
+  isStoredFrozenOperation,
+  type StoredFrozenOperation,
+  type FrozenOperationState,
+} from "./wagerFrozenRecords.ts";
 
 export type WagerFrozenBalance = {
   frozen: MiningMaterials;
@@ -56,16 +60,15 @@ export function assertWagerFrozenKey(value: string): void {
 
 export function storedWagerFrozenOperation(
   state: FrozenOperationState,
-): Record<string, unknown> | null {
+): StoredFrozenOperation | null {
   if (state.status === "absent") return null;
-  if (state.status === "consumed") return { consumed: true };
   if (state.status === "malformed")
     throw new Error("wager-operation-unavailable");
-  const { appliedAtMs, count, deltas, fingerprint } = state.operation;
-  return {
-    appliedAtMs,
-    ...(count === undefined ? {} : { count }),
-    deltas,
-    fingerprint,
-  };
+  const stored: StoredFrozenOperation =
+    state.status === "consumed"
+      ? { schemaVersion: 1, status: "consumed" }
+      : { schemaVersion: 1, status: "active", operation: state.operation };
+  if (!isStoredFrozenOperation(stored))
+    throw new Error("wager-operation-unavailable");
+  return stored;
 }

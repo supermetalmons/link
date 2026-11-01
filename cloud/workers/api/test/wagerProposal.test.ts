@@ -1,3 +1,9 @@
+import {
+  wagerRecordFixture,
+  agreedWagerFixture,
+  settledWagerFixture,
+  pendingProposalSettlementFixture,
+} from "./wagerRecordFixture.ts";
 import { retainedInviteSourceFixture } from "./inviteDocumentFixture.ts";
 import { attachMemoryWagerFrozenStore } from "./wagerFrozenTestUtils.ts";
 import assert from "node:assert/strict";
@@ -143,8 +149,8 @@ function ownershipSnapshot(
         profileId,
         {
           profile: {
-            aura: "",
-            emoji: "",
+            aura: "none",
+            emoji: 1,
             eth: "",
             profileId,
             rating: 1500,
@@ -176,7 +182,8 @@ function repository(
       ice: 10,
     }),
     getMiningSnapshot: async () => null,
-    readState: async () => ({ hostId: "host", guestId: "guest" }),
+    readState: async (path) =>
+      path === "invites/invite" ? { hostId: "host", guestId: "guest" } : null,
     patchStateRoot: async () => undefined,
     readProfileOwnershipSnapshot: async (query) => ownershipSnapshot(query),
     ...overrides,
@@ -188,6 +195,25 @@ function repository(
       return transactState(path, updater, signal);
     },
   };
+  const readState = value.readState;
+  value.readState = async (path, ...args) => {
+    const stored = await readState(path, ...args);
+    return /^invites\/[^/]+\/wagers\//.test(path)
+      ? wagerRecordFixture(stored)
+      : stored;
+  };
+  const transactWagerState = value.transactState;
+  value.transactState = async (path, update, signal) => {
+    const isWager = /^invites\/[^/]+\/wagers\//.test(path);
+    const result = await transactWagerState(
+      path,
+      isWager ? (current) => update(wagerRecordFixture(current)) : update,
+      signal,
+    );
+    return isWager
+      ? { ...result, value: wagerRecordFixture(result.value) }
+      : result;
+  };
   return attachMemoryWagerFrozenStore(value);
 }
 
@@ -198,8 +224,8 @@ test("participant checks use metadata without loading wagers or direct-owner pro
       metadataReads++;
       assert.equal(inviteId, "invite");
       return retainedInviteSourceFixture({
-        hostId: " host ",
-        guestId: " guest ",
+        hostId: "host",
+        guestId: "guest",
       });
     },
     readState: async () => {
@@ -212,7 +238,7 @@ test("participant checks use metadata without loading wagers or direct-owner pro
   for (const [uid, opponentUid] of [
     ["host", "guest"],
     ["guest", "host"],
-  ]) {
+  ] as const) {
     assert.deepEqual(
       await resolveWagerParticipantUids({ uid }, "invite", value),
       {
@@ -229,7 +255,7 @@ test("metadata participant checks preserve missing and invalid participant failu
   const cases: Array<[Record<string, unknown> | null, string]> = [
     [null, "invite-not-found"],
     [{ hostId: "host" }, "missing-opponent"],
-    [{ hostId: 123, guestId: "guest" }, "missing-opponent"],
+
     [{ hostId: "host", guestId: null }, "missing-opponent"],
   ];
   for (const [metadata, reason] of cases) {
@@ -256,7 +282,7 @@ test("metadata participant checks preserve missing and invalid participant failu
           }),
       }),
     ),
-    /invalid-wager-participant/,
+    /invalid invite fixture/,
   );
 });
 
@@ -408,8 +434,20 @@ function applyTransaction(
     value?: unknown;
   };
   return decision.commit === false
-    ? { committed: false, decision: decision.decision, value: current }
-    : { committed: true, decision: decision.decision, value: decision.value };
+    ? {
+        committed: false,
+        ...(decision.decision === undefined
+          ? {}
+          : { decision: decision.decision }),
+        value: current,
+      }
+    : {
+        committed: true,
+        ...(decision.decision === undefined
+          ? {}
+          : { decision: decision.decision }),
+        value: decision.value,
+      };
 }
 
 function applyMiningTransaction(
@@ -480,14 +518,21 @@ function installSendReservation(
   const operations = ((root as Record<string, unknown>).operations ||=
     {}) as Record<string, unknown>;
   operations[proposal.reservationOperationId] = {
-    appliedAtMs,
-    count: proposal.count,
-    deltas: { [proposal.material]: proposal.count },
-    fingerprint: operationFingerprint(
-      "send-reserve",
-      proposal.material,
-      proposal.count,
-    ),
+    schemaVersion: 1,
+    status: "active",
+    operation: {
+      kind: "send-reserve",
+      material: proposal.material,
+      requestedCount: proposal.count,
+      appliedAtMs,
+      count: proposal.count,
+      deltas: { [proposal.material]: proposal.count },
+      fingerprint: operationFingerprint(
+        "send-reserve",
+        proposal.material,
+        proposal.count,
+      ),
+    },
   };
   return root as Record<string, unknown>;
 }
@@ -589,7 +634,7 @@ test("wager contracts require exact request and response shapes", () => {
       material: "dust",
       count: 1.4,
     }),
-    true,
+    false,
   );
   assert.equal(
     isWagerProposalSendRequest({
@@ -670,21 +715,21 @@ test("send reserves materials and persists an exact proposal", async () => {
     transactions.map(({ path }) => path),
     ["reservations/host", "invites/invite/wagers/match"],
   );
-  assert.deepEqual(materialsOnly(transactions[0].value), {
+  assert.deepEqual(materialsOnly(transactions[0]!.value), {
     dust: 5,
     slime: 0,
     gum: 0,
     metal: 0,
     ice: 0,
   });
-  const wager = transactions[1].value as {
+  const wager = transactions[1]!.value as {
     proposals: Record<string, Record<string, unknown>>;
     proposedBy: Record<string, boolean>;
   };
-  assert.equal(wager.proposals.host.material, "dust");
-  assert.equal(wager.proposals.host.count, 4);
-  assert.equal(wager.proposals.host.createdAt, 100);
-  assert.equal(typeof wager.proposals.host.operationId, "string");
+  assert.equal(wager.proposals.host!.material, "dust");
+  assert.equal(wager.proposals.host!.count, 4);
+  assert.equal(wager.proposals.host!.createdAt, 100);
+  assert.equal(typeof wager.proposals.host!.operationId, "string");
   assert.deepEqual(wager.proposedBy, { host: true });
 });
 
@@ -786,7 +831,7 @@ test("send creates an automatic agreement and normalizes both reservations", asy
       "invites/invite/wagers/match",
     ],
   );
-  assert.deepEqual(materialsOnly(transactions[2].value), {
+  assert.deepEqual(materialsOnly(transactions[2]!.value), {
     dust: 4,
     slime: 0,
     gum: 0,
@@ -841,19 +886,28 @@ test("send rejects a canonical reservation ID with the wrong operation kind", as
     frozen: { dust: 1, slime: 0, gum: 0, metal: 0, ice: 0 },
     operations: {
       [reservationOperationId]: {
-        appliedAtMs: 1,
-        count: 1,
-        deltas: { dust: 1 },
-        fingerprint: JSON.stringify([
-          "accept-reserve",
-          "dust:",
-          1,
-          0,
-          0,
-          0,
-          0,
-          0,
-        ]),
+        schemaVersion: 1,
+        status: "active",
+        operation: {
+          kind: "accept-reserve",
+          material: "dust",
+          requestedCount: 1,
+          ownMaterial: null,
+          ownCount: 0,
+          appliedAtMs: 1,
+          count: 1,
+          deltas: { dust: 1 },
+          fingerprint: JSON.stringify([
+            "accept-reserve",
+            "dust:",
+            1,
+            0,
+            0,
+            0,
+            0,
+            0,
+          ]),
+        },
       },
     },
   };
@@ -981,14 +1035,14 @@ test("accept reserves the available count and clears both proposals", async () =
       "invites/invite/wagers/match",
     ],
   );
-  assert.deepEqual(materialsOnly(transactions[0].value), {
+  assert.deepEqual(materialsOnly(transactions[0]!.value), {
     dust: 3,
     slime: 0,
     gum: 0,
     metal: 0,
     ice: 0,
   });
-  assert.deepEqual((transactions[1].value as Record<string, unknown>).agreed, {
+  assert.deepEqual((transactions[1]!.value as Record<string, unknown>).agreed, {
     material: "dust",
     count: 3,
     total: 6,
@@ -996,11 +1050,11 @@ test("accept reserves the available count and clears both proposals", async () =
     accepterId: "host",
     acceptedAt: 300,
   });
-  assert.equal(
-    (transactions[1].value as Record<string, unknown>).proposals,
-    null,
+  assert.deepEqual(
+    (transactions[1]!.value as Record<string, unknown>).proposals,
+    {},
   );
-  assert.deepEqual(materialsOnly(transactions[2].value), {
+  assert.deepEqual(materialsOnly(transactions[2]!.value), {
     dust: 3,
     slime: 0,
     gum: 0,
@@ -1135,19 +1189,21 @@ test("send and accept preserve exact domain failure reasons", async () => {
 
   for (const wager of [
     null,
-    { agreed: { count: 1 } },
-    { resolved: true },
-    { proposals: { host: { material: "dust", count: 1 } } },
+    agreedWagerFixture(),
+    settledWagerFixture(),
+    { proposals: { host: await modernProposal("host", "dust", 1) } },
   ]) {
-    let reads = 0;
     assert.deepEqual(
       await acceptWagerProposal(
         identity,
         { inviteId: "invite", matchId: "match" },
         repository({
-          readState: async () => {
-            reads++;
-            return reads <= 2 ? { hostId: "host", guestId: "guest" } : wager;
+          readState: async (path) => {
+            return path === "invites/invite"
+              ? { hostId: "host", guestId: "guest" }
+              : path.startsWith("reservations/")
+                ? null
+                : wager;
           },
         }),
       ),
@@ -1198,7 +1254,7 @@ test("same-canonical participants cannot create or accept a wager", async () => 
     readState: async (path) =>
       path === "invites/invite"
         ? { hostId: "host", guestId: "guest" }
-        : { proposals: { guest: { material: "dust", count: 1 } } },
+        : { proposals: { guest: await modernProposal("guest", "dust", 1) } },
     readProfileOwnershipSnapshot: async (query) =>
       ownershipSnapshot(query, () => "shared-profile"),
     transactState: async () => {
@@ -1387,10 +1443,26 @@ test("changed send cleanup cannot release a competing proposal", async () => {
     frozen: { dust: 3, slime: 0, gum: 0, metal: 0, ice: 0 },
     operations: {
       [reservationOperationId]: {
-        appliedAtMs: 1,
-        count: 3,
-        deltas: { dust: 3 },
-        fingerprint: JSON.stringify(["send-reserve", "dust", 3, 0, 0, 0, 0, 0]),
+        schemaVersion: 1,
+        status: "active",
+        operation: {
+          kind: "send-reserve",
+          material: "dust",
+          requestedCount: 3,
+          appliedAtMs: 1,
+          count: 3,
+          deltas: { dust: 3 },
+          fingerprint: JSON.stringify([
+            "send-reserve",
+            "dust",
+            3,
+            0,
+            0,
+            0,
+            0,
+            0,
+          ]),
+        },
       },
     },
   };
@@ -1485,10 +1557,26 @@ test("replay fences a reservation against a delayed cleanup commit", async () =>
     frozen: { dust: 3, slime: 0, gum: 0, metal: 0, ice: 0 },
     operations: {
       [reservationOperationId]: {
-        appliedAtMs: 1,
-        count: 3,
-        deltas: { dust: 3 },
-        fingerprint: JSON.stringify(["send-reserve", "dust", 3, 0, 0, 0, 0, 0]),
+        schemaVersion: 1,
+        status: "active",
+        operation: {
+          kind: "send-reserve",
+          material: "dust",
+          requestedCount: 3,
+          appliedAtMs: 1,
+          count: 3,
+          deltas: { dust: 3 },
+          fingerprint: JSON.stringify([
+            "send-reserve",
+            "dust",
+            3,
+            0,
+            0,
+            0,
+            0,
+            0,
+          ]),
+        },
       },
     },
   };
@@ -1575,7 +1663,7 @@ test("replay fences a reservation against a delayed cleanup commit", async () =>
   );
   assert.equal(
     (wager as { proposals: Record<string, Record<string, unknown>> }).proposals
-      .host.reservationOperationId,
+      .host!.reservationOperationId,
     reservationOperationId,
   );
 });
@@ -1592,10 +1680,26 @@ test("ambiguous replay accepts a newer exact reservation fence", async () => {
     frozen: { dust: 1, slime: 0, gum: 0, metal: 0, ice: 0 },
     operations: {
       [reservationOperationId]: {
-        appliedAtMs: 1,
-        count: 1,
-        deltas: { dust: 1 },
-        fingerprint: JSON.stringify(["send-reserve", "dust", 1, 0, 0, 0, 0, 0]),
+        schemaVersion: 1,
+        status: "active",
+        operation: {
+          kind: "send-reserve",
+          material: "dust",
+          requestedCount: 1,
+          appliedAtMs: 1,
+          count: 1,
+          deltas: { dust: 1 },
+          fingerprint: JSON.stringify([
+            "send-reserve",
+            "dust",
+            1,
+            0,
+            0,
+            0,
+            0,
+            0,
+          ]),
+        },
       },
     },
   };
@@ -1617,8 +1721,20 @@ test("ambiguous replay accepts a newer exact reservation fence", async () => {
           const operations = (miningState as Record<string, unknown>)
             .operations as Record<string, Record<string, unknown>> | undefined;
           assert.ok(operations?.[reservationOperationId]);
-          operations[reservationOperationId].appliedAtMs =
-            Number(operations[reservationOperationId].appliedAtMs) + 1;
+          (
+            operations[reservationOperationId].operation as Record<
+              string,
+              unknown
+            >
+          ).appliedAtMs =
+            Number(
+              (
+                operations[reservationOperationId].operation as Record<
+                  string,
+                  unknown
+                >
+              ).appliedAtMs,
+            ) + 1;
           throw new Error("ambiguous-replay");
         }
         return result;
@@ -1646,7 +1762,7 @@ test("ambiguous replay accepts a newer exact reservation fence", async () => {
   assert.equal(materialsOnly(miningState).dust, 1);
   assert.equal(
     (wager as { proposals: Record<string, Record<string, unknown>> }).proposals
-      .host.reservationOperationId,
+      .host!.reservationOperationId,
     reservationOperationId,
   );
 });
@@ -1665,19 +1781,26 @@ test("expired wager holder cannot clean up after a lease takeover", async () => 
       frozen: { dust: 3, slime: 0, gum: 0, metal: 0, ice: 0 },
       operations: {
         [reservationOperationId]: {
-          appliedAtMs: 1,
-          count: 3,
-          deltas: { dust: 3 },
-          fingerprint: JSON.stringify([
-            "send-reserve",
-            "dust",
-            3,
-            0,
-            0,
-            0,
-            0,
-            0,
-          ]),
+          schemaVersion: 1,
+          status: "active",
+          operation: {
+            kind: "send-reserve",
+            material: "dust",
+            requestedCount: 3,
+            appliedAtMs: 1,
+            count: 3,
+            deltas: { dust: 3 },
+            fingerprint: JSON.stringify([
+              "send-reserve",
+              "dust",
+              3,
+              0,
+              0,
+              0,
+              0,
+              0,
+            ]),
+          },
         },
       },
     },
@@ -2016,7 +2139,7 @@ test("cancel removes the caller proposal and releases only its materials", async
     transactions.map(({ path }) => path),
     ["invites/invite/wagers/match", "reservations/host", "reservations/host"],
   );
-  const wager = transactions[0].value as {
+  const wager = transactions[0]!.value as {
     proposals: Record<string, unknown>;
     proposedBy: Record<string, boolean>;
     proposalRemovalOperations: Record<string, unknown>;
@@ -2026,7 +2149,7 @@ test("cancel removes the caller proposal and releases only its materials", async
   });
   assert.deepEqual(wager.proposedBy, { host: true, guest: true });
   assert.equal(Object.keys(wager.proposalRemovalOperations).length, 1);
-  assert.deepEqual(materialsOnly(transactions[2].value), {
+  assert.deepEqual(materialsOnly(transactions[2]!.value), {
     dust: 2,
     slime: 1,
     gum: 0,
@@ -2035,35 +2158,38 @@ test("cancel removes the caller proposal and releases only its materials", async
   });
 });
 
-test("decline removes the opponent proposal and clamps frozen counts", async () => {
-  const paths: string[] = [];
-  const hostProposal = await modernProposal("host", "metal", 9);
+test("decline fails closed when the stored hold cannot cover its reservation", async () => {
+  const proposal = await modernProposal("host", "metal", 9);
   const mining = installSendReservation(
     { dust: 0, slime: 0, gum: 0, metal: 2, ice: 0 },
-    hostProposal,
+    proposal,
   );
-  const result = await removeWagerProposal(
-    { ...identity, uid: "guest" },
-    { inviteId: "invite", matchId: "match" },
-    "decline",
-    repository({
-      transactState: async (path, updater) => {
-        paths.push(path);
-        return applyTransaction(
-          updater,
-          path.startsWith("invites/")
-            ? { proposals: { host: hostProposal } }
-            : mining,
-        );
-      },
-    }),
+  const before = structuredClone(mining);
+  const state = repository({
+    readState: async (path) =>
+      path === "invites/invite"
+        ? { hostId: "host", guestId: "guest" }
+        : path.startsWith("reservations/")
+          ? mining
+          : null,
+    transactState: async (path, update) =>
+      applyTransaction(
+        update,
+        path.startsWith("invites/")
+          ? { proposals: { host: proposal } }
+          : mining,
+      ),
+  });
+  await assert.rejects(
+    removeWagerProposal(
+      { uid: "guest" },
+      { inviteId: "invite", matchId: "match" },
+      "decline",
+      state,
+    ),
+    /wager-material-release-failed/,
   );
-  assert.deepEqual(result, { ok: true });
-  assert.deepEqual(paths, [
-    "invites/invite/wagers/match",
-    "reservations/host",
-    "reservations/host",
-  ]);
+  assert.deepEqual(mining, before);
 });
 
 test("canonical D1 ownership authorizes linked logins with host precedence", async () => {
@@ -2216,14 +2342,14 @@ test("returns exact domain outcomes without debug data", async () => {
     {
       repo: {
         transactState: async (_path, updater) =>
-          applyTransaction(updater, { agreed: { count: 1 }, proposals: {} }),
+          applyTransaction(updater, agreedWagerFixture()),
       },
       expected: { ok: false, reason: "proposal-missing" },
     },
     {
       repo: {
         transactState: async (_path, updater) =>
-          applyTransaction(updater, { resolved: true, proposals: {} }),
+          applyTransaction(updater, settledWagerFixture()),
       },
       expected: { ok: false, reason: "proposal-missing" },
     },
@@ -2248,12 +2374,12 @@ test("does not remove or release a proposal after agreement", async () => {
     { inviteId: "invite", matchId: "match" },
     "cancel",
     repository({
-      readState: async () => ({ hostId: "host", guestId: "guest" }),
+      readState: async (path) =>
+        path === "invites/invite" ? { hostId: "host", guestId: "guest" } : null,
       transactState: async (_path, updater) => {
         transactions++;
         return applyTransaction(updater, {
-          agreed: { material: "dust", count: 1 },
-          proposals: { host: { material: "dust", count: 1 } },
+          ...agreedWagerFixture(),
         });
       },
     }),
@@ -2266,7 +2392,7 @@ test("cancellation returns missing while settlement consumes a proposal", async 
   const hostProposal = await modernProposal("host", "dust", 1);
   const wager = {
     proposals: { host: hostProposal },
-    settlement: { version: 2, state: "pending" },
+    settlement: pendingProposalSettlementFixture(),
   };
   let playerTransactions = 0;
   const result = await removeWagerProposal(
@@ -2282,7 +2408,10 @@ test("cancellation returns missing while settlement consumes a proposal", async 
           return {
             frozen: createEmptyMaterials(),
             operations: {
-              [hostProposal.reservationOperationId]: { consumed: true },
+              [hostProposal.reservationOperationId]: {
+                schemaVersion: 1,
+                status: "consumed",
+              },
             },
           };
         }
@@ -2483,19 +2612,26 @@ test("cancel retry preserves a later accepted reservation", async () => {
       frozen: { dust: 0, slime: 0, gum: 0, metal: 0, ice: 2 },
       operations: {
         [sendReservationOperationId]: {
-          appliedAtMs: 1,
-          count: 2,
-          deltas: { ice: 2 },
-          fingerprint: JSON.stringify([
-            "send-reserve",
-            "ice",
-            2,
-            0,
-            0,
-            0,
-            0,
-            0,
-          ]),
+          schemaVersion: 1,
+          status: "active",
+          operation: {
+            kind: "send-reserve",
+            material: "ice",
+            requestedCount: 2,
+            appliedAtMs: 1,
+            count: 2,
+            deltas: { ice: 2 },
+            fingerprint: JSON.stringify([
+              "send-reserve",
+              "ice",
+              2,
+              0,
+              0,
+              0,
+              0,
+              0,
+            ]),
+          },
         },
       },
     },
@@ -2788,13 +2924,13 @@ async function proposalWriteFixture(operation: "send" | "accept") {
         return { hostId: "host", guestId: "guest" };
       }
       if (path.startsWith("reservations/")) {
-        return state.frozen[path.split("/")[1]];
+        return state.frozen[path.split("/")[1]!];
       }
       return state.wager;
     },
     transactState: async (path, update) => {
       if (path.startsWith("reservations/")) {
-        const uid = path.split("/")[1];
+        const uid = path.split("/")[1]!;
         frozenWrites.push(uid);
         const result = applyMiningTransaction(update, state.frozen[uid]);
         if (result.committed) state.frozen[uid] = result.value;
@@ -2927,9 +3063,11 @@ for (const failureStage of ["lease", "signal"] as const) {
       proposalOperationId: proposal.operationId,
       reservationOperationId: proposal.reservationOperationId,
     };
-    const recovered = decodeWager({
-      proposalRemovalOperations: { [operationId]: receipt },
-    });
+    const recovered = decodeWager(
+      wagerRecordFixture({
+        proposalRemovalOperations: { [operationId]: receipt },
+      }),
+    );
     const value = repository();
     const failure = new Error(`${failureStage}-unavailable`);
     const events: string[] = [];
@@ -2970,7 +3108,7 @@ for (const failureStage of ["lease", "signal"] as const) {
       assert.deepEqual(events, ["read", "refresh"]);
       assert.deepEqual(readbackSignals, []);
     } else {
-      assert.deepEqual((await result)?.raw, receipt);
+      assert.deepEqual(await result, receipt);
       assert.deepEqual(events, ["read", "refresh", "signal", "read"]);
       assert.deepEqual(readbackSignals, [undefined]);
     }
@@ -2995,9 +3133,11 @@ for (const outcome of [
       proposalOperationId: proposal.operationId,
       reservationOperationId: proposal.reservationOperationId,
     };
-    const recovered = decodeWager({
-      proposalRemovalOperations: { [operationId]: receipt },
-    });
+    const recovered = decodeWager(
+      wagerRecordFixture({
+        proposalRemovalOperations: { [operationId]: receipt },
+      }),
+    );
     const value = repository();
     const events: string[] = [];
     const controller = new AbortController();
@@ -3040,7 +3180,7 @@ for (const outcome of [
     } else if (outcome === "missing") {
       assert.equal(await result, null);
     } else {
-      assert.deepEqual((await result)?.raw, receipt);
+      assert.deepEqual(await result, receipt);
     }
     assert.deepEqual(events, [
       "read",

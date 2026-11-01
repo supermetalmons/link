@@ -1,9 +1,10 @@
 import {
   getProfileFallbackEmojiId,
   PROFILE_FALLBACK_EMOJI_COUNT,
-} from "@mons/shared/profiles";
+  type EmojiId,
+} from "@mons/shared/appearance";
 
-export type EmojiId = string | number;
+export type { EmojiId } from "@mons/shared/appearance";
 
 export const emojipackSize = PROFILE_FALLBACK_EMOJI_COUNT;
 export const swagpackStart = 1000;
@@ -30,7 +31,7 @@ export const emojis = {
   },
 
   getRandomEmojiUrlOtherThan: function (
-    id: EmojiId,
+    id: EmojiId | null,
     includingSwagPack: boolean,
   ) {
     return getRandomEmojiUrlOtherThan(id, includingSwagPack);
@@ -40,15 +41,16 @@ export const emojis = {
     return getProfileFallbackEmojiId(str);
   },
 
-  getEmojiUrl: function (id: EmojiId) {
+  getEmojiUrl: function (id: EmojiId | null) {
+    if (id === null) return "";
     return `https://cdn.lil.org/mons/emojipack/thumbs/${id}.webp`;
   },
 };
 
 function getRandomEmojiUrlOtherThan(
-  id: EmojiId,
+  id: EmojiId | null,
   includingSwagPack: boolean,
-): [string, string] {
+): [EmojiId, string] {
   let newId;
   do {
     newId = getRandomEmojiId(includingSwagPack);
@@ -58,32 +60,26 @@ function getRandomEmojiUrlOtherThan(
   return [newId, emoji];
 }
 
-function getRandomEmojiUrl(includingSwagPack: boolean): [string, string] {
+function getRandomEmojiUrl(includingSwagPack: boolean): [EmojiId, string] {
   const id = getRandomEmojiId(includingSwagPack);
   return [id, emojis.getEmojiUrl(id)];
 }
 
-function getRandomEmojiId(includingSwagPack: boolean): string {
+function getRandomEmojiId(includingSwagPack: boolean): EmojiId {
   if (!includingSwagPack) {
     const index = Math.floor(Math.random() * emojipackSize) + 1;
-    return index.toString();
+    return index;
   }
   const totalSize = emojipackSize + swagpackSize;
   const randomIndex = Math.floor(Math.random() * totalSize) + 1;
   if (randomIndex <= emojipackSize) {
-    return randomIndex.toString();
+    return randomIndex;
   }
   const swagIndexOffset = randomIndex - emojipackSize - 1;
   const swagId = swagpackStart + swagIndexOffset;
-  return swagId.toString();
+  return swagId;
 }
 
-export function getIncrementedEmojiId(currentId: EmojiId): string {
-  const currentIndex = parseInt(String(currentId));
-  if (isNaN(currentIndex)) {
-    return getRandomEmojiId(false);
-  }
-
-  const nextIndex = (currentIndex % emojipackSize) + 1;
-  return nextIndex.toString();
+export function getIncrementedEmojiId(currentId: EmojiId): EmojiId {
+  return (currentId % emojipackSize) + 1;
 }

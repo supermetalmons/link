@@ -93,7 +93,11 @@ const parseLogoutSignal = (value: unknown): LogoutSignal | null => {
         : fields.cleanupMode === "fast"
           ? "fast"
           : undefined;
-    return { id: fields.id, generation: fields.generation, cleanupMode };
+    return {
+      id: fields.id,
+      generation: fields.generation,
+      ...(cleanupMode ? { cleanupMode } : {}),
+    };
   } catch {
     return null;
   }

@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { EventCommand } from "../../../runtime/eventCommands.js";
-import { decodeEventCompatibilityPlanFixture } from "./eventCompatibilityFixture.ts";
+import {
+  decodeEventCompatibilityPlanFixture,
+  eventDocumentFixture,
+} from "./eventCompatibilityFixture.ts";
 import { commitPreparedEventMutation } from "../src/eventMutationCommit.ts";
 import {
   buildEventAnnouncementPlan,
@@ -28,13 +31,14 @@ const START_AT_MS = 10_000_000;
 const TARGET_MS = START_AT_MS - 3_600_000;
 
 function scheduledEvent(overrides: Record<string, unknown> = {}) {
-  return {
+  return eventDocumentFixture({
+    eventId: EVENT_ID,
     status: "scheduled",
     isSundayMons: true,
     startAtMs: START_AT_MS,
     telegramAnnouncements: { invite: false, matches: false, results: false },
     ...overrides,
-  };
+  });
 }
 
 function memoryRepository(
@@ -167,7 +171,7 @@ test("event creation commits both announcement markers atomically before dispatc
     memory,
     decodeEventCompatibilityPlanFixture({
       [EVENT_PATH]: event,
-      "invites/unrelated": { status: "active" },
+      "eventPrizeSelections/unrelated": null,
     }),
     dependencies,
   );
@@ -181,7 +185,7 @@ test("event creation commits both announcement markers atomically before dispatc
   assert.deepEqual(memory.patches, [
     {
       [EVENT_PATH]: event,
-      "invites/unrelated": { status: "active" },
+      "eventPrizeSelections/unrelated": null,
       ...markers,
     },
   ]);
@@ -292,7 +296,7 @@ test("repeat scheduling preserves first queue time and the workflow identity", a
 
   assert.equal(enqueued.length, 2);
   assert.deepEqual(enqueued[1], enqueued[0]);
-  assert.equal(enqueued[1].outbox.firstQueuedAtMs, NOW_MS);
+  assert.equal(enqueued[1]!.outbox.firstQueuedAtMs, NOW_MS);
   assert.equal(memory.patches.length, 2);
 });
 
@@ -328,7 +332,7 @@ test("both notification kinds preserve their first scheduling proof on repeat wr
   for (const workflowId of identities) {
     const attempts = enqueued.filter((plan) => plan.workflowId === workflowId);
     assert.deepEqual(attempts[1], attempts[0]);
-    assert.equal(attempts[1].outbox.firstQueuedAtMs, NOW_MS);
+    assert.equal(attempts[1]!.outbox.firstQueuedAtMs, NOW_MS);
   }
 });
 
@@ -473,8 +477,8 @@ test("failure dispatching either kind leaves both markers and dispatches the oth
 test("a Sunday Mons event without prizes schedules only its four-hour reminder", async () => {
   const eventId = "sunday-without-prizes";
   const event = scheduledEvent({
+    eventId,
     startAtMs: 30_000_000,
-    announceOnTelegram: false,
   });
   const memory = memoryRepository();
   const enqueued: EventProgressPlan[] = [];
@@ -600,7 +604,7 @@ test("partial changes evaluate the event after all scheduling fields are applied
   const memory = memoryRepository({
     events: {
       [EVENT_ID]: scheduledEvent({
-        status: "active",
+        status: "scheduled",
         isSundayMons: false,
         startAtMs: NOW_MS,
       }),
@@ -624,27 +628,24 @@ test("partial changes evaluate the event after all scheduling fields are applied
   );
 
   assert.equal(enqueued.length, 1);
-  assert.equal(enqueued[0].params.runAtMs, TARGET_MS);
+  assert.equal(enqueued[0]!.params.runAtMs, TARGET_MS);
   assert.deepEqual(memory.get(EVENT_PATH), scheduledEvent());
   assert.equal(memory.patches.length, 1);
   assert.deepEqual(
-    memory.patches[0][`eventProgressOutbox/${enqueued[0].outboxId}`],
-    enqueued[0].outbox,
+    memory.patches[0]![`eventProgressOutbox/${enqueued[0]!.outboxId}`]!,
+    enqueued[0]!.outbox,
   );
 });
 
 test("only scheduled strict Sunday Mons events with catalog prizes create markers", async () => {
   const cases = [
     { eventId: EVENT_ID, event: scheduledEvent({ isSundayMons: false }) },
-    { eventId: EVENT_ID, event: scheduledEvent({ isSundayMons: undefined }) },
-    { eventId: EVENT_ID, event: scheduledEvent({ isSundayMons: "true" }) },
     { eventId: EVENT_ID, event: scheduledEvent({ status: "active" }) },
     { eventId: EVENT_ID, event: scheduledEvent({ status: "ended" }) },
-    { eventId: EVENT_ID, event: scheduledEvent({ status: "cancelled" }) },
-    { eventId: "no-catalog-prizes", event: scheduledEvent() },
-    { eventId: EVENT_ID, event: null },
-    { eventId: EVENT_ID, event: scheduledEvent({ startAtMs: "10000000" }) },
-    { eventId: EVENT_ID, event: scheduledEvent({ startAtMs: 1.5 }) },
+    {
+      eventId: "no-catalog-prizes",
+      event: scheduledEvent({ eventId: "no-catalog-prizes" }),
+    },
   ];
   for (const { eventId, event } of cases) {
     const memory = memoryRepository();
@@ -672,11 +673,10 @@ test("automatic prizes do not depend on any existing Telegram announcement toggl
   for (const telegramAnnouncements of [
     { invite: false, matches: false, results: false },
     { invite: true, matches: false, results: true },
-    undefined,
   ]) {
     const plan = await buildEventAnnouncementPlan(
       EVENT_ID,
-      scheduledEvent({ announceOnTelegram: false, telegramAnnouncements }),
+      scheduledEvent({ telegramAnnouncements }),
       NOW_MS,
       "prizes",
     );
@@ -750,9 +750,9 @@ test("postponement creates a distinct schedule without overwriting the earlier m
   );
   assert.equal(enqueued.length, 3);
   assert.equal(prizes.length, 2);
-  assert.notEqual(prizes[0].workflowId, prizes[1].workflowId);
-  assert.notEqual(prizes[0].outboxId, prizes[1].outboxId);
-  assert.equal(prizes[1].params.runAtMs, TARGET_MS + 7_200_000);
+  assert.notEqual(prizes[0]!.workflowId, prizes[1]!.workflowId);
+  assert.notEqual(prizes[0]!.outboxId, prizes[1]!.outboxId);
+  assert.equal(prizes[1]!.params.runAtMs, TARGET_MS + 7_200_000);
   for (const plan of enqueued) {
     assert.deepEqual(
       memory.get(`eventProgressOutbox/${plan.outboxId}`),
@@ -781,7 +781,7 @@ test("gameplay updates and existing progress markers pass through unchanged", as
     },
   };
   const updates = {
-    [`${EVENT_PATH}/rounds/0/matches/match-1/status`]: "complete",
+    [`${EVENT_PATH}/rounds/0/matches/0_0/status`]: "bye",
     [`${EVENT_PATH}/updatedAtMs`]: NOW_MS,
     [`eventProgressOutbox/${existing.outboxId}/lastQueuedAtMs`]: NOW_MS + 1,
   };
@@ -844,7 +844,7 @@ test("sweep scheduling persists before dispatch and preserves an existing first 
   );
 
   assert.equal(requests.length, 2);
-  assert.equal(requests[0].id, candidate.workflowId);
+  assert.equal(requests[0]!.id, candidate.workflowId);
   assert.deepEqual(requests[1], requests[0]);
   assert.deepEqual(
     memory.get(`eventProgressOutbox/${candidate.outboxId}`),

@@ -12,6 +12,8 @@ const records_js_2 = require("./records.js");
 const deliveryState_js_1 = require("./deliveryState.js");
 const deliveryPolicy_js_1 = require("./deliveryPolicy.js");
 const values_js_1 = require("./values.js");
+const recordCodec_js_1 = require("./recordCodec.js");
+const deliveryState_js_2 = require("./deliveryState.js");
 function applySafeRetryProofRecord(current, input) {
   const {
     normalizedAttemptId,
@@ -20,15 +22,15 @@ function applySafeRetryProofRecord(current, input) {
     application,
     markApplied,
   } = input;
-  const { retryAtMs, retryDeadlineAtMs, retrySequence, retryStartedAtMs } =
-    asObject(application);
+  const { retryAtMs, retryDeadlineAtMs, retrySequence, retryStartedAtMs } = (0,
+  deliveryState_js_2.documentFields)(application);
   const apply = (record) => {
     const delivery = (0, deliveryState_js_1.readDelivery)(record.delivery);
-    const marker = asObject(delivery.sendInFlight);
+    const marker = delivery.sendInFlight;
     if (
-      (0, deliveryState_js_1.normalizeString)(marker.attemptId) !==
+      (0, deliveryState_js_1.normalizeString)(marker?.attemptId) !==
         normalizedAttemptId ||
-      (0, deliveryState_js_1.normalizeString)(marker.revision) !==
+      (0, deliveryState_js_1.normalizeString)(marker?.revision) !==
         normalizedRevision
     ) {
       return { commit: false, decision: "stale-safe-retry-proof" };
@@ -89,13 +91,13 @@ function applySafeRetryProofRecord(current, input) {
       decision: "safe-retry-proof-applied",
     };
   };
-  const output = apply(asObject(current));
-  return output;
+  return (0, recordCodec_js_1.requireTelegramTransaction)(apply(current));
 }
 function applyDesiredRetryProofRecord(current, input) {
   const { normalizedRevision, now, proofRetryState, application, markApplied } =
     input;
-  const { apiGateReclaimOwner, retryProofLeaseOwner } = asObject(application);
+  const { apiGateReclaimOwner, retryProofLeaseOwner } = (0,
+  deliveryState_js_2.documentFields)(application);
   const apply = (record) => {
     const delivery = (0, deliveryState_js_1.readDelivery)(record.delivery);
     if (
@@ -144,13 +146,14 @@ function applyDesiredRetryProofRecord(current, input) {
       decision: "retry-window-proof-applied",
     };
   };
-  const output = apply(asObject(current));
-  return output;
+  return (0, recordCodec_js_1.requireTelegramTransaction)(apply(current));
 }
 function applyManualRecoveryRecord(current, input) {
   const { processedAtMs } = input;
   const apply = (record) => {
-    const request = asObject(record.manualRecovery);
+    const request = (0, deliveryState_js_2.documentFields)(
+      record.manualRecovery,
+    );
     const requestId = (0, deliveryState_js_1.normalizeString)(
       request.requestId,
     );
@@ -163,13 +166,13 @@ function applyManualRecoveryRecord(current, input) {
     ) {
       return { commit: false, decision: "no-manual-recovery" };
     }
-    const action = (0, deliveryState_js_1.normalizeString)(request.action);
-    const marker = asObject(delivery.sendInFlight);
+    const action = request.action;
+    const marker = delivery.sendInFlight;
     const markerAttemptId = (0, deliveryState_js_1.normalizeString)(
-      marker.attemptId,
+      marker?.attemptId,
     );
     const markerApiGateOwner = (0, deliveryState_js_1.normalizeString)(
-      marker.apiGateOwner,
+      marker?.apiGateOwner,
     );
     const recoverable =
       delivery.status === "uncertain" && markerAttemptId !== "";
@@ -221,16 +224,16 @@ function applyManualRecoveryRecord(current, input) {
     ) {
       const recoveredApplied = {
         destination: (0, deliveryState_js_1.normalizeString)(
-          marker.destination,
+          marker?.destination,
         ),
-        chatId: (0, deliveryState_js_1.normalizeString)(marker.chatId),
+        chatId: (0, deliveryState_js_1.normalizeString)(marker?.chatId),
         messageId: Number(request.messageId),
         instanceKey: (0, deliveryState_js_1.normalizeString)(
-          marker.instanceKey,
+          marker?.instanceKey,
         ),
-        revision: (0, deliveryState_js_1.normalizeString)(marker.revision),
+        revision: (0, deliveryState_js_1.normalizeString)(marker?.revision),
         contentHash: (0, deliveryState_js_1.normalizeString)(
-          marker.contentHash,
+          marker?.contentHash,
         ),
         appliedAtMs: processedAtMs,
         recoveredAtMs: processedAtMs,
@@ -258,7 +261,9 @@ function applyManualRecoveryRecord(current, input) {
           ? { apiGateReleaseOwner: markerApiGateOwner }
           : {}),
       });
-      const previousApplied = asObject(record.applied);
+      const previousApplied = (0, deliveryState_js_2.documentFields)(
+        record.applied,
+      );
       const previousChatId =
         (0, deliveryState_js_1.normalizeString)(previousApplied.chatId) ||
         recoveredApplied.chatId;
@@ -315,7 +320,7 @@ function applyManualRecoveryRecord(current, input) {
             latestRevision ||
             (0, deliveryState_js_1.normalizeString)(delivery.revision),
           deadLetterAtMs: processedAtMs,
-          ...(markerAttemptId
+          ...(marker
             ? {
                 abandonedSend: (0, records_js_2.sendEvidenceDocument)({
                   ...marker,
@@ -354,8 +359,7 @@ function applyManualRecoveryRecord(current, input) {
     }
     return { value: nextRecord, decision: "manual-recovery-processed" };
   };
-  const output = apply(asObject(current));
-  return output;
+  return (0, recordCodec_js_1.requireTelegramTransaction)(apply(current));
 }
 function settleManualGateReleaseRecord(current, input) {
   const { owner } = input;
@@ -377,8 +381,7 @@ function settleManualGateReleaseRecord(current, input) {
       decision: "manual-gate-release-settled",
     };
   };
-  const output = apply(asObject(current));
-  return output;
+  return (0, recordCodec_js_1.requireTelegramTransaction)(apply(current));
 }
 function applyCleanupRetryProofRecord(current, input) {
   const {
@@ -388,7 +391,8 @@ function applyCleanupRetryProofRecord(current, input) {
     application,
     markApplied,
   } = input;
-  const { apiGateReclaimOwner, retryProofLeaseOwner } = asObject(application);
+  const { apiGateReclaimOwner, retryProofLeaseOwner } = (0,
+  deliveryState_js_2.documentFields)(application);
   const apply = (record) => {
     const delivery = (0, deliveryState_js_1.readDelivery)(record.delivery);
     const pendingDelete = (0, deliveryState_js_1.readPendingDelete)(
@@ -445,22 +449,10 @@ function applyCleanupRetryProofRecord(current, input) {
       decision: "pending-delete-retry-window-proof-applied",
     };
   };
-  const output = apply(asObject(current));
-  return output;
+  return (0, recordCodec_js_1.requireTelegramTransaction)(apply(current));
 }
-const asObject = (value) => {
-  const retained =
-    value instanceof deliveryState_js_1.DeliverySnapshot
-      ? (0, deliveryState_js_1.deliveryDocument)(value)
-      : value instanceof deliveryState_js_1.PendingDeleteSnapshot
-        ? (0, deliveryState_js_1.pendingDeleteDocument)(value)
-        : value;
-  return retained && typeof retained === "object" && !Array.isArray(retained)
-    ? retained
-    : {};
-};
 function observeManualRecoveryResult(result) {
-  const recoveryResult = asObject(
+  const recoveryResult = (0, deliveryState_js_2.documentFields)(
     (0, records_js_1.messageRecoveryResultDocument)(result.value),
   );
   const processed =

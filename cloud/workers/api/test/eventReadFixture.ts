@@ -2,7 +2,7 @@ import type {
   EventPrizeAssignmentRecord,
   EventReads,
 } from "../../../runtime/eventReads.js";
-import { readEventDocument } from "../../../runtime/events/documents.js";
+import { eventDocumentFixture } from "./eventCompatibilityFixture.ts";
 import type { StateQuery } from "../test/stateRepositoryTestTypes.ts";
 import type { EventOutboxReads } from "../src/eventOutboxReadRepository.ts";
 
@@ -13,6 +13,15 @@ export function eventReadFixture(
     signal?: AbortSignal,
   ) => Promise<unknown>,
 ): EventReads & EventOutboxReads {
+  const event = (value: unknown, eventId: string) => {
+    if (value === null || value === undefined) return null;
+    if (typeof value !== "object" || Array.isArray(value))
+      throw new TypeError("invalid event fixture");
+    return eventDocumentFixture({
+      eventId,
+      ...Object.fromEntries(Object.entries(value)),
+    });
+  };
   const unexpectedOutboxRead = async () => {
     throw new Error("unexpected-event-outbox-read");
   };
@@ -21,7 +30,7 @@ export function eventReadFixture(
     listDueEventProfileGameProjectionOutboxes: unexpectedOutboxRead,
     listDueEventTelegramProjectionOutboxes: unexpectedOutboxRead,
     readEvent: async (eventId, signal) =>
-      readEventDocument(await read(`events/${eventId}`, undefined, signal)),
+      event(await read(`events/${eventId}`, undefined, signal), eventId),
     readEventPrizeSelections: async (eventId, signal) =>
       ((await read(`eventPrizeSelections/${eventId}`, undefined, signal)) ??
         {}) as Record<string, string>,
@@ -32,15 +41,15 @@ export function eventReadFixture(
         signal,
       )) as EventPrizeAssignmentRecord | null,
     async readEventSnapshot(eventId, signal) {
-      const [event, prizeSelections] = await Promise.all([
+      const [eventValue, prizeSelections] = await Promise.all([
         read(`events/${eventId}`, undefined, signal),
         read(`eventPrizeSelections/${eventId}`, undefined, signal),
       ]);
       return {
-        event: readEventDocument(event),
+        event: event(eventValue, eventId),
         eventId,
         prizeSelections: (prizeSelections ?? {}) as Record<string, string>,
-        revision: event ? 1 : 0,
+        revision: eventValue ? 1 : 0,
       };
     },
     async readProfileEventPrizes(profileId, signal) {
@@ -60,8 +69,8 @@ export function eventReadFixture(
         `profileEventPrizes/${profileId}`,
         {
           orderBy: "$key",
-          startAt: query.startAt,
-          limitToFirst: query.limit,
+          ...(query.startAt !== undefined ? { startAt: query.startAt } : {}),
+          ...(query.limit !== undefined ? { limitToFirst: query.limit } : {}),
         },
         signal,
       )) ?? {}) as Record<string, EventPrizeAssignmentRecord>,

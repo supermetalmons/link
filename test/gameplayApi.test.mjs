@@ -1,3 +1,4 @@
+import { required, canonicalEvent } from "./fixtures/canonicalData.mjs";
 import assert from "node:assert/strict";
 import { registerHooks } from "node:module";
 import test from "node:test";
@@ -61,7 +62,7 @@ const { createPollingAuthTokenProvider } =
 const {
   MAX_GAME_SESSION_RESPONSE_BYTES,
   MAX_GAME_SESSION_STATUS_BYTES,
-  MAX_GAME_SESSION_TIMER_BYTES,
+  isSubmitMoveRequest,
   isCreateInviteRequest,
   isCreateInviteResponse,
   isEndRematchRequest,
@@ -141,6 +142,22 @@ const {
 const originalFetch = globalThis.fetch;
 const AUTOMATCH_OPERATION_ID = "00000000-0000-4000-8000-000000000001";
 
+/**
+ * @template Input, Output
+ * @param {(input: Input, token: import("../src/services/authApi.ts").AuthTokenProvider) => Promise<Output>} mutate
+ * @param {NoInfer<Input>} request
+ * @param {NoInfer<Output>} base
+ */
+function mutationCase(mutate, request, base) {
+  return {
+    request,
+    base,
+    run: (
+      /** @type {import("../src/services/authApi.ts").AuthTokenProvider} */ token,
+    ) => mutate(request, token),
+  };
+}
+/** @param {unknown} body */
 const jsonResponse = (body, status = 200) =>
   new Response(JSON.stringify(body), {
     status,
@@ -198,20 +215,29 @@ test("validates exact frozen-balance requests and authoritative snapshots", () =
 });
 
 test("reads the actor balance through authenticated POST without a wager write header", async () => {
-  let call;
+  /** @type {{ value?: ({ url: RequestInfo | URL; init: RequestInit | undefined; }) }} */
+  const call = {};
   globalThis.fetch = async (url, init) => {
-    call = { url, init };
+    call.value = { url, init };
     return jsonResponse(frozenResponse());
   };
   assert.deepEqual(
     await readWagerFrozenViaApi({ playerUid: "actor" }, async () => "token"),
     frozenResponse(),
   );
-  assert.equal(call.url, "https://api.mons.link/wagers/frozen/read");
-  assert.equal(call.init.method, "POST");
-  assert.equal(call.init.cache, "no-store");
-  assert.deepEqual(JSON.parse(call.init.body), { playerUid: "actor" });
-  const headers = new Headers(call.init.headers);
+  assert.equal(
+    required(call.value).url,
+    "https://api.mons.link/wagers/frozen/read",
+  );
+  assert.equal(required(required(call.value).init).method, "POST");
+  assert.equal(required(required(call.value).init).cache, "no-store");
+  assert.deepEqual(
+    JSON.parse(String(required(required(call.value).init).body)),
+    {
+      playerUid: "actor",
+    },
+  );
+  const headers = new Headers(required(required(call.value).init).headers);
   assert.equal(headers.get("Authorization"), "Bearer token");
   assert.equal(headers.get(WAGER_STORAGE_VERSION_HEADER), null);
 });
@@ -235,8 +261,9 @@ test("rejects wrong-actor, malformed, oversized, and unavailable frozen snapshot
 
 test("frozen read cancellation interrupts pending authentication and prevents transport", async () => {
   const controller = new AbortController();
-  let resolveToken;
-  const token = new Promise((resolve) => (resolveToken = resolve));
+
+  /** @type {PromiseWithResolvers<string>} */
+  const { promise: token, resolve: resolveToken } = Promise.withResolvers();
   let fetches = 0;
   globalThis.fetch = async () => {
     fetches += 1;
@@ -246,8 +273,11 @@ test("frozen read cancellation interrupts pending authentication and prevents tr
     signal: controller.signal,
   });
   controller.abort();
-  await assert.rejects(request, (error) => error.code === "aborted");
-  resolveToken("token");
+  await assert.rejects(
+    request,
+    (error) => error instanceof GameplayApiError && error.code === "aborted",
+  );
+  required(resolveToken)("token");
   await new Promise((resolve) => setImmediate(resolve));
   assert.equal(fetches, 0);
 });
@@ -266,7 +296,8 @@ test("frozen token refresh remains bound to the original login", async () => {
       { playerUid: "actor" },
       createUserBoundAuthTokenProvider(user, () => currentUser),
     ),
-    (error) => error.code === "unauthenticated",
+    (error) =>
+      error instanceof GameplayApiError && error.code === "unauthenticated",
   );
   assert.equal(fetches, 1);
 });
@@ -276,15 +307,16 @@ const matchSnapshotResponse = (overrides = {}) => ({
   ok: true,
   ...matchSnapshotRequest,
   match: {
+    schemaVersion: 1,
     version: 1,
     color: "white",
     emojiId: 1,
-    aura: "",
+    aura: "none",
     gameVariant: "Classic",
     fen: "fen",
-    status: "",
+    status: "active",
     flatMovesString: "move",
-    timer: "",
+    timer: { state: "idle" },
   },
   ...overrides,
 });
@@ -292,6 +324,7 @@ const matchSnapshotResponse = (overrides = {}) => ({
 test("reads public match snapshots and explicit absence without authentication or caching", async (t) => {
   t.mock.timers.enable({ apis: ["setTimeout"] });
   const caller = new AbortController();
+  /** @type {({ input: string; init: RequestInit | undefined; })[]} */
   const calls = [];
   for (const payload of [
     matchSnapshotResponse(),
@@ -314,14 +347,18 @@ test("reads public match snapshots and explicit absence without authentication o
       input,
       "https://api.mons.link/matches/snapshot?playerId=actor&matchId=abcdefghijk",
     );
-    assert.equal(init.method, "GET");
-    assert.equal(init.cache, "no-store");
-    assert.equal(new Headers(init.headers).has("Authorization"), false);
-    assert.equal(init.body, undefined);
+    assert.equal(required(init).method, "GET");
+    assert.equal(required(init).cache, "no-store");
+    assert.equal(
+      new Headers(required(init).headers).has("Authorization"),
+      false,
+    );
+    assert.equal(required(init).body, undefined);
   }
   caller.abort();
   t.mock.timers.runAll();
-  for (const { init } of calls) assert.equal(init.signal.aborted, false);
+  for (const { init } of calls)
+    assert.equal(required(required(init).signal).aborted, false);
 });
 
 test("rejects invalid match snapshot requests before transport", async () => {
@@ -338,13 +375,15 @@ test("rejects invalid match snapshot requests before transport", async () => {
   ]) {
     await assert.rejects(
       readMatchSnapshotViaApi(request),
-      (error) => error.code === "invalid-argument",
+      (error) =>
+        error instanceof GameplayApiError && error.code === "invalid-argument",
     );
   }
   for (const timeoutMs of [0, -1, NaN, Infinity]) {
     await assert.rejects(
       readMatchSnapshotViaApi(matchSnapshotRequest, { timeoutMs }),
-      (error) => error.code === "invalid-argument",
+      (error) =>
+        error instanceof GameplayApiError && error.code === "invalid-argument",
     );
   }
   assert.equal(fetches, 0);
@@ -385,7 +424,8 @@ test("match snapshot failures never become absence or trigger retries", async ()
   };
   await assert.rejects(
     readMatchSnapshotViaApi(matchSnapshotRequest),
-    (error) => error.code === "unauthenticated",
+    (error) =>
+      error instanceof GameplayApiError && error.code === "unauthenticated",
   );
   assert.equal(fetches, invalidResponses.length + 1);
   globalThis.fetch = async () => {
@@ -393,26 +433,32 @@ test("match snapshot failures never become absence or trigger retries", async ()
   };
   await assert.rejects(
     readMatchSnapshotViaApi(matchSnapshotRequest),
-    (error) => error.code === "unavailable",
+    (error) =>
+      error instanceof GameplayApiError && error.code === "unavailable",
   );
 });
 
 test("match snapshot cancellation aborts transport even when fetch ignores cancellation", async () => {
   const caller = new AbortController();
-  let signal;
-  let resolveFetch;
+  /** @type {{ value?: (AbortSignal | null | undefined) }} */
+  const signal = {};
+  /** @type {{ value?: ((value: Response | PromiseLike<Response>) => void) }} */
+  const resolveFetch = {};
   let canceled = false;
   globalThis.fetch = (_input, init) => {
-    signal = init.signal;
-    return new Promise((resolve) => (resolveFetch = resolve));
+    signal.value = required(init).signal;
+    return new Promise((resolve) => (resolveFetch.value = resolve));
   };
   const request = readMatchSnapshotViaApi(matchSnapshotRequest, {
     signal: caller.signal,
   });
   caller.abort();
-  await assert.rejects(request, (error) => error.code === "aborted");
-  assert.equal(signal.aborted, true);
-  resolveFetch(
+  await assert.rejects(
+    request,
+    (error) => error instanceof GameplayApiError && error.code === "aborted",
+  );
+  assert.equal(required(signal.value).aborted, true);
+  required(resolveFetch.value)(
     new Response(
       new ReadableStream({
         cancel() {
@@ -426,21 +472,23 @@ test("match snapshot cancellation aborts transport even when fetch ignores cance
   let fetches = 0;
   globalThis.fetch = async () => {
     fetches += 1;
+    return assert.fail("unexpected aborted fetch");
   };
   await assert.rejects(
     readMatchSnapshotViaApi(matchSnapshotRequest, { signal: caller.signal }),
-    (error) => error.code === "aborted",
+    (error) => error instanceof GameplayApiError && error.code === "aborted",
   );
   assert.equal(fetches, 0);
 });
 
 test("match snapshot deadline aborts fetch without relying on fetch rejection", async (t) => {
   t.mock.timers.enable({ apis: ["setTimeout"] });
-  let signal;
+  /** @type {{ value?: (AbortSignal | null | undefined) }} */
+  const signal = {};
   let fetches = 0;
   globalThis.fetch = (_input, init) => {
     fetches += 1;
-    signal = init.signal;
+    signal.value = required(init).signal;
     return new Promise(() => {});
   };
   const request = readMatchSnapshotViaApi(matchSnapshotRequest, {
@@ -449,14 +497,15 @@ test("match snapshot deadline aborts fetch without relying on fetch rejection", 
   const rejected = assert.rejects(
     request,
     (error) =>
+      error instanceof GameplayApiError &&
       error.code === "unavailable" &&
       error.message === "Gameplay request timed out.",
   );
   t.mock.timers.tick(1199);
-  assert.equal(signal.aborted, false);
+  assert.equal(required(signal.value).aborted, false);
   t.mock.timers.tick(1);
   await rejected;
-  assert.equal(signal.aborted, true);
+  assert.equal(required(signal.value).aborted, true);
   assert.equal(fetches, 1);
 });
 
@@ -464,10 +513,11 @@ test("match snapshot deadline and caller cancellation cover stalled response bod
   t.mock.timers.enable({ apis: ["setTimeout"] });
   for (const callerCanceled of [false, true]) {
     const caller = new AbortController();
-    let signal;
+    /** @type {{ value?: (AbortSignal | null | undefined) }} */
+    const signal = {};
     let canceled = false;
     globalThis.fetch = async (_input, init) => {
-      signal = init.signal;
+      signal.value = required(init).signal;
       return new Response(
         new ReadableStream({
           cancel() {
@@ -481,34 +531,38 @@ test("match snapshot deadline and caller cancellation cover stalled response bod
     });
     const rejected = assert.rejects(
       request,
-      (error) => error.code === (callerCanceled ? "aborted" : "unavailable"),
+      (error) =>
+        error instanceof GameplayApiError &&
+        error.code === (callerCanceled ? "aborted" : "unavailable"),
     );
     await new Promise((resolve) => setImmediate(resolve));
     if (callerCanceled) {
       caller.abort();
     } else {
       t.mock.timers.tick(29_999);
-      assert.equal(signal.aborted, false);
+      assert.equal(required(signal.value).aborted, false);
       t.mock.timers.tick(1);
     }
     await rejected;
-    assert.equal(signal.aborted, true);
+    assert.equal(required(signal.value).aborted, true);
     assert.equal(canceled, true);
   }
 });
 
 test("reads public historical matches without an auth token", async () => {
+  /** @type {({ input: string; init: RequestInit | undefined; })[]} */
   const calls = [];
   const match = {
+    schemaVersion: 1,
     version: 2,
     color: "white",
     emojiId: 1,
-    aura: "",
+    aura: "none",
     gameVariant: "Classic",
     fen: "fen",
     status: "surrendered",
     flatMovesString: "move",
-    timer: "",
+    timer: { state: "idle" },
   };
   const pair = {
     matchId: "abcdefghijk",
@@ -529,16 +583,20 @@ test("reads public historical matches without an auth token", async () => {
     { ok: true, pair },
   );
   assert.equal(
-    calls[0].input,
+    required(calls[0]).input,
     "https://api.mons.link/matches/history?inviteId=abcdefghijk&matchId=abcdefghijk",
   );
-  assert.equal(calls[0].init.method, "GET");
-  assert.equal(new Headers(calls[0].init.headers).has("Authorization"), false);
+  assert.equal(required(required(calls[0]).init).method, "GET");
+  assert.equal(
+    new Headers(required(required(calls[0]).init).headers).has("Authorization"),
+    false,
+  );
 });
 
 test("sends exact authenticated event-control mutations", async () => {
+  /** @type {({ input: string; init: RequestInit | undefined; })[]} */
   const calls = [];
-  const event = { eventId: "event-1", status: "scheduled", startAtMs: 600_000 };
+  const event = canonicalEvent({ eventId: "event-1", startAtMs: 600_000 });
   const responses = [
     { ok: true, eventId: "event-1", event },
     {
@@ -564,10 +622,10 @@ test("sends exact authenticated event-control mutations", async () => {
   };
   const tokenProvider = async () => "session-token";
   assert.deepEqual(
-    await createEventViaApi(
+    await Reflect.apply(createEventViaApi, undefined, [
       { startsInMinutes: 5, announceOnTelegram: true },
       tokenProvider,
-    ),
+    ]),
     { ok: true, eventId: "event-1", event },
   );
   assert.deepEqual(
@@ -608,7 +666,7 @@ test("sends exact authenticated event-control mutations", async () => {
   assert.equal(
     calls.every(
       (call) =>
-        new Headers(call.init.headers).get("Authorization") ===
+        new Headers(required(call.init).headers).get("Authorization") ===
         "Bearer session-token",
     ),
     true,
@@ -664,7 +722,7 @@ test("sends exact authenticated event-control mutations", async () => {
 });
 
 test("event controls accept complete snapshot seeds without an additional request", async () => {
-  const event = { eventId: "event-1", status: "scheduled", startAtMs: 600_000 };
+  const event = canonicalEvent({ eventId: "event-1", startAtMs: 600_000 });
   const eventSnapshot = {
     snapshot: {
       ok: true,
@@ -677,12 +735,12 @@ test("event controls accept complete snapshot seeds without an additional reques
     bookmark: "mons-d1-v1:446cba4b-31c0-4c5e-8daa-af7d235fbe0f:revision-2",
   };
   const cases = [
-    [
+    mutationCase(
       createEventViaApi,
       { startsInMinutes: 5 },
       { ok: true, eventId: "event-1", event },
-    ],
-    [
+    ),
+    mutationCase(
       postponeEventStartViaApi,
       { eventId: "event-1", postponeByMinutes: 5 },
       {
@@ -692,8 +750,8 @@ test("event controls accept complete snapshot seeds without an additional reques
         postponeByMinutes: 5,
         startAtMs: 600_000,
       },
-    ],
-    [
+    ),
+    mutationCase(
       disqualifyEventMatchWinnersViaApi,
       { eventId: "event-1", matchKey: "0_0" },
       {
@@ -704,23 +762,26 @@ test("event controls accept complete snapshot seeds without an additional reques
         didDisqualify: true,
         matchKey: "0_0",
       },
-    ],
-    [
+    ),
+    mutationCase(
       syncEventStateViaApi,
       { eventId: "event-1" },
       { ok: true, eventId: "event-1", event, didChange: true },
-    ],
+    ),
   ];
-  for (const [mutate, request, base] of cases) {
+  for (const { run, request, base } of cases) {
     let calls = 0;
     globalThis.fetch = async (input, init) => {
       calls += 1;
-      assert.equal(new URL(input).searchParams.get("eventSnapshot"), "v1");
-      assert.equal(init.method, "POST");
-      assert.deepEqual(JSON.parse(init.body), request);
+      assert.equal(
+        new URL(String(input)).searchParams.get("eventSnapshot"),
+        "v1",
+      );
+      assert.equal(required(init).method, "POST");
+      assert.deepEqual(JSON.parse(String(required(init).body)), request);
       return jsonResponse({ ...base, eventSnapshot });
     };
-    assert.deepEqual(await mutate(request, async () => "token"), {
+    assert.deepEqual(await run(async () => "token"), {
       ...base,
       eventSnapshot,
     });
@@ -729,7 +790,7 @@ test("event controls accept complete snapshot seeds without an additional reques
 });
 
 test("invalid optional event seeds preserve mutation success without replaying POST", async () => {
-  const event = { eventId: "event-1", status: "scheduled" };
+  const event = canonicalEvent({ eventId: "event-1" });
   const base = {
     ok: true,
     eventId: "event-1",
@@ -778,17 +839,14 @@ test("invalid optional event seeds preserve mutation success without replaying P
 
 test("sends granular Telegram announcements with either event schedule", async () => {
   const telegramAnnouncements = { invite: false, matches: true, results: true };
-  const event = {
-    eventId: "event-1",
-    status: "scheduled",
-    telegramAnnouncements,
-  };
+  const event = canonicalEvent({ eventId: "event-1", telegramAnnouncements });
+  /** @type {({ input: string; init: RequestInit | undefined; })[]} */
   const calls = [];
   globalThis.fetch = async (input, init) => {
     calls.push({ input: String(input), init });
     return jsonResponse({ ok: true, eventId: "event-1", event });
   };
-  for (const schedule of [
+  for (const schedule of /** @type {const} */ ([
     { startsInMinutes: 5 },
     {
       scheduledDate: "2026-09-06",
@@ -796,7 +854,7 @@ test("sends granular Telegram announcements with either event schedule", async (
       scheduledTimezone: "local",
       localTimezoneIana: "Europe/Istanbul",
     },
-  ]) {
+  ])) {
     const request = { ...schedule, telegramAnnouncements };
     assert.equal(isCreateEventRequest(request), true);
     const response = await createEventViaApi(
@@ -807,33 +865,36 @@ test("sends granular Telegram announcements with either event schedule", async (
       response.event.telegramAnnouncements,
       telegramAnnouncements,
     );
-    assert.deepEqual(JSON.parse(calls.at(-1).init.body), request);
+    assert.deepEqual(
+      JSON.parse(String(required(required(calls.at(-1)).init).body)),
+      request,
+    );
   }
 });
 
 test("sends explicit Sunday Mons flags with either event schedule", async () => {
+  /** @type {({ input: string; init: RequestInit | undefined; })[]} */
   const calls = [];
   globalThis.fetch = async (input, init) => {
-    const request = JSON.parse(init.body);
+    const request = JSON.parse(String(required(init).body));
     calls.push({ input: String(input), init });
     return jsonResponse({
       ok: true,
       eventId: "event-1",
-      event: {
+      event: canonicalEvent({
         eventId: "event-1",
-        status: "scheduled",
         isSundayMons: request.isSundayMons === true,
-      },
+      }),
     });
   };
-  for (const schedule of [
+  for (const schedule of /** @type {const} */ ([
     { startsInMinutes: 5 },
     {
       scheduledDate: "2026-09-07",
       scheduledTime: "18:30",
       scheduledTimezone: "ET",
     },
-  ]) {
+  ])) {
     for (const options of [
       {},
       { isSundayMons: false },
@@ -846,7 +907,10 @@ test("sends explicit Sunday Mons flags with either event schedule", async () => 
         async () => "session-token",
       );
       assert.equal(response.event.isSundayMons, options.isSundayMons === true);
-      assert.deepEqual(JSON.parse(calls.at(-1).init.body), request);
+      assert.deepEqual(
+        JSON.parse(String(required(required(calls.at(-1)).init).body)),
+        request,
+      );
     }
     for (const isSundayMons of [
       undefined,
@@ -863,13 +927,13 @@ test("sends explicit Sunday Mons flags with either event schedule", async () => 
   }
 });
 
-test("validates optional Sunday Mons response flags while accepting legacy events", () => {
+test("validates required Sunday Mons response flags on complete canonical events", () => {
   for (const options of [{}, { isSundayMons: false }, { isSundayMons: true }]) {
     assert.equal(
       isCreateEventResponse({
         ok: true,
         eventId: "event-1",
-        event: { eventId: "event-1", status: "scheduled", ...options },
+        event: canonicalEvent({ eventId: "event-1", ...options }),
       }),
       true,
     );
@@ -879,48 +943,56 @@ test("validates optional Sunday Mons response flags while accepting legacy event
       isCreateEventResponse({
         ok: true,
         eventId: "event-1",
-        event: { eventId: "event-1", status: "scheduled", isSundayMons },
+        event: { ...canonicalEvent({ eventId: "event-1" }), isSundayMons },
       }),
       false,
     );
   }
 });
 
-test("validates current Telegram preferences and rejects retired request flags while retaining stored normalization", () => {
+test("validates current Telegram preferences and rejects retired request flags", () => {
   const allOff = { invite: false, matches: false, results: false };
   const allOn = { invite: true, matches: true, results: true };
   const delayedInvite = { invite: false, matches: true, results: true };
   assert.deepEqual(resolveEventTelegramAnnouncements({}), allOff);
   assert.deepEqual(
-    resolveEventTelegramAnnouncements({ announceOnTelegram: false }),
+    Reflect.apply(resolveEventTelegramAnnouncements, undefined, [
+      { announceOnTelegram: false },
+    ]),
     allOff,
   );
   assert.deepEqual(
-    resolveEventTelegramAnnouncements({ announceOnTelegram: true }),
-    allOn,
-  );
-  assert.deepEqual(
-    resolveEventTelegramAnnouncements({
-      announceOnTelegram: true,
-      telegramAnnouncements: allOff,
-    }),
+    Reflect.apply(resolveEventTelegramAnnouncements, undefined, [
+      { announceOnTelegram: true },
+    ]),
     allOff,
   );
   assert.deepEqual(
-    resolveEventTelegramAnnouncements({
-      announceOnTelegram: false,
-      telegramAnnouncements: delayedInvite,
-    }),
+    Reflect.apply(resolveEventTelegramAnnouncements, undefined, [
+      {
+        announceOnTelegram: true,
+        telegramAnnouncements: allOff,
+      },
+    ]),
+    allOff,
+  );
+  assert.deepEqual(
+    Reflect.apply(resolveEventTelegramAnnouncements, undefined, [
+      {
+        announceOnTelegram: false,
+        telegramAnnouncements: delayedInvite,
+      },
+    ]),
     delayedInvite,
   );
-  for (const schedule of [
+  for (const schedule of /** @type {const} */ ([
     { startsInMinutes: 5 },
     {
       scheduledDate: "2026-09-06",
       scheduledTime: "18:30",
       scheduledTimezone: "ET",
     },
-  ]) {
+  ])) {
     assert.equal(isCreateEventRequest(schedule), true);
     for (const telegramAnnouncements of [allOff, allOn, delayedInvite]) {
       assert.equal(
@@ -974,11 +1046,9 @@ test("validates current Telegram preferences and rejects retired request flags w
 });
 
 test("reads conditional event snapshots and profile prizes with transport metadata", async () => {
+  /** @type {({ input: string; init: RequestInit | undefined; })[]} */
   const calls = [];
-  const event = {
-    eventId: LEGACY_CORE_PRIZES_EVENT_ID,
-    status: "scheduled",
-  };
+  const event = canonicalEvent({ eventId: LEGACY_CORE_PRIZES_EVENT_ID });
   const snapshot = {
     ok: true,
     eventId: LEGACY_CORE_PRIZES_EVENT_ID,
@@ -1043,19 +1113,19 @@ test("reads conditional event snapshots and profile prizes with transport metada
     },
   );
   assert.equal(
-    calls[0].input,
+    required(calls[0]).input,
     `https://api.mons.link/events/snapshot?eventId=${LEGACY_CORE_PRIZES_EVENT_ID}`,
   );
   assert.equal(
-    calls[1].input,
+    required(calls[1]).input,
     "https://api.mons.link/events/prizes?pagination=1",
   );
-  const headers = new Headers(calls[0].init.headers);
+  const headers = new Headers(required(required(calls[0]).init).headers);
   assert.equal(headers.get("Authorization"), "Bearer session-token");
   assert.equal(headers.get("If-None-Match"), 'W/"event-2"');
   assert.equal(headers.get("X-D1-Bookmark"), "bookmark-2");
-  assert.equal(calls[0].init.method, "GET");
-  assert.equal(calls[0].init.cache, "no-store");
+  assert.equal(required(required(calls[0]).init).method, "GET");
+  assert.equal(required(required(calls[0]).init).cache, "no-store");
 });
 
 test("rejects conditional responses for a different resource", async () => {
@@ -1094,9 +1164,10 @@ test("rejects conditional responses for a different resource", async () => {
 });
 
 test("rejects an unsolicited not-modified response without a cached validator", async () => {
-  let requestHeaders;
+  /** @type {{ value?: (Headers) }} */
+  const requestHeaders = {};
   globalThis.fetch = async (_input, init) => {
-    requestHeaders = new Headers(init?.headers);
+    requestHeaders.value = new Headers(init?.headers);
     return new Response(null, {
       status: 304,
       headers: {
@@ -1111,10 +1182,11 @@ test("rejects an unsolicited not-modified response without a cached validator", 
     (error) =>
       error instanceof GameplayApiError && error.code === "unavailable",
   );
-  assert.equal(requestHeaders.has("If-None-Match"), false);
+  assert.equal(required(requestHeaders.value).has("If-None-Match"), false);
 });
 
 test("refreshes authentication once for conditional reads and fences the caller", async () => {
+  /** @type {boolean[]} */
   const forceRefreshValues = [];
   const snapshot = {
     ok: true,
@@ -1147,7 +1219,7 @@ test("refreshes authentication once for conditional reads and fences the caller"
   };
   let current = true;
   const tokenProvider = Object.assign(
-    async (forceRefresh) => {
+    async (/** @type {boolean} */ forceRefresh) => {
       forceRefreshValues.push(forceRefresh);
       return "token";
     },
@@ -1181,16 +1253,16 @@ test("aborts a conditional read without AbortSignal.any", async (t) => {
     if (abortSignalAny) {
       Object.defineProperty(AbortSignal, "any", abortSignalAny);
     } else {
-      delete AbortSignal.any;
+      Reflect.deleteProperty(AbortSignal, "any");
     }
   });
   const controller = new AbortController();
   let fetchCalls = 0;
-  let resolveAuthentication;
+
   let boundProviderCalls = 0;
-  const authentication = new Promise((resolve) => {
-    resolveAuthentication = resolve;
-  });
+  /** @type {PromiseWithResolvers<void>} */
+  const { promise: authentication, resolve: resolveAuthentication } =
+    Promise.withResolvers();
   globalThis.fetch = async () => {
     fetchCalls += 1;
     throw new Error("unexpected-fetch");
@@ -1219,7 +1291,7 @@ test("aborts a conditional read without AbortSignal.any", async (t) => {
       error.code === "aborted" &&
       error.message === "request-aborted",
   );
-  resolveAuthentication();
+  required(resolveAuthentication)();
   await new Promise((resolve) => setImmediate(resolve));
   assert.equal(boundProviderCalls, 0);
   assert.equal(fetchCalls, 0);
@@ -1252,13 +1324,13 @@ test("applies the conditional-read deadline to token acquisition", async (t) => 
 
 test("applies the conditional-read deadline to response reading", async (t) => {
   t.mock.timers.enable({ apis: ["setTimeout"] });
-  let requestSignal;
-  let bodyStarted;
-  const started = new Promise((resolve) => {
-    bodyStarted = resolve;
-  });
+  /** @type {{ value?: (AbortSignal | null | undefined) }} */
+  const requestSignal = {};
+
+  /** @type {PromiseWithResolvers<void>} */
+  const { promise: started, resolve: bodyStarted } = Promise.withResolvers();
   globalThis.fetch = async (_input, init) => {
-    requestSignal = init.signal;
+    requestSignal.value = required(init).signal;
     return new Response(
       new ReadableStream({
         start(controller) {
@@ -1283,12 +1355,12 @@ test("applies the conditional-read deadline to response reading", async (t) => {
       error.code === "unavailable" &&
       error.message === "Gameplay request timed out.",
   );
-  assert.equal(requestSignal.aborted, false);
+  assert.equal(required(requestSignal.value).aborted, false);
 
   t.mock.timers.runAll();
 
   await rejection;
-  assert.equal(requestSignal.aborted, true);
+  assert.equal(required(requestSignal.value).aborted, true);
 });
 
 test("bounds conditional event responses and validates exact read contracts", async () => {
@@ -1353,7 +1425,7 @@ test("bounds conditional event responses and validates exact read contracts", as
       ok: true,
       eventId: "future-event",
       revision: 1,
-      event: { eventId: "future-event", status: "scheduled" },
+      event: canonicalEvent({ eventId: "future-event" }),
       prizeSelections: { "profile-1": "future-prize" },
     }),
     true,
@@ -1376,6 +1448,7 @@ test("bounds conditional event responses and validates exact read contracts", as
 });
 
 test("sends the exact event prize selection mutation", async () => {
+  /** @type {({ input: string; init: RequestInit | undefined; })[]} */
   const calls = [];
   globalThis.fetch = async (input, init) => {
     calls.push({ input: String(input), init });
@@ -1385,6 +1458,7 @@ test("sends the exact event prize selection mutation", async () => {
       selectedPrizeId: "1092",
     });
   };
+  /** @type {Parameters<typeof toggleEventPrizeSelectionViaApi>[0]} */
   const request = {
     eventId: LEGACY_CORE_PRIZES_EVENT_ID,
     prizeId: "1092",
@@ -1398,12 +1472,15 @@ test("sends the exact event prize selection mutation", async () => {
     },
   );
   assert.equal(
-    calls[0].input,
+    required(calls[0]).input,
     "https://api.mons.link/events/prize-selections/toggle",
   );
-  assert.deepEqual(JSON.parse(calls[0].init.body), request);
+  assert.deepEqual(
+    JSON.parse(String(required(required(calls[0]).init).body)),
+    request,
+  );
   assert.equal(
-    new Headers(calls[0].init.headers).get("Authorization"),
+    new Headers(required(required(calls[0]).init).headers).get("Authorization"),
     "Bearer session-token",
   );
   assert.equal(isToggleEventPrizeSelectionRequest(request), true);
@@ -1430,6 +1507,7 @@ test("sends the exact event prize selection mutation", async () => {
 });
 
 test("reads the exact authenticated authoritative invite role", async () => {
+  /** @type {({ input: string; init: RequestInit | undefined; })[]} */
   const calls = [];
   const response = {
     ok: true,
@@ -1451,12 +1529,15 @@ test("reads the exact authenticated authoritative invite role", async () => {
     ),
     response,
   );
-  assert.equal(calls[0].input, "https://api.mons.link/invites/role/read");
-  assert.deepEqual(JSON.parse(calls[0].init.body), {
+  assert.equal(
+    required(calls[0]).input,
+    "https://api.mons.link/invites/role/read",
+  );
+  assert.deepEqual(JSON.parse(String(required(required(calls[0]).init).body)), {
     inviteId: "abcdefghijk",
   });
   assert.equal(
-    new Headers(calls[0].init.headers).get("Authorization"),
+    new Headers(required(required(calls[0]).init).headers).get("Authorization"),
     "Bearer session-token",
   );
   assert.equal(isResolveInviteRoleRequest({ inviteId: "abcdefghijk" }), true);
@@ -1545,20 +1626,22 @@ test("rejects an invite role response after authentication changes", async () =>
 });
 
 test("sends exact structural game-session mutations with stable operation IDs", async () => {
+  /** @type {({ input: string; init: RequestInit | undefined; })[]} */
   const calls = [];
   const operationIds = [1, 2, 3, 4, 5].map(
     (index) => `00000000-0000-4000-8000-${String(index).padStart(12, "0")}`,
   );
   const match = {
+    schemaVersion: 1,
     version: 2,
     color: "white",
     emojiId: 7,
     aura: "rainbow",
     gameVariant: "Classic",
     fen: "fen",
-    status: "",
+    status: "active",
     flatMovesString: "",
-    timer: "",
+    timer: { state: "idle" },
   };
   const responses = [
     {
@@ -1579,14 +1662,14 @@ test("sends exact structural game-session mutations with stable operation IDs", 
       inviteId: "abcdefghijk",
       actorUid: "host",
       matchId: "abcdefghijk1",
-      rematches: "1",
+      rematches: { state: "open", indices: [1] },
       match,
     },
     {
       ok: true,
       inviteId: "abcdefghijk",
       actorUid: "host",
-      rematches: "1x",
+      rematches: { state: "ended", indices: [1] },
     },
     {
       ok: true,
@@ -1602,21 +1685,28 @@ test("sends exact structural game-session mutations with stable operation IDs", 
     return jsonResponse(responses.shift());
   };
   const tokenProvider = async () => "session-token";
+  /** @type {import("@mons/shared/game-sessions").GameSessionPresentation} */
   const presentation = { emojiId: 7, aura: "rainbow" };
   const createRequest = {
-    operationId: operationIds[0],
+    operationId: required(operationIds[0]),
     inviteId: "abcdefghijk",
     ...presentation,
   };
-  const joinRequest = { ...createRequest, operationId: operationIds[1] };
-  const proposeRequest = { ...createRequest, operationId: operationIds[2] };
+  const joinRequest = {
+    ...createRequest,
+    operationId: required(operationIds[1]),
+  };
+  const proposeRequest = {
+    ...createRequest,
+    operationId: required(operationIds[2]),
+  };
   const endRequest = {
-    operationId: operationIds[3],
+    operationId: required(operationIds[3]),
     inviteId: "abcdefghijk",
   };
   const ensureRequest = {
     ...createRequest,
-    operationId: operationIds[4],
+    operationId: required(operationIds[4]),
     matchId: "abcdefghijk1",
   };
   assert.equal(
@@ -1631,9 +1721,9 @@ test("sends exact structural game-session mutations with stable operation IDs", 
     (await proposeRematchViaApi(proposeRequest, tokenProvider)).matchId,
     "abcdefghijk1",
   );
-  assert.equal(
+  assert.deepEqual(
     (await endRematchViaApi(endRequest, tokenProvider)).rematches,
-    "1x",
+    { state: "ended", indices: [1] },
   );
   assert.equal(
     (await ensureMatchViaApi(ensureRequest, tokenProvider)).created,
@@ -1650,10 +1740,13 @@ test("sends exact structural game-session mutations with stable operation IDs", 
     ],
   );
   assert.deepEqual(
-    calls.map(({ init }) => JSON.parse(init.body)),
+    calls.map(({ init }) => JSON.parse(String(required(init).body))),
     [createRequest, joinRequest, proposeRequest, endRequest, ensureRequest],
   );
-  for (const [validator, value] of [
+  for (const [
+    validator,
+    value,
+  ] of /** @type {[(value: unknown) => boolean, unknown][]} */ ([
     [isCreateInviteRequest, createRequest],
     [isJoinInviteRequest, joinRequest],
     [isProposeRematchRequest, proposeRequest],
@@ -1685,7 +1778,7 @@ test("sends exact structural game-session mutations with stable operation IDs", 
         inviteId: "abcdefghijk",
         actorUid: "host",
         matchId: "abcdefghijk1",
-        rematches: "1",
+        rematches: { state: "open", indices: [1] },
         match,
       },
     ],
@@ -1695,7 +1788,7 @@ test("sends exact structural game-session mutations with stable operation IDs", 
         ok: true,
         inviteId: "abcdefghijk",
         actorUid: "host",
-        rematches: "x",
+        rematches: { state: "ended", indices: [] },
       },
     ],
     [
@@ -1709,8 +1802,8 @@ test("sends exact structural game-session mutations with stable operation IDs", 
         match,
       },
     ],
-  ]) {
-    assert.equal(validator(value), true);
+  ])) {
+    assert.equal(required(validator)(value), true);
   }
   assert.equal(isCreateInviteRequest({ ...createRequest, extra: true }), false);
   assert.equal(isCreateInviteRequest({ ...createRequest, aura: null }), false);
@@ -1740,6 +1833,7 @@ const submitMoveResponse = {
 };
 
 test("submits authenticated move fields and accepts applied and replay acknowledgements", async () => {
+  /** @type {({ input: string; init: RequestInit | undefined; })[]} */
   const calls = [];
   for (const outcome of ["applied", "already-applied"]) {
     const response = { ...submitMoveResponse, outcome };
@@ -1754,11 +1848,14 @@ test("submits authenticated move fields and accepts applied and replay acknowled
   }
   for (const { input, init } of calls) {
     assert.equal(input, "https://api.mons.link/matches/move");
-    assert.equal(init.method, "POST");
-    const headers = new Headers(init.headers);
+    assert.equal(required(init).method, "POST");
+    const headers = new Headers(required(init).headers);
     assert.equal(headers.get("Authorization"), "Bearer session-token");
-    assert.equal(init.cache, "no-store");
-    assert.deepEqual(JSON.parse(init.body), submitMoveRequest);
+    assert.equal(required(init).cache, "no-store");
+    assert.deepEqual(
+      JSON.parse(String(required(init).body)),
+      submitMoveRequest,
+    );
     assert.equal(headers.get(WAGER_STORAGE_VERSION_HEADER), null);
   }
 });
@@ -1771,7 +1868,7 @@ test("invalid move requests and deadlines fail before authentication or transpor
   };
   for (const request of [
     { ...submitMoveRequest, status: "surrendered" },
-    { ...submitMoveRequest, timer: "" },
+    { ...submitMoveRequest, timer: { state: "idle" } },
     { ...submitMoveRequest, playerId: "" },
     { ...submitMoveRequest, fen: "" },
     { ...submitMoveRequest, flatMovesString: "first" },
@@ -1779,13 +1876,15 @@ test("invalid move requests and deadlines fail before authentication or transpor
   ]) {
     await assert.rejects(
       submitMoveViaApi(request, token),
-      (error) => error.code === "invalid-argument",
+      (error) =>
+        error instanceof GameplayApiError && error.code === "invalid-argument",
     );
   }
   for (const timeoutMs of [0, -1, NaN, Infinity]) {
     await assert.rejects(
       submitMoveViaApi(submitMoveRequest, token, { timeoutMs }),
-      (error) => error.code === "invalid-argument",
+      (error) =>
+        error instanceof GameplayApiError && error.code === "invalid-argument",
     );
   }
   assert.equal(authenticated, false);
@@ -1793,10 +1892,12 @@ test("invalid move requests and deadlines fail before authentication or transpor
 
 test("move authentication refresh retains a snapshot of the original append", async () => {
   const body = { ...submitMoveRequest };
+  /** @type {unknown[]} */
   const calls = [];
+  /** @type {(boolean)[]} */
   const refreshes = [];
   globalThis.fetch = async (_input, init) => {
-    calls.push(JSON.parse(init.body));
+    calls.push(JSON.parse(String(required(init).body)));
     body.fen = "mutated";
     body.playerId = "changed";
     return calls.length === 1
@@ -1819,20 +1920,21 @@ test("move checkpoints are copied before pending authentication can mutate the c
     ...submitMoveRequest,
     previousStates: [{ moveCount: 1, fen: "base-fen" }],
   };
-  let resolveToken;
-  const token = new Promise((resolve) => {
-    resolveToken = resolve;
-  });
+
+  /** @type {PromiseWithResolvers<string>} */
+  const { promise: token, resolve: resolveToken } = Promise.withResolvers();
+  /** @type {unknown[]} */
   const calls = [];
   globalThis.fetch = async (_input, init) => {
-    calls.push(JSON.parse(init.body));
+    calls.push(JSON.parse(String(required(init).body)));
     return jsonResponse(submitMoveResponse);
   };
   const submitted = submitMoveViaApi(request, () => token);
-  request.previousStates[0].fen = "changed-checkpoint";
+  required(request.previousStates[0]).fen = "changed-checkpoint";
   request.previousStates.push({ moveCount: 2, fen: "extra" });
-  resolveToken("token");
+  required(resolveToken)("token");
   await submitted;
+  assert.ok(isSubmitMoveRequest(calls[0]));
   assert.deepEqual(calls[0].previousStates, [
     { moveCount: 1, fen: "base-fen" },
   ]);
@@ -1856,7 +1958,8 @@ test("superseded acknowledgements require checkpoint opt-in and a strict complet
   );
   await assert.rejects(
     submitMoveViaApi(submitMoveRequest, async () => "token"),
-    (error) => error.code === "unavailable",
+    (error) =>
+      error instanceof GameplayApiError && error.code === "unavailable",
   );
   for (const history of [
     "first-second",
@@ -1868,7 +1971,8 @@ test("superseded acknowledgements require checkpoint opt-in and a strict complet
       jsonResponse({ ...superseded, flatMovesString: history });
     await assert.rejects(
       submitMoveViaApi(request, async () => "token"),
-      (error) => error.code === "unavailable",
+      (error) =>
+        error instanceof GameplayApiError && error.code === "unavailable",
     );
   }
 });
@@ -1888,18 +1992,23 @@ test("move acknowledgements must match the captured actor and target", async () 
     };
     await assert.rejects(
       submitMoveViaApi(submitMoveRequest, async () => "token"),
-      (error) => error.code === "unavailable",
+      (error) =>
+        error instanceof GameplayApiError && error.code === "unavailable",
     );
     assert.equal(calls, 1);
   }
 });
 
 test("move transport preserves conflicts and leaves transient retries to the connection", async () => {
-  for (const [code, message, status] of [
+  for (const [
+    code,
+    message,
+    status,
+  ] of /** @type {[string, string, number][]} */ ([
     ["aborted", "move-chain-conflict", 409],
     ["failed-precondition", "match-move-blocked", 409],
     ["unavailable", "storage-unavailable", 503],
-  ]) {
+  ])) {
     let calls = 0;
     globalThis.fetch = async () => {
       calls++;
@@ -1907,7 +2016,10 @@ test("move transport preserves conflicts and leaves transient retries to the con
     };
     await assert.rejects(
       submitMoveViaApi(submitMoveRequest, async () => "token"),
-      (error) => error.code === code && error.message === message,
+      (error) =>
+        error instanceof GameplayApiError &&
+        error.code === code &&
+        error.message === message,
     );
     assert.equal(calls, 1);
   }
@@ -1915,11 +2027,17 @@ test("move transport preserves conflicts and leaves transient retries to the con
 
 test("move transport is bound to the original auth user across token, refresh, and response", async () => {
   for (const phase of ["token", "refresh", "response"]) {
+    /** @type {Parameters<typeof createUserBoundAuthTokenProvider>[0] | null} */
     let currentUser;
     const originalUser = {
       uid: "login-alias",
       getIdToken: async () => {
-        if (phase === "token") currentUser = { uid: "login-alias" };
+        if (phase === "token")
+          currentUser = {
+            uid: "login-alias",
+            getIdToken: async () =>
+              assert.fail("replacement token must not be requested"),
+          };
         return "token";
       },
     };
@@ -1946,10 +2064,11 @@ test("move transport is bound to the original auth user across token, refresh, a
 test("move deadlines cover authentication and a pending response, and abort local transport", async (t) => {
   t.mock.timers.enable({ apis: ["setTimeout"] });
   let calls = 0;
-  let signal;
+  /** @type {{ value?: (AbortSignal | null | undefined) }} */
+  const signal = {};
   globalThis.fetch = (_input, init) => {
     calls++;
-    signal = init.signal;
+    signal.value = required(init).signal;
     return new Promise(() => {});
   };
   for (const provider of [() => new Promise(() => {}), async () => "token"]) {
@@ -1962,15 +2081,14 @@ test("move deadlines cover authentication and a pending response, and abort loca
     await rejected;
   }
   assert.equal(calls, 1);
-  assert.equal(signal.aborted, true);
+  assert.equal(required(signal.value).aborted, true);
 });
 
 test("move cancellation prevents transport during pending authentication", async () => {
   const controller = new AbortController();
-  let resolveToken;
-  const token = new Promise((resolve) => {
-    resolveToken = resolve;
-  });
+
+  /** @type {PromiseWithResolvers<string>} */
+  const { promise: token, resolve: resolveToken } = Promise.withResolvers();
   let calls = 0;
   globalThis.fetch = async () => {
     calls++;
@@ -1980,8 +2098,11 @@ test("move cancellation prevents transport during pending authentication", async
     signal: controller.signal,
   });
   controller.abort();
-  await assert.rejects(sent, (error) => error.code === "aborted");
-  resolveToken("token");
+  await assert.rejects(
+    sent,
+    (error) => error instanceof GameplayApiError && error.code === "aborted",
+  );
+  required(resolveToken)("token");
   await Promise.resolve();
   await Promise.resolve();
   assert.equal(calls, 0);
@@ -2000,6 +2121,7 @@ const surrenderResponse = {
 };
 
 test("sends only surrender identity through authenticated API requests and accepts duplicate success", async () => {
+  /** @type {({ input: string; init: RequestInit | undefined; })[]} */
   const calls = [];
   globalThis.fetch = async (input, init) => {
     calls.push({ input: String(input), init });
@@ -2015,11 +2137,11 @@ test("sends only surrender identity through authenticated API requests and accep
   }
   for (const { input, init } of calls) {
     assert.equal(input, "https://api.mons.link/matches/surrender");
-    assert.equal(init.method, "POST");
-    const headers = new Headers(init.headers);
+    assert.equal(required(init).method, "POST");
+    const headers = new Headers(required(init).headers);
     assert.equal(headers.get("Authorization"), "Bearer session-token");
-    assert.equal(init.cache, "no-store");
-    assert.deepEqual(JSON.parse(init.body), surrenderRequest);
+    assert.equal(required(init).cache, "no-store");
+    assert.deepEqual(JSON.parse(String(required(init).body)), surrenderRequest);
     assert.equal(headers.get(WAGER_STORAGE_VERSION_HEADER), null);
   }
   for (const request of [
@@ -2039,10 +2161,12 @@ test("sends only surrender identity through authenticated API requests and accep
 });
 
 test("surrender refreshes authentication once while retaining the original target", async () => {
+  /** @type {(boolean)[]} */
   const tokens = [];
+  /** @type {unknown[]} */
   const requests = [];
   globalThis.fetch = async (_input, init) => {
-    requests.push(JSON.parse(init.body));
+    requests.push(JSON.parse(String(required(init).body)));
     return requests.length === 1
       ? jsonResponse({ error: "unauthenticated" }, 401)
       : jsonResponse(surrenderResponse);
@@ -2107,11 +2231,17 @@ test("surrender preserves backend failures and does not retry an uncertain submi
 
 test("surrender remains bound to the original user before transport, on token refresh, and after response", async () => {
   for (const phase of ["token", "refresh", "response"]) {
+    /** @type {Parameters<typeof createUserBoundAuthTokenProvider>[0] | null} */
     let currentUser;
     const originalUser = {
       uid: "login-alias",
       getIdToken: async () => {
-        if (phase === "token") currentUser = { uid: "login-alias" };
+        if (phase === "token")
+          currentUser = {
+            uid: "login-alias",
+            getIdToken: async () =>
+              assert.fail("replacement token must not be requested"),
+          };
         return "session-token";
       },
     };
@@ -2138,10 +2268,11 @@ test("surrender remains bound to the original user before transport, on token re
 test("surrender applies the existing deadline to authentication and a pending response", async (t) => {
   t.mock.timers.enable({ apis: ["setTimeout"] });
   let calls = 0;
-  let requestSignal;
+  /** @type {{ value?: (AbortSignal | null | undefined) }} */
+  const requestSignal = {};
   globalThis.fetch = (_input, init) => {
     calls += 1;
-    requestSignal = init.signal;
+    requestSignal.value = required(init).signal;
     return new Promise(() => {});
   };
   for (const tokenProvider of [
@@ -2155,20 +2286,25 @@ test("surrender applies the existing deadline to authentication and a pending re
     await rejected;
   }
   assert.equal(calls, 1);
-  assert.equal(requestSignal.aborted, true);
+  assert.equal(required(requestSignal.value).aborted, true);
 });
 
 test("accepts the largest valid ensured match response", async () => {
   const match = {
+    schemaVersion: 1,
     version: 2,
     color: "white",
     emojiId: 1,
-    aura: "",
+    aura: "none",
     gameVariant: "Classic",
     fen: "\u0000".repeat(MAX_MATCH_FEN_BYTES),
-    status: "\u0000".repeat(MAX_GAME_SESSION_STATUS_BYTES),
+    status: "active",
     flatMovesString: "\u0000".repeat(MAX_MATCH_HISTORY_BYTES),
-    timer: "\u0000".repeat(MAX_GAME_SESSION_TIMER_BYTES),
+    timer: {
+      state: "running",
+      turnNumber: Number.MAX_SAFE_INTEGER,
+      deadlineAtMs: Number.MAX_SAFE_INTEGER,
+    },
   };
   const response = {
     ok: true,
@@ -2200,7 +2336,7 @@ test("accepts the largest valid ensured match response", async () => {
           inviteId: "abcdefghijk",
           matchId: "abcdefghijk1",
           emojiId: 1,
-          aura: "",
+          aura: "none",
         },
         async () => "session-token",
       )
@@ -2210,11 +2346,12 @@ test("accepts the largest valid ensured match response", async () => {
 });
 
 test("retries busy and ambiguous failures with the same operation ID", async () => {
+  /** @type {unknown[]} */
   const bodies = [];
   let calls = 0;
   globalThis.fetch = async (_input, init) => {
     calls += 1;
-    bodies.push(JSON.parse(init.body));
+    bodies.push(JSON.parse(String(required(init).body)));
     return calls === 1
       ? jsonResponse({ error: "aborted", message: "invite-busy" }, 409)
       : calls === 2
@@ -2229,6 +2366,7 @@ test("retries busy and ambiguous failures with the same operation ID", async () 
             matchId: "abcdefghijk",
           });
   };
+  /** @type {import("@mons/shared/game-sessions").CreateInviteRequest} */
   const request = {
     operationId: "00000000-0000-4000-8000-000000000001",
     inviteId: "abcdefghijk",
@@ -2241,10 +2379,14 @@ test("retries busy and ambiguous failures with the same operation ID", async () 
 });
 
 test("end transport leaves busy and unavailable retries to the durable delivery", async () => {
-  for (const [status, error, message] of [
+  for (const [
+    status,
+    error,
+    message,
+  ] of /** @type {[number, string, string][]} */ ([
     [409, "aborted", "invite-busy"],
     [503, "unavailable", "gameplay-service-unavailable"],
-  ]) {
+  ])) {
     let calls = 0;
     globalThis.fetch = async () => {
       calls++;
@@ -2328,10 +2470,8 @@ test("stops a structural retry after the authenticated user changes", async () =
 });
 
 test("does not send a structural mutation after authentication changes", async () => {
-  let resolveToken;
-  const token = new Promise((resolve) => {
-    resolveToken = resolve;
-  });
+  /** @type {PromiseWithResolvers<string>} */
+  const { promise: token, resolve: resolveToken } = Promise.withResolvers();
   const firstUser = {
     uid: "first-user",
     getIdToken: () => token,
@@ -2360,7 +2500,7 @@ test("does not send a structural mutation after authentication changes", async (
     },
     createUserBoundAuthTokenProvider(firstUser, () => currentUser),
   );
-  resolveToken("first-token");
+  required(resolveToken)("first-token");
   queueMicrotask(() => {
     currentUser = secondUser;
   });
@@ -2369,14 +2509,12 @@ test("does not send a structural mutation after authentication changes", async (
 });
 
 test("does not return a structural mutation after authentication changes", async () => {
-  let resolveResponse;
-  const response = new Promise((resolve) => {
-    resolveResponse = resolve;
-  });
-  let requestStarted;
-  const started = new Promise((resolve) => {
-    requestStarted = resolve;
-  });
+  /** @type {PromiseWithResolvers<Response>} */
+  const { promise: response, resolve: resolveResponse } =
+    Promise.withResolvers();
+
+  /** @type {PromiseWithResolvers<void>} */
+  const { promise: started, resolve: requestStarted } = Promise.withResolvers();
   const firstUser = {
     uid: "first-user",
     getIdToken: async () => "first-token",
@@ -2401,7 +2539,7 @@ test("does not return a structural mutation after authentication changes", async
   );
   await started;
   currentUser = secondUser;
-  resolveResponse(
+  required(resolveResponse)(
     jsonResponse({
       ok: true,
       inviteId: "abcdefghijk",
@@ -2413,7 +2551,9 @@ test("does not return a structural mutation after authentication changes", async
 });
 
 test("sends the exact rating mutation with strict contracts", async () => {
+  /** @type {({ input: string; init: RequestInit | undefined; })[]} */
   const calls = [];
+  /** @type {(number)[]} */
   const delays = [];
   let now = 1_000;
   const responses = [{ ok: true, skipped: true }, { ok: true }];
@@ -2438,10 +2578,16 @@ test("sends the exact rating mutation with strict contracts", async () => {
     { ok: true },
   );
   assert.equal(calls.length, 2);
-  assert.equal(calls[0].input, "https://api.mons.link/ratings/update");
-  assert.deepEqual(JSON.parse(calls[0].init.body), request);
   assert.equal(
-    new Headers(calls[0].init.headers).get("Authorization"),
+    required(calls[0]).input,
+    "https://api.mons.link/ratings/update",
+  );
+  assert.deepEqual(
+    JSON.parse(String(required(required(calls[0]).init).body)),
+    request,
+  );
+  assert.equal(
+    new Headers(required(required(calls[0]).init).headers).get("Authorization"),
     "Bearer session-token",
   );
   assert.equal(RATING_API_TIMEOUT_MS, 60_000);
@@ -2517,6 +2663,7 @@ test("retries one unavailable rating update within the same deadline", async () 
 test("bounds a busy rating retry to one 60-second deadline", async () => {
   let fetches = 0;
   let now = 1_000;
+  /** @type {(number)[]} */
   const delays = [];
   globalThis.fetch = async () => {
     fetches++;
@@ -2545,6 +2692,7 @@ test("bounds a busy rating retry to one 60-second deadline", async () => {
 });
 
 test("leaves events with an authenticated self-only request and matching response", async () => {
+  /** @type {({ input: URL | RequestInfo; init: RequestInit | undefined; })[]} */
   const calls = [];
   const response = {
     ok: true,
@@ -2560,15 +2708,17 @@ test("leaves events with an authenticated self-only request and matching respons
     response,
   );
   assert.equal(
-    calls[0].input,
+    required(calls[0]).input,
     "https://api.mons.link/events/participants/leave",
   );
-  assert.equal(calls[0].init.method, "POST");
+  assert.equal(required(required(calls[0]).init).method, "POST");
   assert.equal(
-    new Headers(calls[0].init.headers).get("Authorization"),
+    new Headers(required(required(calls[0]).init).headers).get("Authorization"),
     "Bearer session-token",
   );
-  assert.deepEqual(JSON.parse(calls[0].init.body), { eventId: "event-1" });
+  assert.deepEqual(JSON.parse(String(required(required(calls[0]).init).body)), {
+    eventId: "event-1",
+  });
 
   for (const invalidResponse of [
     { ...response, eventId: "different-event" },
@@ -2585,6 +2735,7 @@ test("leaves events with an authenticated self-only request and matching respons
 });
 
 test("sends exact authenticated gameplay mutations and validates contracts", async () => {
+  /** @type {({ input: string; init: RequestInit | undefined; })[]} */
   const calls = [];
   const responses = [
     {
@@ -2645,7 +2796,11 @@ test("sends exact authenticated gameplay mutations and validates contracts", asy
       },
     },
     { ok: true, eventId: "event-1", removedProfileId: "profile-2" },
-    { ok: true, timer: "4;1000", duration: 90000 },
+    {
+      ok: true,
+      timer: { state: "running", turnNumber: 4, deadlineAtMs: 1000 },
+      duration: 90000,
+    },
     { ok: true },
     { ok: true },
     { ok: false, reason: "proposal-missing" },
@@ -2714,7 +2869,7 @@ test("sends exact authenticated gameplay mutations and validates contracts", asy
   );
   assert.equal(isReadNavigationGamesRequest(readRequest), true);
   assert.equal(isReadNavigationGamesResponse(readResponse), true);
-  assert.equal(readResponse.items[0].id, "invite-1");
+  assert.equal(required(readResponse.items[0]).id, "invite-1");
   const participant = {
     profileId: "profile-1",
     loginUid: "login-1",
@@ -2748,7 +2903,11 @@ test("sends exact authenticated gameplay mutations and validates contracts", asy
       },
       async () => "session-token",
     ),
-    { ok: true, timer: "4;1000", duration: 90000 },
+    {
+      ok: true,
+      timer: { state: "running", turnNumber: 4, deadlineAtMs: 1000 },
+      duration: 90000,
+    },
   );
   assert.deepEqual(
     await claimMatchVictoryByTimerViaApi(
@@ -2838,7 +2997,7 @@ test("sends exact authenticated gameplay mutations and validates contracts", asy
     ],
   );
   assert.deepEqual(
-    calls.map((call) => JSON.parse(call.init.body)),
+    calls.map((call) => JSON.parse(String(required(call.init).body))),
     [
       {
         emojiId: 7,
@@ -2874,10 +3033,10 @@ test("sends exact authenticated gameplay mutations and validates contracts", asy
     ],
   );
   for (const call of calls) {
-    assert.equal(call.init.method, "POST");
-    assert.equal(call.init.cache, "no-store");
-    assert.ok(call.init.signal instanceof AbortSignal);
-    const headers = new Headers(call.init.headers);
+    assert.equal(required(call.init).method, "POST");
+    assert.equal(required(call.init).cache, "no-store");
+    assert.ok(required(call.init).signal instanceof AbortSignal);
+    const headers = new Headers(required(call.init).headers);
     assert.equal(headers.get("Accept"), "application/json");
     assert.equal(headers.get("Authorization"), "Bearer session-token");
     assert.equal(headers.get("Content-Type"), "application/json");
@@ -2908,21 +3067,21 @@ test("sends exact authenticated gameplay mutations and validates contracts", asy
   assert.equal(
     isStartAutomatchRequest({
       emojiId: 0,
-      aura: "",
+      aura: "none",
     }),
-    false,
+    true,
   );
   assert.equal(
     isStartAutomatchRequest({
       emojiId: Number.MAX_SAFE_INTEGER + 1,
-      aura: "",
+      aura: "none",
     }),
     false,
   );
   assert.equal(
     isStartAutomatchRequest({
       emojiId: 7,
-      aura: "",
+      aura: "none",
       extra: true,
     }),
     false,
@@ -3094,7 +3253,7 @@ test("sends exact authenticated gameplay mutations and validates contracts", asy
   assert.equal(
     isStartMatchTimerResponse({
       ok: true,
-      timer: "4;1000",
+      timer: { state: "running", turnNumber: 4, deadlineAtMs: 1000 },
       duration: 90000,
     }),
     true,
@@ -3160,7 +3319,7 @@ test("sends exact authenticated gameplay mutations and validates contracts", asy
   assert.equal(
     isStartMatchTimerResponse({
       ok: true,
-      timer: "4;1000",
+      timer: { state: "running", turnNumber: 4, deadlineAtMs: 1000 },
       duration: 1000,
     }),
     false,
@@ -3172,7 +3331,7 @@ test("sends exact authenticated gameplay mutations and validates contracts", asy
       material: "dust",
       count: 1.4,
     }),
-    true,
+    false,
   );
   assert.equal(
     isWagerProposalSendRequest({
@@ -3195,10 +3354,12 @@ test("sends exact authenticated gameplay mutations and validates contracts", asy
 });
 
 test("refreshes the session token once after a 401", async () => {
+  /** @type {(boolean)[]} */
   const refreshes = [];
+  /** @type {(string | null)[]} */
   const tokens = [];
   globalThis.fetch = async (_input, init) => {
-    tokens.push(new Headers(init.headers).get("Authorization"));
+    tokens.push(new Headers(required(init).headers).get("Authorization"));
     if (tokens.length === 1) {
       return jsonResponse(
         {
@@ -3278,10 +3439,10 @@ test("rejects malformed and oversized gameplay responses", async () => {
     }),
     new Response("{"),
   ];
-  globalThis.fetch = async () => responses.shift();
+  globalThis.fetch = async () => required(responses.shift());
   await assert.rejects(
     startAutomatchViaApi(
-      { emojiId: 1, aura: "" },
+      { emojiId: 1, aura: "none" },
       async () => "token",
       AUTOMATCH_OPERATION_ID,
     ),
@@ -3369,17 +3530,20 @@ test("automatch opts into a fresh bootstrap while keeping legacy receipts exact"
   assert.equal(isStartAutomatchResponse(enriched), false);
   for (const payload of [legacy, enriched]) {
     globalThis.fetch = async (url, init) => {
-      assert.equal(new URL(url).searchParams.get("bootstrap"), "1");
+      assert.equal(new URL(String(url)).searchParams.get("bootstrap"), "1");
       assert.equal(
-        new URL(url).searchParams.get("operationId"),
+        new URL(String(url)).searchParams.get("operationId"),
         AUTOMATCH_OPERATION_ID,
       );
-      assert.deepEqual(JSON.parse(init.body), { emojiId: 1, aura: "" });
+      assert.deepEqual(JSON.parse(String(required(init).body)), {
+        emojiId: 1,
+        aura: "none",
+      });
       return jsonResponse(payload);
     };
     assert.deepEqual(
       await startAutomatchViaApi(
-        { emojiId: 1, aura: "" },
+        { emojiId: 1, aura: "none" },
         async () => "token",
         AUTOMATCH_OPERATION_ID,
       ),
@@ -3421,7 +3585,7 @@ test("invalid optional automatch bootstraps preserve successful mutations", asyn
     };
     assert.deepEqual(
       await startAutomatchViaApi(
-        { emojiId: 1, aura: "" },
+        { emojiId: 1, aura: "none" },
         async () => "token",
         AUTOMATCH_OPERATION_ID,
       ),
@@ -3456,7 +3620,7 @@ test("only automatch uses the larger bootstrap response budget", async () => {
     });
   assert.deepEqual(
     await startAutomatchViaApi(
-      { emojiId: 1, aura: "" },
+      { emojiId: 1, aura: "none" },
       async () => "token",
       AUTOMATCH_OPERATION_ID,
     ),
@@ -3470,7 +3634,7 @@ test("only automatch uses the larger bootstrap response budget", async () => {
     });
   await assert.rejects(
     startAutomatchViaApi(
-      { emojiId: 1, aura: "" },
+      { emojiId: 1, aura: "none" },
       async () => "token",
       AUTOMATCH_OPERATION_ID,
     ),
@@ -3489,9 +3653,12 @@ test("only automatch uses the larger bootstrap response budget", async () => {
 });
 
 test("gameplay mutation authentication initializes before checking the bound user", async () => {
+  /** @type {(string)[]} */
   const sequence = [];
   const tokenProvider = createPollingAuthTokenProvider({
-    ensureAuthenticated: async () => sequence.push("authenticate"),
+    ensureAuthenticated: async () => {
+      sequence.push("authenticate");
+    },
     getUserBoundProvider: () =>
       Object.assign(
         async () => {
@@ -3552,13 +3719,13 @@ test("applies one deadline to token acquisition and response reading", async (t)
   t.mock.timers.runAll();
   await tokenRejection;
 
-  let signal;
-  let bodyStarted;
-  const started = new Promise((resolve) => {
-    bodyStarted = resolve;
-  });
+  /** @type {{ value?: (AbortSignal | null | undefined) }} */
+  const signal = {};
+
+  /** @type {PromiseWithResolvers<void>} */
+  const { promise: started, resolve: bodyStarted } = Promise.withResolvers();
   globalThis.fetch = async (_input, init) => {
-    signal = init.signal;
+    signal.value = required(init).signal;
     return new Response(
       new ReadableStream({
         start(controller) {
@@ -3576,8 +3743,8 @@ test("applies one deadline to token acquisition and response reading", async (t)
       error instanceof GameplayApiError &&
       error.message === "Gameplay request timed out.",
   );
-  assert.equal(signal.aborted, false);
+  assert.equal(required(signal.value).aborted, false);
   t.mock.timers.runAll();
   await bodyRejection;
-  assert.equal(signal.aborted, true);
+  assert.equal(required(signal.value).aborted, true);
 });

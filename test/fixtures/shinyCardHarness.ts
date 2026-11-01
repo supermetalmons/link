@@ -1,3 +1,8 @@
+import { requireValue } from "./browserAssertions.ts";
+import {
+  createDefaultProfileAppearance,
+  type StickerSlot,
+} from "@mons/shared/appearance";
 import "../../src/ui/ShinyCard";
 import "../../src/index.css";
 import * as cardUi from "../../src/ui/shinyCardUiPort";
@@ -12,6 +17,7 @@ import {
   initialValues,
   spriteForKey,
   storage,
+  type FixtureValues,
 } from "./shinyCardEnvironment";
 
 const recordWrite = (write: unknown[]) => {
@@ -42,8 +48,8 @@ const textBubble = (top: string) =>
   Array.from(card()?.querySelectorAll<HTMLElement>("div") ?? []).find(
     (element) => element.style.top === top && element.querySelector("span"),
   );
-const stickerTarget = (type: string) => {
-  const selected = JSON.parse(String(environment.values.CardStickers || "{}"));
+const stickerTarget = (type: StickerSlot) => {
+  const selected = environment.values.CardStickers;
   const sticker = STICKER_PATHS[type].find(
     ({ name }) => name === selected[type],
   );
@@ -70,7 +76,7 @@ let retiredCard: HTMLElement | null = null;
 let retiredMutations = 0;
 let retiredObserver: MutationObserver | null = null;
 
-(window as any).harness = {
+export const harness = {
   environment,
   spriteForKey,
   storeEmoji: storage.setPlayerEmojiId,
@@ -81,7 +87,7 @@ let retiredObserver: MutationObserver | null = null;
       stickers.map(({ name }) => name),
     ]),
   ),
-  reset(values: Record<string, unknown> = {}) {
+  reset(values: Partial<FixtureValues> = {}) {
     cardUi.hideShinyCard();
     environment.values = {
       ...initialValues,
@@ -96,16 +102,19 @@ let retiredObserver: MutationObserver | null = null;
   other: (id = "other-b") =>
     cardUi.showShinyCard(
       {
+        ...createDefaultProfileAppearance(2),
         id,
-        emoji: "2",
+        username: null,
+        eth: null,
+        sol: null,
         cardBackgroundId: 7,
         cardSubtitleId: 1,
-        profileMons: "1,1,1,1,1",
-        cardStickers: "",
+        profileMons: { demon: 1, angel: 1, drainer: 1, spirit: 1, mystic: 1 },
+        cardStickers: {},
         rating: 1600,
         nonce: 5,
         totalManaPoints: 12,
-      } as any,
+      },
       id,
       true,
     ),
@@ -122,7 +131,7 @@ let retiredObserver: MutationObserver | null = null;
     click(card()?.querySelector('img[src*="/emojipack/regular/"]')),
   clickCounter: () => click(textBubble("58.7%")),
   clickSubtitle: () => click(textBubble("47.5%")),
-  clickSticker: (type: string) => click(stickerTarget(type)),
+  clickSticker: (type: StickerSlot) => click(stickerTarget(type)),
   clickMon(index = 0) {
     click(card()?.querySelectorAll('img[src^="data:image/"]')[index]);
   },
@@ -141,10 +150,13 @@ let retiredObserver: MutationObserver | null = null;
             'img[src*="/stickers_overlays/"]',
           ) ?? [],
         ).map((image) => {
-          const [type, name] = image.src
-            .split("/stickers_overlays/")[1]
-            .split("/");
-          return [type, name.replace(/\.webp$/, "")];
+          const [type, name] = requireValue(
+            image.src.split("/stickers_overlays/")[1],
+          ).split("/");
+          return [
+            requireValue(type),
+            requireValue(name).replace(/\.webp$/, ""),
+          ] as const;
         }),
       ),
       aura:
@@ -201,3 +213,10 @@ let retiredObserver: MutationObserver | null = null;
   },
   retiredMutations: () => retiredMutations,
 };
+
+declare global {
+  interface Window {
+    shinyCardHarness: typeof harness;
+  }
+}
+window.shinyCardHarness = harness;

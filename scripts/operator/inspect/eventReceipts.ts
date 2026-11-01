@@ -143,7 +143,7 @@ function createSqlDependencies(
     async maintenance() {
       const event = (
         await run(
-          "SELECT storage_mode, freeze_generation, (SELECT COUNT(*) FROM event_write_admissions) AS admissions, (SELECT COUNT(*) FROM event_leases WHERE expires_at_ms > ?) AS leases, (SELECT COUNT(*) FROM event_transition_intents) AS intents FROM event_runtime_control WHERE singleton = 1",
+          "SELECT storage_mode, freeze_generation, (SELECT COUNT(*) FROM event_write_admissions) AS admissions, (SELECT COUNT(*) FROM event_leases WHERE expires_at_ms > ?) AS leases, (SELECT COUNT(*) FROM event_transition_intents_canonical) AS intents FROM event_runtime_control WHERE singleton = 1",
           EVENT_DB,
           [now()],
         )
@@ -196,7 +196,7 @@ function createSqlDependencies(
           "mons-link-telegram",
           "SELECT storage_mode FROM telegram_runtime_control WHERE singleton = 1",
         ],
-      ]) {
+      ] as const) {
         const rows = await run(sql, db);
         if (rows.length !== 1)
           throw new Error("unrelated maintenance control is missing");
@@ -248,8 +248,19 @@ function createProvider({
     config.name !== "mons-link-api"
   )
     throw new Error("invalid tracked API configuration");
+  const workflow = Array.isArray(config.workflows)
+    ? config.workflows
+        .map(record)
+        .find((entry) => entry?.binding === "EVENT_PROGRESS_WORKFLOW")
+    : null;
+  if (
+    !workflow ||
+    typeof workflow.name !== "string" ||
+    !/^[A-Za-z0-9_-]{1,64}$/.test(workflow.name)
+  )
+    throw new Error("invalid tracked event Workflow configuration");
   const base = `https://api.cloudflare.com/client/v4/accounts/${accountId}`,
-    workflowPath = "/workflows/mons-link-event-progress",
+    workflowPath = `/workflows/${workflow.name}`,
     workerPath = "/workers/scripts/mons-link-api";
   async function request(path: string): Promise<JsonRecord> {
     const response = await fetcher(`${base}${path}`, {

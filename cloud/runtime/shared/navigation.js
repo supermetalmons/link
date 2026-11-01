@@ -21,18 +21,15 @@ exports.isRemoveNavigationGameResponse =
   exports.NAVIGATION_SORT_BUCKETS =
   exports.AUTOMATCH_API_MAX_RESPONSE_BYTES =
     void 0;
+const profile_game_projections_js_1 = require("./profile-game-projections.js");
+const appearance_js_1 = require("./appearance.js");
 const ids_js_1 = require("./ids.js");
 const game_bootstrap_js_1 = require("./game-bootstrap.js");
 const AUTOMATCH_API_MAX_RESPONSE_BYTES =
   game_bootstrap_js_1.GAME_BOOTSTRAP_MAX_RESPONSE_BYTES + 1024;
 exports.AUTOMATCH_API_MAX_RESPONSE_BYTES = AUTOMATCH_API_MAX_RESPONSE_BYTES;
-const NAVIGATION_SORT_BUCKETS = Object.freeze({
-  pending: 20,
-  waiting: 30,
-  active: 40,
-  ended: 50,
-  dismissed: 50,
-});
+const NAVIGATION_SORT_BUCKETS =
+  profile_game_projections_js_1.PROJECTION_SORT_BUCKETS;
 exports.NAVIGATION_SORT_BUCKETS = NAVIGATION_SORT_BUCKETS;
 const normalizeStrictAutomatchStateHint = (value) =>
   value === "pending" || value === "matched" || value === "canceled"
@@ -112,23 +109,6 @@ const exactKeys = (value, expected) => {
     keys.every((key) => expected.includes(key))
   );
 };
-const readTimestampMillis = (value) => {
-  if (typeof value === "number" && Number.isFinite(value)) {
-    return Math.floor(value);
-  }
-  return 0;
-};
-const normalizeStringOrNull = (value) =>
-  typeof value === "string" && value !== "" ? value : null;
-const normalizeFiniteNumber = (value, fallback = 0) => {
-  const parsed =
-    typeof value === "number"
-      ? value
-      : typeof value === "string" && value !== ""
-        ? Number(value)
-        : NaN;
-  return Number.isFinite(parsed) ? Math.floor(parsed) : fallback;
-};
 const normalizeNavigationStatus = (status) =>
   status === "pending" ||
   status === "waiting" ||
@@ -137,91 +117,42 @@ const normalizeNavigationStatus = (status) =>
   status === "dismissed"
     ? status
     : "waiting";
-const mapProjectionParticipantPreview = (value) => {
-  if (!Array.isArray(value)) return [];
-  return value.reduce((participants, candidate) => {
-    if (!isRecord(candidate)) return participants;
-    const emojiId = normalizeFiniteNumber(candidate.emojiId, NaN);
-    participants.push({
-      profileId: normalizeStringOrNull(candidate.profileId),
-      displayName: normalizeStringOrNull(candidate.displayName),
-      emojiId: Number.isFinite(emojiId) ? emojiId : null,
-      aura: normalizeStringOrNull(candidate.aura),
-    });
-    return participants;
-  }, []);
-};
-const mapProfileGameProjection = (rawData, fallbackProjectionId) => {
-  if (!isRecord(rawData)) return null;
-  const entityType = rawData.entityType === "event" ? "event" : "game";
-  if (entityType === "event") {
-    const eventId = normalizeStringOrNull(rawData.eventId);
-    if (!eventId) return null;
-    const rawStatus = normalizeNavigationStatus(rawData.status);
-    if (rawStatus === "pending") return null;
-    const participantPreview = mapProjectionParticipantPreview(
-      rawData.participantPreview,
-    );
+const mapProfileGameProjection = (value, projectionId) => {
+  if (!(0, profile_game_projections_js_1.isProfileGameProjectionRecord)(value))
+    return null;
+  if (value.entityType === "event") {
+    if (projectionId !== value.id) return null;
     return {
-      id:
-        typeof rawData.id === "string" && rawData.id !== ""
-          ? rawData.id
-          : `event_${eventId}`,
+      id: value.id,
       entityType: "event",
-      eventId,
-      status: rawStatus,
-      sortBucket: getNavigationSortBucket(rawStatus),
-      listSortAtMs: readTimestampMillis(rawData.listSortAt) || Date.now(),
-      startAtMs: readTimestampMillis(rawData.startAt) || null,
-      updatedAtMs: readTimestampMillis(rawData.updatedAt) || null,
-      endedAtMs: readTimestampMillis(rawData.endedAt) || null,
-      participantCount: normalizeFiniteNumber(
-        rawData.participantCount,
-        participantPreview.length,
-      ),
-      participantPreview,
-      winnerDisplayName: normalizeStringOrNull(rawData.winnerDisplayName),
+      eventId: value.eventId,
+      status: value.status,
+      sortBucket: value.sortBucket,
+      listSortAtMs: value.listSortAt,
+      startAtMs: value.startAt,
+      updatedAtMs: value.updatedAt,
+      endedAtMs: value.endedAt,
+      participantCount: value.participantCount,
+      participantPreview: value.participantPreview,
+      winnerDisplayName: value.winnerDisplayName,
     };
   }
-  const inviteId =
-    typeof rawData.inviteId === "string" && rawData.inviteId !== ""
-      ? rawData.inviteId
-      : fallbackProjectionId;
-  if (!inviteId) return null;
-  const rawStatus = normalizeNavigationStatus(rawData.status);
-  const status = rawStatus === "dismissed" ? "ended" : rawStatus;
-  const rawOpponentEmoji = rawData.opponentEmoji ?? rawData.opponentEmojiId;
-  const rawOpponentName = rawData.opponentName ?? rawData.opponentDisplayName;
-  const opponentEmoji = normalizeFiniteNumber(rawOpponentEmoji, NaN);
-  const normalizedOpponentEmoji = Number.isFinite(opponentEmoji)
-    ? opponentEmoji
-    : null;
-  if (
-    (status === "active" || status === "ended") &&
-    normalizedOpponentEmoji === null
-  ) {
-    return null;
-  }
+  if (projectionId !== value.inviteId) return null;
   return {
-    id: inviteId,
+    id: value.inviteId,
     entityType: "game",
-    inviteId,
-    kind: rawData.kind === "auto" ? "auto" : "direct",
-    status,
-    sortBucket: getNavigationSortBucket(status),
-    listSortAtMs: readTimestampMillis(rawData.listSortAt) || Date.now(),
-    hostLoginId: normalizeStringOrNull(rawData.hostLoginId),
-    guestLoginId: normalizeStringOrNull(rawData.guestLoginId),
-    opponentProfileId: normalizeStringOrNull(rawData.opponentProfileId),
-    opponentName: typeof rawOpponentName === "string" ? rawOpponentName : null,
-    opponentEmoji: normalizedOpponentEmoji,
-    automatchStateHint: normalizeStrictAutomatchStateHint(
-      rawData.automatchStateHint,
-    ),
-    isPendingAutomatch:
-      typeof rawData.isPendingAutomatch === "boolean"
-        ? rawData.isPendingAutomatch
-        : status === "pending",
+    inviteId: value.inviteId,
+    kind: value.kind,
+    status: value.status,
+    sortBucket: value.sortBucket,
+    listSortAtMs: value.listSortAt,
+    hostLoginId: value.hostLoginId,
+    guestLoginId: value.guestLoginId,
+    opponentProfileId: value.opponentProfileId,
+    opponentName: value.opponentName,
+    opponentEmoji: value.opponentEmoji,
+    automatchStateHint: value.automatchStateHint,
+    isPendingAutomatch: value.isPendingAutomatch,
   };
 };
 exports.mapProfileGameProjection = mapProfileGameProjection;
@@ -236,8 +167,10 @@ const isNavigationParticipantPreview = (value) =>
       exactKeys(participant, ["profileId", "displayName", "emojiId", "aura"]) &&
       isNullableString(participant.profileId) &&
       isNullableString(participant.displayName) &&
-      isNullableNumber(participant.emojiId) &&
-      isNullableString(participant.aura),
+      (participant.emojiId === null ||
+        (0, appearance_js_1.isEmojiId)(participant.emojiId)) &&
+      (participant.aura === null ||
+        (0, appearance_js_1.isAura)(participant.aura)),
   );
 const isNavigationItem = (value) => {
   if (!isRecord(value)) return false;
@@ -307,7 +240,8 @@ const isNavigationItem = (value) => {
     isNullableString(value.guestLoginId) &&
     isNullableString(value.opponentProfileId) &&
     isNullableString(value.opponentName) &&
-    isNullableNumber(value.opponentEmoji) &&
+    (value.opponentEmoji === null ||
+      (0, appearance_js_1.isEmojiId)(value.opponentEmoji)) &&
     normalizeStrictAutomatchStateHint(value.automatchStateHint) ===
       value.automatchStateHint &&
     typeof value.isPendingAutomatch === "boolean"
@@ -347,9 +281,8 @@ exports.isReadNavigationGamesResponse = isReadNavigationGamesResponse;
 const isStartAutomatchRequest = (value) =>
   isRecord(value) &&
   Object.keys(value).length === 2 &&
-  Number.isSafeInteger(value.emojiId) &&
-  value.emojiId > 0 &&
-  typeof value.aura === "string";
+  (0, appearance_js_1.isEmojiId)(value.emojiId) &&
+  (0, appearance_js_1.isAura)(value.aura);
 exports.isStartAutomatchRequest = isStartAutomatchRequest;
 const isStartAutomatchResponse = (value) => {
   if (!isRecord(value) || typeof value.ok !== "boolean") {

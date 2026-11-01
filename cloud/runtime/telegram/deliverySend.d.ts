@@ -47,21 +47,21 @@ export declare function createTelegramSendDelivery({
       }
     | {
         status: string;
-        retryAtMs?: undefined;
-        scheduled?: undefined;
-        messageId?: undefined;
+        retryAtMs?: never;
+        scheduled?: never;
+        messageId?: never;
       }
     | {
         status: string;
         retryAtMs: number;
         scheduled: boolean;
-        messageId?: undefined;
+        messageId?: never;
       }
     | {
         status: string;
         messageId: number;
-        retryAtMs?: undefined;
-        scheduled?: undefined;
+        retryAtMs?: never;
+        scheduled?: never;
       }
   >;
 };

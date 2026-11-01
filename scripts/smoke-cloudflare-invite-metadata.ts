@@ -1,3 +1,7 @@
+const {
+  APPLICATION_DATA_SOCKET_PROTOCOL,
+  applicationDataHeaders,
+}: typeof import("@mons/shared/data-contract") = require("@mons/shared/data-contract");
 const { WebSocket }: typeof import("ws") = require("ws");
 const {
   normalizeRecordKey,
@@ -25,7 +29,7 @@ type Dependencies = {
   connect: (
     url: string,
     options: import("ws").ClientOptions,
-    protocol: string,
+    protocol: string[],
   ) => import("ws").WebSocket;
   log: (message: string) => void;
   setTimeout: typeof setTimeout;
@@ -97,7 +101,10 @@ async function readSnapshot(
       `${options.baseUrl}/invites/${encodeURIComponent(options.inviteId)}/metadata`,
       {
         method: "GET",
-        headers: { Accept: "application/json", Origin: ORIGIN },
+        headers: applicationDataHeaders({
+          Accept: "application/json",
+          Origin: ORIGIN,
+        }),
         redirect: "error",
         cache: "no-store",
         signal,
@@ -192,7 +199,7 @@ async function smokeConnection(
           maxPayload: INVITE_METADATA_MAX_MESSAGE_BYTES,
           perMessageDeflate: false,
         },
-        INVITE_METADATA_SOCKET_PROTOCOL,
+        [INVITE_METADATA_SOCKET_PROTOCOL, APPLICATION_DATA_SOCKET_PROTOCOL],
       );
     } catch {
       reject(new Error("Invite metadata smoke could not open its WebSocket."));

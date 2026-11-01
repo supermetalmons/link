@@ -1,4 +1,4 @@
-import { materializeProfileCompatibility as materializeCanonicalProfile } from "../test/profileDataBoundaryFixture.ts";
+import { materializeProfileFixture as materializeCanonicalProfile } from "../test/profileDataBoundaryFixture.ts";
 import { env } from "cloudflare:workers";
 import type { D1Migration } from "cloudflare:test";
 import type { CompletePlayerProfile } from "@mons/shared/profiles";
@@ -97,7 +97,6 @@ async function retireProfile(
           targetProfileId: target.profileId,
           mergedAtMs: 3_000,
           opId: "challenge-replay-merge",
-          sourceLegacyFields: source.legacyFields,
         },
       },
     ],
@@ -199,9 +198,8 @@ describe("canonical challenge replay profile reads", () => {
     const opponent = await createProfile(
       {},
       {
-        legacyFields: { imported: { missingRating: true }, custom: [1, null] },
         emojiPresent: false,
-        gameplayEmoji: "legacy-emoji",
+        gameplayEmoji: 0,
         winPresent: false,
         sortPresence: { rating: false, nonce: false, mp: true, gum: false },
         sortValues: { mp: null, gum: null },
@@ -317,7 +315,7 @@ describe("canonical challenge replay profile reads", () => {
             timing === "before"
               ? {
                   ...updates[index],
-                  profileId: updates[index].profile.id,
+                  profileId: updates[index]!.profile.id,
                   revision: 2,
                 }
               : [player, opponent][index],
@@ -375,8 +373,8 @@ describe("canonical challenge replay profile reads", () => {
     ["profile revision", { revision: 0 }],
     ["profile identity", { profile_id: "wrong-profile" }],
     ["profile payload", { payload_json: "{}" }],
-    ["legacy fields", { legacy_fields_json: "[]" }],
-    ["gameplay emoji", { gameplay_emoji_json: "{}" }],
+    ["gameplay emoji", { gameplay_emoji: "0" }],
+    ["gameplay emoji", { gameplay_emoji: "{}" }],
     ["active redirect", { canonical_merge_source_profile_id: "source" }],
     ["orphan flag", { canonical_orphaned_dependents: 2 }],
   ])("rejects corrupt %s in either role", async (_label, changes) => {
@@ -506,14 +504,14 @@ describe("canonical challenge replay profile reads", () => {
     await db.batch([
       db
         .prepare(
-          `INSERT INTO profile_auth_methods
+          `INSERT INTO profile_auth_methods_canonical
         (method, normalized_value, profile_id, raw_value, linked_at_ms, created_at_ms, updated_at_ms)
-        VALUES ('apple', ?, ?, 'apple-subject', 0.5, 1000, 2000)`,
+        VALUES ('apple', ?, ?, 'apple-subject', 1000, 1000, 2000)`,
         )
         .bind(crypto.randomUUID(), profile.profileId),
       db
         .prepare(
-          `INSERT INTO profile_auth_recovery_jobs
+          `INSERT INTO profile_auth_recovery_jobs_canonical
         (profile_id, login_uids_json, source_profile_ids_json, source_phase,
          phase_started_at_ms, last_enqueued_at_ms, created_at_ms, updated_at_ms)
         VALUES (?, '[false]', '[]', 'prizes', 1000, 1000, 1000, 2000)`,
@@ -534,7 +532,7 @@ describe("canonical challenge replay profile reads", () => {
     const snapshot = { profile, februaryOpponentProfileIds: [] };
     expect(result).toEqual({ player: snapshot, opponent: snapshot });
     expect(observed.batches.map((batch) => batch.length)).toEqual([4]);
-    expect(observed.batches[0].join("\n")).not.toMatch(
+    expect(observed.batches[0]!.join("\n")).not.toMatch(
       /login_uids_json|source_profile_ids_json|raw_value|linked_at_ms/,
     );
   });

@@ -48,16 +48,16 @@ export type EventFieldValues = {
     matches: boolean;
     results: boolean;
   };
-  announceOnTelegram: boolean;
 };
 export type EventField = keyof EventFieldValues;
+type EventFieldCommand<K extends EventField> = {
+  kind: "event-field";
+  eventId: string;
+  field: K;
+  value: EventFieldValues[K];
+};
 export type EventFieldMutation = {
-  [K in EventField]: {
-    kind: "event-field";
-    eventId: string;
-    field: K;
-    value: EventFieldValues[K];
-  };
+  [K in EventField]: EventFieldCommand<K>;
 }[EventField];
 export type EventProfileGameOutboxFieldValues = {
   schemaVersion: 1;
@@ -243,37 +243,24 @@ const eventField = <K extends EventField>(
   eventId: string,
   field: K,
   value: EventFieldValues[K],
-): Extract<EventFieldMutation, { field: K }> =>
-  ({
-    kind: "event-field",
-    eventId,
-    field,
-    value,
-  }) as Extract<EventFieldMutation, { field: K }>;
+): EventFieldCommand<K> => ({
+  kind: "event-field",
+  eventId,
+  field,
+  value,
+});
 const eventCommandIdentity = (command: EventCommand): string => {
-  const fields: {
-    kind: string;
-    eventId?: unknown;
-    profileId?: unknown;
-    outboxId?: unknown;
-    inviteId?: unknown;
-    playerId?: unknown;
-    matchId?: unknown;
-    field?: unknown;
-    roundKey?: unknown;
-    matchKey?: unknown;
-  } = command;
   return JSON.stringify([
-    fields.kind,
-    fields.eventId,
-    fields.profileId,
-    fields.outboxId,
-    fields.inviteId,
-    fields.playerId,
-    fields.matchId,
-    fields.field,
-    fields.roundKey,
-    fields.matchKey,
+    command.kind,
+    "eventId" in command ? command.eventId : null,
+    "profileId" in command ? command.profileId : null,
+    "outboxId" in command ? command.outboxId : null,
+    "inviteId" in command ? command.inviteId : null,
+    "playerId" in command ? command.playerId : null,
+    "matchId" in command ? command.matchId : null,
+    "field" in command ? command.field : null,
+    "roundKey" in command ? command.roundKey : null,
+    "matchKey" in command ? command.matchKey : null,
   ]);
 };
 const mergeEventPlans = (
@@ -290,12 +277,12 @@ function getEventField<K extends EventField>(
   field: K,
 ): EventFieldValues[K] | undefined {
   const command = plan.findLast(
-    (command): command is Extract<EventFieldMutation, { field: K }> =>
+    (command): command is EventFieldMutation & EventFieldCommand<K> =>
       command.kind === "event-field" &&
       command.eventId === eventId &&
       command.field === field,
   );
-  return command?.value as EventFieldValues[K] | undefined;
+  return command?.value;
 }
 export {
   getEventField,

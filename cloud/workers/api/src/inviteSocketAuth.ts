@@ -4,6 +4,7 @@ import {
   isReactionSocketToken,
 } from "@mons/shared/reactions";
 import { AuthApiFailure } from "./authErrors.ts";
+import { APPLICATION_DATA_SOCKET_PROTOCOL } from "@mons/shared/data-contract";
 
 export function readInviteSocketToken(
   request: Request,
@@ -17,22 +18,32 @@ export function readInviteSocketToken(
     REACTION_MAX_MESSAGE_BYTES +
       REACTION_AUTH_PROTOCOL_PREFIX.length +
       protocol.length +
+      APPLICATION_DATA_SOCKET_PROTOCOL.length +
+      2 +
       4
   ) {
     throw invalid();
   }
-  const protocols = header.split(",").map((value) => value.trim());
+  const offered = header.split(",").map((value) => value.trim());
+  if (
+    offered.filter((value) => value === APPLICATION_DATA_SOCKET_PROTOCOL)
+      .length !== 1
+  )
+    throw invalid();
+  const protocols = offered.filter(
+    (value) => value !== APPLICATION_DATA_SOCKET_PROTOCOL,
+  );
   if (
     protocols[0] !== protocol ||
     protocols.length > 2 ||
     (protocols.length === 2 &&
-      !protocols[1].startsWith(REACTION_AUTH_PROTOCOL_PREFIX))
+      !protocols[1]!.startsWith(REACTION_AUTH_PROTOCOL_PREFIX))
   ) {
     throw invalid();
   }
   const token =
     protocols.length === 2
-      ? protocols[1].slice(REACTION_AUTH_PROTOCOL_PREFIX.length)
+      ? protocols[1]!.slice(REACTION_AUTH_PROTOCOL_PREFIX.length)
       : null;
   if (token !== null && !isReactionSocketToken(token)) throw invalid();
   const authorization = request.headers.get("Authorization");

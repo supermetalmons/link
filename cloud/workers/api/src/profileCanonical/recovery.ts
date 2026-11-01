@@ -71,7 +71,7 @@ export async function quarantineCanonicalAuthRecoveryJob(
     target: "auth",
     select: {
       sql: `SELECT job.profile_id, CAST(job.revision AS TEXT), ?, ?
-       FROM profile_auth_recovery_jobs AS job
+       FROM profile_auth_recovery_jobs_canonical AS job
        WHERE job.profile_id = CASE WHEN ? = 'blob' THEN ? ELSE CAST(? AS TEXT) END
          AND ${guard.sql}
          AND EXISTS (
@@ -110,10 +110,10 @@ export async function listCanonicalAuthRecoverySweepRows(
       `SELECT ${JOB_EXPRESSIONS.join(", ")},
               CAST(job.profile_id AS BLOB) AS recovery_key_bytes,
               typeof(job.profile_id) AS recovery_key_type
-       FROM profile_auth_recovery_jobs AS job
+       FROM profile_auth_recovery_jobs_canonical AS job
        WHERE job.last_enqueued_at_ms <= ?
          AND NOT EXISTS (
-           SELECT 1 FROM profile_auth_recovery_quarantine AS quarantine
+           SELECT 1 FROM profile_auth_recovery_quarantine_canonical AS quarantine
            WHERE quarantine.profile_id = job.profile_id
              AND quarantine.revision_token = CAST(job.revision AS TEXT)
          )
@@ -158,11 +158,11 @@ export async function readCanonicalAuthRecoveryQuarantineEntry(
     .withSession("first-primary")
     .prepare(
       `SELECT ${recoveryObservationColumns(JOB_EXPRESSIONS, JOB_REVISION_INDEX)}
-       FROM profile_auth_recovery_jobs AS job
+       FROM profile_auth_recovery_jobs_canonical AS job
        WHERE job.profile_id = CASE WHEN ? = 'blob' THEN ? ELSE CAST(? AS TEXT) END
          AND job.last_enqueued_at_ms <= ?
          AND NOT EXISTS (
-           SELECT 1 FROM profile_auth_recovery_quarantine AS quarantine
+           SELECT 1 FROM profile_auth_recovery_quarantine_canonical AS quarantine
            WHERE quarantine.profile_id = job.profile_id
              AND quarantine.revision_token = CAST(job.revision AS TEXT)
          )`,

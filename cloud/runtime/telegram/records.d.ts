@@ -4,28 +4,85 @@ import type {
   TelegramDeliveryErrorState,
   TelegramRetryState,
 } from "./deliveryRetryTypes.js";
-declare const telegramDocument: unique symbol;
-type RetainedTelegramDocument<Kind extends string> = {
-  readonly [telegramDocument]: Kind;
+export type TelegramDesiredDocument = TelegramDesired;
+export type TelegramSendEvidence = {
+  attemptId: string;
+  revision: string;
+  destination: TelegramDesired["destination"];
+  chatId: string;
+  instanceKey: string;
+  contentHash: string;
+  startedAtMs: number;
+  apiGateOwner: string;
+  abandonedAtMs?: number;
 };
-export type TelegramMessageDocument = RetainedTelegramDocument<"message">;
-export type TelegramControlDocument = RetainedTelegramDocument<"control">;
-export type TelegramDesiredDocument = RetainedTelegramDocument<"desired">;
-export type TelegramDeliveryDocument = RetainedTelegramDocument<"delivery">;
-export type TelegramCleanupDocument = RetainedTelegramDocument<"cleanup">;
-export type TelegramAppliedDocument = RetainedTelegramDocument<"applied">;
-export type TelegramRecoveryDocument = RetainedTelegramDocument<"recovery">;
-export type TelegramApiGateDocument = RetainedTelegramDocument<"api-gate">;
-export type TelegramSendEvidence = RetainedTelegramDocument<"send-evidence">;
-export type TelegramRetryProofDocument =
-  RetainedTelegramDocument<"retry-proof">;
-export type TelegramCleanupQueueDocument =
-  RetainedTelegramDocument<"cleanup-queue">;
-export type TelegramOrphanedDeletesDocument =
-  RetainedTelegramDocument<"orphaned-deletes">;
-export type TelegramRecoveryResultDocument =
-  RetainedTelegramDocument<"recovery-result">;
-export type TelegramRetryDocument = RetainedTelegramDocument<"retry-state">;
+export type TelegramAppliedDocument = TelegramAppliedReceiptWrite & {
+  recoveredAtMs?: number;
+};
+export type TelegramRecoveryDocument = TelegramManualRecoveryWrite;
+export type TelegramApiGateDocument = TelegramApiGateWrite;
+export type TelegramRetryProofDocument = TelegramRetryProofWrite;
+export type TelegramRetryDocument = Partial<TelegramRetryState> & {
+  apiGateStartedAtMs?: number;
+};
+export type TelegramCleanupDocument = TelegramCleanupFields &
+  Partial<TelegramRetryState> & {
+    status: "pending" | "processing" | "retryable";
+    leaseOwner?: string;
+    leaseExpiresAtMs?: number;
+  };
+export type TelegramCleanupQueueDocument = Record<
+  string,
+  TelegramCleanupDocument
+>;
+export type TelegramOrphanedDelete = Omit<TelegramCleanupDocument, "status"> & {
+  terminalAtMs: number;
+  lastError: TelegramDeliveryErrorState;
+};
+export type TelegramOrphanedDeletesDocument = Record<
+  string,
+  TelegramOrphanedDelete
+>;
+export type TelegramRecoveryResultDocument = {
+  requestId: string;
+  action: TelegramManualRecoveryWrite["action"];
+  processedAtMs: number;
+} & (
+  | {
+      status: "accepted";
+      messageId?: number;
+      code?: never;
+    }
+  | {
+      status: "rejected";
+      code:
+        | "recovery-not-uncertain"
+        | "invalid-manual-recovery"
+        | "missing-send-in-flight";
+      messageId?: never;
+    }
+);
+export type TelegramDeliveryDocument = TelegramDeliveryMetadata &
+  Partial<TelegramRetryState> & {
+    status:
+      | "pending"
+      | "processing"
+      | "retryable"
+      | "delivered"
+      | "terminal"
+      | "uncertain";
+    revision: string;
+    leaseOwner?: string;
+    leaseExpiresAtMs?: number;
+    sendInFlight?: TelegramSendEvidence;
+  };
+export type TelegramMessageDocument = TelegramMessageFields & {
+  schemaVersion: 1;
+  manualRecoveryResult?: TelegramRecoveryResultDocument;
+};
+export type TelegramControlDocument = TelegramControlFields & {
+  schemaVersion: 1;
+};
 export type TelegramAutomatchProjectionGuardWrite = {
   schemaVersion: 1;
   lifecycle: "pending" | "matched" | "canceled";
@@ -76,15 +133,15 @@ export type TelegramRetryProofWrite = TelegramRetryState & {
   proofTaskKind?: "desired" | "pending-delete";
 };
 export type TelegramMessageFields = {
-  desired?: TelegramDesired | TelegramDesiredDocument;
+  desired?: TelegramDesired;
   delivery?: TelegramDeliveryDocument;
-  applied?: TelegramAppliedReceiptWrite | TelegramAppliedDocument;
-  manualRecovery?: TelegramManualRecoveryWrite | TelegramRecoveryDocument;
+  applied?: TelegramAppliedDocument;
+  manualRecovery?: TelegramManualRecoveryWrite;
   automatchProjection?: TelegramAutomatchProjectionGuardWrite;
 };
 export type TelegramControlFields = {
   retryNotBeforeMs?: number;
-  apiGate?: TelegramApiGateWrite | TelegramApiGateDocument;
+  apiGate?: TelegramApiGateWrite;
 };
 export type TelegramDeliveryMetadata = {
   attempts?: number;
@@ -104,7 +161,7 @@ export type TelegramDeliveryMetadata = {
   apiGateSettleOwner?: string;
   pendingDeleteApiGateSettleOwner?: string;
   apiGateReleaseOwner?: string;
-  apiGateProofRequired?: TelegramRetryProofWrite | TelegramRetryProofDocument;
+  apiGateProofRequired?: TelegramRetryProofWrite;
   lastRecoveryRequestId?: string;
   pendingDelete?: TelegramCleanupDocument;
   pendingDeleteQueue?: TelegramCleanupQueueDocument;
@@ -118,57 +175,55 @@ export type TelegramDeliveryMetadata = {
   abandonedSend?: TelegramSendEvidence;
 };
 export type TelegramCleanupFields = TelegramDeliveryMetadata & {
-  pendingDeleteId?: string;
-  chatId?: string;
-  messageId?: number;
-  instanceKey?: string;
+  pendingDeleteId: string;
+  chatId: string;
+  messageId: number;
+  instanceKey: string;
 };
-export declare function readTelegramMessageDocument(
-  value: unknown,
-): TelegramMessageDocument | null;
-export declare function readTelegramControlDocument(
-  value: unknown,
-): TelegramControlDocument | null;
+export {
+  readTelegramMessageDocument,
+  readTelegramControlDocument,
+} from "./recordCodec.js";
 export declare function messageDocument(
-  value: unknown,
+  value: TelegramMessageDocument | null | undefined,
 ): TelegramMessageDocument;
 export declare function controlDocument(
-  value: unknown,
+  value?: TelegramControlDocument | null,
 ): TelegramControlDocument;
 export declare function apiGateDocument(
-  value: unknown,
+  value: TelegramApiGateDocument,
 ): TelegramApiGateDocument;
 export declare function appliedDocument(
-  value: unknown,
+  value: TelegramAppliedDocument,
 ): TelegramAppliedDocument;
 export declare function desiredDocument(
-  value: unknown,
+  value: TelegramDesiredDocument,
 ): TelegramDesiredDocument;
+export declare function sendEvidenceDocument(
+  value: TelegramSendEvidence,
+): TelegramSendEvidence;
 export declare function updateTelegramApplied(
   current: TelegramAppliedDocument,
   fields: Partial<TelegramAppliedReceiptWrite>,
 ): TelegramAppliedDocument;
-export declare function sendEvidenceDocument(
-  value: unknown,
-): TelegramSendEvidence;
 export declare function messageDeliveryDocument(
   value: TelegramMessageDocument | null | undefined,
-): TelegramDeliveryDocument;
+): Partial<TelegramDeliveryDocument>;
 export declare function messageDesiredDocument(
   value: TelegramMessageDocument | null | undefined,
-): TelegramDesiredDocument;
+): TelegramDesiredDocument | undefined;
 export declare function messageDesiredRevision(
   value: TelegramMessageDocument | null | undefined,
 ): string;
 export declare function messageAppliedDocument(
   value: TelegramMessageDocument | null | undefined,
-): TelegramAppliedDocument;
+): TelegramAppliedDocument | undefined;
 export declare function messageRecoveryResultDocument(
   value: TelegramMessageDocument | null | undefined,
-): TelegramRecoveryResultDocument;
+): TelegramRecoveryResultDocument | undefined;
 export declare class AppliedMessageSnapshot {
   private readonly document;
-  constructor(document: TelegramAppliedDocument);
+  constructor(document: TelegramAppliedDocument | undefined);
   get chatId(): string;
   get messageId(): number | undefined;
   hasMessageId(): this is this & {
@@ -197,4 +252,3 @@ export declare function updateTelegramControl(
 export declare function clearTelegramApiGate(
   current: TelegramControlDocument,
 ): TelegramControlDocument;
-export {};

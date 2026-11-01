@@ -1,3 +1,5 @@
+import { publicMatchFixture } from "./matchRecordFixture.ts";
+import { applicationRequest } from "./testEnv.ts";
 import { retainedInviteSourceFixture } from "./inviteDocumentFixture.ts";
 import { matchDocumentFixture } from "./matchRecordFixture.ts";
 import assert from "node:assert/strict";
@@ -29,22 +31,22 @@ import { TELEGRAM_TEST_ENV, withProfileControl } from "./testEnv.ts";
 
 const operationId = "00000000-0000-4000-8000-000000000001";
 const uid = "login-uid";
-const presentation = { emojiId: 1, aura: "" };
+const presentation = { emojiId: 1, aura: "none" };
 const operation = { operationId, inviteId: "invite" };
 const matchRequest = { inviteId: "invite", matchId: "invite", playerId: uid };
 const timerRequest = { ...matchRequest, opponentId: "opponent-uid" };
 const wagerRequest = { inviteId: "invite", matchId: "invite" };
-const match = {
+const match = publicMatchFixture({
   version: 1,
   color: "white",
   emojiId: 1,
-  aura: "",
+  aura: "none",
   gameVariant: "Classic",
   fen: "stored-fen",
-  status: "",
+  status: "active",
   flatMovesString: "",
-  timer: "",
-};
+  timer: { state: "idle" },
+});
 const materials = { dust: 0, slime: 0, gum: 0, metal: 0, ice: 0 };
 
 type RouteCase = {
@@ -91,7 +93,7 @@ const routes: RouteCase[] = [
     receipt: {
       kind: "invite-create",
       fingerprint:
-        "60b8680dcda1f9e322fb2836ac36487d8b150f147bb7457b958ffce99f2d17b4",
+        "f2677fe974e0b898e810a29726bb129eaae03d29ef1f16e254f46da41fb656ad",
     },
     response: {
       ok: true,
@@ -107,7 +109,7 @@ const routes: RouteCase[] = [
     receipt: {
       kind: "invite-join",
       fingerprint:
-        "9edc23d8a1ad5b44cd62f5e2b504f7ee99714b93c679556b09685f52200f6cdd",
+        "102df5aecd9798a064634879876e66d402d701113c822effea42d08c77488d80",
     },
     response: {
       ok: true,
@@ -137,7 +139,7 @@ const routes: RouteCase[] = [
     receipt: {
       kind: "match-ensure",
       fingerprint:
-        "bdf60cb7e3ee308ea2db7db43efe4379b9d13d33b9142f7bee80b524cbe8d838",
+        "2f8db93619da77ac9954b91d62980c903adc59bf579b5a797d50a9191c1de297",
     },
     response: {
       ok: true,
@@ -195,7 +197,12 @@ const routes: RouteCase[] = [
       fingerprint:
         "be05702264e491e2d35142721e69813ea7058d2f7fa140dd588eaf2d7d28cb01",
     },
-    response: { ok: true, inviteId: "invite", actorUid: uid, rematches: "x" },
+    response: {
+      ok: true,
+      inviteId: "invite",
+      actorUid: uid,
+      rematches: { state: "ended", indices: [] },
+    },
   },
   {
     path: "/rematches/propose",
@@ -204,14 +211,14 @@ const routes: RouteCase[] = [
     receipt: {
       kind: "rematch-propose",
       fingerprint:
-        "69990ab96985e54b2b10d95f6e5573341e26f17c0f2d8b6a5112dc431f7af748",
+        "3e52e0b465b2a0f1962552970f4cf5b8606efd90cf56d3474ee705b5af5e436c",
     },
     response: {
       ok: true,
       inviteId: "invite",
       actorUid: uid,
       matchId: "invite1",
-      rematches: "1",
+      rematches: { state: "open", indices: [1] },
       match,
     },
   },
@@ -231,7 +238,7 @@ const routes: RouteCase[] = [
 ];
 
 function request(path: string, body: unknown = {}, method = "POST"): Request {
-  return new Request(`https://api.mons.link${path}`, {
+  return applicationRequest(`https://api.mons.link${path}`, {
     method,
     headers: {
       Origin: "https://mons.link",
@@ -300,7 +307,7 @@ function fixture(route: RouteCase) {
             revision: 1,
             profile: {
               profileId: "profile",
-              aura: "",
+              aura: "none",
               emoji: 1,
               eth: "",
               sol: "",
@@ -324,7 +331,8 @@ function fixture(route: RouteCase) {
       effects.push(route.effect);
       assert.equal(route.path, "/automatch/start");
       return decodeAutomatchReceipt({
-        schemaVersion: 1,
+        schemaVersion: 2,
+        effects: { state: "enabled" },
         kind: "automatch-start",
         operationId,
         requesterUid: uid,
@@ -341,7 +349,8 @@ function fixture(route: RouteCase) {
       effects.push(route.effect);
       assert.ok(route.receipt);
       return decodeGameSessionMutationReceipt({
-        schemaVersion: 1,
+        schemaVersion: 2,
+        effects: { state: "enabled" },
         ...operation,
         inviteId: route.body.inviteId,
         ...route.receipt,
@@ -354,6 +363,7 @@ function fixture(route: RouteCase) {
     automatchPersistence: createAutomatchPersistenceStub(),
   };
   const ratingRepository: RatingRepository = {
+    readWagerAgreement: async () => null,
     ...repository,
     putEventProgressOutbox: unexpected,
     readInviteMetadata: async (inviteId) => {
@@ -481,21 +491,16 @@ test("gameplay routes only construct coordination used by their domain", async (
       const f = fixture(route);
       const coordination = createMemoryGameplayCoordinationStores();
       const usesLocks = lockPaths.has(route.path);
-      const usesTimerStarts = route.path === "/ratings/update";
       let decoratedLocks = 0;
       const repository = f.dependencies.repository!;
       const dependencies: GameplayRouteDependencies = {
         ...f.dependencies,
         get coordination() {
-          assert.ok(usesLocks || usesTimerStarts, "unexpected coordination");
+          assert.ok(usesLocks, "unexpected coordination");
           return {
             get mutationLocks() {
               assert.ok(usesLocks, "unexpected mutation locks");
               return coordination.mutationLocks;
-            },
-            get timerStarts() {
-              assert.ok(usesTimerStarts, "unexpected timer starts");
-              return coordination.timerStarts;
             },
           };
         },
@@ -557,7 +562,9 @@ test("invalid gameplay bodies do not construct domain coordination", async (t) =
         {
           gameplay: {
             ...f.dependencies,
-            get coordination(): GameplayRouteDependencies["coordination"] {
+            get coordination(): NonNullable<
+              GameplayRouteDependencies["coordination"]
+            > {
               return assert.fail("invalid request constructed coordination");
             },
           },
@@ -582,11 +589,14 @@ test("wager authentication and client version precede profile gates and body par
         async () => {
           const f = fixture(route);
           let reservationReads = 0;
-          const input = new Request(`https://api.mons.link${route.path}`, {
-            method: "POST",
-            headers: { Origin: "https://mons.link" },
-            body: "invalid-json",
-          });
+          const input = applicationRequest(
+            `https://api.mons.link${route.path}`,
+            {
+              method: "POST",
+              headers: { Origin: "https://mons.link" },
+              body: "invalid-json",
+            },
+          );
           const response = await handleRequest(
             input,
             withProfileControl(
@@ -603,6 +613,7 @@ test("wager authentication and client version precede profile gates and body par
                 ...f.dependencies,
                 get wagerReservations() {
                   reservationReads++;
+                  assert.ok(f.dependencies.wagerReservations);
                   return f.dependencies.wagerReservations;
                 },
                 verifyIdentity: async () => {
@@ -675,7 +686,7 @@ test("wager outcome limiting stays between profile admission and body parsing", 
     await t.test(`${entry.path}: ${entry.state}`, async () => {
       const f = fixture(routes.find((route) => route.path === entry.path)!);
       const rateKeys: string[] = [];
-      const input = new Request(`https://api.mons.link${entry.path}`, {
+      const input = applicationRequest(`https://api.mons.link${entry.path}`, {
         method: "POST",
         headers: {
           Origin: "https://mons.link",
@@ -838,7 +849,11 @@ for (const changeEpoch of [false, true]) {
         {
           path: "/matches/timer/start",
           method: "startCanonicalMatchTimer",
-          result: { ok: true, timer: "1;100000", duration: 90_000 },
+          result: {
+            ok: true,
+            timer: { state: "running", turnNumber: 1, deadlineAtMs: 100000 },
+            duration: 90_000,
+          },
         },
         {
           path: "/matches/timer/claim",
@@ -875,15 +890,16 @@ for (const changeEpoch of [false, true]) {
               },
             }),
           };
+          const defaultGameplay = { ...f.dependencies };
+          delete defaultGameplay.move;
+          delete defaultGameplay.surrender;
+          delete defaultGameplay.timer;
           const response = await handleRequest(
             request(route.path, route.body),
             env,
             {
               gameplay: {
-                ...f.dependencies,
-                move: undefined,
-                surrender: undefined,
-                timer: undefined,
+                ...defaultGameplay,
                 verifyIdentity: async () => {
                   if (changeEpoch) epoch = 3;
                   return { uid };
@@ -1121,7 +1137,7 @@ test("gameplay telemetry wraps only the declared POST routes, including early fa
       logs.length = 0;
       const control = withMatchControl(entry.state);
       let authentications = 0;
-      const input = new Request(`https://api.mons.link${entry.path}`, {
+      const input = applicationRequest(`https://api.mons.link${entry.path}`, {
         method: entry.method,
         headers: { Origin: "https://mons.link" },
         ...(entry.method === "POST" ? { body: "invalid-json" } : {}),
@@ -1148,12 +1164,12 @@ test("gameplay telemetry wraps only the declared POST routes, including early fa
       assert.equal(logs.length, measured ? 1 : 0);
       const automatch = measured && entry.path === "/automatch/start";
       if (measured) {
-        assert.equal(logs[0].status, entry.status);
+        assert.equal(logs[0]!.status, entry.status);
         assert.equal(
-          logs[0].event,
+          logs[0]!.event,
           automatch ? "automatch_timing" : "d1_timing",
         );
-        if (!automatch) assert.equal(logs[0].operation, "ratings.update");
+        if (!automatch) assert.equal(logs[0]!.operation, "ratings.update");
       }
       assert.equal(response.headers.has("Server-Timing"), automatch);
       assert.equal(response.headers.has("Timing-Allow-Origin"), automatch);
@@ -1166,7 +1182,7 @@ test("gameplay telemetry wraps only the declared POST routes, including early fa
   }
 });
 
-test("gameplay request normalization preserves trimmed identifiers and domain payloads", async (t) => {
+test("gameplay request normalization preserves domain payloads and rejects noncanonical timer identifiers", async (t) => {
   const cases = [
     ...["/matches/timer/start", "/matches/timer/claim", "/ratings/update"].map(
       (path) => ({ path, body: timerRequest }),
@@ -1199,6 +1215,28 @@ test("gameplay request normalization preserves trimmed identifiers and domain pa
         ...navigationRoutes,
         ...wagerRoutes,
       ].find((route) => route.path === entry.path)!;
+      if (
+        entry.path === "/matches/timer/start" ||
+        entry.path === "/matches/timer/claim"
+      ) {
+        await assert.rejects(
+          prepareGameplayRoute(
+            input,
+            route.bindRequest({
+              request: input,
+              env: TELEGRAM_TEST_ENV,
+              ctx: f.context,
+              dependencies: f.dependencies,
+              pathname: entry.path,
+              identity: { uid },
+              repository: f.dependencies.repository!,
+            }),
+          ),
+          /invalid-request/,
+        );
+        assert.deepEqual(f.effects, []);
+        return;
+      }
       assert.deepEqual(
         (
           await prepareGameplayRoute(

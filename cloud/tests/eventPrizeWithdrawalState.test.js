@@ -3,20 +3,32 @@
 const assert = require("node:assert/strict");
 const { createRequire } = require("node:module");
 const test = require("node:test");
+const { canonicalWithdrawalFixture } = require("./withdrawalFixture");
 const bs58 = require("bs58");
 const requireRuntimeDependency = createRequire(
   require.resolve("../runtime/package.json"),
 );
-const { createSignerFromKeypair, none, publicKeyBytes, signerIdentity, some } =
-  requireRuntimeDependency("@metaplex-foundation/umi");
+const {
+  createSignerFromKeypair,
+  none,
+  publicKey,
+  publicKeyBytes,
+  signerIdentity,
+  some,
+} = /** @type {typeof import("@metaplex-foundation/umi")} */ (
+  requireRuntimeDependency("@metaplex-foundation/umi")
+);
 const {
   publicKey: publicKeySerializer,
   u8,
   u64,
-} = requireRuntimeDependency("@metaplex-foundation/umi/serializers");
-const { createUmi } = requireRuntimeDependency(
-  "@metaplex-foundation/umi-bundle-defaults",
+} = /** @type {typeof import("@metaplex-foundation/umi/serializers")} */ (
+  requireRuntimeDependency("@metaplex-foundation/umi/serializers")
 );
+const { createUmi } =
+  /** @type {typeof import("@metaplex-foundation/umi-bundle-defaults")} */ (
+    requireRuntimeDependency("@metaplex-foundation/umi-bundle-defaults")
+  );
 const {
   TokenProgramVersion,
   TokenStandard,
@@ -26,7 +38,9 @@ const {
   hashMetadataCreators,
   hashMetadataData,
   mplBubblegum,
-} = requireRuntimeDependency("@metaplex-foundation/mpl-bubblegum");
+} = /** @type {typeof import("@metaplex-foundation/mpl-bubblegum")} */ (
+  requireRuntimeDependency("@metaplex-foundation/mpl-bubblegum")
+);
 const {
   EVENT_PRIZE_ADMIN_WALLET,
   buildWithdrawalCompletion,
@@ -56,7 +70,6 @@ const {
   reconcileSubmittedAssetState,
   recoverSubmittedWithdrawal,
 } = require("../runtime/eventPrizes/submissionRecovery");
-const { loadSolanaDependencies } = require("../runtime/eventPrizes/solana");
 const {
   buildSubmittedTransaction,
   deserializePersistedSubmittedTransaction,
@@ -83,6 +96,12 @@ const prizeId = "1092";
 const assetAddress = getEventPrizeAssetAddress(eventId, prizeId);
 const profileId = "profile";
 const recipientAddress = "11111111111111111111111111111111";
+/**
+ * @typedef {import("../runtime/eventPrizes/records").WithdrawalDocument} WithdrawalDocument
+ * @typedef {{read?(): Promise<WithdrawalDocument | null>, transaction(update: (current: WithdrawalDocument | null) => WithdrawalDocument | null): Promise<{committed: boolean, value: WithdrawalDocument | null}>}} WithdrawalReference
+ * @typedef {{transaction(update: (current: unknown) => unknown): Promise<{committed: boolean, value?: unknown}>}} AssignmentReference
+ */
+/** @param {{targetRecord: AssignmentReference, eventId: string, prizeId: string}} input */
 const removeMatchingProfileEventPrizeAssignment = async ({
   targetRecord,
   eventId: targetEventId,
@@ -100,23 +119,30 @@ const removeMatchingProfileEventPrizeAssignment = async ({
   return result.committed === true && result.value === null;
 };
 
+/** @param {WithdrawalReference} reference */
 const typedWithdrawalRecord = (reference) =>
   createWithdrawalRecordCommands({
     read: async () => reference.read?.() ?? null,
     async transaction(update) {
-      let decision;
+      /** @type {{decision?: import("../runtime/transactions").TransactionDecision<WithdrawalDocument>}} */
+      const state = {};
       const result = await reference.transaction((current) => {
-        decision = update(current);
-        return decision.commit === false ? (current ?? null) : decision.value;
+        const decision = update(current);
+        state.decision = decision;
+        return "commit" in decision ? (current ?? null) : decision.value;
       });
+      const decision = state.decision;
       return {
         ...result,
-        committed: result.committed && decision?.commit !== false,
-        decision: decision?.decision,
+        committed: result.committed && !(decision && "commit" in decision),
+        ...(decision?.decision === undefined
+          ? {}
+          : { decision: decision.decision }),
       };
     },
   });
 
+/** @param {{assignments?: Map<string, unknown>, mergeTargets?: Record<string, string>, transactionError?: Error | null}} [input] @returns {Parameters<typeof reconcileCompletedWithdrawalProjections>[1]} */
 const createProjectionDependencies = ({
   assignments = new Map(),
   mergeTargets = {},
@@ -154,7 +180,7 @@ const createProjectionDependencies = ({
 
 test("re-exports the shared event-prize projection policy", () => {
   const withdrawalState = require("../runtime/eventPrizeWithdrawalState");
-  for (const name of [
+  for (const name of /** @type {const} */ ([
     "filterProjectableEventPrizeAssignments",
     "getCompletedEventPrizeProjectionCleanupRequest",
     "getEventPrizeAssetAddress",
@@ -162,30 +188,39 @@ test("re-exports the shared event-prize projection policy", () => {
     "isCompletedEventPrizeWithdrawal",
     "isMatchingProfileEventPrizeAssignment",
     "isWithdrawalRecordForPrize",
-  ]) {
+  ])) {
     assert.strictEqual(withdrawalState[name], eventPrizeProjectionState[name]);
   }
 });
 
+/** @param {import("@metaplex-foundation/umi").Umi} umi */
 const generateTestSigner = (umi) =>
   createSignerFromKeypair(umi, umi.eddsa.generateKeypair());
 
+/** @param {Uint8Array[]} leaves @param {number} leafIndex */
 const buildMerkleRootAndProof = (leaves, leafIndex) => {
   const proof = [];
   let nodes = leaves;
   let index = leafIndex;
   while (nodes.length > 1) {
-    proof.push(nodes[index ^ 1]);
+    const sibling = nodes[index ^ 1];
+    assert.ok(sibling);
+    proof.push(sibling);
     const parents = [];
     for (let nodeIndex = 0; nodeIndex < nodes.length; nodeIndex += 2) {
-      parents.push(hash([nodes[nodeIndex], nodes[nodeIndex + 1]]));
+      const left = nodes[nodeIndex],
+        right = nodes[nodeIndex + 1];
+      assert.ok(left && right);
+      parents.push(hash([left, right]));
     }
     nodes = parents;
     index = Math.floor(index / 2);
   }
+  assert.ok(nodes[0]);
   return { root: nodes[0], proof };
 };
 
+/** @param {Uint8Array} leaf @param {Uint8Array[]} proof @param {number} leafIndex */
 const calculateMerkleRoot = (leaf, proof, leafIndex) => {
   return proof.reduce(
     (node, sibling, depth) =>
@@ -240,17 +275,20 @@ const createCompressedPrizeFixture = ({ collectionVerified = true } = {}) => {
     dataHash,
     creatorHash,
   ]);
+  /** @type {Uint8Array[]} */
   const leaves = Array.from({ length: 8 }, () =>
     publicKeyBytes(generateTestSigner(umi).publicKey),
   );
   leaves[nonce] = leaf;
   const merkle = buildMerkleRootAndProof(leaves, nonce);
+  /** @param {Uint8Array} value */
   const encodeBytes = (value) => bs58.default.encode(value);
-  const rootAddress = encodeBytes(merkle.root);
-  const dataHashAddress = encodeBytes(dataHash);
-  const creatorHashAddress = encodeBytes(creatorHash);
-  const proof = merkle.proof.map(encodeBytes);
+  const rootAddress = publicKey(encodeBytes(merkle.root));
+  const dataHashAddress = publicKey(encodeBytes(dataHash));
+  const creatorHashAddress = publicKey(encodeBytes(creatorHash));
+  const proof = merkle.proof.map((value) => publicKey(encodeBytes(value)));
   umi.use(signerIdentity(owner));
+  /** @type {import("@metaplex-foundation/mpl-bubblegum").AssetWithProof} */
   const assetWithProof = {
     leafOwner: owner.publicKey,
     leafDelegate: owner.publicKey,
@@ -269,14 +307,26 @@ const createCompressedPrizeFixture = ({ collectionVerified = true } = {}) => {
         metadata: { name: metadata.name, symbol: metadata.symbol },
         json_uri: metadata.uri,
       },
+      authorities: [],
       creators: metadata.creators,
       mutable: metadata.isMutable,
       royalty: {
+        royalty_model: "creators",
+        target: null,
+        percent: metadata.sellerFeeBasisPoints / 10000,
+        locked: false,
         basis_points: metadata.sellerFeeBasisPoints,
         primary_sale_happened: metadata.primarySaleHappened,
       },
-      supply: { edition_nonce: null },
+      supply: {
+        edition_nonce: null,
+        print_max_supply: 0,
+        print_current_supply: 0,
+      },
       compression: {
+        eligible: true,
+        asset_hash: publicKey(encodeBytes(leaf)),
+        seq: 0,
         compressed: true,
         tree: merkleTree,
         leaf_id: nonce,
@@ -304,7 +354,7 @@ const createCompressedPrizeFixture = ({ collectionVerified = true } = {}) => {
       root: rootAddress,
       proof,
       node_index: nonce + leaves.length,
-      leaf: encodeBytes(leaf),
+      leaf: publicKey(encodeBytes(leaf)),
     },
   };
   return {
@@ -313,15 +363,16 @@ const createCompressedPrizeFixture = ({ collectionVerified = true } = {}) => {
     prize: {
       assetAddress: compressedAssetAddress,
       collectionAddress,
-      standard: "compressed",
+      standard: /** @type {const} */ ("compressed"),
     },
     assetWithProof,
   };
 };
 
+/** @param {Parameters<typeof canonicalWithdrawalFixture>[0]} current @param {Partial<Parameters<typeof decideWithdrawalClaim>[0]>} [overrides] */
 const claim = (current, overrides = {}) =>
   decideWithdrawalClaim({
-    current,
+    current: canonicalWithdrawalFixture(current),
     eventId,
     prizeId,
     assetAddress,
@@ -334,14 +385,16 @@ const claim = (current, overrides = {}) =>
     ...overrides,
   });
 
+/** @param {Uint8Array} transactionSignature @param {Partial<{transactionSignature: string, blockhash: string, lastValidBlockHeight: number}>} [overrides] */
 const createSubmittedTransaction = (transactionSignature, overrides = {}) => ({
   signedTransaction: { signatures: [transactionSignature] },
   transactionSignature: bs58.default.encode(transactionSignature),
-  blockhash: "blockhash",
+  blockhash: "11111111111111111111111111111111",
   lastValidBlockHeight: 123,
   ...overrides,
 });
 
+/** @param {{submitted: ReturnType<typeof createSubmittedTransaction>, rpc?: Record<string, unknown>, assetOwner?: string, blocked?: boolean, status?: import("../runtime/eventPrizes/types").SubmittedTransactionStatus}} input */
 const reconcileTestSubmission = ({
   submitted,
   rpc = {},
@@ -349,13 +402,17 @@ const reconcileTestSubmission = ({
   blocked = true,
   status = { kind: "pending", signatureFound: false },
 }) =>
-  reconcileSubmittedAssetState({
-    umi: { rpc },
-    withdrawal: {},
-    assetState: { assetOwner, blocked },
-    recipientAddress,
-    inspection: { submitted, status },
-  });
+  /** @type {ReturnType<typeof reconcileSubmittedAssetState>} */ (
+    Reflect.apply(reconcileSubmittedAssetState, undefined, [
+      {
+        umi: { rpc },
+        withdrawal: {},
+        assetState: { assetOwner, blocked },
+        recipientAddress,
+        inspection: { submitted, status },
+      },
+    ])
+  );
 
 test("maps every configured prize to its asset address", () => {
   assert.equal(
@@ -424,14 +481,18 @@ test("maps every configured prize to its asset address", () => {
 
 test("routes claim-enabled Artifact Magazine 3 prizes through destination validation", async () => {
   await assert.rejects(
-    handleWithdrawEventPrize({
-      auth: { uid: "uid" },
-      data: {
-        eventId: "VOxalSrexcA",
-        prizeId: "282",
+    Reflect.apply(handleWithdrawEventPrize, undefined, [
+      {
+        auth: { uid: "uid" },
+        data: {
+          eventId: "VOxalSrexcA",
+          prizeId: "282",
+        },
       },
-    }),
+    ]),
     (error) =>
+      error instanceof Error &&
+      "code" in error &&
       error.code === "invalid-argument" &&
       error.message === "A valid Solana address is required.",
   );
@@ -439,14 +500,18 @@ test("routes claim-enabled Artifact Magazine 3 prizes through destination valida
 
 test("routes claim-enabled second Artifact Magazine 3 prizes through destination validation", async () => {
   await assert.rejects(
-    handleWithdrawEventPrize({
-      auth: { uid: "uid" },
-      data: {
-        eventId: "oXAceF6anag",
-        prizeId: "281",
+    Reflect.apply(handleWithdrawEventPrize, undefined, [
+      {
+        auth: { uid: "uid" },
+        data: {
+          eventId: "oXAceF6anag",
+          prizeId: "281",
+        },
       },
-    }),
+    ]),
     (error) =>
+      error instanceof Error &&
+      "code" in error &&
       error.code === "invalid-argument" &&
       error.message === "A valid Solana address is required.",
   );
@@ -454,14 +519,18 @@ test("routes claim-enabled second Artifact Magazine 3 prizes through destination
 
 test("routes claim-enabled Rare Weitsmans prizes through destination validation", async () => {
   await assert.rejects(
-    handleWithdrawEventPrize({
-      auth: { uid: "uid" },
-      data: {
-        eventId: "RpPjMNyrJJa",
-        prizeId: "217",
+    Reflect.apply(handleWithdrawEventPrize, undefined, [
+      {
+        auth: { uid: "uid" },
+        data: {
+          eventId: "RpPjMNyrJJa",
+          prizeId: "217",
+        },
       },
-    }),
+    ]),
     (error) =>
+      error instanceof Error &&
+      "code" in error &&
       error.code === "invalid-argument" &&
       error.message === "A valid Solana address is required.",
   );
@@ -469,20 +538,25 @@ test("routes claim-enabled Rare Weitsmans prizes through destination validation"
 
 test("routes claim-enabled compressed prizes through destination validation", async () => {
   await assert.rejects(
-    handleWithdrawEventPrize({
-      auth: { uid: "uid" },
-      data: {
-        eventId: "FRkdorMWaYW",
-        prizeId: "1866",
+    Reflect.apply(handleWithdrawEventPrize, undefined, [
+      {
+        auth: { uid: "uid" },
+        data: {
+          eventId: "FRkdorMWaYW",
+          prizeId: "1866",
+        },
       },
-    }),
+    ]),
     (error) =>
+      error instanceof Error &&
+      "code" in error &&
       error.code === "invalid-argument" &&
       error.message === "A valid Solana address is required.",
   );
 });
 
 test("withdrawal reads the entitlement through its typed profile prize reader", async () => {
+  /** @type {[string, string][]} */
   const reads = [];
   await assert.rejects(
     handleWithdrawEventPrize(
@@ -491,7 +565,18 @@ test("withdrawal reads the entitlement through its typed profile prize reader", 
         data: { eventId, prizeId, solanaAddress: recipientAddress },
       },
       {
+        removeMatchingProfileEventPrizeAssignment: async () =>
+          assert.fail("unassigned prizes must not be projected"),
+        resolveCanonicalProfilePath: async () =>
+          assert.fail("unassigned prizes must not resolve cleanup"),
+        createEventPrizeUmi: () =>
+          assert.fail("unassigned prizes must not load Solana"),
+        resolveWithdrawalProfileId: async () =>
+          assert.fail("unassigned prizes must not resolve withdrawals"),
         withdrawals: {
+          get: async () => assert.fail("unassigned prizes must not be read"),
+          replaceCompleted: async () =>
+            assert.fail("unassigned prizes must not be completed"),
           record: (candidateEventId, candidatePrizeId) => {
             assert.equal(candidateEventId, eventId);
             assert.equal(candidatePrizeId, prizeId);
@@ -510,7 +595,10 @@ test("withdrawal reads the entitlement through its typed profile prize reader", 
       },
     ),
     (error) =>
-      error.code === "not-found" && error.message === "Event prize not found.",
+      error instanceof Error &&
+      "code" in error &&
+      error.code === "not-found" &&
+      error.message === "Event prize not found.",
   );
   assert.deepEqual(reads, [[profileId, eventId]]);
 });
@@ -530,31 +618,33 @@ test("recognizes completed compressed withdrawal records", () => {
     assetStandard: "compressed",
   };
   assert.equal(
-    isCompletedEventPrizeWithdrawal(
+    Reflect.apply(isCompletedEventPrizeWithdrawal, undefined, [
       completed,
       compressedEventId,
       compressedPrizeId,
-    ),
+    ]),
     true,
   );
   assert.deepEqual(
-    filterProjectableEventPrizeAssignments({
-      eventId: compressedEventId,
-      assignments: {
-        1: {
-          eventId: compressedEventId,
-          profileId,
-          place: 1,
-          prizeId: compressedPrizeId,
+    Reflect.apply(filterProjectableEventPrizeAssignments, undefined, [
+      {
+        eventId: compressedEventId,
+        assignments: {
+          1: {
+            eventId: compressedEventId,
+            profileId,
+            place: 1,
+            prizeId: compressedPrizeId,
+          },
         },
+        withdrawals: { [compressedPrizeId]: completed },
       },
-      withdrawals: { [compressedPrizeId]: completed },
-    }),
+    ]),
     {},
   );
 });
 
-test("accepts missing asset standards only for legacy Core records", () => {
+test("rejects missing asset standards in stored Core and compressed records", () => {
   const legacyCoreCompleted = {
     status: "completed",
     eventId,
@@ -562,11 +652,15 @@ test("accepts missing asset standards only for legacy Core records", () => {
     assetAddress,
   };
   assert.equal(
-    isCompletedEventPrizeWithdrawal(legacyCoreCompleted, eventId, prizeId),
-    true,
+    Reflect.apply(isCompletedEventPrizeWithdrawal, undefined, [
+      legacyCoreCompleted,
+      eventId,
+      prizeId,
+    ]),
+    false,
   );
   assert.equal(
-    isCompletedEventPrizeWithdrawal(
+    Reflect.apply(isCompletedEventPrizeWithdrawal, undefined, [
       {
         status: "completed",
         eventId: "FRkdorMWaYW",
@@ -575,7 +669,7 @@ test("accepts missing asset standards only for legacy Core records", () => {
       },
       "FRkdorMWaYW",
       "1866",
-    ),
+    ]),
     false,
   );
 });
@@ -605,7 +699,11 @@ test("records the configured standard on new compressed withdrawals", () => {
 test("validates a Helius-shaped Bubblegum V1 prize without a grouping verification flag", () => {
   const fixture = createCompressedPrizeFixture();
   assert.equal(
-    Object.hasOwn(fixture.assetWithProof.rpcAsset.grouping[0], "verified"),
+    Object.hasOwn(
+      fixture.assetWithProof.rpcAsset.grouping[0] ??
+        assert.fail("missing collection"),
+      "verified",
+    ),
     false,
   );
   assert.deepEqual(validateCompressedPrizeAsset(fixture), {
@@ -625,7 +723,9 @@ test("accepts a fully truncated canopy proof", () => {
 
 test("blocks compressed prizes from another collection", () => {
   const fixture = createCompressedPrizeFixture();
-  fixture.assetWithProof.rpcAsset.grouping[0].group_value = recipientAddress;
+  assert.ok(fixture.assetWithProof.rpcAsset.grouping[0]);
+  fixture.assetWithProof.rpcAsset.grouping[0].group_value =
+    publicKey(recipientAddress);
   assert.deepEqual(validateCompressedPrizeAsset(fixture), {
     assetOwner: fixture.owner.publicKey,
     blocked: true,
@@ -644,11 +744,15 @@ test("blocks explicitly unverified compressed prize collections", () => {
 
 test("keeps incomplete compressed ownership and collection data retryable", () => {
   for (const update of [
-    (asset) => {
+    (
+      /** @type {ReturnType<typeof createCompressedPrizeFixture>["assetWithProof"]["rpcAsset"]} */ asset,
+    ) => {
       asset.grouping = [];
     },
-    (asset) => {
-      delete asset.ownership.frozen;
+    (
+      /** @type {ReturnType<typeof createCompressedPrizeFixture>["assetWithProof"]["rpcAsset"]} */ asset,
+    ) => {
+      Reflect.deleteProperty(asset.ownership, "frozen");
     },
   ]) {
     const fixture = createCompressedPrizeFixture();
@@ -656,6 +760,8 @@ test("keeps incomplete compressed ownership and collection data retryable", () =
     assert.throws(
       () => validateCompressedPrizeAsset(fixture),
       (error) =>
+        error instanceof Error &&
+        "code" in error &&
         error.code === "failed-precondition" &&
         error.message === "The compressed prize data could not be verified.",
     );
@@ -664,11 +770,16 @@ test("keeps incomplete compressed ownership and collection data retryable", () =
 
 test("rejects compressed metadata that does not match its leaf hashes", () => {
   for (const update of [
-    (assetWithProof) => {
+    (
+      /** @type {ReturnType<typeof createCompressedPrizeFixture>["assetWithProof"]} */ assetWithProof,
+    ) => {
       assetWithProof.rpcAsset.content.json_uri =
         "https://example.com/other.json";
     },
-    (assetWithProof) => {
+    (
+      /** @type {ReturnType<typeof createCompressedPrizeFixture>["assetWithProof"]} */ assetWithProof,
+    ) => {
+      assert.ok(assetWithProof.rpcAsset.creators[0]);
       assetWithProof.rpcAsset.creators[0].share = 99;
     },
   ]) {
@@ -677,6 +788,8 @@ test("rejects compressed metadata that does not match its leaf hashes", () => {
     assert.throws(
       () => validateCompressedPrizeAsset(fixture),
       (error) =>
+        error instanceof Error &&
+        "code" in error &&
         error.code === "failed-precondition" &&
         error.message === "The compressed prize data could not be verified.",
     );
@@ -685,10 +798,14 @@ test("rejects compressed metadata that does not match its leaf hashes", () => {
 
 test("blocks burnt and permanently non-transferable compressed prizes", () => {
   for (const update of [
-    (asset) => {
+    (
+      /** @type {ReturnType<typeof createCompressedPrizeFixture>["assetWithProof"]["rpcAsset"]} */ asset,
+    ) => {
       asset.burnt = true;
     },
-    (asset) => {
+    (
+      /** @type {ReturnType<typeof createCompressedPrizeFixture>["assetWithProof"]["rpcAsset"]} */ asset,
+    ) => {
       asset.ownership.non_transferable = true;
     },
   ]) {
@@ -704,6 +821,8 @@ test("keeps frozen compressed prizes retryable", () => {
   assert.throws(
     () => validateCompressedPrizeAsset(fixture),
     (error) =>
+      error instanceof Error &&
+      "code" in error &&
       error.code === "failed-precondition" &&
       error.message === "This prize cannot be withdrawn right now.",
   );
@@ -713,26 +832,32 @@ test("submitted compressed recovery reads ownership without fetching a proof", a
   const fixture = createCompressedPrizeFixture();
   let assetReadCount = 0;
   let assetRequest;
-  const state = await loadPrizeAssetState({
-    umi: {
-      rpc: {
-        getAsset: async (request) => {
-          assetReadCount += 1;
-          assetRequest = request;
-          return fixture.assetWithProof.rpcAsset;
+  const state = await /** @type {ReturnType<typeof loadPrizeAssetState>} */ (
+    Reflect.apply(loadPrizeAssetState, undefined, [
+      {
+        umi: {
+          rpc: {
+            getAsset: async (
+              /** @type {{assetId: string, displayOptions: {showUnverifiedCollections: boolean}}} */ request,
+            ) => {
+              assetReadCount += 1;
+              assetRequest = request;
+              return fixture.assetWithProof.rpcAsset;
+            },
+            getAssetProof: async () => {
+              throw new Error("proof must not be read");
+            },
+            getAccount: async () => {
+              throw new Error("tree account must not be read");
+            },
+          },
         },
-        getAssetProof: async () => {
-          throw new Error("proof must not be read");
-        },
-        getAccount: async () => {
-          throw new Error("tree account must not be read");
-        },
+        prize: fixture.prize,
+        recipientAddress,
+        needsTransferBuilder: false,
       },
-    },
-    prize: fixture.prize,
-    recipientAddress,
-    needsTransferBuilder: false,
-  });
+    ])
+  );
 
   assert.equal(assetReadCount, 1);
   assert.deepEqual(assetRequest, {
@@ -747,22 +872,26 @@ test("submitted compressed recovery reads ownership without fetching a proof", a
 
 test("submitted compressed recovery blocks an unverified collection without a proof", async () => {
   const fixture = createCompressedPrizeFixture({ collectionVerified: false });
-  const state = await loadPrizeAssetState({
-    umi: {
-      rpc: {
-        getAsset: async () => fixture.assetWithProof.rpcAsset,
-        getAssetProof: async () => {
-          throw new Error("proof must not be read");
+  const state = await /** @type {ReturnType<typeof loadPrizeAssetState>} */ (
+    Reflect.apply(loadPrizeAssetState, undefined, [
+      {
+        umi: {
+          rpc: {
+            getAsset: async () => fixture.assetWithProof.rpcAsset,
+            getAssetProof: async () => {
+              throw new Error("proof must not be read");
+            },
+            getAccount: async () => {
+              throw new Error("tree account must not be read");
+            },
+          },
         },
-        getAccount: async () => {
-          throw new Error("tree account must not be read");
-        },
+        prize: fixture.prize,
+        recipientAddress,
+        needsTransferBuilder: false,
       },
-    },
-    prize: fixture.prize,
-    recipientAddress,
-    needsTransferBuilder: false,
-  });
+    ])
+  );
 
   assert.deepEqual(state, {
     assetOwner: fixture.owner.publicKey,
@@ -773,42 +902,71 @@ test("submitted compressed recovery blocks an unverified collection without a pr
 
 test("rejects Bubblegum V2 and malformed compressed prize proofs", () => {
   const v2Fixture = createCompressedPrizeFixture();
-  v2Fixture.assetWithProof.rpcAsset.interface = "V2_NFT";
+  Reflect.set(v2Fixture.assetWithProof.rpcAsset, "interface", "V2_NFT");
   v2Fixture.assetWithProof.rpcAsset.compression.asset_data_hash =
-    recipientAddress;
+    publicKey(recipientAddress);
   assert.throws(
     () => validateCompressedPrizeAsset(v2Fixture),
     (error) =>
+      error instanceof Error &&
+      "code" in error &&
       error.code === "failed-precondition" &&
       error.message === "The compressed prize format is not supported.",
   );
 
   for (const update of [
-    (fixture) => {
-      fixture.assetWithProof.rpcAsset.id = recipientAddress;
+    (
+      /** @type {ReturnType<typeof createCompressedPrizeFixture>} */ fixture,
+    ) => {
+      fixture.assetWithProof.rpcAsset.id = publicKey(recipientAddress);
     },
-    (fixture) => {
-      fixture.assetWithProof.rpcAssetProof.tree_id = recipientAddress;
+    (
+      /** @type {ReturnType<typeof createCompressedPrizeFixture>} */ fixture,
+    ) => {
+      fixture.assetWithProof.rpcAssetProof.tree_id =
+        publicKey(recipientAddress);
     },
-    (fixture) => {
-      fixture.assetWithProof.proof = [recipientAddress];
+    (
+      /** @type {ReturnType<typeof createCompressedPrizeFixture>} */ fixture,
+    ) => {
+      fixture.assetWithProof.proof = [publicKey(recipientAddress)];
     },
-    (fixture) => {
-      fixture.assetWithProof.leafDelegate = recipientAddress;
+    (
+      /** @type {ReturnType<typeof createCompressedPrizeFixture>} */ fixture,
+    ) => {
+      fixture.assetWithProof.leafDelegate = publicKey(recipientAddress);
     },
-    (fixture) => {
+    (
+      /** @type {ReturnType<typeof createCompressedPrizeFixture>} */ fixture,
+    ) => {
       fixture.assetWithProof.rpcAssetProof.node_index += 1;
     },
-    (fixture) => {
-      fixture.assetWithProof.rpcAsset.compression.data_hash = "invalid";
+    (
+      /** @type {ReturnType<typeof createCompressedPrizeFixture>} */ fixture,
+    ) => {
+      Reflect.set(
+        fixture.assetWithProof.rpcAsset.compression,
+        "data_hash",
+        "invalid",
+      );
     },
-    (fixture) => {
-      fixture.assetWithProof.rpcAsset.compression.creator_hash = "invalid";
+    (
+      /** @type {ReturnType<typeof createCompressedPrizeFixture>} */ fixture,
+    ) => {
+      Reflect.set(
+        fixture.assetWithProof.rpcAsset.compression,
+        "creator_hash",
+        "invalid",
+      );
     },
-    (fixture) => {
+    (
+      /** @type {ReturnType<typeof createCompressedPrizeFixture>} */ fixture,
+    ) => {
       fixture.assetWithProof.dataHash = new Uint8Array(31);
     },
-    (fixture) => {
+    (
+      /** @type {ReturnType<typeof createCompressedPrizeFixture>} */ fixture,
+    ) => {
       fixture.assetWithProof.creatorHash = new Uint8Array(31);
     },
   ]) {
@@ -817,6 +975,8 @@ test("rejects Bubblegum V2 and malformed compressed prize proofs", () => {
     assert.throws(
       () => validateCompressedPrizeAsset(fixture),
       (error) =>
+        error instanceof Error &&
+        "code" in error &&
         error.code === "failed-precondition" &&
         error.message === "The compressed prize data could not be verified.",
     );
@@ -832,6 +992,13 @@ test("builds compressed transfers with the admin identity as leaf owner", () => 
     recipientAddress: destination,
   });
   const [instruction] = builder.getInstructions();
+  assert.ok(instruction);
+  assert.ok(
+    instruction.keys[1] &&
+      instruction.keys[2] &&
+      instruction.keys[3] &&
+      instruction.keys[4],
+  );
   const [instructionData] = getTransferInstructionDataSerializer().deserialize(
     instruction.data,
   );
@@ -964,19 +1131,20 @@ test("reacquires an active submitted withdrawal for idempotent recovery", () => 
     leaseId: "lease-current",
     leaseExpiresAtMs: 2000,
     transactionSignature: "signature",
-    signedTransactionBase64: "transaction",
-    blockhash: "blockhash",
+    signedTransactionBase64: "AQID",
+    blockhash: "11111111111111111111111111111111",
     lastValidBlockHeight: 123,
   });
   assert.equal(decision.kind, "acquired");
   assert.equal(decision.value.status, "submitted");
   assert.equal(decision.value.leaseId, "lease-next");
   assert.equal(decision.value.transactionSignature, "signature");
-  assert.equal(decision.value.signedTransactionBase64, "transaction");
+  assert.equal(decision.value.signedTransactionBase64, "AQID");
 });
 
 test("checks the authoritative claim after a stale local transaction read", async () => {
-  const authoritative = {
+  /** @type {WithdrawalDocument | null} */
+  const authoritative = canonicalWithdrawalFixture({
     status: "processing",
     eventId,
     prizeId,
@@ -987,10 +1155,11 @@ test("checks the authoritative claim after a stale local transaction read", asyn
     requesterUid: "other-uid",
     leaseId: "lease-current",
     leaseExpiresAtMs: Date.now() + 60_000,
-  };
+  });
   const withdrawalRecord = typedWithdrawalRecord({
     transaction: async (update) => {
       const optimistic = update(null);
+      assert.ok(optimistic);
       assert.equal(optimistic.status, "processing");
       const unchanged = update(authoritative);
       assert.equal(unchanged, authoritative);
@@ -1014,13 +1183,16 @@ test("checks the authoritative claim after a stale local transaction read", asyn
       canonicalRecordSourceProfileId: profileId,
     }),
     (error) =>
+      error instanceof Error &&
+      "code" in error &&
       error.code === "aborted" &&
       error.message === "This prize withdrawal is already being processed.",
   );
 });
 
 test("retries acquisition when a busy lease expires after the transaction", async () => {
-  const authoritative = {
+  /** @type {WithdrawalDocument | null} */
+  const authoritative = canonicalWithdrawalFixture({
     status: "processing",
     eventId,
     prizeId,
@@ -1031,7 +1203,7 @@ test("retries acquisition when a busy lease expires after the transaction", asyn
     requesterUid: "other-uid",
     leaseId: "lease-current",
     leaseExpiresAtMs: Date.now() + 5,
-  };
+  });
   let transactionCount = 0;
   const withdrawalRecord = typedWithdrawalRecord({
     transaction: async (update) => {
@@ -1041,6 +1213,7 @@ test("retries acquisition when a busy lease expires after the transaction", asyn
         assert.equal(next, authoritative);
         await new Promise((resolve) => setTimeout(resolve, 10));
       } else {
+        assert.ok(next);
         assert.equal(next.status, "processing");
         assert.notEqual(next.leaseId, authoritative.leaseId);
       }
@@ -1063,14 +1236,16 @@ test("retries acquisition when a busy lease expires after the transaction", asyn
     canonicalRecordSourceProfileId: profileId,
   });
   assert.equal(transactionCount, 2);
+  assert.ok(claimResult.withdrawal);
   assert.equal(claimResult.withdrawal.status, "processing");
 });
 
 test("persists a submission after refreshing a stale local transaction cache", async () => {
-  const authoritative = {
+  const authoritative = canonicalWithdrawalFixture({
     status: "processing",
     leaseId: "lease",
-  };
+  });
+  /** @type {unknown[]} */
   const inputs = [];
   const withdrawalRecord = typedWithdrawalRecord({
     transaction: async (update) => {
@@ -1088,8 +1263,8 @@ test("persists a submission after refreshing a stale local transaction cache", a
     withdrawalRecord,
     leaseId: "lease",
     transactionSignature: "signature",
-    signedTransactionBase64: "transaction",
-    blockhash: "blockhash",
+    signedTransactionBase64: "AQID",
+    blockhash: "11111111111111111111111111111111",
     lastValidBlockHeight: 123,
   });
   assert.deepEqual(inputs, [null, authoritative]);
@@ -1098,15 +1273,16 @@ test("persists a submission after refreshing a stale local transaction cache", a
 });
 
 test("simulates a signed transfer before persisting its submission", async () => {
+  /** @type {string[]} */
   const calls = [];
   const signature = new Uint8Array(64).fill(21);
   const signedTransaction = { signatures: [signature] };
   const latestBlockhash = {
-    blockhash: "blockhash",
+    blockhash: "11111111111111111111111111111111",
     lastValidBlockHeight: 123,
   };
   const builder = {
-    setBlockhash: (value) => {
+    setBlockhash: (/** @type {typeof latestBlockhash} */ value) => {
       calls.push("set-blockhash");
       assert.equal(value, latestBlockhash);
       return builder;
@@ -1122,7 +1298,10 @@ test("simulates a signed transfer before persisting its submission", async () =>
         calls.push("latest-blockhash");
         return latestBlockhash;
       },
-      simulateTransaction: async (value, options) => {
+      simulateTransaction: async (
+        /** @type {unknown} */ value,
+        /** @type {{verifySignatures: boolean}} */ options,
+      ) => {
         calls.push("simulate");
         assert.equal(value, signedTransaction);
         assert.equal(options.verifySignatures, true);
@@ -1133,7 +1312,11 @@ test("simulates a signed transfer before persisting its submission", async () =>
       serialize: () => new Uint8Array([1, 2, 3]),
     },
   };
-  let current = { status: "processing", leaseId: "lease" };
+  /** @type {WithdrawalDocument | null} */
+  let current = canonicalWithdrawalFixture({
+    status: "processing",
+    leaseId: "lease",
+  });
   const withdrawalRecord = typedWithdrawalRecord({
     transaction: async (update) => {
       calls.push("persist");
@@ -1145,12 +1328,17 @@ test("simulates a signed transfer before persisting its submission", async () =>
     },
   });
 
-  const submitted = await buildSubmittedTransaction({
-    umi,
-    builder,
-    withdrawalRecord,
-    leaseId: "lease",
-  });
+  const submitted =
+    await /** @type {ReturnType<typeof buildSubmittedTransaction>} */ (
+      Reflect.apply(buildSubmittedTransaction, undefined, [
+        {
+          umi,
+          builder,
+          withdrawalRecord,
+          leaseId: "lease",
+        },
+      ])
+    );
 
   assert.deepEqual(calls, [
     "latest-blockhash",
@@ -1161,14 +1349,16 @@ test("simulates a signed transfer before persisting its submission", async () =>
   ]);
   assert.equal(submitted.transactionSignature, bs58.default.encode(signature));
   assert.equal(submitted.persistedWithdrawal, current);
+  assert.ok(current);
   assert.equal(current.status, "submitted");
 });
 
 test("does not persist a submission after authoritative lease ownership changes", async () => {
-  const authoritative = {
+  /** @type {WithdrawalDocument | null} */
+  const authoritative = canonicalWithdrawalFixture({
     status: "processing",
     leaseId: "another-lease",
-  };
+  });
   const withdrawalRecord = typedWithdrawalRecord({
     transaction: async (update) => {
       const unchanged = update(authoritative);
@@ -1184,20 +1374,23 @@ test("does not persist a submission after authoritative lease ownership changes"
       withdrawalRecord,
       leaseId: "lease",
       transactionSignature: "signature",
-      signedTransactionBase64: "transaction",
-      blockhash: "blockhash",
+      signedTransactionBase64: "AQID",
+      blockhash: "11111111111111111111111111111111",
       lastValidBlockHeight: 123,
     }),
-    (error) => error.code === "aborted",
+    (error) =>
+      error instanceof Error && "code" in error && error.code === "aborted",
   );
 });
 
 test("discards only the exact definitive submitted transaction", async () => {
-  let current = {
+  /** @type {WithdrawalDocument | null} */
+  /** @type {WithdrawalDocument | null} */
+  let current = canonicalWithdrawalFixture({
     status: "submitted",
     leaseId: "lease",
     transactionSignature: "signature",
-  };
+  });
   const withdrawalRecord = typedWithdrawalRecord({
     transaction: async (update) => {
       current = update(current);
@@ -1221,11 +1414,13 @@ test("discards only the exact definitive submitted transaction", async () => {
 });
 
 test("checks authoritative state before discarding a submission", async () => {
-  const authoritative = {
+  /** @type {WithdrawalDocument | null} */
+  const authoritative = canonicalWithdrawalFixture({
     status: "submitted",
     leaseId: "lease",
     transactionSignature: "signature",
-  };
+  });
+  /** @type {unknown[]} */
   const inputs = [];
   const withdrawalRecord = typedWithdrawalRecord({
     transaction: async (update) => {
@@ -1249,11 +1444,11 @@ test("checks authoritative state before discarding a submission", async () => {
 });
 
 test("does not discard a concurrent successor submission", async () => {
-  const successor = {
+  const successor = canonicalWithdrawalFixture({
     status: "submitted",
     leaseId: "successor-lease",
     transactionSignature: "successor-signature",
-  };
+  });
   const withdrawalRecord = typedWithdrawalRecord({
     transaction: async (update) => {
       const next = update(successor);
@@ -1271,7 +1466,8 @@ test("does not discard a concurrent successor submission", async () => {
       leaseId: "old-lease",
       transactionSignature: "old-signature",
     }),
-    (error) => error.code === "aborted",
+    (error) =>
+      error instanceof Error && "code" in error && error.code === "aborted",
   );
   assert.equal(successor.transactionSignature, "successor-signature");
 });
@@ -1290,14 +1486,14 @@ test("preserves submitted transaction data on an idempotent retry", () => {
     leaseExpiresAtMs: 500,
     startedAtMs: 100,
     transactionSignature: "signature",
-    signedTransactionBase64: "transaction",
-    blockhash: "blockhash",
+    signedTransactionBase64: "AQID",
+    blockhash: "11111111111111111111111111111111",
     lastValidBlockHeight: 123,
   });
   assert.equal(decision.kind, "acquired");
   assert.equal(decision.value.status, "submitted");
   assert.equal(decision.value.transactionSignature, "signature");
-  assert.equal(decision.value.signedTransactionBase64, "transaction");
+  assert.equal(decision.value.signedTransactionBase64, "AQID");
   assert.equal(decision.value.startedAtMs, 100);
 });
 
@@ -1317,8 +1513,8 @@ test("migrates a submitted attempt to the caller's current profile", () => {
       leaseId: "expired",
       leaseExpiresAtMs: 500,
       transactionSignature: "signature",
-      signedTransactionBase64: "transaction",
-      blockhash: "blockhash",
+      signedTransactionBase64: "AQID",
+      blockhash: "11111111111111111111111111111111",
       lastValidBlockHeight: 123,
     },
     { profileId: currentProfileId },
@@ -1328,8 +1524,8 @@ test("migrates a submitted attempt to the caller's current profile", () => {
   assert.equal(decision.value.entitledProfileId, originalProfileId);
   assert.equal(decision.value.recipientAddress, recipientAddress);
   assert.equal(decision.value.transactionSignature, "signature");
-  assert.equal(decision.value.signedTransactionBase64, "transaction");
-  assert.equal(decision.value.blockhash, "blockhash");
+  assert.equal(decision.value.signedTransactionBase64, "AQID");
+  assert.equal(decision.value.blockhash, "11111111111111111111111111111111");
   assert.equal(decision.value.lastValidBlockHeight, 123);
 });
 
@@ -1422,7 +1618,7 @@ test("locks a submitted withdrawal to its original destination", () => {
 });
 
 test("returns completed withdrawals without acquiring another lease", () => {
-  const completed = {
+  const completed = canonicalWithdrawalFixture({
     status: "completed",
     eventId,
     prizeId,
@@ -1430,7 +1626,7 @@ test("returns completed withdrawals without acquiring another lease", () => {
     profileId,
     recipientAddress,
     transactionSignature: "signature",
-  };
+  });
   const decision = claim(completed);
   assert.equal(decision.kind, "completed");
   assert.equal(decision.value, completed);
@@ -1441,7 +1637,7 @@ test("returns completed withdrawals without acquiring another lease", () => {
 });
 
 test("returns a completed withdrawal after the caller's profile was merged", () => {
-  const completed = {
+  const completed = canonicalWithdrawalFixture({
     status: "completed",
     eventId,
     prizeId,
@@ -1450,7 +1646,7 @@ test("returns a completed withdrawal after the caller's profile was merged", () 
     recipientAddress,
     requesterUid: "uid",
     transactionSignature: "signature",
-  };
+  });
   const decision = claim(completed, { profileId: "profile-after-merge" });
   assert.equal(decision.kind, "completed");
   assert.equal(decision.value, completed);
@@ -1465,12 +1661,12 @@ test("filters completed withdrawals out of prize projections", () => {
     eventId,
     assignments,
     withdrawals: {
-      [prizeId]: {
+      [prizeId]: canonicalWithdrawalFixture({
         status: "completed",
         eventId,
         prizeId,
         assetAddress,
-      },
+      }),
     },
   });
   assert.deepEqual(Object.keys(projectable), ["2"]);
@@ -1481,21 +1677,25 @@ test("schedules ended-event cleanup even when no event fields changed", () => {
     1: { eventId, profileId, place: 1, prizeId },
   };
   assert.deepEqual(
-    getCompletedEventPrizeProjectionCleanupRequest({
-      eventId,
-      eventStatus: "ended",
-      assignments,
-      didChange: false,
-    }),
+    Reflect.apply(getCompletedEventPrizeProjectionCleanupRequest, undefined, [
+      {
+        eventId,
+        eventStatus: "ended",
+        assignments,
+        didChange: false,
+      },
+    ]),
     { eventId, assignments },
   );
   assert.equal(
-    getCompletedEventPrizeProjectionCleanupRequest({
-      eventId,
-      eventStatus: "active",
-      assignments,
-      didChange: true,
-    }),
+    Reflect.apply(getCompletedEventPrizeProjectionCleanupRequest, undefined, [
+      {
+        eventId,
+        eventStatus: "active",
+        assignments,
+        didChange: true,
+      },
+    ]),
     null,
   );
 });
@@ -1514,7 +1714,8 @@ test("requires the entitlement to match the canonical profile and requested priz
         prizeId: "1111",
         profileId,
       }),
-    (error) => error.code === "not-found",
+    (error) =>
+      error instanceof Error && "code" in error && error.code === "not-found",
   );
   assert.throws(
     () =>
@@ -1524,7 +1725,8 @@ test("requires the entitlement to match the canonical profile and requested priz
         prizeId,
         profileId: "different-profile",
       }),
-    (error) => error.code === "not-found",
+    (error) =>
+      error instanceof Error && "code" in error && error.code === "not-found",
   );
 });
 
@@ -1573,7 +1775,11 @@ test("preserves prize assignment rejection errors and exact request identifiers"
       }),
     ),
   ];
-  for (const field of ["eventId", "prizeId", "profileId"]) {
+  for (const field of /** @type {const} */ ([
+    "eventId",
+    "prizeId",
+    "profileId",
+  ])) {
     for (const value of [undefined, null, false, 1, [], {}, "", "different"]) {
       requests.push({
         assignment: { ...assignment, [field]: value },
@@ -1594,6 +1800,8 @@ test("preserves prize assignment rejection errors and exact request identifiers"
     assert.throws(
       () => validatePrizeAssignment(request),
       (error) =>
+        error instanceof Error &&
+        "code" in error &&
         error instanceof EventPrizeWithdrawalError &&
         error.name === "EventPrizeWithdrawalError" &&
         error.code === "not-found" &&
@@ -1607,7 +1815,10 @@ test("recognizes a confirmed submitted transaction by its stored signature", asy
   let statusReadCount = 0;
   const umi = {
     rpc: {
-      getSignatureStatuses: async (signatures, options) => {
+      getSignatureStatuses: async (
+        /** @type {readonly Uint8Array[]} */ signatures,
+        /** @type {unknown} */ options,
+      ) => {
         assert.equal(signatures[0], transactionSignature);
         assert.deepEqual(options, { searchTransactionHistory: true });
         statusReadCount += 1;
@@ -1622,11 +1833,16 @@ test("recognizes a confirmed submitted transaction by its stored signature", asy
       },
     },
   };
-  const status = await waitForSubmittedTransactionStatus({
-    umi,
-    submitted: createSubmittedTransaction(transactionSignature),
-    retryDelaysMs: [0, 0],
-  });
+  const status =
+    await /** @type {ReturnType<typeof waitForSubmittedTransactionStatus>} */ (
+      Reflect.apply(waitForSubmittedTransactionStatus, undefined, [
+        {
+          umi,
+          submitted: createSubmittedTransaction(transactionSignature),
+          retryDelaysMs: [0, 0],
+        },
+      ])
+    );
   assert.equal(status.kind, "confirmed");
   assert.equal(statusReadCount, 2);
 });
@@ -1647,11 +1863,16 @@ test("does not treat a processed transaction as failed", async () => {
       },
     },
   };
-  const status = await waitForSubmittedTransactionStatus({
-    umi,
-    submitted: createSubmittedTransaction(transactionSignature),
-    retryDelaysMs: [0, 0],
-  });
+  const status =
+    await /** @type {ReturnType<typeof waitForSubmittedTransactionStatus>} */ (
+      Reflect.apply(waitForSubmittedTransactionStatus, undefined, [
+        {
+          umi,
+          submitted: createSubmittedTransaction(transactionSignature),
+          retryDelaysMs: [0, 0],
+        },
+      ])
+    );
   assert.equal(status.kind, "confirmed");
   assert.equal(statusReadCount, 2);
 });
@@ -1668,12 +1889,16 @@ test("bounds stalled confirmation and reconciles the exact signature", async () 
     },
   };
   const startedAtMs = Date.now();
-  await sendAndConfirmSubmittedTransaction({
-    umi,
-    submitted: createSubmittedTransaction(transactionSignature),
-    confirmationTimeoutMs: 1,
-    statusRetryDelaysMs: [0],
-  });
+  await /** @type {ReturnType<typeof sendAndConfirmSubmittedTransaction>} */ (
+    Reflect.apply(sendAndConfirmSubmittedTransaction, undefined, [
+      {
+        umi,
+        submitted: createSubmittedTransaction(transactionSignature),
+        confirmationTimeoutMs: 1,
+        statusRetryDelaysMs: [0],
+      },
+    ])
+  );
   assert.ok(Date.now() - startedAtMs < 1000);
 });
 
@@ -1688,13 +1913,20 @@ test("exits a stalled unresolved confirmation before the function deadline", asy
   };
   const startedAtMs = Date.now();
   await assert.rejects(
-    sendAndConfirmSubmittedTransaction({
-      umi,
-      submitted: createSubmittedTransaction(transactionSignature),
-      confirmationTimeoutMs: 1,
-      statusRetryDelaysMs: [0],
-    }),
-    (error) => error.code === "confirmation-timeout",
+    /** @type {ReturnType<typeof sendAndConfirmSubmittedTransaction>} */ (
+      Reflect.apply(sendAndConfirmSubmittedTransaction, undefined, [
+        {
+          umi,
+          submitted: createSubmittedTransaction(transactionSignature),
+          confirmationTimeoutMs: 1,
+          statusRetryDelaysMs: [0],
+        },
+      ])
+    ),
+    (error) =>
+      error instanceof Error &&
+      "code" in error &&
+      error.code === "confirmation-timeout",
   );
   assert.ok(Date.now() - startedAtMs < 1000);
 });
@@ -1708,27 +1940,36 @@ test("bounds a stalled send before confirming the exact signature", async () => 
     },
   };
   const startedAtMs = Date.now();
-  await sendAndConfirmSubmittedTransaction({
-    umi,
-    submitted: createSubmittedTransaction(transactionSignature),
-    sendTimeoutMs: 1,
-  });
+  await /** @type {ReturnType<typeof sendAndConfirmSubmittedTransaction>} */ (
+    Reflect.apply(sendAndConfirmSubmittedTransaction, undefined, [
+      {
+        umi,
+        submitted: createSubmittedTransaction(transactionSignature),
+        sendTimeoutMs: 1,
+      },
+    ])
+  );
   assert.ok(Date.now() - startedAtMs < 1000);
 });
 
 test("bounds stalled exact-signature status reads", async () => {
   const transactionSignature = new Uint8Array(64).fill(11);
   const startedAtMs = Date.now();
-  const status = await waitForSubmittedTransactionStatus({
-    umi: {
-      rpc: {
-        getSignatureStatuses: async () => new Promise(() => {}),
-      },
-    },
-    submitted: createSubmittedTransaction(transactionSignature),
-    retryDelaysMs: [0],
-    statusRequestTimeoutMs: 1,
-  });
+  const status =
+    await /** @type {ReturnType<typeof waitForSubmittedTransactionStatus>} */ (
+      Reflect.apply(waitForSubmittedTransactionStatus, undefined, [
+        {
+          umi: {
+            rpc: {
+              getSignatureStatuses: async () => new Promise(() => {}),
+            },
+          },
+          submitted: createSubmittedTransaction(transactionSignature),
+          retryDelaysMs: [0],
+          statusRequestTimeoutMs: 1,
+        },
+      ])
+    );
   assert.equal(status.kind, "unknown");
   assert.ok(Date.now() - startedAtMs < 1000);
 });
@@ -1742,13 +1983,16 @@ test("recovers an ambiguous send error when the signature was confirmed", async 
       sendTransaction: async () => {
         throw sendError;
       },
-      confirmTransaction: async (signature, options) => {
+      confirmTransaction: async (
+        /** @type {Uint8Array} */ signature,
+        /** @type {unknown} */ options,
+      ) => {
         assert.equal(signature, transactionSignature);
         assert.deepEqual(options, {
           commitment: "confirmed",
           strategy: {
             type: "blockhash",
-            blockhash: "blockhash",
+            blockhash: "11111111111111111111111111111111",
             lastValidBlockHeight: 123,
           },
         });
@@ -1760,17 +2004,21 @@ test("recovers an ambiguous send error when the signature was confirmed", async 
       },
     },
   };
-  await sendAndConfirmSubmittedTransaction({
-    umi,
-    submitted: createSubmittedTransaction(transactionSignature),
-    statusRetryDelaysMs: [0],
-  });
+  await /** @type {ReturnType<typeof sendAndConfirmSubmittedTransaction>} */ (
+    Reflect.apply(sendAndConfirmSubmittedTransaction, undefined, [
+      {
+        umi,
+        submitted: createSubmittedTransaction(transactionSignature),
+        statusRetryDelaysMs: [0],
+      },
+    ])
+  );
   assert.equal(statusReadCount, 0);
 });
 
 test("preserves a log-bearing send error when the signature is not confirmed", async () => {
   const sendError = new Error("RPC rejected the request");
-  sendError.logs = ["Program failed"];
+  Object.assign(sendError, { logs: ["Program failed"] });
   const transactionSignature = new Uint8Array(64).fill(3);
   const umi = {
     rpc: {
@@ -1784,11 +2032,15 @@ test("preserves a log-bearing send error when the signature is not confirmed", a
     },
   };
   await assert.rejects(
-    sendAndConfirmSubmittedTransaction({
-      umi,
-      submitted: createSubmittedTransaction(transactionSignature),
-      statusRetryDelaysMs: [0],
-    }),
+    /** @type {ReturnType<typeof sendAndConfirmSubmittedTransaction>} */ (
+      Reflect.apply(sendAndConfirmSubmittedTransaction, undefined, [
+        {
+          umi,
+          submitted: createSubmittedTransaction(transactionSignature),
+          statusRetryDelaysMs: [0],
+        },
+      ])
+    ),
     (error) => error === sendError,
   );
 });
@@ -1809,12 +2061,17 @@ test("classifies a confirmed on-chain transaction error as definitive", async ()
     },
   };
   await assert.rejects(
-    sendAndConfirmSubmittedTransaction({
-      umi,
-      submitted: createSubmittedTransaction(transactionSignature),
-      statusRetryDelaysMs: [0],
-    }),
+    /** @type {ReturnType<typeof sendAndConfirmSubmittedTransaction>} */ (
+      Reflect.apply(sendAndConfirmSubmittedTransaction, undefined, [
+        {
+          umi,
+          submitted: createSubmittedTransaction(transactionSignature),
+          statusRetryDelaysMs: [0],
+        },
+      ])
+    ),
     (error) =>
+      error instanceof Error &&
       isDefinitiveSubmittedTransactionFailure(error) &&
       error.message === "Prize transfer failed.",
   );
@@ -1822,7 +2079,7 @@ test("classifies a confirmed on-chain transaction error as definitive", async ()
 
 test("reconciles a log-bearing preflight error against the exact signature", async () => {
   const sendError = new Error("preflight failed");
-  sendError.logs = ["Program failed"];
+  Object.assign(sendError, { logs: ["Program failed"] });
   const transactionSignature = new Uint8Array(64).fill(5);
   let confirmationCount = 0;
   let statusReadCount = 0;
@@ -1841,11 +2098,15 @@ test("reconciles a log-bearing preflight error against the exact signature", asy
       },
     },
   };
-  await sendAndConfirmSubmittedTransaction({
-    umi,
-    submitted: createSubmittedTransaction(transactionSignature),
-    statusRetryDelaysMs: [0],
-  });
+  await /** @type {ReturnType<typeof sendAndConfirmSubmittedTransaction>} */ (
+    Reflect.apply(sendAndConfirmSubmittedTransaction, undefined, [
+      {
+        umi,
+        submitted: createSubmittedTransaction(transactionSignature),
+        statusRetryDelaysMs: [0],
+      },
+    ])
+  );
   assert.equal(confirmationCount, 1);
   assert.equal(statusReadCount, 1);
 });
@@ -1868,12 +2129,17 @@ test("classifies a failed signature status as definitive", async () => {
   };
 
   await assert.rejects(
-    sendAndConfirmSubmittedTransaction({
-      umi,
-      submitted: createSubmittedTransaction(transactionSignature),
-      statusRetryDelaysMs: [0],
-    }),
+    /** @type {ReturnType<typeof sendAndConfirmSubmittedTransaction>} */ (
+      Reflect.apply(sendAndConfirmSubmittedTransaction, undefined, [
+        {
+          umi,
+          submitted: createSubmittedTransaction(transactionSignature),
+          statusRetryDelaysMs: [0],
+        },
+      ])
+    ),
     (error) =>
+      error instanceof Error &&
       isDefinitiveSubmittedTransactionFailure(error) &&
       error.message === "Prize transfer failed.",
   );
@@ -1904,13 +2170,18 @@ test("rejects a stored signature that does not match the signed transaction", as
     },
   };
   await assert.rejects(
-    sendAndConfirmSubmittedTransaction({
-      umi,
-      submitted: createSubmittedTransaction(new Uint8Array(64).fill(7), {
-        transactionSignature: "different-signature",
-      }),
-    }),
-    (error) => error.code === "internal",
+    /** @type {ReturnType<typeof sendAndConfirmSubmittedTransaction>} */ (
+      Reflect.apply(sendAndConfirmSubmittedTransaction, undefined, [
+        {
+          umi,
+          submitted: createSubmittedTransaction(new Uint8Array(64).fill(7), {
+            transactionSignature: "different-signature",
+          }),
+        },
+      ])
+    ),
+    (error) =>
+      error instanceof Error && "code" in error && error.code === "internal",
   );
   assert.equal(sendCount, 0);
 });
@@ -1918,22 +2189,26 @@ test("rejects a stored signature that does not match the signed transaction", as
 test("reads an expired persisted signature for completed-transfer recovery", () => {
   const transactionSignature = new Uint8Array(64).fill(10);
   const serialized = new Uint8Array([1, 2, 3]);
-  const recovered = deserializePersistedSubmittedTransaction(
-    {
-      transactions: {
-        deserialize: (bytes) => {
-          assert.deepEqual(bytes, serialized);
-          return { signatures: [transactionSignature] };
+  const recovered =
+    /** @type {ReturnType<typeof deserializePersistedSubmittedTransaction>} */ (
+      Reflect.apply(deserializePersistedSubmittedTransaction, undefined, [
+        {
+          transactions: {
+            deserialize: (/** @type {Uint8Array} */ bytes) => {
+              assert.deepEqual(bytes, serialized);
+              return { signatures: [transactionSignature] };
+            },
+          },
         },
-      },
-    },
-    {
-      signedTransactionBase64: Buffer.from(serialized).toString("base64"),
-      transactionSignature: bs58.default.encode(transactionSignature),
-      blockhash: "expired-blockhash",
-      lastValidBlockHeight: 1,
-    },
-  );
+        {
+          signedTransactionBase64: Buffer.from(serialized).toString("base64"),
+          transactionSignature: bs58.default.encode(transactionSignature),
+          blockhash: "expired-blockhash",
+          lastValidBlockHeight: 1,
+        },
+      ])
+    );
+  assert.ok(recovered);
   assert.equal(recovered.blockhash, "expired-blockhash");
   assert.equal(recovered.lastValidBlockHeight, 1);
   assert.equal(
@@ -1945,25 +2220,30 @@ test("reads an expired persisted signature for completed-transfer recovery", () 
 test("inspects a persisted submitted signature once", async () => {
   const transactionSignature = new Uint8Array(64).fill(15);
   let statusReadCount = 0;
-  const inspection = await inspectSubmittedWithdrawal({
-    umi: {
-      transactions: {
-        deserialize: () => ({ signatures: [transactionSignature] }),
-      },
-      rpc: {
-        getSignatureStatuses: async () => {
-          statusReadCount += 1;
-          return [{ commitment: "confirmed", error: null }];
+  const inspection =
+    await /** @type {ReturnType<typeof inspectSubmittedWithdrawal>} */ (
+      Reflect.apply(inspectSubmittedWithdrawal, undefined, [
+        {
+          umi: {
+            transactions: {
+              deserialize: () => ({ signatures: [transactionSignature] }),
+            },
+            rpc: {
+              getSignatureStatuses: async () => {
+                statusReadCount += 1;
+                return [{ commitment: "confirmed", error: null }];
+              },
+            },
+          },
+          withdrawal: {
+            signedTransactionBase64: Buffer.from([9]).toString("base64"),
+            transactionSignature: bs58.default.encode(transactionSignature),
+            blockhash: "11111111111111111111111111111111",
+            lastValidBlockHeight: 123,
+          },
         },
-      },
-    },
-    withdrawal: {
-      signedTransactionBase64: Buffer.from([9]).toString("base64"),
-      transactionSignature: bs58.default.encode(transactionSignature),
-      blockhash: "blockhash",
-      lastValidBlockHeight: 123,
-    },
-  });
+      ])
+    );
 
   assert.equal(inspection.status.kind, "confirmed");
   assert.equal(
@@ -2023,17 +2303,25 @@ test("failed submissions rebuild only while the admin still owns the prize", asy
   };
 
   assert.deepEqual(
-    await recoverSubmittedWithdrawal({
-      ...base,
-      assetOwner: EVENT_PRIZE_ADMIN_WALLET,
-    }),
+    await /** @type {ReturnType<typeof recoverSubmittedWithdrawal>} */ (
+      Reflect.apply(recoverSubmittedWithdrawal, undefined, [
+        {
+          ...base,
+          assetOwner: EVENT_PRIZE_ADMIN_WALLET,
+        },
+      ])
+    ),
     { kind: "retry", discardPersistedSubmission: true, submitted },
   );
   assert.deepEqual(
-    await recoverSubmittedWithdrawal({
-      ...base,
-      assetOwner: "11111111111111111111111111111112",
-    }),
+    await /** @type {ReturnType<typeof recoverSubmittedWithdrawal>} */ (
+      Reflect.apply(recoverSubmittedWithdrawal, undefined, [
+        {
+          ...base,
+          assetOwner: "11111111111111111111111111111112",
+        },
+      ])
+    ),
     { kind: "blocked", submitted },
   );
 });
@@ -2042,31 +2330,36 @@ test("recovers a confirmed submitted transfer despite a blocked current state", 
   const transactionSignature = new Uint8Array(64).fill(11);
   const serialized = new Uint8Array([4, 5, 6]);
   let statusReadCount = 0;
-  const resolution = await reconcileSubmittedAssetState({
-    umi: {
-      transactions: {
-        deserialize: () => ({ signatures: [transactionSignature] }),
-      },
-      rpc: {
-        getSignatureStatuses: async () => {
-          statusReadCount += 1;
-          return [{ commitment: "finalized", error: null }];
+  const resolution =
+    await /** @type {ReturnType<typeof reconcileSubmittedAssetState>} */ (
+      Reflect.apply(reconcileSubmittedAssetState, undefined, [
+        {
+          umi: {
+            transactions: {
+              deserialize: () => ({ signatures: [transactionSignature] }),
+            },
+            rpc: {
+              getSignatureStatuses: async () => {
+                statusReadCount += 1;
+                return [{ commitment: "finalized", error: null }];
+              },
+            },
+          },
+          withdrawal: {
+            signedTransactionBase64: Buffer.from(serialized).toString("base64"),
+            transactionSignature: bs58.default.encode(transactionSignature),
+            blockhash: "expired-blockhash",
+            lastValidBlockHeight: 1,
+          },
+          assetState: {
+            assetOwner: "11111111111111111111111111111112",
+            blocked: true,
+          },
+          recipientAddress,
+          statusRetryDelaysMs: [0],
         },
-      },
-    },
-    withdrawal: {
-      signedTransactionBase64: Buffer.from(serialized).toString("base64"),
-      transactionSignature: bs58.default.encode(transactionSignature),
-      blockhash: "expired-blockhash",
-      lastValidBlockHeight: 1,
-    },
-    assetState: {
-      assetOwner: "11111111111111111111111111111112",
-      blocked: true,
-    },
-    recipientAddress,
-    statusRetryDelaysMs: [0],
-  });
+      ])
+    );
   assert.equal(resolution.kind, "completed");
   assert.equal(
     resolution.submitted.transactionSignature,
@@ -2219,7 +2512,9 @@ test("keeps submitted recovery retryable after an invalid block height response"
         },
       },
     }),
-    (error) => error.message === "Solana RPC returned an invalid block height.",
+    (error) =>
+      error instanceof Error &&
+      error.message === "Solana RPC returned an invalid block height.",
   );
 });
 
@@ -2228,31 +2523,35 @@ test("keeps a blocked submitted withdrawal retryable when status is unavailable"
   const statusError = new Error("RPC unavailable");
   let statusReadCount = 0;
   await assert.rejects(
-    reconcileSubmittedAssetState({
-      umi: {
-        transactions: {
-          deserialize: () => ({ signatures: [transactionSignature] }),
-        },
-        rpc: {
-          getSignatureStatuses: async () => {
-            statusReadCount += 1;
-            throw statusError;
+    /** @type {ReturnType<typeof reconcileSubmittedAssetState>} */ (
+      Reflect.apply(reconcileSubmittedAssetState, undefined, [
+        {
+          umi: {
+            transactions: {
+              deserialize: () => ({ signatures: [transactionSignature] }),
+            },
+            rpc: {
+              getSignatureStatuses: async () => {
+                statusReadCount += 1;
+                throw statusError;
+              },
+            },
           },
+          withdrawal: {
+            signedTransactionBase64: Buffer.from([7]).toString("base64"),
+            transactionSignature: bs58.default.encode(transactionSignature),
+            blockhash: "11111111111111111111111111111111",
+            lastValidBlockHeight: 123,
+          },
+          assetState: {
+            assetOwner: "11111111111111111111111111111112",
+            blocked: true,
+          },
+          recipientAddress,
+          statusRetryDelaysMs: [0],
         },
-      },
-      withdrawal: {
-        signedTransactionBase64: Buffer.from([7]).toString("base64"),
-        transactionSignature: bs58.default.encode(transactionSignature),
-        blockhash: "blockhash",
-        lastValidBlockHeight: 123,
-      },
-      assetState: {
-        assetOwner: "11111111111111111111111111111112",
-        blocked: true,
-      },
-      recipientAddress,
-      statusRetryDelaysMs: [0],
-    }),
+      ])
+    ),
     (error) => error === statusError,
   );
   assert.equal(statusReadCount, 1);
@@ -2261,46 +2560,52 @@ test("keeps a blocked submitted withdrawal retryable when status is unavailable"
 test("rejects a mismatched persisted signature before reading its status", async () => {
   let statusReadCount = 0;
   await assert.rejects(
-    recoverSubmittedWithdrawal({
-      umi: {
-        transactions: {
-          deserialize: () => ({ signatures: [new Uint8Array(64).fill(13)] }),
-        },
-        rpc: {
-          getSignatureStatuses: async () => {
-            statusReadCount += 1;
-            return [null];
+    /** @type {ReturnType<typeof recoverSubmittedWithdrawal>} */ (
+      Reflect.apply(recoverSubmittedWithdrawal, undefined, [
+        {
+          umi: {
+            transactions: {
+              deserialize: () => ({
+                signatures: [new Uint8Array(64).fill(13)],
+              }),
+            },
+            rpc: {
+              getSignatureStatuses: async () => {
+                statusReadCount += 1;
+                return [null];
+              },
+            },
           },
+          withdrawal: {
+            signedTransactionBase64: Buffer.from([8]).toString("base64"),
+            transactionSignature: "different-signature",
+            blockhash: "11111111111111111111111111111111",
+            lastValidBlockHeight: 123,
+          },
+          assetOwner: EVENT_PRIZE_ADMIN_WALLET,
+          recipientAddress,
+          statusRetryDelaysMs: [0],
         },
-      },
-      withdrawal: {
-        signedTransactionBase64: Buffer.from([8]).toString("base64"),
-        transactionSignature: "different-signature",
-        blockhash: "blockhash",
-        lastValidBlockHeight: 123,
-      },
-      assetOwner: EVENT_PRIZE_ADMIN_WALLET,
-      recipientAddress,
-      statusRetryDelaysMs: [0],
-    }),
-    (error) => error.code === "internal",
+      ])
+    ),
+    (error) =>
+      error instanceof Error && "code" in error && error.code === "internal",
   );
   assert.equal(statusReadCount, 0);
 });
 
-test("completion records the canonical profile and retains event history", () => {
+test("completion records the canonical profile and preserves confirmed evidence", () => {
   const originalProfileId = "profile-before-merge";
-  const currentProfileId = "profile-after-merge";
+  const withdrawal = canonicalWithdrawalFixture({
+    status: "submitted",
+    profileId: originalProfileId,
+    entitledProfileId: originalProfileId,
+    startedAtMs: 10,
+    submittedAtMs: 20,
+  });
   const result = buildWithdrawalCompletion({
-    withdrawal: {
-      profileId: originalProfileId,
-      entitledProfileId: originalProfileId,
-      place: 1,
-      requesterUid: "uid",
-      startedAtMs: 10,
-      submittedAtMs: 20,
-    },
-    profileId: currentProfileId,
+    withdrawal,
+    profileId: "profile-after-merge",
     eventId,
     prizeId,
     assetAddress,
@@ -2308,36 +2613,24 @@ test("completion records the canonical profile and retains event history", () =>
     transactionSignature: "signature",
     completedAtMs: 30,
   });
-  assert.equal(
-    JSON.stringify(result),
-    JSON.stringify({
-      eventId,
-      prizeId,
-      assetAddress,
-      assetStandard: "core",
-      profileId: currentProfileId,
-      entitledProfileId: originalProfileId,
-      place: 1,
-      recipientAddress,
-      requesterUid: "uid",
-      status: "completed",
-      transactionSignature: "signature",
-      startedAtMs: 10,
-      submittedAtMs: 20,
-      completedAtMs: 30,
-      updatedAtMs: 30,
-    }),
-  );
+  assert.deepEqual(result, {
+    ...withdrawal,
+    profileId: "profile-after-merge",
+    status: "completed",
+    leaseId: null,
+    leaseExpiresAtMs: null,
+    completedAtMs: 30,
+    updatedAtMs: 30,
+  });
 });
 
-test("completion payload preserves timestamp fallbacks and contains no profile projection mutations", () => {
+test("completion preserves the original start and uses the confirmation time only when no submission was stored", () => {
+  const withdrawal = canonicalWithdrawalFixture({
+    status: "processing",
+    startedAtMs: 10,
+  });
   const completed = buildWithdrawalCompletion({
-    withdrawal: {
-      profileId,
-      entitledProfileId: profileId,
-      place: 1,
-      requesterUid: "uid",
-    },
+    withdrawal,
     profileId,
     eventId,
     prizeId,
@@ -2347,18 +2640,11 @@ test("completion payload preserves timestamp fallbacks and contains no profile p
     completedAtMs: 30,
   });
   assert.deepEqual(completed, {
-    eventId,
-    prizeId,
-    assetAddress,
-    assetStandard: "core",
-    profileId,
-    entitledProfileId: profileId,
-    place: 1,
-    recipientAddress,
-    requesterUid: "uid",
+    ...withdrawal,
     status: "completed",
+    leaseId: null,
+    leaseExpiresAtMs: null,
     transactionSignature: "signature",
-    startedAtMs: 30,
     submittedAtMs: 30,
     completedAtMs: 30,
     updatedAtMs: 30,
@@ -2368,10 +2654,13 @@ test("completion payload preserves timestamp fallbacks and contains no profile p
 test("completion reconciliation includes every known profile exactly once", () => {
   assert.deepEqual(
     getWithdrawalProjectionProfileIds({
-      withdrawal: {
-        profileId: "profile-before-merge",
-        entitledProfileId: "profile-before-merge",
-      },
+      withdrawal: canonicalWithdrawalFixture({
+        status: "completed",
+        ...{
+          profileId: "profile-before-merge",
+          entitledProfileId: "profile-before-merge",
+        },
+      }),
       profileIds: ["profile-after-merge", "profile-before-merge", ""],
     }),
     ["profile-before-merge", "profile-after-merge"],
@@ -2396,10 +2685,13 @@ test("completed retries reconcile old and current profile projections", async ()
     mergeTargets: { [originalProfileId]: currentProfileId },
   });
 
-  const withdrawal = {
-    profileId: originalProfileId,
-    entitledProfileId: originalProfileId,
-  };
+  const withdrawal = canonicalWithdrawalFixture({
+    status: "completed",
+    ...{
+      profileId: originalProfileId,
+      entitledProfileId: originalProfileId,
+    },
+  });
   await reconcileCompletedWithdrawalProjections(
     {
       withdrawal,
@@ -2450,10 +2742,13 @@ test("completed reconciliation cleans every profile in a merge chain", async () 
 
   await reconcileCompletedWithdrawalProjections(
     {
-      withdrawal: {
-        profileId: targetProfileId,
-        entitledProfileId: sourceProfileId,
-      },
+      withdrawal: canonicalWithdrawalFixture({
+        status: "completed",
+        ...{
+          profileId: targetProfileId,
+          entitledProfileId: sourceProfileId,
+        },
+      }),
       profileIds: [],
       eventId,
       prizeId,
@@ -2473,7 +2768,10 @@ test("projection cleanup failures remain retryable", async () => {
   await assert.rejects(
     reconcileCompletedWithdrawalProjections(
       {
-        withdrawal: { profileId },
+        withdrawal: canonicalWithdrawalFixture({
+          status: "completed",
+          ...{ profileId },
+        }),
         profileIds: [],
         eventId,
         prizeId,
@@ -2487,7 +2785,9 @@ test("projection cleanup failures remain retryable", async () => {
 });
 
 test("completed merge cleanup removes only the matching target projection", async () => {
+  /** @type {unknown} */
   let currentAssignment = { eventId, prizeId, profileId, place: 1 };
+  /** @type {AssignmentReference} */
   const targetRecord = {
     transaction: async (update) => {
       const next = update(currentAssignment);
@@ -2535,7 +2835,9 @@ test("completed merge cleanup removes only the matching target projection", asyn
 
 test("removes a completed prize projection after a stale local read", async () => {
   const authoritative = { eventId, prizeId, profileId, place: 1 };
+  /** @type {unknown[]} */
   const inputs = [];
+  /** @type {AssignmentReference} */
   const targetRecord = {
     transaction: async (update) => {
       inputs.push(null);

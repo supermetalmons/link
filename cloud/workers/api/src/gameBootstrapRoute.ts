@@ -42,7 +42,7 @@ function readRoute(
   const match = GAME_BOOTSTRAP_ROUTE_PATTERN.exec(url.pathname);
   let inviteId = "";
   try {
-    inviteId = match ? decodeURIComponent(match[1]) : "";
+    inviteId = match ? decodeURIComponent(match[1]!) : "";
   } catch {
     throw new AuthApiFailure(400, "invalid-argument", "invalid-invite-id");
   }

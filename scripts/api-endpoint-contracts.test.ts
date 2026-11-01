@@ -34,6 +34,8 @@ gameplayMutation("/matches/move", endpointMove, endpointToken, isSubmitMoveRespo
 gameplayMutation("/matches/move?existing=1", endpointMove, endpointToken, isSubmitMoveResponse);
 retryGameSessionMutation("/matches/move?existing=1", endpointMove, endpointToken, isSubmitMoveResponse, false);
 eventMutation("/events/create", endpointCreate, endpointToken, isCreateEventResponse);
+gameplayMutation("/events/create?eventSnapshot=v1", endpointCreate, endpointToken, isCreateEventResponse);
+// @ts-expect-error Unvalidated field bags are not event wire responses.
 gameplayMutation("/events/create?eventSnapshot=v1", endpointCreate, endpointToken, isRecord);
 // @ts-expect-error The literal path cannot infer another endpoint's body.
 gameplayMutation("/matches/move", {}, endpointToken, isSubmitMoveResponse);

@@ -221,11 +221,11 @@ const createEventBracketRuntime = (dependencies = {}) => {
     );
     const canonicalSelections = (0,
     ownership_js_1.canonicalizeEventPrizeSelections)(
-      (0, documents_js_1.readEventDocument)({
+      {
         participants: (0, documents_js_1.createEventParticipantsDocument)(
           Object.fromEntries(placementParticipantEntries),
         ),
-      }),
+      },
       placementSelections,
       ownershipSnapshot,
     ).selectionsByProfileId;
@@ -442,15 +442,17 @@ const createEventBracketRuntime = (dependencies = {}) => {
     const sortedRoundIndexes = (0,
     startTransitionCore_js_1.getSortedRoundIndexes)(rounds);
     const finalRoundIndex = sortedRoundIndexes[sortedRoundIndexes.length - 1];
+    if (finalRoundIndex === undefined) return [];
     const finalRound = (0, documents_js_1.eventRoundAt)(
       rounds,
       String(finalRoundIndex),
     );
     const finalMatches = (0, documents_js_1.eventPlacementMatches)(finalRound);
-    const finalMatchEntry =
-      finalMatches[
-        (0, startTransitionCore_js_1.getSortedMatchKeys)(finalMatches)[0]
-      ];
+    const finalMatchKey = (0, startTransitionCore_js_1.getSortedMatchKeys)(
+      finalMatches,
+    )[0];
+    if (finalMatchKey === undefined) return [];
+    const finalMatchEntry = finalMatches[finalMatchKey];
     if (!finalMatchEntry?.present) return [];
     const finalMatch = finalMatchEntry.match;
     const disqualifiedIdentityKeys = getEventPrizeDisqualifiedIdentityKeys({
@@ -527,8 +529,8 @@ const createEventBracketRuntime = (dependencies = {}) => {
           return rightRound - leftRound;
         }
         const joinedDifference =
-          (0, documents_js_1.eventParticipantJoinedOrder)(left, 0) -
-          (0, documents_js_1.eventParticipantJoinedOrder)(right, 0);
+          (0, documents_js_1.eventParticipantJoinedOrder)(left) -
+          (0, documents_js_1.eventParticipantJoinedOrder)(right);
         if (joinedDifference !== 0) {
           return joinedDifference;
         }
@@ -734,7 +736,7 @@ const createEventBracketRuntime = (dependencies = {}) => {
       event,
       rounds,
       participantsById,
-      thirdPlaceMatch,
+      ...(thirdPlaceMatch === undefined ? {} : { thirdPlaceMatch }),
     });
     const storedAssignments = (0, documents_js_1.eventPrizeAssignments)(
       event,

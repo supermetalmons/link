@@ -187,7 +187,11 @@ async function handleBeginXFlow(
     );
   }
   const nowMs = (dependencies.now || Date.now)();
-  if (intent.expiresAtMs <= nowMs || intent.consumedAtMs > 0) {
+  if (
+    intent.dataEpoch !== 1 ||
+    intent.expiresAtMs <= nowMs ||
+    intent.status !== "created"
+  ) {
     throw new AuthApiFailure(409, "failed-precondition", "x-intent-invalid");
   }
   const clientId = env.X_CLIENT_ID.trim();

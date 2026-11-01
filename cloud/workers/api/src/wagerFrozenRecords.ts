@@ -5,74 +5,88 @@ import {
   type MiningMaterials,
 } from "@mons/shared/mining";
 
-export type FrozenOperationRecord = {
-  appliedAtMs: number;
-  count?: number;
-  deltas: Partial<MiningMaterials>;
-  fingerprint: string;
-};
-
-export type ReservationOperationKind =
-  | "accept-proposer-adjustment"
-  | "accept-reserve"
-  | "send-proposer-adjustment"
-  | "send-reserve"
-  | "send-self-adjustment";
-
-export type WagerFrozenOperationKind = ReservationOperationKind;
-
 export type FrozenDeltaOperationKind =
   | "accept-proposer-adjustment"
   | "send-proposer-adjustment"
   | "send-self-adjustment";
-
-type ParsedOperationBase = FrozenOperationRecord & {
-  expectedDeltas: Partial<MiningMaterials>;
+export type ReservationOperationKind =
+  FrozenDeltaOperationKind | "send-reserve" | "accept-reserve";
+export type WagerFrozenOperationKind = ReservationOperationKind;
+type OperationBase = {
+  appliedAtMs: number;
+  deltas: Partial<MiningMaterials>;
+  fingerprint: string;
 };
-
-type ParsedSendReservation = ParsedOperationBase & {
-  count: number;
-  kind: "send-reserve";
-  material: MiningMaterialName;
-  requestedCount: number;
-};
-
-type ParsedAcceptReservation = ParsedOperationBase & {
-  count: number;
-  kind: "accept-reserve";
-  material: MiningMaterialName;
-  ownCount?: number;
-  ownMaterial?: MiningMaterialName;
-  requestedCount: number;
-};
-
-type ParsedAdjustmentOperation = ParsedOperationBase & {
-  kind:
-    | "accept-proposer-adjustment"
-    | "send-proposer-adjustment"
-    | "send-self-adjustment";
-};
-
-export type ParsedFrozenOperation =
-  ParsedAcceptReservation | ParsedAdjustmentOperation | ParsedSendReservation;
-
+export type ParsedFrozenOperation = OperationBase &
+  (
+    | {
+        kind: "send-reserve";
+        material: MiningMaterialName;
+        count: number;
+        requestedCount: number;
+      }
+    | {
+        kind: "accept-reserve";
+        material: MiningMaterialName;
+        count: number;
+        requestedCount: number;
+        ownMaterial: MiningMaterialName | null;
+        ownCount: number;
+      }
+    | { kind: FrozenDeltaOperationKind }
+  );
+export type FrozenOperationRecord = ParsedFrozenOperation;
+export type StoredFrozenOperation =
+  | { schemaVersion: 1; status: "consumed" }
+  | { schemaVersion: 1; status: "active"; operation: ParsedFrozenOperation };
 export type FrozenOperationState =
   | { status: "absent" }
   | { status: "consumed" }
-  | { operation: ParsedFrozenOperation; status: "active" }
+  | { status: "active"; operation: ParsedFrozenOperation }
   | { status: "malformed" };
 
-function toRecord(value: unknown): Record<string, unknown> | null {
-  return value && typeof value === "object" && !Array.isArray(value)
-    ? (value as Record<string, unknown>)
-    : null;
+function record(value: unknown): value is Record<string, unknown> {
+  return (
+    value !== null &&
+    typeof value === "object" &&
+    !Array.isArray(value) &&
+    (Object.getPrototypeOf(value) === Object.prototype ||
+      Object.getPrototypeOf(value) === null)
+  );
 }
-
-function toPlainRecord(value: unknown): Record<string, unknown> | null {
-  const record = toRecord(value);
-  if (!record) return null;
-  const prototype = Object.getPrototypeOf(record);
-  return prototype === Object.prototype || prototype === null ? record : null;
+function exact(
+  value: unknown,
+  keys: readonly string[],
+): value is Record<string, unknown> {
+  return (
+    record(value) &&
+    Object.keys(value).length === keys.length &&
+    keys.every((key) => Object.hasOwn(value, key))
+  );
+}
+function amount(value: unknown): value is number {
+  return (
+    typeof value === "number" &&
+    Number.isSafeInteger(value) &&
+    value > 0 &&
+    Number.isSafeInteger(value * 2)
+  );
+}
+function exactDeltas(
+  value: unknown,
+  expected: Partial<MiningMaterials>,
+): boolean {
+  return (
+    record(value) &&
+    Object.keys(value).length === Object.keys(expected).length &&
+    Object.entries(value).every(
+      ([key, delta]) =>
+        isMaterialName(key) &&
+        Number.isSafeInteger(delta) &&
+        delta !== 0 &&
+        delta === expected[key],
+    )
+  );
 }
 
 export async function createOperationId(...parts: string[]): Promise<string> {
@@ -108,194 +122,111 @@ export function operationFingerprint(
   ]);
 }
 
-function exactMaterialDeltas(
-  value: unknown,
-  expected: Partial<MiningMaterials>,
-): value is Partial<MiningMaterials> {
-  const actual = toPlainRecord(value);
-  if (!actual) return false;
-  const actualKeys = Object.keys(actual);
-  const expectedKeys = Object.keys(expected);
-  return (
-    actualKeys.length === expectedKeys.length &&
-    actualKeys.every((material) => {
-      const delta = actual[material];
-      return (
-        isMaterialName(material) &&
-        Number.isSafeInteger(delta) &&
-        delta !== 0 &&
-        delta === expected[material]
-      );
-    })
-  );
-}
-
 export function parseFrozenOperation(
   value: unknown,
 ): ParsedFrozenOperation | null {
-  const operation = toPlainRecord(value);
-  if (!operation || typeof operation.fingerprint !== "string") return null;
-  const appliedAtMs = operation.appliedAtMs;
-  const storedFingerprint = operation.fingerprint;
   if (
-    typeof appliedAtMs !== "number" ||
-    !Number.isSafeInteger(appliedAtMs) ||
-    appliedAtMs < 0
-  ) {
+    !record(value) ||
+    typeof value.fingerprint !== "string" ||
+    typeof value.appliedAtMs !== "number" ||
+    !Number.isSafeInteger(value.appliedAtMs) ||
+    value.appliedAtMs < 0
+  )
     return null;
-  }
-  let fingerprint: unknown;
-  try {
-    fingerprint = JSON.parse(storedFingerprint);
-  } catch {
-    return null;
-  }
-  if (
-    !Array.isArray(fingerprint) ||
-    fingerprint.length !== MATERIAL_KEYS.length + 3 ||
-    typeof fingerprint[0] !== "string" ||
-    typeof fingerprint[1] !== "string" ||
-    !Number.isSafeInteger(fingerprint[2]) ||
-    fingerprint.slice(3).some((delta) => !Number.isSafeInteger(delta))
-  ) {
-    return null;
-  }
-  if (storedFingerprint !== JSON.stringify(fingerprint)) return null;
-  const kind = fingerprint[0];
-  const material = fingerprint[1];
-  const requestedCount = fingerprint[2];
-  const fingerprintDeltas = fingerprint.slice(3) as number[];
-  const hasCount = Object.hasOwn(operation, "count");
-  const count = operation.count;
-  const hasDeltas = Object.hasOwn(operation, "deltas");
-  const operationKeys = Object.keys(operation);
-  const activeKeys =
-    kind === "accept-reserve" && !hasDeltas
-      ? ["appliedAtMs", "count", "fingerprint"]
-      : hasCount
-        ? ["appliedAtMs", "count", "deltas", "fingerprint"]
-        : ["appliedAtMs", "deltas", "fingerprint"];
-  if (
-    operationKeys.length !== activeKeys.length ||
-    !operationKeys.every((key) => activeKeys.includes(key))
-  ) {
-    return null;
-  }
-  const base = (deltas: Partial<MiningMaterials>): ParsedOperationBase => ({
-    appliedAtMs,
-    ...(hasCount ? { count: count as number } : {}),
-    deltas,
-    expectedDeltas: deltas,
-    fingerprint: storedFingerprint,
-  });
-  if (kind === "send-reserve") {
+  const base = ["kind", "appliedAtMs", "deltas", "fingerprint"];
+  if (value.kind === "send-reserve") {
     if (
-      !hasCount ||
-      !hasDeltas ||
-      !isMaterialName(material) ||
-      requestedCount <= 0 ||
-      typeof count !== "number" ||
-      !Number.isSafeInteger(count) ||
-      count <= 0 ||
-      count > requestedCount ||
-      fingerprintDeltas.some((delta) => delta !== 0)
-    ) {
+      !exact(value, [...base, "material", "count", "requestedCount"]) ||
+      !isMaterialName(value.material) ||
+      !amount(value.count) ||
+      !amount(value.requestedCount) ||
+      value.count > value.requestedCount ||
+      !exactDeltas(value.deltas, { [value.material]: value.count }) ||
+      value.fingerprint !==
+        operationFingerprint(value.kind, value.material, value.requestedCount)
+    )
       return null;
-    }
-    const deltas = { [material]: count as number };
-    return exactMaterialDeltas(operation.deltas, deltas)
-      ? {
-          ...base(deltas),
-          count,
-          kind,
-          material,
-          requestedCount,
-        }
-      : null;
-  }
-  if (kind === "accept-reserve") {
-    const [acceptedMaterial, ownMaterial, ...extra] = material.split(":");
+  } else if (value.kind === "accept-reserve") {
     if (
-      !hasCount ||
-      extra.length > 0 ||
-      !isMaterialName(acceptedMaterial) ||
-      (ownMaterial !== "" && !isMaterialName(ownMaterial)) ||
-      requestedCount <= 0 ||
-      typeof count !== "number" ||
-      !Number.isSafeInteger(count) ||
-      count <= 0 ||
-      count > requestedCount
-    ) {
+      !exact(value, [
+        ...base,
+        "material",
+        "count",
+        "requestedCount",
+        "ownMaterial",
+        "ownCount",
+      ]) ||
+      !isMaterialName(value.material) ||
+      !amount(value.count) ||
+      !amount(value.requestedCount) ||
+      value.count > value.requestedCount ||
+      !(value.ownMaterial === null
+        ? value.ownCount === 0
+        : isMaterialName(value.ownMaterial) && amount(value.ownCount))
+    )
       return null;
-    }
-    const ownIndex = ownMaterial ? MATERIAL_KEYS.indexOf(ownMaterial) : -1;
-    const ownCount = ownIndex < 0 ? 0 : fingerprintDeltas[ownIndex];
+    const ownMaterial = value.ownMaterial as MiningMaterialName | null;
+    const ownCount = value.ownCount as number;
+    const expected: Partial<MiningMaterials> = {};
+    if (ownMaterial !== null) expected[ownMaterial] = -ownCount;
+    expected[value.material] = (expected[value.material] ?? 0) + value.count;
+    if (expected[value.material] === 0) delete expected[value.material];
     if (
-      fingerprintDeltas.some(
-        (delta, index) => index !== ownIndex && delta !== 0,
+      !exactDeltas(value.deltas, expected) ||
+      value.fingerprint !==
+        operationFingerprint(
+          value.kind,
+          `${value.material}:${ownMaterial ?? ""}`,
+          value.requestedCount,
+          ownMaterial === null ? {} : { [ownMaterial]: ownCount },
+        )
+    )
+      return null;
+  } else {
+    if (
+      !exact(value, base) ||
+      ![
+        "accept-proposer-adjustment",
+        "send-proposer-adjustment",
+        "send-self-adjustment",
+      ].includes(String(value.kind)) ||
+      !record(value.deltas) ||
+      Object.keys(value.deltas).length !== 1 ||
+      !Object.entries(value.deltas).every(
+        ([key, delta]) =>
+          isMaterialName(key) &&
+          typeof delta === "number" &&
+          Number.isSafeInteger(delta) &&
+          delta < 0,
       ) ||
-      ownCount < 0 ||
-      (ownMaterial === "" ? ownCount !== 0 : ownCount <= 0)
-    ) {
+      value.fingerprint !==
+        operationFingerprint(
+          value.kind as FrozenDeltaOperationKind,
+          "",
+          0,
+          value.deltas,
+        )
+    )
       return null;
-    }
-    const deltas: Partial<MiningMaterials> = {};
-    if (ownMaterial && ownCount > 0) deltas[ownMaterial] = -ownCount;
-    deltas[acceptedMaterial] = (deltas[acceptedMaterial] || 0) + count;
-    if (deltas[acceptedMaterial] === 0) delete deltas[acceptedMaterial];
-    if (
-      hasDeltas
-        ? !exactMaterialDeltas(operation.deltas, deltas)
-        : Object.keys(deltas).length !== 0
-    ) {
-      return null;
-    }
-    return {
-      ...base(deltas),
-      count,
-      kind,
-      material: acceptedMaterial,
-      ...(ownMaterial ? { ownCount, ownMaterial } : {}),
-      requestedCount,
-    };
   }
-  if (
-    ![
-      "accept-proposer-adjustment",
-      "send-proposer-adjustment",
-      "send-self-adjustment",
-    ].includes(kind) ||
-    hasCount ||
-    !hasDeltas ||
-    material !== "" ||
-    requestedCount !== 0
-  ) {
-    return null;
-  }
-  const deltas: Partial<MiningMaterials> = {};
-  for (let index = 0; index < MATERIAL_KEYS.length; index += 1) {
-    const delta = fingerprintDeltas[index];
-    if (delta !== 0) deltas[MATERIAL_KEYS[index]] = delta;
-  }
-  if (
-    Object.keys(deltas).length !== 1 ||
-    Object.values(deltas)[0] >= 0 ||
-    !exactMaterialDeltas(operation.deltas, deltas)
-  ) {
-    return null;
-  }
-  return {
-    ...base(deltas),
-    kind: kind as ParsedAdjustmentOperation["kind"],
-  };
+  return value as ParsedFrozenOperation;
 }
-
+export function isStoredFrozenOperation(
+  value: unknown,
+): value is StoredFrozenOperation {
+  if (!record(value) || value.schemaVersion !== 1) return false;
+  if (value.status === "consumed")
+    return exact(value, ["schemaVersion", "status"]);
+  return (
+    value.status === "active" &&
+    exact(value, ["schemaVersion", "status", "operation"]) &&
+    parseFrozenOperation(value.operation) !== null
+  );
+}
 export function frozenOperationState(value: unknown): FrozenOperationState {
   if (value === undefined) return { status: "absent" };
-  const record = toPlainRecord(value);
-  if (record && Object.keys(record).length === 1 && record.consumed === true) {
-    return { status: "consumed" };
-  }
-  const operation = parseFrozenOperation(value);
-  return operation ? { operation, status: "active" } : { status: "malformed" };
+  if (!isStoredFrozenOperation(value)) return { status: "malformed" };
+  return value.status === "consumed"
+    ? { status: "consumed" }
+    : { status: "active", operation: value.operation };
 }

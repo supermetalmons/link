@@ -101,11 +101,11 @@ export function prepareEventTelegramProjection(
     async dispatch() {
       const results = await Promise.allSettled(tasks.map(enqueue));
       for (let index = 0; index < results.length; index += 1) {
-        if (results[index].status === "rejected") {
+        if (results[index]!.status === "rejected") {
           logger.error(
             JSON.stringify({
               event: "event_telegram_projection_enqueue_failed",
-              eventId: tasks[index].eventId,
+              eventId: tasks[index]!.eventId,
             }),
           );
         }

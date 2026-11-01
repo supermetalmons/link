@@ -2,10 +2,12 @@
 
 const assert = require("node:assert/strict");
 const test = require("node:test");
+const { event: eventFixture } = require("./fixtures/canonicalEvents");
 const {
   createEventProfileGameProjectionCore,
 } = require("../runtime/eventProfileGameProjectionCore");
 
+/** @param {{canonical?: Record<string, string | null>, logins?: Record<string, string | null>}} [input] */
 const ownershipSnapshot = ({ canonical = {}, logins = {} } = {}) => ({
   canonicalProfileIdByProfileId: new Map(Object.entries(canonical)),
   loginOwnerByUid: new Map(
@@ -16,20 +18,26 @@ const ownershipSnapshot = ({ canonical = {}, logins = {} } = {}) => ({
   ),
 });
 
-const event = (participants) => ({
-  createdAtMs: 1,
-  participants,
-  startAtMs: 2,
-  status: "scheduled",
-  updatedAtMs: 3,
-});
+/** @param {NonNullable<NonNullable<Parameters<typeof eventFixture>[0]>["participants"]>} participants */
+const event = (participants) =>
+  eventFixture({
+    createdAtMs: 1,
+    participants,
+    startAtMs: 2,
+    status: "scheduled",
+    updatedAtMs: 3,
+  });
 
 test("event projection resolves and validates every owner in one snapshot", async () => {
+  /** @type {import("../runtime/eventProfileGameProjectionCore").EventProjectionWrite[]} */
   const writes = [];
+  /** @type {Parameters<import("../runtime/eventProfileGameProjectionCore").EventProfileGameProjectionRepository["readProfileOwnershipSnapshot"]>[0][]} */
   const queries = [];
   const core = createEventProfileGameProjectionCore({
     repository: {
-      commitProjectionWrites: async (nextWrites) => writes.push(...nextWrites),
+      commitProjectionWrites: async (nextWrites) => {
+        writes.push(...nextWrites);
+      },
       getEvent: async () => null,
       async readProfileOwnershipSnapshot(query) {
         queries.push(query);
@@ -70,6 +78,10 @@ test("event projection resolves and validates every owner in one snapshot", asyn
       { profileId: "source-profile", type: "delete" },
     ],
   );
+  assert.ok(
+    writes[0]?.type === "merge" && writes[0].data.entityType === "event",
+  );
+  assert.ok(writes[0].data.participantPreview[0]);
   assert.equal(
     writes[0].data.participantPreview[0].profileId,
     "target-profile",

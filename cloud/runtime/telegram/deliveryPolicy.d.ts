@@ -13,13 +13,19 @@ declare const createTelegramLocalRetryBarrier: (
 declare const normalizeAttempts: (value: unknown) => number;
 declare const normalizeTimestamp: (value: unknown) => number;
 declare const normalizeRetrySequence: (value: unknown) => number;
-declare const resolveRetryDeadlineAtMs: (value: unknown) => number;
+declare const resolveRetryDeadlineAtMs: (
+  state: Partial<TelegramRetryState> & {
+    apiGateStartedAtMs?: number;
+  },
+) => number;
 declare const buildSafeRetryState: ({
   current,
   result,
   nowMs,
 }: {
-  current: unknown;
+  current: Partial<TelegramRetryState> & {
+    apiGateStartedAtMs?: number;
+  };
   result?: TelegramRetryFailure | null;
   nowMs: number;
 }) => TelegramRetryState;
@@ -32,7 +38,9 @@ declare const buildRateLimitBarrierAtMs: ({
   retryState?: Partial<TelegramRetryState>;
   nowMs: number;
 }) => number;
-declare const omitRetryState: (value: unknown) => Record<string, unknown>;
+declare const omitRetryState: <T extends object>(
+  value: T,
+) => Omit<T, keyof TelegramRetryState>;
 declare const buildErrorState: (
   result: TelegramRetryFailure | null | undefined,
   nowMs: number,

@@ -1,3 +1,4 @@
+import { required } from "./fixtures/canonicalData.mjs";
 import assert from "node:assert/strict";
 import { registerHooks } from "node:module";
 import test from "node:test";
@@ -25,16 +26,17 @@ const {
 } = await import("../src/services/matchSyncApi.ts");
 
 const originalFetch = globalThis.fetch;
-const match = (color, changes = {}) => ({
+const match = (/** @type {string} */ color, changes = {}) => ({
+  schemaVersion: 1,
   version: 2,
   color,
   emojiId: 1,
-  aura: "",
+  aura: "none",
   gameVariant: "Classic",
   fen: "initial",
-  status: "",
+  status: "active",
   flatMovesString: "",
-  timer: "",
+  timer: { state: "idle" },
   ...changes,
 });
 const value = (snapshot = {}) => ({
@@ -50,13 +52,23 @@ const value = (snapshot = {}) => ({
     ...snapshot,
   },
 });
-const response = (body = value(), status = 200, headers) =>
-  new Response(JSON.stringify(body), { status, headers });
-const deferred = () => {
-  let resolve;
-  const promise = new Promise((done) => {
-    resolve = done;
+/**
+ * @param {unknown} [body]
+ * @param {number} [status]
+ * @param {HeadersInit} [headers]
+ */
+const response = (body = value(), status = 200, headers = undefined) =>
+  new Response(JSON.stringify(body), {
+    status,
+    ...(headers === undefined ? {} : { headers }),
   });
+/**
+ * @template [T=void]
+ * @returns {Pick<PromiseWithResolvers<T>, "promise" | "resolve">}
+ */
+const deferred = () => {
+  /** @type {PromiseWithResolvers<T>} */
+  const { promise, resolve } = Promise.withResolvers();
   return { promise, resolve };
 };
 const flush = () => new Promise((resolve) => setImmediate(resolve));
@@ -64,10 +76,11 @@ test.afterEach(() => {
   globalThis.fetch = originalFetch;
 });
 
-test("uses match sync-only socket protocol and keeps validated JWTs out of URLs", () => {
+test("uses match sync and application socket protocols and keeps validated JWTs out of URLs", () => {
   assert.deepEqual(createMatchSyncSocketProtocols("header.payload.signature"), [
     "mons-match-sync-v1",
     "bearer.header.payload.signature",
+    "mons-data-v1",
   ]);
   assert.equal(
     getMatchSyncSocketUrl("invite", "invite"),
@@ -81,9 +94,12 @@ test("uses match sync-only socket protocol and keeps validated JWTs out of URLs"
     "x".repeat(4097),
     null,
   ]) {
-    assert.throws(() => createMatchSyncSocketProtocols(token), {
-      code: "invalid-match-sync-socket-token",
-    });
+    assert.throws(
+      () => Reflect.apply(createMatchSyncSocketProtocols, undefined, [token]),
+      {
+        code: "invalid-match-sync-socket-token",
+      },
+    );
   }
   assert.throws(() => getMatchSyncSocketUrl("bad/invite", "bad/invite"), {
     code: "invalid-invite",
@@ -91,6 +107,9 @@ test("uses match sync-only socket protocol and keeps validated JWTs out of URLs"
 });
 
 test("reads a bounded authenticated snapshot and permits public spectator reads", async () => {
+  /**
+   * @type {Array<{ url: RequestInfo | URL; options: RequestInit | undefined }>}
+   */
   const calls = [];
   globalThis.fetch = async (url, options) => {
     calls.push({ url, options });
@@ -102,17 +121,28 @@ test("reads a bounded authenticated snapshot and permits public spectator reads"
   );
   await readMatchSyncViaApi("invite", "invite");
   assert.equal(
-    calls[0].url,
+    required(calls[0]).url,
     "https://api.mons.link/invites/invite/matches/invite/snapshot",
   );
-  assert.equal(calls[0].options.method, "GET");
-  assert.equal(calls[0].options.headers.Authorization, "Bearer token");
-  assert.equal(calls[0].options.cache, "no-store");
-  assert.equal(calls[0].options.redirect, "error");
-  assert.equal(calls[1].options.headers.Authorization, undefined);
+  assert.equal(required(required(calls[0]).options).method, "GET");
+  assert.equal(
+    new Headers(required(required(calls[0]).options).headers).get(
+      "Authorization",
+    ),
+    "Bearer token",
+  );
+  assert.equal(required(required(calls[0]).options).cache, "no-store");
+  assert.equal(required(required(calls[0]).options).redirect, "error");
+  assert.equal(
+    new Headers(required(required(calls[1]).options).headers).get(
+      "Authorization",
+    ),
+    null,
+  );
 });
 
 test("refreshes auth exactly once for 401 and preserves the shared deadline", async () => {
+  /** @type {Array<boolean>} */
   const refreshes = [];
   let calls = 0;
   globalThis.fetch = async () =>
@@ -199,6 +229,7 @@ test("bounds declared and streamed payloads and cancels oversized bodies", async
 });
 
 test("aborts pending token lookup without a late request", async () => {
+  /** @type {Pick<PromiseWithResolvers<string>, "promise" | "resolve">} */
   const token = deferred();
   const controller = new AbortController();
   let fetches = 0;
@@ -218,6 +249,7 @@ test("aborts pending token lookup without a late request", async () => {
 
 test("one deadline bounds token refresh and rejects late tokens even before delayed timer callbacks", async (t) => {
   t.mock.timers.enable({ apis: ["setTimeout"] });
+  /** @type {Pick<PromiseWithResolvers<string>, "promise" | "resolve">} */
   const token = deferred();
   globalThis.fetch = async () => response({}, 401);
   const pending = readMatchSyncViaApi("invite", "invite", (refresh) =>
@@ -231,6 +263,7 @@ test("one deadline bounds token refresh and rejects late tokens even before dela
   await flush();
   let now = Date.now();
   t.mock.method(Date, "now", () => now);
+  /** @type {Pick<PromiseWithResolvers<string>, "promise" | "resolve">} */
   const late = deferred();
   const delayed = readMatchSyncViaApi("invite", "invite", () => late.promise);
   now += MATCH_SYNC_REQUEST_TIMEOUT_MS;
@@ -241,9 +274,10 @@ test("one deadline bounds token refresh and rejects late tokens even before dela
 test("aborts stalled response streams as well as the request", async () => {
   const controller = new AbortController();
   let canceled = false;
+  /** @type {AbortSignal | null | undefined} */
   let signal;
   globalThis.fetch = async (_url, options) => {
-    signal = options.signal;
+    signal = required(options).signal;
     return new Response(
       new ReadableStream({
         cancel() {
@@ -258,11 +292,12 @@ test("aborts stalled response streams as well as the request", async () => {
   await flush();
   controller.abort();
   await assert.rejects(pending, { code: "aborted" });
-  assert.equal(signal.aborted, true);
+  assert.equal(required(signal).aborted, true);
   assert.equal(canceled, true);
 });
 
 test("rejects auth-user replacement and cancels late response bodies", async () => {
+  /** @type {Pick<PromiseWithResolvers<Response>, "promise" | "resolve">} */
   const request = deferred();
   let current = true;
   let canceled = false;

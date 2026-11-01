@@ -1,3 +1,5 @@
+import { telegramMessageFixture } from "./telegramMessageFixture.ts";
+import { eventDocumentFixture } from "./eventCompatibilityFixture.ts";
 import { eventProjectionOutboxFixture } from "./profileDataBoundaryFixture.ts";
 import { readTelegramAnnouncementPayloadDocument } from "../src/telegramAnnouncementRecords.ts";
 import type { TelegramRetryScheduleResult } from "../../../runtime/telegram/deliveryTypes.js";
@@ -18,7 +20,7 @@ import { buildSundayMonsReminder } from "../../../runtime/telegram/sundayMonsRem
 import type { TelegramEditResult } from "../../../runtime/telegram/client.js";
 import type { TelegramRepository } from "../../../runtime/telegram/deliveryEngine.js";
 import type { TelegramAnnouncementRecord } from "../src/telegramD1.ts";
-import { buildEventTelegramProjectionUpdates } from "../../../tests/eventProjectionChangesFixture.js";
+import eventProjectionFixture from "../../../tests/eventProjectionChangesFixture.js";
 import { telegramRepositoryFixture } from "./telegramRepositoryFixture.ts";
 import type { StateRepository } from "../test/stateRepositoryTestTypes.ts";
 import {
@@ -36,6 +38,7 @@ import type {
 import type { TelegramProjectionTask } from "../src/telegramProjectionTasks.ts";
 import { handleTelegramProjectionMessage } from "../src/telegramProjection.ts";
 import { TELEGRAM_TEST_ENV } from "./testEnv.ts";
+const { buildEventTelegramProjectionUpdates } = eventProjectionFixture;
 
 type ProjectionArguments = Parameters<typeof processTypedEventProjectionTask>;
 function processEventProjectionTask(
@@ -60,7 +63,16 @@ function processEventProjectionTask(
 }
 
 function store(initial: Record<string, unknown>) {
-  const values = new Map(Object.entries(initial));
+  const fixtureValue = (path: string, value: unknown) =>
+    path.startsWith("telegramMessages/") && path.split("/").length === 2
+      ? telegramMessageFixture(value)
+      : value;
+  const values = new Map(
+    Object.entries(initial).map(([path, value]) => [
+      path,
+      fixtureValue(path, value),
+    ]),
+  );
   const client: StateRepository &
     EventReads &
     Pick<EventOutboxReads, "listDueEventTelegramProjectionOutboxes"> = {
@@ -72,7 +84,7 @@ function store(initial: Record<string, unknown>) {
     },
     async patchRoot(updates) {
       for (const [path, value] of Object.entries(updates)) {
-        values.set(path, value);
+        values.set(path, fixtureValue(path, value));
       }
     },
     async transactPath(path, updater) {
@@ -83,7 +95,9 @@ function store(initial: Record<string, unknown>) {
       if ("commit" in output && output.commit === false) {
         return {
           committed: false,
-          decision: output.decision,
+          ...(output.decision !== undefined
+            ? { decision: output.decision }
+            : {}),
           value: current,
         };
       }
@@ -93,7 +107,7 @@ function store(initial: Record<string, unknown>) {
       values.set(path, output.value);
       return {
         committed: true,
-        decision: output.decision,
+        ...(output.decision !== undefined ? { decision: output.decision } : {}),
         value: output.value,
       };
     },
@@ -101,12 +115,14 @@ function store(initial: Record<string, unknown>) {
   return {
     client: attachProjectionTestPorts(client),
     read: (path: string) => values.get(path) ?? null,
-    write: (path: string, value: unknown) => values.set(path, value),
+    write: (path: string, value: unknown) =>
+      values.set(path, fixtureValue(path, value)),
   };
 }
 
 function ratingRepository(): RatingProjectionRepository {
   return {
+    readWagerAgreement: async () => null,
     applyFebruaryChallengeReplay: async () => undefined,
     claimRatingTelegramProjection: async () => false,
     finalizeRatingUpdate: async () => ({ status: "lost" }),
@@ -148,14 +164,15 @@ const marker = {
 };
 
 function scheduledEvent() {
-  return {
+  return eventDocumentFixture({
+    eventId: "event-1",
     telegramDeliveryVersion: 2,
-    announceOnTelegram: true,
+    telegramAnnouncements: { invite: true, matches: true, results: true },
     status: "scheduled",
     startAtMs: Date.UTC(2026, 7, 26, 17),
     participants: {},
     rounds: {},
-  };
+  });
 }
 
 test("event projection persists desired state before delivery and clears its outbox", async () => {
@@ -190,7 +207,7 @@ test("event projection persists desired state before delivery and clears its out
   );
   assert.ok(state.read("eventTelegramProjections/event-1"));
   assert.equal(deliveries.length, 1);
-  assert.equal(deliveries[0].producer, "event-projection");
+  assert.equal(deliveries[0]!.producer, "event-projection");
   assert.equal(state.read("eventTelegramProjectionLocks/event-1"), null);
 });
 
@@ -354,8 +371,13 @@ test("a legacy send racing projection retains its heading and retries participan
     contentHash: desired.contentHash,
     revision: desired.revision,
   };
-  const applied = { ...deliveryIdentity, messageId: 42 };
-  const sending = {
+  const applied = {
+    ...deliveryIdentity,
+    messageId: 42,
+    chatId: "community-chat",
+    appliedAtMs: 1,
+  };
+  const sending = telegramMessageFixture({
     desired,
     delivery: {
       sendInFlight: {
@@ -365,8 +387,12 @@ test("a legacy send racing projection retains its heading and retries participan
         startedAtMs: now(),
       },
     },
-  };
-  const delivered = { desired, applied, delivery: { status: "delivered" } };
+  });
+  const delivered = telegramMessageFixture({
+    desired,
+    applied,
+    delivery: { status: "delivered" },
+  });
 
   for (const race of [
     "already sending",
@@ -447,7 +473,7 @@ test("a legacy send racing projection retains its heading and retries participan
       assert.deepEqual(recovered.applied, applied);
       assert.equal(recovered.desired.operation, "edit");
       assert.match(recovered.desired.text, /^join sunday mons\n/);
-      assert.match(recovered.desired.text, /Alice Bob$/);
+      assert.match(recovered.desired.text, /Alice .*Bob$/);
       assert.equal(state.read(outboxPath), null);
       assert.equal(deliveries, 1);
 
@@ -647,7 +673,9 @@ test("uncertain invites preserve lifecycle and manual recovery decisions", async
             state.write("events/event-1", {
               ...event,
               status,
-              rounds: status === "scheduled" ? {} : rounds,
+              rounds:
+                status === "scheduled" || status === "dismissed" ? {} : rounds,
+              ...(status === "dismissed" ? { endedAtMs: 2 } : {}),
               participants: updatedParticipants,
             });
             state.write(outboxPath, marker);
@@ -787,11 +815,14 @@ test("uncertain invites preserve lifecycle and manual recovery decisions", async
             state.write(outboxPath, marker);
             assert.equal(await project(), "projected");
             assert.equal(pending.length, 1);
-            assert.equal(pending[0].messageKey, upcomingKey);
+            assert.equal(pending[0]!.messageKey, upcomingKey);
             await deliver(["delivered"]);
             const resumed = readInvite();
             assert.equal(resumed.desired.operation, "edit");
-            assert.match(resumed.desired.text, /Alice Bob Carol Dave Erin$/);
+            assert.match(
+              resumed.desired.text,
+              /Alice .*Bob .*Carol .*Dave .*Erin$/,
+            );
             assert.equal(resumed.applied?.messageId, resent.applied?.messageId);
             assert.deepEqual(editedTexts, [resumed.desired.text]);
             assert.deepEqual(
@@ -804,7 +835,7 @@ test("uncertain invites preserve lifecycle and manual recovery decisions", async
             assert.equal(recovered.desired.operation, "edit");
             if (stillScheduled) {
               expectedHeadings.push("upcoming event");
-              assert.match(recovered.desired.text, /Alice Bob Carol$/);
+              assert.match(recovered.desired.text, /Alice .*Bob .*Carol$/);
               assert.deepEqual(editedTexts, [recovered.desired.text]);
               assert.equal(recovered.applied?.messageId, 102);
             } else {
@@ -858,6 +889,9 @@ test("a manual invite receipt unlocks an edit through the Telegram repository an
   assert.equal(deliveries, 0);
   const hiddenProjection = state.read("eventTelegramProjections/event-1");
   const applied = {
+    chatId: "community-chat",
+    appliedAtMs: 1,
+    revision: "applied-revision",
     destination: "community",
     instanceKey: "event:event-1:upcoming:v2",
     messageId: 42,
@@ -918,7 +952,6 @@ test("final score reads follow the results preference independently of the legac
         [getEventTelegramProjectionOutboxPath(task.eventId)]: marker,
         "events/event-1": {
           ...scheduledEvent(),
-          announceOnTelegram: !results,
           telegramAnnouncements: { invite: false, matches: false, results },
           status: "ended",
           participants: {
@@ -977,6 +1010,9 @@ test("rating read failures retain pending event work for a successful retry", as
           matches: {
             "0_0": {
               inviteId: "match-1",
+              status: "host",
+              hostProfileId: "alice",
+              guestProfileId: "bob",
               hostLoginUid: "alice-login",
               guestLoginUid: "bob-login",
               hostDisplayName: "Alice",
@@ -1107,11 +1143,30 @@ test("a newer generation fences stale desired and state commits", async () => {
     [getEventTelegramProjectionGenerationPath(task.eventId)]: 1,
     "events/event-1": scheduledEvent(),
     "eventTelegramProjections/event-1": {
-      eventTelegramProjectionGuard: { generation: 2 },
+      eventTelegramProjectionGuard: {
+        eventId: "event-1",
+        generation: 2,
+        lockId: "newer-lock",
+        lockRoot: "eventTelegramProjectionLocks",
+        ownerUid: "newer-owner",
+      },
     },
     "telegramMessages/event:event-1:upcoming": {
       desired: {
-        eventTelegramProjectionGuard: { generation: 2 },
+        ...buildTelegramSendDesired({
+          destination: "community",
+          instanceKey: "event:event-1:upcoming:v2",
+          text: "newer text",
+          sourceRevision: "newer-source",
+        }),
+        eventTelegramProjectionGuard: {
+          eventId: "event-1",
+          generation: 2,
+          lockId: "newer-lock",
+          lockRoot: "eventTelegramProjectionLocks",
+          ownerUid: "newer-owner",
+          messageKey: "event:event-1:upcoming",
+        },
         revision: "newer",
       },
     },
@@ -1138,65 +1193,39 @@ test("a newer generation fences stale desired and state commits", async () => {
   );
 });
 
-test("event sweep claims valid markers and dead-letters malformed records", async () => {
+test("event sweep rejects malformed canonical records before claiming or enqueueing", async () => {
   const state = store({
-    [getEventTelegramProjectionOutboxPath("event-1")]: marker,
-    [getEventTelegramProjectionOutboxPath("event-bad")]: {
-      status: "pending",
-      updatedAtMs: 100,
-    },
+    [getEventTelegramProjectionOutboxPath(task.eventId)]: marker,
   });
-  state.client.listDueEventTelegramProjectionOutboxes = async (
-    beforeMs,
-    limit,
-  ) => {
-    assert.equal(beforeMs, 200);
-    assert.equal(limit, 100);
-    return [
-      {
-        eventId: "event-1",
-        record: eventProjectionOutboxFixture("telegram", marker),
-      },
-      {
-        eventId: "event-bad",
-        record: eventProjectionOutboxFixture("telegram", {
-          status: "pending",
-          updatedAtMs: 100,
-        }),
-      },
-    ];
-  };
-  const batches: TelegramProjectionTask[][] = [];
+  state.client.listDueEventTelegramProjectionOutboxes = async () => [
+    {
+      eventId: "event-bad",
+      record: eventProjectionOutboxFixture("telegram", {
+        status: "pending",
+        updatedAtMs: 100,
+      }),
+    },
+  ];
+  let enqueues = 0;
   const queue = {
     ...TELEGRAM_TEST_ENV.TELEGRAM_PROJECTION_QUEUE,
-    sendBatch: async (messages: Iterable<MessageSendRequest<unknown>>) => {
-      batches.push(
-        Array.from(messages).map(({ body }) => body as TelegramProjectionTask),
-      );
+    async sendBatch() {
+      enqueues++;
       return { metadata: { metrics: { backlogCount: 0, backlogBytes: 0 } } };
     },
   } satisfies Queue<TelegramProjectionTask>;
-  assert.equal(
-    await sweepEventTelegramProjections(
+  await assert.rejects(
+    sweepEventTelegramProjections(
       queue,
       telegramProjectionRecoveryFixture(state.client),
       200,
     ),
-    1,
+    /invalid-event-projection-outbox/,
   );
-  assert.deepEqual(batches.flat(), [task]);
+  assert.equal(enqueues, 0);
   assert.deepEqual(
-    state.read(getEventTelegramProjectionOutboxPath("event-1")),
-    { ...marker, updatedAtMs: 200 },
-  );
-  assert.deepEqual(
-    state.read(getEventTelegramProjectionOutboxPath("event-bad")),
-    {
-      status: "dead",
-      reason: "invalid-record",
-      updatedAtMs: null,
-      deadAtMs: 200,
-    },
+    state.read(getEventTelegramProjectionOutboxPath(task.eventId)),
+    marker,
   );
 });
 
@@ -1253,46 +1282,34 @@ function eventSweepFixture(
   return { state, visited, batches, queue };
 }
 
-for (const phase of ["repair", "claim"] as const) {
-  test(`event sweep enqueues successful claims before rethrowing a single ${phase} failure`, async () => {
-    const failure = new Error(`${phase}-unavailable`);
-    const { state, visited, batches, queue } = eventSweepFixture(
-      [
-        {
-          eventId: "event-failed",
-          record:
-            phase === "repair"
-              ? { status: "pending", updatedAtMs: 100 }
-              : marker,
-        },
-        { eventId: task.eventId, record: marker },
-      ],
-      new Map([["event-failed", failure]]),
-    );
-    await assert.rejects(
-      sweepEventTelegramProjections(
-        queue,
-        telegramProjectionRecoveryFixture(state.client),
-        200,
-      ),
-      (error) => error === failure,
-    );
-    assert.deepEqual(visited, ["event-failed", task.eventId, "enqueue"]);
-    assert.deepEqual(batches, [[task]]);
-  });
-}
+test("event sweep enqueues successful claims before rethrowing a claim failure", async () => {
+  const failure = new Error("claim-unavailable");
+  const { state, visited, batches, queue } = eventSweepFixture(
+    [
+      { eventId: "event-failed", record: marker },
+      { eventId: task.eventId, record: marker },
+    ],
+    new Map([["event-failed", failure]]),
+  );
+  await assert.rejects(
+    sweepEventTelegramProjections(
+      queue,
+      telegramProjectionRecoveryFixture(state.client),
+      200,
+    ),
+    (error) => error === failure,
+  );
+  assert.deepEqual(visited, ["event-failed", task.eventId, "enqueue"]);
+  assert.deepEqual(batches, [[task]]);
+});
 
-test("event sweep enqueues in order and aggregates all repair and claim failures", async () => {
-  const repairFailure = new Error("repair-unavailable");
-  const claimFailure = new Error("claim-unavailable");
-  const malformed = { status: "pending", updatedAtMs: 100 };
+test("event sweep preserves ordering and aggregates claim failures", async () => {
+  const failure = new Error("claim-unavailable");
   const { state, visited, batches, queue } = eventSweepFixture(
     [
       { eventId: "claim-failed", record: marker },
-      { eventId: "repair-failed", record: malformed },
       { eventId: task.eventId, record: marker },
       { eventId: "stale", record: marker },
-      { eventId: "repair-non-error", record: malformed },
       { eventId: "claim-non-error", record: marker },
       {
         eventId: "event-last",
@@ -1300,9 +1317,7 @@ test("event sweep enqueues in order and aggregates all repair and claim failures
       },
     ],
     new Map<string, unknown>([
-      ["repair-failed", repairFailure],
-      ["claim-failed", claimFailure],
-      ["repair-non-error", "unavailable"],
+      ["claim-failed", failure],
       ["claim-non-error", "unavailable"],
     ]),
   );
@@ -1321,17 +1336,13 @@ test("event sweep enqueues in order and aggregates all repair and claim failures
     (error) => {
       assert.ok(error instanceof AggregateError);
       assert.equal(error.message, "event-projection-sweep-failed");
-      assert.equal(error.errors.length, 4);
-      assert.equal(error.errors[0], repairFailure);
-      assert.equal(error.errors[1].message, "invalid-record-failed");
-      assert.equal(error.errors[2], claimFailure);
-      assert.equal(error.errors[3].message, "event-claim-failed");
+      assert.equal(error.errors.length, 2);
+      assert.equal(error.errors[0], failure);
+      assert.equal(error.errors[1].message, "event-claim-failed");
       return true;
     },
   );
   assert.deepEqual(visited, [
-    "repair-failed",
-    "repair-non-error",
     "claim-failed",
     task.eventId,
     "stale",
@@ -1343,54 +1354,22 @@ test("event sweep enqueues in order and aggregates all repair and claim failures
     [task, { ...task, eventId: "event-last", requestId: "request-last" }],
   ]);
   assert.deepEqual(
-    logs.map((entry) => {
-      const { eventId, phase, itemIndex, error } = JSON.parse(entry);
-      return { eventId, phase, itemIndex, error };
-    }),
-    [
-      {
-        eventId: "repair-failed",
-        phase: "repair",
-        itemIndex: 0,
-        error: { name: "Error", message: "repair-unavailable" },
-      },
-      {
-        eventId: "repair-non-error",
-        phase: "repair",
-        itemIndex: 1,
-        error: { type: "string" },
-      },
-      {
-        eventId: "claim-failed",
-        phase: "claim",
-        itemIndex: 0,
-        error: { name: "Error", message: "claim-unavailable" },
-      },
-      {
-        eventId: "claim-non-error",
-        phase: "claim",
-        itemIndex: 3,
-        error: { type: "string" },
-      },
-    ],
+    logs.map((entry) => JSON.parse(entry).eventId),
+    ["claim-failed", "claim-non-error"],
   );
 });
 
-test("event sweep preserves queue failure precedence over repair and claim failures", async () => {
+test("event sweep preserves queue failure precedence over claim failures", async () => {
   const queueFailure = new Error("queue-unavailable");
   const { state, visited, queue } = eventSweepFixture(
     [
-      { eventId: "repair-failed", record: { updatedAtMs: 100 } },
       { eventId: "claim-failed", record: marker },
       { eventId: task.eventId, record: marker },
     ],
-    new Map([
-      ["repair-failed", new Error("repair-unavailable")],
-      ["claim-failed", new Error("claim-unavailable")],
-    ]),
+    new Map([["claim-failed", new Error("claim-unavailable")]]),
   );
   queue.sendBatch = async (messages) => {
-    assert.deepEqual(visited, ["repair-failed", "claim-failed", task.eventId]);
+    assert.deepEqual(visited, ["claim-failed", task.eventId]);
     assert.deepEqual(
       Array.from(messages, ({ body }) => body),
       [task],
@@ -1414,7 +1393,7 @@ test("event sweep preserves queue failure precedence over repair and claim failu
   );
   assert.deepEqual(
     logs.map((entry) => JSON.parse(entry).eventId),
-    ["repair-failed", "claim-failed"],
+    ["claim-failed"],
   );
 });
 
@@ -1442,6 +1421,14 @@ function reminderProjectionFixture() {
     transactPath: messages.client.transactPath,
   });
   const receipt: TelegramAnnouncementRecord = {
+    schemaVersion: 1,
+    startAtMs: null,
+    runAtMs: null,
+    firstQueuedAtMs: null,
+    attemptId: null,
+    attemptCount: null,
+    retryAtMs: null,
+    errorCode: null,
     kind: "reminder",
     eventId: task.eventId,
     createdAtMs: 100,
@@ -1561,9 +1548,9 @@ test("a confirmed reminder is edited in place and follows joins with invites dis
   assert.deepEqual(f.deliveries, [f.messageKey]);
   assert.equal(f.readMessage().desired.operation, "edit");
   assert.equal(f.readMessage().desired.ifMissing, "skip");
-  assert.match(f.readMessage().desired.text, /Alice Bob$/);
+  assert.match(f.readMessage().desired.text, /Alice .*Bob$/);
   assert.equal((await f.deliver()).status, "delivered");
-  assert.equal(f.edits[0].messageId, 23001);
+  assert.equal(f.edits[0]!.messageId, 23001);
   assert.equal(f.readMessage().applied?.messageId, 23001);
   assert.equal(
     f.readMessage().applied?.contentHash,
@@ -1580,8 +1567,8 @@ test("a confirmed reminder is edited in place and follows joins with invites dis
   f.state.write(f.outboxPath, marker);
   assert.equal(await f.project(), "projected");
   assert.equal((await f.deliver()).status, "delivered");
-  assert.match(String(f.edits[1].text), /Alice Bob Carol$/);
-  assert.equal(f.edits[1].messageId, 23001);
+  assert.match(String(f.edits[1]!.text), /Alice .*Bob .*Carol$/);
+  assert.equal(f.edits[1]!.messageId, 23001);
   assert.equal(f.controls.readReceipts, 1);
   assert.deepEqual(f.receipt, receipt);
   assert.equal(
@@ -1624,8 +1611,8 @@ test("the projection queue supplies announcement receipts for reminder adoption"
   assert.equal(acknowledged, true);
   assert.deepEqual(f.deliveries, [f.messageKey]);
   assert.equal((await f.deliver()).status, "delivered");
-  assert.equal(f.edits[0].messageId, 23001);
-  assert.match(String(f.edits[0].text), /Alice Bob$/);
+  assert.equal(f.edits[0]!.messageId, 23001);
+  assert.match(String(f.edits[0]!.text), /Alice .*Bob$/);
 });
 
 test("a reminder recovers after adoption and desired persistence without a queue acknowledgment", async () => {
@@ -1682,7 +1669,7 @@ test("a reminder delivery racing the next projection defers and retries its part
   assert.deepEqual(f.state.read(f.outboxPath), marker);
   assert.equal(await f.project(), "projected");
   assert.equal((await f.deliver()).status, "delivered");
-  assert.match(String(f.edits.at(-1)?.text), /Alice Bob Carol$/);
+  assert.match(String(f.edits.at(-1)?.text), /Alice .*Bob .*Carol$/);
 });
 
 test("a deleted reminder is never adopted again or replaced on later joins", async () => {

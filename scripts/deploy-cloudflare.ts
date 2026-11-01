@@ -100,7 +100,11 @@ function parseArgs(argv: string[]): CliOptions {
     throw new DeployError("--version-id is only valid in production mode.", 2);
   }
 
-  return { mode, tokenFile, versionId };
+  return {
+    mode,
+    ...(tokenFile ? { tokenFile } : {}),
+    ...(versionId ? { versionId } : {}),
+  };
 }
 
 function createBuildEnvironment(
@@ -201,7 +205,10 @@ function execute(
   dependencies: FrontendRuntimeDependencies = createDefaultDependencies(),
 ): void {
   const options = parseArgs(argv);
-  const nodeMajor = Number.parseInt(dependencies.nodeVersion.split(".")[0], 10);
+  const nodeMajor = Number.parseInt(
+    dependencies.nodeVersion.split(".")[0]!,
+    10,
+  );
   if (!Number.isFinite(nodeMajor) || nodeMajor < 24) {
     throw new DeployError(
       `Node 24 or newer is required; current version is ${dependencies.nodeVersion}.`,
@@ -217,7 +224,7 @@ function execute(
     options.mode === "dry-run"
       ? undefined
       : readCloudflareApiToken({
-          tokenFile: options.tokenFile,
+          ...(options.tokenFile ? { tokenFile: options.tokenFile } : {}),
           environment: dependencies.processEnv,
           readFile: dependencies.readFile,
         });

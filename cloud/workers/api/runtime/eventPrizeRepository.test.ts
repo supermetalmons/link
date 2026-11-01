@@ -1,5 +1,10 @@
+import { applyCanonicalTestMigrations } from "./canonicalTestMigrations.ts";
+import { canonicalWithdrawalFixture } from "../test/canonicalWithdrawalFixture.ts";
+import { eventDocumentFixture } from "../test/eventCompatibilityFixture.ts";
+import { createStoredPlayerProfile } from "../src/profileCanonical/contracts.ts";
+import { createDefaultProfileAppearance } from "@mons/shared/appearance";
 import { createWithdrawalStorageFixture as createD1EventPrizeWithdrawalStore } from "../test/withdrawalStorageFixture.ts";
-import { applyD1Migrations, type D1Migration } from "cloudflare:test";
+import type { D1Migration } from "cloudflare:test";
 import { env } from "cloudflare:workers";
 import type { EventPrizeAssignmentRecord } from "../../../runtime/eventReads.js";
 import {
@@ -86,21 +91,23 @@ async function owner() {
         value: materializeCanonicalProfile({
           createdAtMs: 100,
           updatedAtMs: 100,
-          profile: {
-            id: profileId,
-            nonce: 1,
-            rating: 1600,
-            totalManaPoints: 5,
-            win: true,
-            emoji: 2,
-            username: null,
-            eth: null,
-            sol: null,
-            mining: {
-              lastRockDate: "2026-08-28",
-              materials: { dust: 0, slime: 0, gum: 0, metal: 0, ice: 0 },
+          profile: createStoredPlayerProfile(
+            profileId,
+            createDefaultProfileAppearance(2),
+            {
+              nonce: 1,
+              rating: 1600,
+              totalManaPoints: 5,
+              win: true,
+              username: null,
+              eth: null,
+              sol: null,
+              mining: {
+                lastRockDate: "2026-08-28",
+                materials: { dust: 0, slime: 0, gum: 0, metal: 0, ice: 0 },
+              },
             },
-          },
+          ),
         }),
       },
       {
@@ -129,7 +136,7 @@ describe("focused event prize repositories", () => {
       testEnv.EVENT_DB,
       testEnv.TEST_EVENT_D1_MIGRATIONS,
     );
-    await applyD1Migrations(
+    await applyCanonicalTestMigrations(
       testEnv.EVENT_PRIZE_WITHDRAWALS_DB,
       testEnv.TEST_EVENT_PRIZE_WITHDRAWAL_D1_MIGRATIONS,
     );
@@ -140,17 +147,19 @@ describe("focused event prize repositories", () => {
 
   beforeEach(async () => {
     await testEnv.EVENT_DB.batch([
-      testEnv.EVENT_DB.prepare("DELETE FROM profile_event_prizes"),
-      testEnv.EVENT_DB.prepare("DELETE FROM profile_event_prize_revisions"),
-      testEnv.EVENT_DB.prepare("DELETE FROM event_records"),
+      testEnv.EVENT_DB.prepare("DELETE FROM profile_event_prizes_canonical"),
+      testEnv.EVENT_DB.prepare(
+        "DELETE FROM profile_event_prize_revisions_canonical",
+      ),
+      testEnv.EVENT_DB.prepare("DELETE FROM event_records_canonical"),
     ]);
     const admission = await acquireEventWriteAdmission(testEnv.EVENT_DB);
     try {
       await patchEventOwnedPaths(
         testEnv.EVENT_DB,
         {
-          [`events/${eventId}`]: {
-            schemaVersion: 2,
+          [`events/${eventId}`]: eventDocumentFixture({
+            schemaVersion: 3,
             eventId,
             status: "scheduled",
             createdAtMs: 100,
@@ -161,7 +170,7 @@ describe("focused event prize repositories", () => {
             createdByUsername: "owner",
             participants: {},
             rounds: {},
-          },
+          }),
         },
         { admission },
       );
@@ -209,7 +218,7 @@ describe("focused event prize repositories", () => {
     expect(ownership.loginUidsByProfileId.get(profileId)).toEqual([loginUid]);
     expect(ownership.profileById.get(profileId)?.profile).toEqual({
       profileId,
-      aura: "",
+      aura: "none",
       emoji: 2,
       eth: "",
       sol: "",
@@ -262,7 +271,7 @@ describe("focused event prize repositories", () => {
       testEnv.EVENT_PRIZE_WITHDRAWALS_DB,
     );
     const recipientAddress = "11111111111111111111111111111111";
-    const completed = {
+    const completed = canonicalWithdrawalFixture({
       assetAddress: "JEGmxy88eGv9vD4rWRtN5so9fMfMU6WA5djgrysDWKrU",
       eventId,
       place: 1,
@@ -272,7 +281,7 @@ describe("focused event prize repositories", () => {
       requesterUid: loginUid,
       status: "completed",
       transactionSignature: "signature",
-    };
+    });
     await withdrawals.replaceRecords([{ eventId, prizeId, value: completed }]);
     const invoke = (path: string, body: unknown) =>
       handleEventPrizeWithdrawalRoute(
@@ -290,52 +299,48 @@ describe("focused event prize repositories", () => {
       );
     const readRevision = () =>
       testEnv.EVENT_DB.prepare(
-        "SELECT revision, updated_at_ms FROM profile_event_prize_revisions WHERE profile_id = ?",
+        "SELECT revision, updated_at_ms FROM profile_event_prize_revisions_canonical WHERE profile_id = ?",
       )
         .bind(profileId)
         .first<{ revision: number; updated_at_ms: number }>();
-    try {
-      const status = await invoke("/events/prizes/withdrawals/status", {
-        eventId,
-        prizeId,
-        operationId: await buildEventPrizeWithdrawalOperationId(
-          eventId,
-          prizeId,
-        ),
-      });
-      expect(status.status).toBe(200);
-      expect(await status.json()).toMatchObject({ status: "completed" });
-      expect(
-        await repository.readProfileEventPrizeAssignment(profileId, eventId),
-      ).toEqual(assignment(profileId));
-      expect((await readRevision())?.revision).toBe(1);
+    const status = await invoke("/events/prizes/withdrawals/status", {
+      eventId,
+      prizeId,
+      operationId: await buildEventPrizeWithdrawalOperationId(eventId, prizeId),
+    });
+    expect(status.status).toBe(200);
+    expect(await status.json()).toMatchObject({ status: "completed" });
+    expect(
+      await repository.readProfileEventPrizeAssignment(profileId, eventId),
+    ).toEqual(assignment(profileId));
+    expect((await readRevision())?.revision).toBe(1);
 
-      const first = await invoke("/events/prizes/withdrawals", {
-        eventId,
-        prizeId,
-        solanaAddress: recipientAddress,
-      });
-      expect(first.status).toBe(200);
-      expect(await first.json()).toMatchObject({ status: "completed" });
-      expect(
-        await repository.readProfileEventPrizeAssignment(profileId, eventId),
-      ).toBeNull();
-      const revision = await readRevision();
-      expect(revision?.revision).toBe(2);
+    const first = await invoke("/events/prizes/withdrawals", {
+      eventId,
+      prizeId,
+      solanaAddress: recipientAddress,
+    });
+    expect(first.status).toBe(200);
+    expect(await first.json()).toMatchObject({ status: "completed" });
+    expect(
+      await repository.readProfileEventPrizeAssignment(profileId, eventId),
+    ).toBeNull();
+    const revision = await readRevision();
+    expect(revision?.revision).toBe(2);
 
-      const repeated = await invoke("/events/prizes/withdrawals", {
-        eventId,
-        prizeId,
-        solanaAddress: recipientAddress,
-      });
-      expect(repeated.status).toBe(200);
-      expect(await repeated.json()).toMatchObject({ status: "completed" });
-      expect(await readRevision()).toEqual(revision);
-      expect(await withdrawals.get(eventId, prizeId)).toEqual(completed);
-      expect(await admissionCount()).toBe(0);
-    } finally {
-      await withdrawals.replaceRecords([{ eventId, prizeId, value: null }]);
-    }
+    const repeated = await invoke("/events/prizes/withdrawals", {
+      eventId,
+      prizeId,
+      solanaAddress: recipientAddress,
+    });
+    expect(repeated.status).toBe(200);
+    expect(await repeated.json()).toMatchObject({ status: "completed" });
+    expect(await readRevision()).toEqual(revision);
+    expect(await withdrawals.get(eventId, prizeId)).toEqual(completed);
+    expect(await admissionCount()).toBe(0);
+    await expect(
+      withdrawals.replaceRecords([{ eventId, prizeId, value: null }]),
+    ).rejects.toThrow("completed withdrawal evidence is permanent");
   });
 
   it("keeps profileDb overrides scoped to merge paths and narrows the execution default", async () => {
@@ -367,7 +372,8 @@ describe("focused event prize repositories", () => {
     expect(mergeReads).toBe(1);
     await expect(
       executeEventPrizeWithdrawal(restrictedEnv(), {
-        schemaVersion: 1,
+        schemaVersion: 2,
+        dataEpoch: 1,
         kind: "withdrawal",
         eventId,
         prizeId,

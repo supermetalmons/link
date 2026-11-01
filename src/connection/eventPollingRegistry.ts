@@ -369,7 +369,10 @@ export class EventPollingRegistry {
     onEmpty: () => void,
     initialDelayMs = 0,
   ): () => void {
-    const subscriber: PollingSubscriber<T> = { onError, onUpdate };
+    const subscriber: PollingSubscriber<T> = {
+      onUpdate,
+      ...(onError ? { onError } : {}),
+    };
     const shouldStart = entry.subscribers.size === 0;
     entry.subscribers.add(subscriber);
     if (shouldStart) {
@@ -720,7 +723,7 @@ export class EventPollingRegistry {
   private failureDelay(consecutiveFailures: number): number {
     return this.backoffMs[
       Math.min(consecutiveFailures - 1, this.backoffMs.length - 1)
-    ];
+    ]!;
   }
 
   private notifyUpdate<T>(

@@ -63,7 +63,7 @@ async function readMatchStatePairs(
           finishRoomReads();
         }
       },
-      { signal, timing },
+      { ...(signal ? { signal } : {}), ...(timing ? { timing } : {}) },
     );
   } finally {
     finishRoomReads();
@@ -73,14 +73,18 @@ async function readMatchStatePairs(
 export function createMatchStateSource(env: Env): MatchStatePort {
   return {
     async readMatchRecord(input, signal) {
-      const value = await readMatchStateRecord(env, input, { signal });
+      const value = await readMatchStateRecord(env, input, {
+        ...(signal ? { signal } : {}),
+      });
       return value;
     },
     async readMatchRecords(inputs, signal) {
-      return await readMatchStateRecords(env, inputs, { signal });
+      return await readMatchStateRecords(env, inputs, {
+        ...(signal ? { signal } : {}),
+      });
     },
     async readMatchPair(input, signal) {
-      return (await readMatchStatePairs(env, [input], signal))[0];
+      return (await readMatchStatePairs(env, [input], signal))[0]!;
     },
     async readMatchPairs(inputs, signal) {
       signal?.throwIfAborted();

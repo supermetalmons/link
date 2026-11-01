@@ -1,6 +1,6 @@
 import { readTelegramAnnouncementPayloadDocument } from "../src/telegramAnnouncementRecords.ts";
 import { eventDocumentFixture } from "./eventCompatibilityFixture.ts";
-import { encodeEventUpdates } from "../src/eventCompatibilityCodec.ts";
+import { encodeEventUpdates } from "./eventLegacyFixtureCodec.ts";
 import assert from "node:assert/strict";
 import test from "node:test";
 import { telegramRepositoryFixture } from "./telegramRepositoryFixture.ts";
@@ -33,6 +33,14 @@ function sentReceipt(
   leadMs: 10800000 | 14400000 = 14_400_000,
 ): TelegramAnnouncementRecord {
   return {
+    schemaVersion: 1,
+    startAtMs: null,
+    runAtMs: null,
+    firstQueuedAtMs: null,
+    attemptId: null,
+    attemptCount: null,
+    retryAtMs: null,
+    errorCode: null,
     eventId: EVENT_ID,
     kind: "reminder",
     status: "sent",
@@ -63,10 +71,20 @@ function telegramStore(initial: unknown = null) {
         value?: unknown;
       };
       if (result.commit === false) {
-        return { committed: false, decision: result.decision, value: message };
+        return {
+          committed: false,
+          ...(result.decision !== undefined
+            ? { decision: result.decision }
+            : {}),
+          value: message,
+        };
       }
       message = result.value;
-      return { committed: true, decision: result.decision, value: message };
+      return {
+        committed: true,
+        ...(result.decision !== undefined ? { decision: result.decision } : {}),
+        value: message,
+      };
     },
   });
   return { telegram, read: () => message, transactions: () => transactions };
@@ -119,13 +137,13 @@ test("adopts the original sent reminder as a complete edit-only delivery without
   const receipt = sentReceipt();
   const original = structuredClone(receipt);
   const state = telegramStore();
-  const message = (await adoptSundayMonsReminderMessage({
+  const message = await adoptSundayMonsReminderMessage({
     eventId: EVENT_ID,
     receipt,
     telegram: state.telegram,
     chatId: env.TELEGRAM_EXTRA_CHAT_ID,
-  })) as Record<string, Record<string, unknown>>;
-  assert.equal(message.desired.operation, "edit");
+  });
+  assert.ok(message?.desired?.operation === "edit");
   assert.equal(message.desired.ifMissing, "skip");
   assert.equal(message.desired.destination, "community");
   assert.equal(message.desired.instanceKey, `${MESSAGE_KEY}:v2`);
@@ -152,17 +170,25 @@ test("adopts the original sent reminder as a complete edit-only delivery without
   assert.deepEqual(receipt, original);
 });
 
-test("adoption preserves every existing record, including missing or abandoned delivery state", async () => {
+test("adoption preserves existing canonical records and terminal recovery decisions", async () => {
+  const confirmed = await adoptSundayMonsReminderMessage({
+    eventId: EVENT_ID,
+    receipt: sentReceipt(),
+    telegram: telegramStore().telegram,
+    chatId: "community-chat",
+  });
+  assert.ok(confirmed?.applied);
   for (const existing of [
-    {},
-    { applied: { messageId: 999 }, desired: { text: "newer" } },
+    { schemaVersion: 1 },
+    { ...confirmed, applied: { ...confirmed.applied, messageId: 999 } },
     {
+      schemaVersion: 1,
       delivery: {
         status: "terminal",
-        lastError: { code: "manually-abandoned" },
+        revision: "fixture-revision",
+        lastError: { code: "manually-abandoned", atMs: 1 },
       },
     },
-    { applied: null, delivery: { status: "delivered" } },
   ]) {
     const state = telegramStore(existing);
     const result = await adoptSundayMonsReminderMessage({
@@ -180,12 +206,14 @@ test("only a valid confirmed reminder for the exact event and destination can be
   const receipt = sentReceipt();
   for (const invalid of [
     null,
-    ...["sending", "uncertain", "retryable", "terminal"].map((status) => ({
-      ...receipt,
-      status,
-    })),
+    ...(["sending", "uncertain", "retryable", "terminal"] as const).map(
+      (status) => ({
+        ...receipt,
+        status,
+      }),
+    ),
     { ...receipt, kind: "prizes" as const },
-    { ...receipt, kind: undefined },
+
     { ...receipt, eventId: "another-event" },
     { ...receipt, messageIds: null },
     { ...receipt, messageIds: [] },
@@ -236,12 +264,13 @@ test("adopts reminders already containing participants from their actual sent te
         Reflect.get(receipt.payload!, "text") + suffix,
       );
       const state = telegramStore();
-      const result = (await adoptSundayMonsReminderMessage({
+      const result = await adoptSundayMonsReminderMessage({
         eventId: EVENT_ID,
         receipt,
         telegram: state.telegram,
         chatId: "community-chat",
-      })) as Record<string, Record<string, unknown>>;
+      });
+      assert.ok(result?.desired?.operation === "edit");
       assert.equal(result.desired.text, Reflect.get(receipt.payload!, "text"));
     }
   }
@@ -289,9 +318,7 @@ test("refresh ignores events outside strict scheduled Sunday v2 eligibility and 
   for (const candidate of [
     null,
     ...["active", "ended", "dismissed"].map((status) => ({ ...event, status })),
-    { ...event, isSundayMons: "true" },
     { ...event, isSundayMons: false },
-    { ...event, telegramDeliveryVersion: 1 },
     { ...event, startAtMs: 0 },
   ]) {
     const state = fixture();

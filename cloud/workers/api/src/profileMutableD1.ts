@@ -3,7 +3,6 @@ import {
   parseCanonicalOwnedProfileRowWith,
 } from "./profileCanonical/ownedProfile.ts";
 import {
-  materializeCanonicalProfile,
   materializeCanonicalProfileFields,
   resolveCanonicalProfilesUsing,
 } from "./profileCanonical/profiles.ts";
@@ -18,6 +17,7 @@ import type {
   CanonicalMutation,
   CanonicalSortKey,
 } from "./profileCanonical/types.ts";
+import type { EmojiId } from "@mons/shared/appearance";
 
 export type { CanonicalMutableProfileSnapshot } from "./profileCanonical/types.ts";
 
@@ -30,7 +30,7 @@ export type MutableProfileUpdateOptions = {
   sortUpdates?: Partial<Record<CanonicalSortKey, number>>;
   winPresent?: boolean;
   emojiPresent?: boolean;
-  gameplayEmoji?: string | number;
+  gameplayEmoji?: EmojiId;
 };
 
 export type MutableProfileMutation = Extract<
@@ -75,12 +75,12 @@ export async function readMutableRatingProfiles(
   );
   return {
     player: parseCanonicalOwnedProfileRowWith(
-      player.results[0],
+      player!.results[0],
       playerLoginUid,
       parseMutableProfileRow,
     ),
     opponent: parseCanonicalOwnedProfileRowWith(
-      opponent.results[0],
+      opponent!.results[0],
       opponentLoginUid,
       parseMutableProfileRow,
     ),
@@ -129,16 +129,6 @@ export function buildMutableProfileMutation(
     emojiPresent,
     gameplayEmoji,
   };
-  if (snapshot.storageShape === "full") {
-    return {
-      kind: "patch-active-profile",
-      current: snapshot,
-      value: materializeCanonicalProfile({
-        ...input,
-        legacyFields: snapshot.legacyFields,
-      }),
-    };
-  }
   return {
     kind: "patch-profile-fields",
     current: snapshot,

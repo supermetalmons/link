@@ -1,3 +1,5 @@
+import { required } from "./fixtures/canonicalData.mjs";
+import { browserServerOrigin } from "./browserViteServer.mjs";
 import assert from "node:assert/strict";
 import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
@@ -5,6 +7,7 @@ import test from "node:test";
 import { createServer } from "vite";
 
 const require = createRequire(import.meta.url);
+/** @type {typeof import("playwright")} */
 const { chromium } = require(process.env.MONS_PLAYWRIGHT_PATH || "playwright");
 const repository = fileURLToPath(new URL("../", import.meta.url));
 const harnessSource = `
@@ -62,7 +65,7 @@ function Probe({ hasViewport, pangchiu, mountReaction }) {
 }
 const run = callback => flushSync(callback);
 const video = opponent => document.querySelector('#root > div').children[opponent ? 1 : 2].querySelector('video');
-window.harness = {
+window.boardReactionsHarness = {
   render(hasViewport = true, pangchiu = false, mountReaction = null) {
     run(() => root.render(React.createElement(React.StrictMode, null,
       React.createElement(Probe, { hasViewport, pangchiu, mountReaction }))));
@@ -138,6 +141,7 @@ window.harness = {
 };
 `;
 
+/** @param {(page: import("playwright").Page) => Promise<void>} run */
 async function fixture(run) {
   const server = await createServer({
     root: repository,
@@ -172,10 +176,11 @@ async function fixture(run) {
       },
     ],
   });
+  /** @type {import("playwright").Browser | undefined} */
   let browser;
   try {
     await server.listen();
-    const origin = `http://127.0.0.1:${server.httpServer.address().port}`;
+    const origin = browserServerOrigin(server);
     browser = await chromium.launch({
       headless: true,
       ...(process.env.MONS_BROWSER_EXECUTABLE
@@ -189,10 +194,11 @@ async function fixture(run) {
         : route.abort(),
     );
     const page = await context.newPage();
+    /** @type {string[]} */
     const errors = [];
     page.on("pageerror", (error) => errors.push(error.message));
     await page.goto(`${origin}/__reactions`);
-    await page.waitForFunction(() => !!window.harness);
+    await page.waitForFunction(() => !!window.boardReactionsHarness);
     await run(page);
     assert.deepEqual(errors, []);
   } finally {
@@ -201,12 +207,32 @@ async function fixture(run) {
   }
 }
 
-const invoke = (page, method, ...args) =>
-  page.evaluate(({ method, args }) => window.harness[method](...args), {
-    method,
-    args,
-  });
+/**
+ * @template {keyof import("./fixtures/mediaBrowserGlobals.ts").BoardReactionsHarness} K
+ * @param {import("playwright").Page} page
+ * @param {K} method
+ * @param {Parameters<import("./fixtures/mediaBrowserGlobals.ts").BoardReactionsHarness[K]>} args
+ * @returns {Promise<Awaited<ReturnType<import("./fixtures/mediaBrowserGlobals.ts").BoardReactionsHarness[K]>>>}
+ */
+const invoke = async (page, method, ...args) =>
+  await page.evaluate(
+    async ({ method, args }) => {
+      /** @type {ReturnType<import("./fixtures/mediaBrowserGlobals.ts").BoardReactionsHarness[K]>} */
+      const result = Reflect.apply(
+        window.boardReactionsHarness[method],
+        window.boardReactionsHarness,
+        args,
+      );
+      return await result;
+    },
+    {
+      method,
+      args,
+    },
+  );
+/** @param {import("playwright").Page} page */
 const snapshot = (page) => invoke(page, "snapshot");
+/** @param {import("./fixtures/mediaBrowserGlobals.ts").ReactionSnapshot} state */
 const videoIds = (state) => state.videos.map((video) => video.id);
 
 test("reactions retain pre-layout state, placement, media sources, and isolate parent renders", async () => {
@@ -224,7 +250,7 @@ test("reactions retain pre-layout state, placement, media sources, and isolate p
       { top: "85.22%", height: "12.5%", transform: "translateX(-50%)" },
     ]);
     assert.ok(state.videos.every((video) => video.muted && video.playsInline));
-    assert.deepEqual(state.videos[0].sources, [
+    assert.deepEqual(required(state.videos[0]).sources, [
       'video/quicktime; codecs="hvc1"',
       "video/webm",
     ]);
@@ -249,13 +275,13 @@ test("playback updates lifetime and replacement ignores stale playback failures"
     await invoke(page, "rejectPlay", 0, "NotAllowedError");
     assert.deepEqual(videoIds(await snapshot(page)), [2]);
     await invoke(page, "advance", 400);
-    assert.equal((await snapshot(page)).videos[0].opacity, "1");
+    assert.equal(required((await snapshot(page)).videos[0]).opacity, "1");
     await invoke(page, "playing", false, 2, 1);
     assert.deepEqual((await snapshot(page)).timers, [1700]);
     await invoke(page, "advance", 1699);
-    assert.equal((await snapshot(page)).videos[0].opacity, "1");
+    assert.equal(required((await snapshot(page)).videos[0]).opacity, "1");
     await invoke(page, "advance", 1);
-    assert.equal((await snapshot(page)).videos[0].opacity, "0");
+    assert.equal(required((await snapshot(page)).videos[0]).opacity, "0");
     await invoke(page, "advance", 200);
     assert.deepEqual(videoIds(await snapshot(page)), []);
     await invoke(page, "show", false, 3);
@@ -277,7 +303,7 @@ test("page resume resumes active playback and expires suspended reactions", asyn
     assert.equal((await snapshot(page)).playCount, first.playCount + 1);
     await invoke(page, "advance", 7001, false);
     await invoke(page, "resume", "pageshow");
-    assert.equal((await snapshot(page)).videos[0].opacity, "0");
+    assert.equal(required((await snapshot(page)).videos[0]).opacity, "0");
     await invoke(page, "advance", 121, false);
     await invoke(page, "resume", "visibilitychange");
     assert.deepEqual(videoIds(await snapshot(page)), []);
@@ -300,7 +326,7 @@ test("clearing both reactions cancels old timers and preserves new reactions", a
     await invoke(page, "show", false, 4);
     await invoke(page, "advance", 400);
     assert.deepEqual(videoIds(await snapshot(page)), [4]);
-    assert.equal((await snapshot(page)).videos[0].opacity, "1");
+    assert.equal(required((await snapshot(page)).videos[0]).opacity, "1");
     await invoke(page, "dispose");
     await invoke(page, "show", false, 5);
     assert.deepEqual((await snapshot(page)).timers, []);
@@ -314,9 +340,9 @@ test("source errors do not dismiss a reaction but media element errors do", asyn
     await invoke(page, "show", false, 1);
     await invoke(page, "advance", 400);
     await invoke(page, "error", false, true);
-    assert.equal((await snapshot(page)).videos[0].opacity, "1");
+    assert.equal(required((await snapshot(page)).videos[0]).opacity, "1");
     await invoke(page, "error", false);
-    assert.equal((await snapshot(page)).videos[0].opacity, "0");
+    assert.equal(required((await snapshot(page)).videos[0]).opacity, "0");
     await invoke(page, "advance", 200);
     assert.deepEqual(videoIds(await snapshot(page)), []);
   });
@@ -330,7 +356,7 @@ test("StrictMode mount replay replaces canceled reaction timers and unmount rele
     assert.deepEqual(videoIds(state), [17]);
     assert.deepEqual(state.timers, [400, 7000]);
     await invoke(page, "advance", 400);
-    assert.equal((await snapshot(page)).videos[0].opacity, "1");
+    assert.equal(required((await snapshot(page)).videos[0]).opacity, "1");
     await invoke(page, "playing", false, 2);
     assert.deepEqual((await snapshot(page)).timers, [2700]);
     await invoke(page, "dispose");

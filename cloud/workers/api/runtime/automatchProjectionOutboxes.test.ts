@@ -1,9 +1,11 @@
+import { applyCanonicalTestMigrations } from "./canonicalTestMigrations.ts";
+import { inviteDocumentFixture } from "../test/inviteDocumentFixture.ts";
 import {
   retainedAutomatchSnapshotFixture,
   retainedAutomatchClaimFixture,
 } from "../test/automatchRecordFixture.ts";
 import { env } from "cloudflare:workers";
-import { applyD1Migrations, type D1Migration } from "cloudflare:test";
+import type { D1Migration } from "cloudflare:test";
 import { beforeAll, beforeEach, describe, expect, it } from "vitest";
 import {
   acquireAutomatchWriteAdmission,
@@ -16,17 +18,19 @@ import type { AutomatchOutboxClaimSnapshot } from "../src/automatchD1/types.ts";
 
 const testEnv = env as Env & { TEST_D1_MIGRATIONS: D1Migration[] };
 const db = env.PROFILE_GAMES_DB;
-const profileTable = "game_session_projection_outbox";
-const telegramTable = "automatch_telegram_projection_outbox";
+const profileTable = "game_session_projection_outbox_canonical";
+const telegramTable = "automatch_telegram_projection_outbox_canonical";
 const nowMs = 1_800_000_000_000;
 
 function profileOutbox(extra: Record<string, unknown> = {}) {
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     status: "pending",
     requestId: "request-one",
     sourceUpdatedAtMs: 50,
     lastQueuedAtMs: 100,
+    historicalMatches: {},
+    archiveRetry: null,
     reason: "automatch-queue",
     ...extra,
   };
@@ -34,7 +38,7 @@ function profileOutbox(extra: Record<string, unknown> = {}) {
 
 function telegramOutbox(extra: Record<string, unknown> = {}) {
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     status: "pending",
     requestId: "request-one",
     updatedAtMs: 100,
@@ -56,7 +60,7 @@ function historical(retryNotBeforeMs?: number) {
     hostPlayerId: "host",
     guestPlayerId: "guest",
     source: "transition",
-    ...(retryNotBeforeMs === undefined ? {} : { retryNotBeforeMs }),
+    retryNotBeforeMs: retryNotBeforeMs ?? null,
   };
 }
 
@@ -156,11 +160,11 @@ async function writableStore(database = db, now = () => nowMs) {
 }
 
 describe("native automatch projection outboxes", () => {
-  beforeAll(() => applyD1Migrations(db, testEnv.TEST_D1_MIGRATIONS));
+  beforeAll(() => applyCanonicalTestMigrations(db, testEnv.TEST_D1_MIGRATIONS));
   beforeEach(async () => {
     await db.batch([
-      db.prepare("DELETE FROM game_session_transition_resources"),
-      db.prepare("DELETE FROM game_session_transitions"),
+      db.prepare("DELETE FROM game_session_transition_resources_canonical"),
+      db.prepare("DELETE FROM game_session_transitions_canonical"),
       db.prepare(`DELETE FROM ${profileTable}`),
       db.prepare(`DELETE FROM ${telegramTable}`),
       db.prepare("DELETE FROM automatch_write_admissions"),
@@ -178,10 +182,9 @@ describe("native automatch projection outboxes", () => {
     ]);
   });
 
-  it("claims both outboxes with one read and field updates, preserving unknown fields and monotonic timestamps", async () => {
-    const unknown = { nested: [1, { retained: true }], note: "future-schema" };
-    await seed(profileTable, profileOutbox({ unknown }), 7, nowMs + 100);
-    await seed(telegramTable, telegramOutbox({ unknown }), 9, nowMs + 100);
+  it("claims both outboxes with one read and field updates, preserving request data and monotonic timestamps", async () => {
+    await seed(profileTable, profileOutbox(), 7, nowMs + 100);
+    await seed(telegramTable, telegramOutbox(), 9, nowMs + 100);
     const observed = observeDatabase();
     const store = await writableStore(observed.database);
     expect(
@@ -216,19 +219,18 @@ describe("native automatch projection outboxes", () => {
     expect(await stored(profileTable)).toMatchObject({
       revision: 8,
       updated_at_ms: nowMs + 100,
-      value: profileOutbox({ unknown, lastQueuedAtMs: 200 }),
+      value: profileOutbox({ lastQueuedAtMs: 200 }),
     });
     expect(await stored(telegramTable)).toMatchObject({
       revision: 10,
       updated_at_ms: nowMs + 100,
-      value: telegramOutbox({ unknown, updatedAtMs: 200 }),
+      value: telegramOutbox({ updatedAtMs: 200 }),
     });
   });
 
   it("claims scanned snapshots with one fewer primary read per outbox", async () => {
-    const unknown = { nested: [1, { retained: true }] };
-    const profile = profileOutbox({ unknown });
-    const telegram = telegramOutbox({ unknown });
+    const profile = profileOutbox();
+    const telegram = telegramOutbox();
     await seed(profileTable, profile, 7, nowMs + 100);
     await seed(telegramTable, telegram, 9, nowMs + 100);
     const observed = observeDatabase();
@@ -263,12 +265,12 @@ describe("native automatch projection outboxes", () => {
     expect(await stored(profileTable)).toMatchObject({
       revision: 8,
       updated_at_ms: nowMs + 100,
-      value: profileOutbox({ unknown, lastQueuedAtMs: 200 }),
+      value: profileOutbox({ lastQueuedAtMs: 200 }),
     });
     expect(await stored(telegramTable)).toMatchObject({
       revision: 10,
       updated_at_ms: nowMs + 100,
-      value: telegramOutbox({ unknown, updatedAtMs: 200 }),
+      value: telegramOutbox({ updatedAtMs: 200 }),
     });
   });
 
@@ -291,7 +293,7 @@ describe("native automatch projection outboxes", () => {
           : change === "timestamp"
             ? profileOutbox({ lastQueuedAtMs: 150 })
             : change === "metadata"
-              ? profileOutbox({ unknown: { newer: true } })
+              ? profileOutbox({ reason: "newer" })
               : null;
       if (change !== "deleted") await seed(profileTable, newer, 2);
       const observed = observeDatabase();
@@ -312,7 +314,7 @@ describe("native automatch projection outboxes", () => {
         expect(await stored(profileTable)).toMatchObject({
           revision: 3,
           value: profileOutbox({
-            unknown: { newer: true },
+            reason: "newer",
             lastQueuedAtMs: 200,
           }),
         });
@@ -364,7 +366,6 @@ describe("native automatch projection outboxes", () => {
 
   it("discards invalid or ineligible seeds before choosing the authoritative outcome", async () => {
     const values = [
-      claimSnapshot("telegramProjectionOutbox/automatch", telegramOutbox()),
       {
         ...claimSnapshot(
           "profileGameProjectionOutbox/automatch",
@@ -390,14 +391,6 @@ describe("native automatch projection outboxes", () => {
         "profileGameProjectionOutbox/automatch",
         profileOutbox({ lastQueuedAtMs: 300 }),
       ),
-      claimSnapshot(
-        "profileGameProjectionOutbox/automatch",
-        profileOutbox({ "invalid/key": true }),
-      ),
-      claimSnapshot(
-        "profileGameProjectionOutbox/automatch",
-        profileOutbox({ future: { ".sv": "unsupported" } }),
-      ),
     ];
     for (const snapshot of values) {
       await seed(profileTable, profileOutbox());
@@ -419,19 +412,6 @@ describe("native automatch projection outboxes", () => {
       expect(observed.reads).toHaveLength(1);
       expect(observed.batches()).toBe(1);
     }
-    const invalid = profileOutbox({ "invalid/key": true });
-    await seed(profileTable, invalid);
-    const store = await writableStore();
-    await expect(
-      store.claimAutomatchProfileOutbox(
-        "invite",
-        "request-one",
-        100,
-        200,
-        undefined,
-        claimSnapshot("profileGameProjectionOutbox/automatch", invalid),
-      ),
-    ).rejects.toThrow("invalid-automatch-key");
   });
 
   it("does not expose a read-only seed error when the current row is a no-op", async () => {
@@ -474,50 +454,6 @@ describe("native automatch projection outboxes", () => {
     expect(observed.batches()).toBe(25);
   });
 
-  it.each([false, true])(
-    "retains the initial marker clock for a seeded claim with conflict=%s",
-    async (conflict) => {
-      const value = profileOutbox({
-        lastQueuedAtMs: 100.9,
-        sourceUpdatedAtMs: 50.5,
-        future: {
-          at: { ".sv": "timestamp" },
-          count: { ".sv": { increment: 2 } },
-        },
-      });
-      await seed(profileTable, value);
-      let clock = nowMs;
-      let changed = false;
-      const observed = observeDatabase(async () => {
-        if (!conflict || changed) return;
-        changed = true;
-        await db
-          .prepare(`UPDATE ${profileTable} SET revision = revision + 1`)
-          .run();
-      });
-      const store = await writableStore(observed.database, () => clock++);
-      const operationClock = clock;
-      expect(
-        await store.claimAutomatchProfileOutbox(
-          "invite",
-          "request-one",
-          100,
-          100,
-          undefined,
-          claimSnapshot("profileGameProjectionOutbox/automatch", value),
-        ),
-      ).toBe(true);
-      expect(await stored(profileTable)).toMatchObject({
-        value: {
-          future: { at: operationClock, count: 2 },
-          sourceUpdatedAtMs: 50.5,
-        },
-        updated_at_ms: operationClock + (conflict ? 2 : 1),
-      });
-      expect(observed.reads).toHaveLength(conflict ? 1 : 0);
-    },
-  );
-
   it.each(["before", "conflict", "committed"] as const)(
     "preserves cancellation %s a seeded write",
     async (stage) => {
@@ -552,91 +488,6 @@ describe("native automatch projection outboxes", () => {
     },
   );
 
-  it("preserves raw unknown JSON bytes when a seeded claim patches its timestamp", async () => {
-    const raw =
-      JSON.stringify(profileOutbox()).slice(0, -1) +
-      ',"precision":9007199254740993123,"duplicate":1,"duplicate":2}';
-    await seed(profileTable, profileOutbox());
-    await db
-      .prepare(`UPDATE ${profileTable} SET payload_json = ?`)
-      .bind(raw)
-      .run();
-    const observed = observeDatabase();
-    const store = await writableStore(observed.database);
-    expect(
-      await store.claimAutomatchProfileOutbox(
-        "invite",
-        "request-one",
-        100,
-        200,
-        undefined,
-        claimSnapshot("profileGameProjectionOutbox/automatch", JSON.parse(raw)),
-      ),
-    ).toBe(true);
-    expect(observed.reads).toEqual([]);
-    const row = await stored(profileTable);
-    expect(row?.payload_json).toContain('"precision":9007199254740993123');
-    expect(row?.payload_json).toContain('"duplicate":1,"duplicate":2');
-    expect(row?.value.lastQueuedAtMs).toBe(200);
-  });
-
-  it("falls back to the primary row when malformed UTF-8 scan keys collide", async () => {
-    const key = "\uFFFD";
-    const canonical = profileOutbox({
-      future: { owner: "canonical", retained: true },
-    });
-    const malformed = profileOutbox({
-      future: { owner: "malformed", at: { ".sv": "timestamp" } },
-    });
-    await db.batch([
-      db
-        .prepare(
-          `INSERT INTO ${profileTable} (record_key, payload_json, revision, updated_at_ms) VALUES (?, ?, 1, ?)`,
-        )
-        .bind(key, JSON.stringify(canonical), nowMs),
-      db
-        .prepare(
-          `INSERT INTO ${profileTable} (record_key, payload_json, revision, updated_at_ms) VALUES (CAST(X'FF' AS TEXT), ?, 1, ?)`,
-        )
-        .bind(JSON.stringify(malformed), nowMs),
-    ]);
-    const observed = observeDatabase();
-    const store = await writableStore(observed.database);
-    const page = await store.listDueAutomatchProfileOutboxesPage(100, 10);
-    expect(page.scannedIdentities).toEqual(["text:EFBFBD", "text:FF"]);
-    expect(page.entries?.[key]).toEqual(malformed);
-    expect(
-      await store.claimAutomatchProfileOutbox(
-        key,
-        "request-one",
-        100,
-        200,
-        undefined,
-        page.snapshots?.get(key),
-      ),
-    ).toBe(true);
-    const rows = await db
-      .prepare(
-        `SELECT hex(CAST(record_key AS BLOB)) AS identity, payload_json, revision FROM ${profileTable} ORDER BY record_key`,
-      )
-      .all<{ identity: string; payload_json: string; revision: number }>();
-    expect(
-      rows.results.map((row) => ({
-        ...row,
-        payload_json: JSON.parse(row.payload_json),
-      })),
-    ).toEqual([
-      {
-        identity: "EFBFBD",
-        payload_json: { ...canonical, lastQueuedAtMs: 200 },
-        revision: 2,
-      },
-      { identity: "FF", payload_json: malformed, revision: 1 },
-    ]);
-    expect(page.snapshots?.has(key)).toBe(false);
-    expect(observed.reads).toHaveLength(2);
-  });
-
   it("does not retry a provider failure during a seeded write", async () => {
     await seed(profileTable, profileOutbox());
     const failure = new Error("provider-write-failed");
@@ -659,42 +510,7 @@ describe("native automatch projection outboxes", () => {
     expect((await stored(profileTable))?.revision).toBe(1);
   });
 
-  it("retains floored fractional timestamp matching and equal-time claims", async () => {
-    await seed(
-      profileTable,
-      profileOutbox({ lastQueuedAtMs: 100.9, sourceUpdatedAtMs: 50.5 }),
-    );
-    await seed(telegramTable, telegramOutbox({ updatedAtMs: 100.9 }));
-    const store = await writableStore();
-    expect(
-      await store.claimAutomatchProfileOutbox(
-        "invite",
-        "request-one",
-        100,
-        100,
-      ),
-    ).toBe(true);
-    expect(
-      await store.claimAutomatchTelegramOutbox(
-        "invite",
-        "request-one",
-        100,
-        100,
-      ),
-    ).toBe(true);
-    expect((await stored(profileTable))?.value.sourceUpdatedAtMs).toBe(50.5);
-    expect(
-      await store.claimAutomatchProfileOutbox(
-        "invite",
-        "request-one",
-        100,
-        100.25,
-      ),
-    ).toBe(true);
-    expect((await stored(profileTable))?.value.lastQueuedAtMs).toBe(100.25);
-  });
-
-  it("keeps missing, malformed, superseded and not-due operations as no-ops without guards", async () => {
+  it("keeps missing, superseded and not-due operations as no-ops without guards", async () => {
     const observed = observeDatabase();
     const store = createAutomatchD1Store(observed.database, {
       now: () => Number.NaN,
@@ -702,21 +518,6 @@ describe("native automatch projection outboxes", () => {
     expect(
       await store.acknowledgeAutomatchProfileOutbox("invite", "request-one"),
     ).toBe(false);
-    await seed(
-      profileTable,
-      profileOutbox({ historicalMatches: { broken: {} } }),
-    );
-    expect(
-      await store.claimAutomatchProfileOutbox(
-        "invite",
-        "request-one",
-        100,
-        200,
-      ),
-    ).toBe(false);
-    expect(
-      await store.finishAutomatchProfileOutbox("invite", "request-one", 200),
-    ).toBe("superseded");
     await seed(profileTable, profileOutbox());
     expect(
       await store.claimAutomatchProfileOutbox("invite", "other", 100, 200),
@@ -749,9 +550,9 @@ describe("native automatch projection outboxes", () => {
     ).rejects.toThrow("invalid-automatch-revision");
   });
 
-  it("tombstones acknowledgements without strengthening Telegram's request-id-only check", async () => {
+  it("tombstones acknowledgements only for the current canonical request", async () => {
     await seed(profileTable, profileOutbox(), 3);
-    await seed(telegramTable, { requestId: "request-one", unknown: true }, 4);
+    await seed(telegramTable, telegramOutbox(), 4);
     const store = await writableStore();
     expect(
       await store.acknowledgeAutomatchTelegramOutbox("invite", "other"),
@@ -796,7 +597,7 @@ describe("native automatch projection outboxes", () => {
     };
     await seed(
       profileTable,
-      profileOutbox({ historicalMatches, unknown: { preserved: true } }),
+      profileOutbox({ historicalMatches, reason: "preserved" }),
     );
     expect(
       await store.finishAutomatchProfileOutbox("invite", "request-one", 200),
@@ -807,7 +608,7 @@ describe("native automatch projection outboxes", () => {
         historicalMatches,
         lastQueuedAtMs: 200,
         archiveRetry: { requestId: "request-one", notBeforeMs: 300 },
-        unknown: { preserved: true },
+        reason: "preserved",
       },
     });
     await seed(profileTable, profileOutbox());
@@ -876,45 +677,6 @@ describe("native automatch projection outboxes", () => {
     expect(observed.batches()).toBe(25);
   });
 
-  it.each([false, true])(
-    "preserves the initial server-marker clock with conflict=%s",
-    async (conflict) => {
-      await seed(
-        profileTable,
-        profileOutbox({
-          future: {
-            at: { ".sv": "timestamp" },
-            count: { ".sv": { increment: 2 } },
-          },
-        }),
-      );
-      let clock = nowMs;
-      let changed = false;
-      const observed = observeDatabase(async () => {
-        if (!conflict || changed) return;
-        changed = true;
-        await db
-          .prepare(`UPDATE ${profileTable} SET revision = revision + 1`)
-          .run();
-      });
-      const store = await writableStore(observed.database, () => clock++);
-      const operationClock = clock;
-      expect(
-        await store.claimAutomatchProfileOutbox(
-          "invite",
-          "request-one",
-          100,
-          200,
-        ),
-      ).toBe(true);
-      expect(await stored(profileTable)).toMatchObject({
-        value: { future: { at: operationClock, count: 2 } },
-        updated_at_ms: operationClock + (conflict ? 2 : 1),
-      });
-      expect(observed.batches()).toBe(conflict ? 2 : 1);
-    },
-  );
-
   it.each(["claim", "finish"])(
     "reports a committed %s when cancellation follows the write",
     async (operation) => {
@@ -950,18 +712,6 @@ describe("native automatch projection outboxes", () => {
     },
   );
 
-  it("rejects invalid stored keys before writing and skips validation for tombstones", async () => {
-    await seed(profileTable, profileOutbox({ "invalid/key": true }));
-    const store = await writableStore();
-    await expect(
-      store.claimAutomatchProfileOutbox("invite", "request-one", 100, 200),
-    ).rejects.toThrow("invalid-automatch-key");
-    expect((await stored(profileTable))?.revision).toBe(1);
-    expect(
-      await store.acknowledgeAutomatchProfileOutbox("invite", "request-one"),
-    ).toBe(true);
-  });
-
   it("fences a frozen admission and a retired backend before changing the outbox", async () => {
     await seed(profileTable, profileOutbox());
     const store = await writableStore();
@@ -986,10 +736,32 @@ describe("native automatch projection outboxes", () => {
   it("retains pending transition resource guards in the public persistence wrapper", async () => {
     await seed(profileTable, profileOutbox());
     await db.batch([
-      db.prepare(`INSERT INTO game_session_transitions
+      db
+        .prepare(
+          `INSERT INTO game_session_transitions_canonical
         (transition_id, invite_id, payload_json, status, created_at_ms, updated_at_ms)
-        VALUES ('transition', 'invite', '{}', 'pending', 1, 1)`),
-      db.prepare(`INSERT INTO game_session_transition_resources (resource_key, transition_id)
+        VALUES ('transition', 'invite', ?, 'pending', 1, 1)`,
+        )
+        .bind(
+          JSON.stringify({
+            version: 3,
+            transitionId: "transition",
+            inviteId: "invite",
+            inviteSourceEpoch: 1,
+            operationDigest: "a".repeat(64),
+            resources: ["invite"],
+            mutations: [],
+            creations: [],
+            createdAtMs: 1,
+            inviteMutations: [
+              {
+                current: { inviteId: "invite", revision: 0, value: null },
+                value: inviteDocumentFixture({ hostId: "host" }),
+              },
+            ],
+          }),
+        ),
+      db.prepare(`INSERT INTO game_session_transition_resources_canonical (resource_key, transition_id)
         VALUES ('invite', 'transition')`),
     ]);
     const raw = matchTestPort({

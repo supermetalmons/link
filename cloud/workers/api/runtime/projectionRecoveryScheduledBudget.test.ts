@@ -1,4 +1,13 @@
-import { applyD1Migrations, type D1Migration } from "cloudflare:test";
+import { applyCanonicalTestMigrations } from "./canonicalTestMigrations.ts";
+import { canonicalAutomatchFixture } from "../test/automatchRecordFixture.ts";
+import { canonicalQueuePayloadFixture } from "../test/canonicalQueueFixture.ts";
+import { eventDocumentFixture } from "../test/eventCompatibilityFixture.ts";
+import {
+  canonicalRatingFixture,
+  canonicalRatingInsert,
+} from "./canonicalRatingFixture.ts";
+import { runApplicationOperation } from "../src/applicationExecution.ts";
+import type { D1Migration } from "cloudflare:test";
 import { env } from "cloudflare:workers";
 import { afterEach, beforeAll, expect, it, vi } from "vitest";
 import { handleScheduled } from "../src/workerHandler.ts";
@@ -132,12 +141,14 @@ function recordQueue(onCall: () => void, allowIndividualSends = false) {
       if (!allowIndividualSends)
         throw new Error("unexpected-scheduled-individual-send");
       onCall();
-      messages.push({ body, options });
+      messages.push({ body: canonicalQueuePayloadFixture(body), options });
       return { metadata: { metrics: { backlogCount: 0, backlogBytes: 0 } } };
     },
     async sendBatch(messages) {
       onCall();
-      batches.push(Array.from(messages, ({ body }) => body));
+      batches.push(
+        Array.from(messages, ({ body }) => canonicalQueuePayloadFixture(body)),
+      );
       return { metadata: { metrics: { backlogCount: 0, backlogBytes: 0 } } };
     },
   };
@@ -195,9 +206,9 @@ async function seedAutomatch() {
       "UPDATE invite_source_control SET backend = 'd1', state = 'active', epoch = 1, verified_at_ms = 1, activated_at_ms = 1 WHERE singleton = 1",
     ),
   ];
-  for (const family of ["profile", "malformed", "telegram"] as const) {
+  for (const family of ["profile", "telegram"] as const) {
     for (const inviteId of ids(`automatch-${family}`)) {
-      const value = {
+      const raw = {
         schemaVersion: 1,
         status: "pending",
         requestId: `request-${inviteId}`,
@@ -205,14 +216,20 @@ async function seedAutomatch() {
           ? { updatedAtMs: 100 }
           : {
               sourceUpdatedAtMs: 100,
-              lastQueuedAtMs: family === "malformed" ? "invalid" : 100,
+              lastQueuedAtMs: 100,
               reason: "automatch-queue",
             }),
       };
       const table =
         family === "telegram"
-          ? "automatch_telegram_projection_outbox"
-          : "game_session_projection_outbox";
+          ? "automatch_telegram_projection_outbox_canonical"
+          : "game_session_projection_outbox_canonical";
+      const value = canonicalAutomatchFixture(
+        family === "telegram"
+          ? "telegramProjectionOutbox/automatch"
+          : "profileGameProjectionOutbox/automatch",
+        raw,
+      );
       statements.push(
         db
           .prepare(
@@ -236,9 +253,19 @@ async function seedAutomatch() {
         .bind(id),
       db
         .prepare(
-          'INSERT INTO game_session_mutation_receipts (record_key, payload_json, revision, expiration_json, expiration_revision, updated_at_ms) VALUES (?, \'{"kind":"invite-create"}\', 1, \'{"completedAtMs":100}\', 1, 100)',
+          "INSERT INTO game_session_mutation_receipts_canonical (record_key, payload_json, revision, expiration_json, expiration_revision, updated_at_ms) VALUES (?, ?, 1, ?, 1, 100)",
         )
-        .bind(id),
+        .bind(
+          id,
+          JSON.stringify(
+            canonicalAutomatchFixture("gameplayMutationReceipts", {
+              kind: "invite-create",
+              inviteId: id,
+              completedAtMs: 100,
+            }),
+          ),
+          JSON.stringify({ schemaVersion: 1, completedAtMs: 100 }),
+        ),
     );
   }
   await writeBatches(db, statements);
@@ -249,7 +276,7 @@ async function seedProfiles() {
   const statements = ids("profile-link").map((loginUid) =>
     db
       .prepare(
-        `INSERT INTO profile_link_catchup_jobs
+        `INSERT INTO profile_link_catchup_jobs_canonical
      (login_uid, request_id, profile_id, cleanup_profile_ids_json, source_updated_at_ms, last_queued_at_ms, revision)
      VALUES (?, ?, 'profile', '[]', 100, 100, 1)`,
       )
@@ -257,43 +284,19 @@ async function seedProfiles() {
   );
   for (const family of ["profile", "telegram"] as const) {
     for (const inviteId of ids(`rating-${family}`)) {
-      const payload = {
-        status: "done",
-        inviteId,
+      const value = canonicalRatingFixture(inviteId, {
         matchId: inviteId,
-        playerId: "player",
-        opponentId: "opponent",
-        ownerUid: "owner",
-        ownerToken: "token",
-        startedAtMs: 100,
-        updatedAtMs: 100,
-        leaseExpiresAtMs: 100,
-        completedAtMs: 100,
-        telegramProjectionState: family === "telegram" ? "pending" : "done",
-        telegramProjectionUpdatedAtMs: 100,
-        telegramProjectionVersion: 1,
-        profileGameProjectionState: family === "profile" ? "pending" : "done",
-        profileGameProjectionUpdatedAtMs: 100,
-        profileGameProjectionVersion: 1,
-      };
+        profileState: family === "profile" ? "pending" : "done",
+        telegramState: family === "telegram" ? "pending" : "done",
+        eventState: "done",
+      });
       statements.push(
-        db
-          .prepare(
-            `INSERT INTO rating_updates
-         (operation_id, payload_json, status, invite_id, match_id, player_id, opponent_id,
-          owner_uid, owner_token, started_at_ms, updated_at_ms, lease_expires_at_ms, completed_at_ms,
-          telegram_projection_state, telegram_projection_updated_at_ms, telegram_projection_version,
-          profile_game_projection_state, profile_game_projection_updated_at_ms, profile_game_projection_version, revision)
-         VALUES (?, ?, 'done', ?, ?, 'player', 'opponent', 'owner', 'token', 100, 100, 100, 100, ?, 100, 1, ?, 100, 1, 1)`,
-          )
-          .bind(
-            `${inviteId}__${inviteId}`,
-            JSON.stringify(payload),
-            inviteId,
-            inviteId,
-            family === "telegram" ? "pending" : "done",
-            family === "profile" ? "pending" : "done",
-          ),
+        canonicalRatingInsert(db, {
+          ...value,
+          profileGameProjectionUpdatedAtMs: 100,
+          telegramProjectionUpdatedAtMs: 100,
+          eventProgressUpdatedAtMs: 100,
+        }),
       );
     }
   }
@@ -312,9 +315,22 @@ async function seedEvents() {
       statements.push(
         db
           .prepare(
-            "INSERT INTO event_records (event_id, status, start_at_ms, updated_at_ms, revision, record_json) VALUES (?, 'ended', 1, 1, 1, '{}')",
+            "INSERT INTO event_records_canonical (event_id, status, start_at_ms, updated_at_ms, revision, record_json) VALUES (?, 'ended', 1, 2, 1, ?)",
           )
-          .bind(eventId),
+          .bind(
+            eventId,
+            JSON.stringify(
+              eventDocumentFixture({
+                eventId,
+                status: "ended",
+                createdAtMs: 1,
+                startedAtMs: 1,
+                endedAtMs: 2,
+                updatedAtMs: 2,
+                startAtMs: 1,
+              }),
+            ),
+          ),
       );
       const value = {
         schemaVersion: 1,
@@ -328,12 +344,12 @@ async function seedEvents() {
         family === "profile"
           ? db
               .prepare(
-                "INSERT INTO event_profile_game_projection_outboxes (event_id, request_id, status, last_queued_at_ms, record_json) VALUES (?, ?, 'pending', 100, ?)",
+                "INSERT INTO event_profile_game_projection_outboxes_canonical (event_id, request_id, status, last_queued_at_ms, record_json) VALUES (?, ?, 'pending', 100, ?)",
               )
               .bind(eventId, requestId, JSON.stringify(value))
           : db
               .prepare(
-                "INSERT INTO event_telegram_projection_outboxes (event_id, request_id, status, first_queued_at_ms, updated_at_ms, record_json) VALUES (?, ?, 'pending', 100, 100, ?)",
+                "INSERT INTO event_telegram_projection_outboxes_canonical (event_id, request_id, status, first_queued_at_ms, updated_at_ms, record_json) VALUES (?, ?, 'pending', 100, 100, ?)",
               )
               .bind(eventId, requestId, JSON.stringify(value)),
       );
@@ -357,12 +373,27 @@ beforeAll(async () => {
       testEnv.EVENT_DB,
       testEnv.TEST_EVENT_D1_MIGRATIONS,
     ),
-    applyD1Migrations(
+    applyCanonicalTestMigrations(
       testEnv.AUTH_STATE_DB,
       testEnv.TEST_AUTH_STATE_D1_MIGRATIONS,
     ),
-    applyD1Migrations(testEnv.TELEGRAM_DB, testEnv.TEST_TELEGRAM_D1_MIGRATIONS),
+    applyCanonicalTestMigrations(
+      testEnv.TELEGRAM_DB,
+      testEnv.TEST_TELEGRAM_D1_MIGRATIONS,
+    ),
   ]);
+  for (const binding of [
+    "PROFILE_GAMES_DB",
+    "PROFILE_DB",
+    "EVENT_DB",
+    "AUTH_STATE_DB",
+    "TELEGRAM_DB",
+  ] as const)
+    await testEnv[binding]
+      .prepare(
+        "UPDATE application_data_control SET data_epoch = 1 WHERE singleton = 1",
+      )
+      .run();
   await testEnv.TELEGRAM_DB.prepare(
     "UPDATE telegram_runtime_control SET storage_mode = 'd1' WHERE singleton = 1",
   ).run();
@@ -379,7 +410,9 @@ it("bounds failed scheduled workflows and announcement-heavy background recovery
   const [authFixture, progressFixture, transitionFixture] = await Promise.all([
     seedCombinedCronAuth(testEnv, nowMs),
     seedCombinedCronEventProgress(testEnv, nowMs),
-    seedCombinedCronTransitions(testEnv, nowMs),
+    runApplicationOperation(testEnv, "scheduled", 1, (admitted) =>
+      seedCombinedCronTransitions(admitted, nowMs),
+    ),
   ]);
   const calls = { d1: 0, workflow: 0, queue: 0, durableObject: 0 };
   const consume = (kind: keyof typeof calls) => {
@@ -425,9 +458,11 @@ it("bounds failed scheduled workflows and announcement-heavy background recovery
       consume("durableObject"),
     ),
   };
-  await handleScheduled(
-    { scheduledTime: nowMs, cron: "*/5 * * * *", noRetry() {} },
-    measuredEnv,
+  await runApplicationOperation(measuredEnv, "scheduled", 1, (admitted) =>
+    handleScheduled(
+      { scheduledTime: nowMs, cron: "*/5 * * * *", noRetry() {} },
+      admitted,
+    ),
   );
   const tasks = [
     ...profile.batches.flat(),
@@ -445,7 +480,7 @@ it("bounds failed scheduled workflows and announcement-heavy background recovery
     ratingTelegram: count("rating-telegram-projection"),
     eventTelegram: count("event-telegram-projection"),
   }).toEqual({
-    automatchProfile: 40,
+    automatchProfile: 20,
     ratingProfile: 20,
     profileLink: 20,
     eventProfile: 20,
@@ -453,13 +488,13 @@ it("bounds failed scheduled workflows and announcement-heavy background recovery
     ratingTelegram: 20,
     eventTelegram: 100,
   });
-  expect(tasks).toHaveLength(240);
+  expect(tasks).toHaveLength(220);
   expect(new Set(tasks.map((task) => JSON.stringify(task))).size).toBe(
     tasks.length,
   );
   expect(
     tasks.filter((task) => task.inviteId?.startsWith("automatch-malformed-")),
-  ).toHaveLength(20);
+  ).toHaveLength(0);
   expect(auth.batches).toEqual([]);
   expect(auth.messages).toEqual(
     authFixture.expectedTasks.map((body) => ({
@@ -486,12 +521,35 @@ it("bounds failed scheduled workflows and announcement-heavy background recovery
     (sum, value) => sum + value.sqlStatements,
     0,
   );
+  const writeFences = Object.values(observed)
+    .flatMap(({ executions }) => executions)
+    .filter(({ queries }) =>
+      queries.some((query) =>
+        /^\s*INSERT INTO application_write_context\b/.test(query),
+      ),
+    );
+  for (const { queries } of writeFences) {
+    expect(queries[0]).toMatch(/^\s*INSERT INTO application_write_context\b/);
+    expect(queries.at(-1)).toMatch(
+      /^\s*DELETE FROM application_write_context\b/,
+    );
+    expect(
+      queries.filter((query) =>
+        /^\s*(?:INSERT INTO|DELETE FROM) application_write_context\b/.test(
+          query,
+        ),
+      ),
+    ).toHaveLength(2);
+  }
   expect(
     Object.values(summary).every(({ failedCalls }) => failedCalls === 0),
     JSON.stringify(summary),
   ).toBe(true);
   expect(bindingCalls, JSON.stringify(summary)).toBeLessThan(6_000);
-  expect(sqlStatements, JSON.stringify(summary)).toBeLessThan(14_000);
+  expect(
+    sqlStatements - writeFences.length * 2,
+    JSON.stringify(summary),
+  ).toBeLessThan(14_000);
   expect(calls.d1).toBe(bindingCalls);
   expect(calls.workflow).toBe(workflows.operations.length);
   expect(calls.queue).toBe(
@@ -511,7 +569,7 @@ it("bounds failed scheduled workflows and announcement-heavy background recovery
     .filter((query) => query.includes("AS recovery_scan_identity"));
   for (const [source, expected] of [
     ["FROM automatch_telegram_projection_outbox", 2],
-    ["FROM game_session_projection_outbox", 4],
+    ["FROM game_session_projection_outbox_canonical", 3],
     ["FROM profile_link_catchup_jobs", 2],
     ["rating.profile_game_projection_state = 'pending'", 2],
     ["rating.telegram_projection_state = 'pending'", 2],
@@ -550,7 +608,7 @@ it("bounds failed scheduled workflows and announcement-heavy background recovery
   }
   expect(
     await testEnv.PROFILE_GAMES_DB.prepare(
-      "SELECT COUNT(*) AS count FROM game_session_mutation_receipts WHERE record_key LIKE 'cleanup-%' AND payload_json IS NOT NULL",
+      "SELECT COUNT(*) AS count FROM game_session_mutation_receipts_canonical WHERE record_key LIKE 'cleanup-%' AND payload_json IS NOT NULL",
     ).first("count"),
   ).toBe(0);
   expect(
@@ -562,49 +620,43 @@ it("bounds failed scheduled workflows and announcement-heavy background recovery
     {
       db: testEnv.PROFILE_GAMES_DB,
       query:
-        "SELECT json_extract(payload_json, '$.lastQueuedAtMs') AS timestamp FROM game_session_projection_outbox WHERE record_key = 'automatch-profile-020'",
+        "SELECT json_extract(payload_json, '$.lastQueuedAtMs') AS timestamp FROM game_session_projection_outbox_canonical WHERE record_key = 'automatch-profile-020'",
       expected: 100,
     },
     {
       db: testEnv.PROFILE_GAMES_DB,
       query:
-        "SELECT json_extract(payload_json, '$.lastQueuedAtMs') AS timestamp FROM game_session_projection_outbox WHERE record_key = 'automatch-malformed-020'",
-      expected: "invalid",
-    },
-    {
-      db: testEnv.PROFILE_GAMES_DB,
-      query:
-        "SELECT json_extract(payload_json, '$.updatedAtMs') AS timestamp FROM automatch_telegram_projection_outbox WHERE record_key = 'automatch-telegram-020'",
+        "SELECT json_extract(payload_json, '$.updatedAtMs') AS timestamp FROM automatch_telegram_projection_outbox_canonical WHERE record_key = 'automatch-telegram-020'",
       expected: 100,
     },
     {
       db: testEnv.PROFILE_DB,
       query:
-        "SELECT last_queued_at_ms AS timestamp FROM profile_link_catchup_jobs WHERE login_uid = 'profile-link-020'",
+        "SELECT last_queued_at_ms AS timestamp FROM profile_link_catchup_jobs_canonical WHERE login_uid = 'profile-link-020'",
       expected: 100,
     },
     {
       db: testEnv.PROFILE_DB,
       query:
-        "SELECT profile_game_projection_updated_at_ms AS timestamp FROM rating_updates WHERE operation_id = 'rating-profile-020__rating-profile-020'",
+        "SELECT profile_game_projection_updated_at_ms AS timestamp FROM rating_updates_canonical WHERE operation_id = 'rating-profile-020__rating-profile-020'",
       expected: 100,
     },
     {
       db: testEnv.PROFILE_DB,
       query:
-        "SELECT telegram_projection_updated_at_ms AS timestamp FROM rating_updates WHERE operation_id = 'rating-telegram-020__rating-telegram-020'",
+        "SELECT telegram_projection_updated_at_ms AS timestamp FROM rating_updates_canonical WHERE operation_id = 'rating-telegram-020__rating-telegram-020'",
       expected: 100,
     },
     {
       db: testEnv.EVENT_DB,
       query:
-        "SELECT last_queued_at_ms AS timestamp FROM event_profile_game_projection_outboxes WHERE event_id = 'event-profile-020'",
+        "SELECT last_queued_at_ms AS timestamp FROM event_profile_game_projection_outboxes_canonical WHERE event_id = 'event-profile-020'",
       expected: 100,
     },
     {
       db: testEnv.EVENT_DB,
       query:
-        "SELECT updated_at_ms AS timestamp FROM event_telegram_projection_outboxes WHERE event_id = 'event-telegram-100'",
+        "SELECT updated_at_ms AS timestamp FROM event_telegram_projection_outboxes_canonical WHERE event_id = 'event-telegram-100'",
       expected: 100,
     },
   ];

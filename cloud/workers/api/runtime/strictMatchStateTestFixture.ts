@@ -1,10 +1,14 @@
 import { applyD1Migrations, type D1Migration } from "cloudflare:test";
+import {
+  applyCanonicalCleanupTestMigrations,
+  preCleanupTestMigrations,
+} from "./canonicalTestMigrations.ts";
 
 export async function applyStrictMatchStateTestMigrations(
   db: D1Database,
   migrations: D1Migration[],
 ): Promise<void> {
-  await applyD1Migrations(db, migrations);
+  await applyD1Migrations(db, preCleanupTestMigrations(migrations));
   await db
     .prepare(
       `UPDATE match_state_control SET backend = 'durable', state = 'active', epoch = 2,
@@ -16,4 +20,5 @@ export async function applyStrictMatchStateTestMigrations(
     )
     .bind("a".repeat(64), "a".repeat(64), "b".repeat(64))
     .run();
+  await applyCanonicalCleanupTestMigrations(db, migrations);
 }

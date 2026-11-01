@@ -1,0 +1,13 @@
+{
+  "extends": "../../scripts/tsconfig.json",
+  "compilerOptions": {
+    "allowJs": true,
+    "checkJs": true,
+    "jsx": "react-jsx"
+  },
+  "include": [
+    "./**/*.js",
+    "../workers/api/worker-configuration.d.ts",
+    "../../src/glicko2.d.ts"
+  ]
+}

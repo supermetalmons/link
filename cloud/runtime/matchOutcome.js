@@ -14,13 +14,15 @@ async function resolveMatchWinner(matchData, opponentMatchData) {
   }
   if (
     matchData.status === "surrendered" ||
-    opponentMatchData.timer === timers_1.MATCH_TIMER_TERMINAL
+    ((0, timers_1.isMatchTimer)(opponentMatchData.timer) &&
+      opponentMatchData.timer.state === "finished")
   ) {
     return { winner: "opponent", reason: "surrender-or-timer" };
   }
   if (
     opponentMatchData.status === "surrendered" ||
-    matchData.timer === timers_1.MATCH_TIMER_TERMINAL
+    ((0, timers_1.isMatchTimer)(matchData.timer) &&
+      matchData.timer.state === "finished")
   ) {
     return { winner: "player", reason: "surrender-or-timer" };
   }

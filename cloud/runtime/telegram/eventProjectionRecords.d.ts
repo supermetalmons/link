@@ -1,42 +1,61 @@
 // Generated from src/telegram/eventProjectionRecords.ts. Run npm run generate:runtime.
-declare const projectionStateDocument: unique symbol;
-declare const startedLinesDocument: unique symbol;
-declare const endedResultsDocument: unique symbol;
-export type EventTelegramProjectionStateDocument = {
-  readonly [projectionStateDocument]: true;
-};
-export type RetainedStartedMatchLines = {
-  readonly [startedLinesDocument]: true;
-};
-export type EventTelegramEndedResultsDocument = {
-  readonly [endedResultsDocument]: true;
-};
 export type EventTelegramProjectionGuard = {
   eventId: string;
   generation?: number;
   lockId: string;
-  lockRoot: string;
+  lockRoot: "eventTelegramProjectionLocks";
   ownerUid: string;
 };
-export type EventTelegramProjectionStateWrite = {
-  schemaVersion: 2;
+export type RetainedStartedMatchLines = Record<string, string>;
+export type EventTelegramEndedResult =
+  | {
+      status: "unavailable" | "disqualified";
+    }
+  | {
+      status: "scored";
+      hostScore: number;
+      guestScore: number;
+    };
+export type EventTelegramEndedResultsDocument = Record<
+  string,
+  EventTelegramEndedResult
+>;
+export type EventTelegramProjectionStateDocument = {
+  schemaVersion: 3;
   upcomingText: string;
   reminderText: string;
   startedText: string;
   endedText: string;
   endedAnnouncementArmed: boolean;
   startedMatchKeys: string[];
-  startedMatchLinesByKey: Record<string, string> | RetainedStartedMatchLines;
+  startedMatchLinesByKey: RetainedStartedMatchLines;
   lastProjectedSignature: string;
   updatedAtMs: number;
-  eventTelegramProjectionGuard?: EventTelegramProjectionGuard;
+  eventTelegramProjectionGuard: Required<EventTelegramProjectionGuard> | null;
 };
+export type EventTelegramProjectionStateWrite =
+  EventTelegramProjectionStateDocument;
 export type EventTelegramTextField = "upcomingText" | "reminderText";
+export declare function isEventTelegramProjectionGuard(
+  value: unknown,
+): value is Required<EventTelegramProjectionGuard>;
+export declare function isStartedMatchLines(
+  value: unknown,
+): value is RetainedStartedMatchLines;
+export declare function isEventTelegramEndedResults(
+  value: unknown,
+): value is EventTelegramEndedResultsDocument;
+export declare function isEventTelegramProjectionDocument(
+  value: unknown,
+): value is EventTelegramProjectionStateDocument;
 export declare function readEventTelegramProjectionDocument(
   value: unknown,
 ): EventTelegramProjectionStateDocument;
 export declare function createEventTelegramProjectionDocument(
   value: EventTelegramProjectionStateWrite,
+): EventTelegramProjectionStateDocument;
+export declare function createEmptyEventTelegramProjectionDocument(
+  updatedAtMs?: number,
 ): EventTelegramProjectionStateDocument;
 export declare function retainStartedMatchLines(
   value: unknown,
@@ -63,4 +82,3 @@ export declare function deferEventTelegramProjectionTexts(
   previous: EventTelegramProjectionStateDocument | null,
   fields: ReadonlySet<EventTelegramTextField>,
 ): EventTelegramProjectionStateDocument;
-export {};

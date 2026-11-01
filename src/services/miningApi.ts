@@ -1,3 +1,7 @@
+import {
+  parseApiErrorDetails,
+  type ApiErrorDetails,
+} from "@mons/shared/api-errors";
 import type {
   ApiHttpUrl,
   ApiRequest,
@@ -19,13 +23,13 @@ const MINING_API_MAX_RESPONSE_BYTES = 64 * 1024;
 
 export class MiningApiError extends Error {
   readonly code: string;
-  readonly details?: unknown;
+  readonly details: ApiErrorDetails | undefined;
 
-  constructor(code: string, message: string, details?: unknown) {
+  constructor(code: string, message: string, details?: ApiErrorDetails) {
     super(message);
     this.name = "MiningApiError";
     this.code = code;
-    this.details = details;
+    this.details = parseApiErrorDetails(code, details);
   }
 }
 

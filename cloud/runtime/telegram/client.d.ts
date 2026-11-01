@@ -34,31 +34,22 @@ export type TelegramMediaGroupInput = TelegramTransportOptions & {
   silent?: boolean;
   hasSpoiler?: boolean;
 };
-declare const retainedTelegramRequest: unique symbol;
-export type RetainedTelegramSendInput = {
-  readonly [retainedTelegramRequest]: "send";
-};
-export type RetainedTelegramEditInput = {
-  readonly [retainedTelegramRequest]: "edit";
-};
-export type RetainedTelegramDeleteInput = {
-  readonly [retainedTelegramRequest]: "delete";
-};
-export type RetainedTelegramMediaGroupInput = {
-  readonly [retainedTelegramRequest]: "send-media-group";
-};
+export type RetainedTelegramSendInput = TelegramSendInput;
+export type RetainedTelegramEditInput = TelegramEditInput;
+export type RetainedTelegramDeleteInput = TelegramDeleteInput;
+export type RetainedTelegramMediaGroupInput = TelegramMediaGroupInput;
 export declare const retainTelegramSendInput: (
-  value: unknown,
-) => RetainedTelegramSendInput;
+  value: TelegramSendInput,
+) => TelegramSendInput;
 export declare const retainTelegramEditInput: (
-  value: unknown,
-) => RetainedTelegramEditInput;
+  value: TelegramEditInput,
+) => TelegramEditInput;
 export declare const retainTelegramDeleteInput: (
-  value: unknown,
-) => RetainedTelegramDeleteInput;
+  value: TelegramDeleteInput,
+) => TelegramDeleteInput;
 export declare const retainTelegramMediaGroupInput: (
-  value: unknown,
-) => RetainedTelegramMediaGroupInput;
+  value: TelegramMediaGroupInput,
+) => TelegramMediaGroupInput;
 export type TelegramFailure = {
   ok: false;
   classification: "missing" | "retryable" | "terminal" | "uncertain";

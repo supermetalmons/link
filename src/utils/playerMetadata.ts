@@ -1,3 +1,4 @@
+import type { Aura } from "@mons/shared/appearance";
 import type { PlayerProfile } from "../connection/connectionModels";
 import type { EmojiId } from "../content/emojis";
 import glicko2 from "glicko2";
@@ -33,8 +34,8 @@ export type PlayerMetadata = {
   ethAddress: string | undefined;
   solAddress: string | undefined;
   ens: string | undefined;
-  emojiId: EmojiId;
-  aura?: string;
+  emojiId: EmojiId | null;
+  aura: Aura;
   voiceReactionText: string;
   voiceReactionDate: number | undefined;
   rating: number | undefined;
@@ -48,8 +49,8 @@ export const newEmptyPlayerMetadata = (): PlayerMetadata => ({
   ethAddress: undefined,
   solAddress: undefined,
   ens: undefined,
-  emojiId: "",
-  aura: "",
+  emojiId: null,
+  aura: "none",
   voiceReactionText: "",
   voiceReactionDate: undefined,
   rating: undefined,
@@ -137,10 +138,7 @@ export function updatePlayerMetadataWithProfile(
         }
         const ens = decodeEnsProfile(data);
         if (ens) {
-          ensForUids[loginId] = {
-            name: ens.name,
-            avatar: ens.avatar,
-          };
+          ensForUids[loginId] = ens;
           onSuccess();
         }
       })
@@ -174,8 +172,8 @@ export function updatePlayerMetadataWithProfile(
             profile.completedProblemIds ?? [],
             profile.isTutorialCompleted ?? false,
           );
-          storage.setPlayerEmojiId(profile.emoji.toString());
-          storage.setPlayerEmojiAura(profile.aura ?? "");
+          storage.setPlayerEmojiId(profile.emoji);
+          storage.setPlayerEmojiAura(profile.aura ?? "none");
           storage.setUsername(profile.username ?? "");
           storage.setPlayerRating(profile.rating ?? 1500);
           storage.setPlayerNonce(profile.nonce ?? -1);
@@ -198,11 +196,7 @@ export function updatePlayerMetadataWithProfile(
             storage.getSolAddress(""),
           );
           if (!isPlayerMetadataWatchOnly()) {
-            updatePlayerEmojiAndAura(
-              profile.emoji.toString(),
-              profile.aura,
-              false,
-            );
+            updatePlayerEmojiAndAura(profile.emoji, profile.aura, false);
           }
         }
         onSuccess();

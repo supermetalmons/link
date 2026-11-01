@@ -1,3 +1,9 @@
+import {
+  APPLICATION_DATA_SOCKET_PROTOCOL,
+  APPLICATION_DATA_HEADER,
+} from "@mons/shared/data-contract";
+import type { RematchSeries } from "@mons/shared/rematches";
+import type { GameSessionMatch } from "@mons/shared/game-sessions";
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import {
@@ -13,7 +19,10 @@ import test from "node:test";
 import { Game } from "mons-rules";
 import {
   countMoveHistory,
+  isCreateInviteRequest,
+  isJoinInviteRequest,
   isMoveHistoryPrefix,
+  isProposeRematchRequest,
   isSubmitMoveRequest,
   normalizeMatchSnapshot,
 } from "@mons/shared/game-sessions";
@@ -75,24 +84,13 @@ type Source = {
   hostId: string;
   guestId: string | null;
   hostColor: "white";
-  hostRematches: string;
-  guestRematches: string;
+  hostRematches: RematchSeries;
+  guestRematches: RematchSeries;
   automatchStateHint: null;
   eventId: null;
   eventOwned: false;
 };
-type Match = {
-  version: number;
-  color: "white" | "black";
-  emojiId: number;
-  aura: string;
-  gameVariant: string;
-  fen: string;
-  status: string;
-  flatMovesString: string;
-  timer: string;
-  sessionCreation: string;
-};
+type Match = GameSessionMatch & { sessionCreation: string; reaction: null };
 
 class FakeSocket extends EventEmitter implements SmokeSocket {
   terminated = false;
@@ -156,7 +154,7 @@ function harness(
   const connections: {
     url: string;
     options: import("ws").ClientOptions;
-    protocol: string;
+    protocol: string[];
   }[] = [];
   const deleted: string[] = [];
   const sessionOwners = new Map<string, string>();
@@ -228,8 +226,8 @@ function harness(
       if (
         options.delayFinalRematchUpdateMs !== undefined &&
         socket.matchId === `${INVITE}1` &&
-        snapshot.hostMatch?.status === "" &&
-        snapshot.guestMatch?.status === "" &&
+        snapshot.hostMatch?.status === "active" &&
+        snapshot.guestMatch?.status === "active" &&
         [snapshot.hostMatch, snapshot.guestMatch].some(
           (match) =>
             match !== null && countMoveHistory(match.flatMovesString) === 5,
@@ -255,7 +253,9 @@ function harness(
     });
     broadcastMatches();
   };
-  const seed = (uid: string, matchId: string, emojiId: number): Match => ({
+  const seed = (uid: string, matchId: string, emojiId: 1 | 2): Match => ({
+    schemaVersion: 1,
+    reaction: null,
     version: 2,
     color:
       uid === HOST
@@ -266,16 +266,17 @@ function harness(
           ? "black"
           : "white",
     emojiId,
-    aura: "",
+    aura: "none",
     gameVariant: "Classic",
     fen: new Game().toFen(),
-    status: "",
+    status: "active",
     flatMovesString: "",
-    timer: "",
+    timer: { state: "idle" },
     sessionCreation: (uid === HOST ? "a" : "b").repeat(64),
   });
   const handle = (request: RequestRecord): Response => {
     const { url, body, method, headers } = request;
+    assert.equal(headers.get(APPLICATION_DATA_HEADER), "1");
     if (url.pathname.startsWith("/auth/session/")) {
       assert.equal(method, "POST");
       assert.equal(headers.get("Origin"), "https://mons.link");
@@ -381,7 +382,7 @@ function harness(
     ).exec(url.pathname);
     if (syncPath) {
       assert.equal(method, "GET");
-      return json({ ok: true, snapshot: syncSnapshot(syncPath[1]) });
+      return json({ ok: true, snapshot: syncSnapshot(syncPath[1]!) });
     }
     assert.equal(method, "POST");
     if (url.pathname === "/matches/timer/start") {
@@ -542,8 +543,8 @@ function harness(
         hostId: HOST,
         guestId: null,
         hostColor: "white",
-        hostRematches: "",
-        guestRematches: "",
+        hostRematches: { state: "open", indices: [] },
+        guestRematches: { state: "open", indices: [] },
         automatchStateHint: null,
         eventId: null,
         eventOwned: false,
@@ -576,17 +577,21 @@ function harness(
           "surrendered",
         );
         const key = uid === HOST ? "hostRematches" : "guestRematches";
-        assert.equal(source[key], "");
-        source[key] = "1";
+        assert.deepEqual(source[key], { state: "open", indices: [] });
+        source[key] = { state: "open", indices: [1] };
         const match = seed(uid, `${INVITE}1`, uid === HOST ? 1 : 2);
         matches.set(`${uid}/${INVITE}1`, { value: match, revision: 1 });
-        const { sessionCreation: _marker, ...publicMatch } = match;
+        const {
+          sessionCreation: _marker,
+          reaction: _reaction,
+          ...publicMatch
+        } = match;
         payload = {
           ok: true,
           inviteId: INVITE,
           actorUid: uid,
           matchId: `${INVITE}1`,
-          rematches: "1",
+          rematches: { state: "open", indices: [1] },
           match: publicMatch,
         };
       } else {
@@ -596,7 +601,7 @@ function harness(
           "No automatch, rating, prizes, or Telegram endpoints are called",
         );
         assert.equal(uid, HOST);
-        if (!source.hostRematches.endsWith("x")) source.hostRematches += "x";
+        source.hostRematches = { ...source.hostRematches, state: "ended" };
         payload = {
           ok: true,
           inviteId: INVITE,
@@ -642,11 +647,13 @@ function harness(
       }
       return response;
     },
-    connect: (url, socketOptions, protocol) => {
-      connections.push({ url, options: socketOptions, protocol });
+    connect: (url, socketOptions, protocols) => {
+      assert.ok(protocols.includes(APPLICATION_DATA_SOCKET_PROTOCOL));
+      const protocol = protocols[0]!;
+      connections.push({ url, options: socketOptions, protocol: protocols });
       const matchId =
         protocol === MATCH_SYNC_SOCKET_PROTOCOL
-          ? new URL(url).pathname.split("/")[4]
+          ? new URL(url).pathname.split("/")[4]!
           : null;
       if (!matchId)
         assert.equal(
@@ -793,6 +800,27 @@ test("requires an explicit approved target and supports only the current lifecyc
     assert.throws(() => parseArgs(args), /Usage:/);
 });
 
+test("emitted create, join, and rematch payloads satisfy shared request guards", async () => {
+  const guards = new Map<string, (value: unknown) => boolean>([
+    ["/invites/create", isCreateInviteRequest],
+    ["/invites/join", isJoinInviteRequest],
+    ["/rematches/propose", isProposeRematchRequest],
+  ]);
+  const observed = new Set<string>();
+  const state = harness({
+    intercept(request, response) {
+      const validate = guards.get(request.url.pathname);
+      if (validate) {
+        assert.equal(validate(request.body), true, request.url.pathname);
+        observed.add(request.url.pathname);
+      }
+      return response();
+    },
+  });
+  await runSmoke({ baseUrl: API }, state.dependencies);
+  assert.deepEqual([...observed].sort(), [...guards.keys()].sort());
+});
+
 test("default smoke verifies only Worker snapshots, original timer deadlines and isolated gameplay", async () => {
   const state = harness({});
   const report = await runSmoke({ baseUrl: API }, state.dependencies);
@@ -858,8 +886,8 @@ test("default smoke verifies only Worker snapshots, original timer deadlines and
     (request) => request.url.pathname === "/matches/timer/start",
   );
   assert.equal(starts.length, 4);
-  assert.deepEqual(starts[0].body, starts[1].body);
-  assert.deepEqual(starts[2].body, starts[3].body);
+  assert.deepEqual(starts[0]!.body, starts[1]!.body);
+  assert.deepEqual(starts[2]!.body, starts[3]!.body);
   assert.equal(
     state.requests.filter(
       (request) => request.url.pathname === "/matches/timer/claim",
@@ -874,7 +902,10 @@ test("default smoke verifies only Worker snapshots, original timer deadlines and
   assert.ok(state.sockets.every((socket) => socket.terminated));
   assert.deepEqual(state.deleted.sort(), [GUEST, HOST]);
   assert.equal(state.timers.size, 0);
-  assert.equal(state.source()?.hostRematches, "1x");
+  assert.deepEqual(state.source()?.hostRematches, {
+    state: "ended",
+    indices: [1],
+  });
   for (const token of TOKENS.values())
     assert.ok(!state.logs.join("\n").includes(token));
 });
@@ -916,7 +947,7 @@ test("bootstrap smoke rejects inconsistent participant roles, identities and inc
         runSmoke({ baseUrl: API }, state.dependencies),
         /bootstrap metadata, match pair or participant identity was incorrect/,
       );
-      assert.ok(state.source()?.hostRematches.endsWith("x"));
+      assert.ok(state.source()?.hostRematches.state === "ended");
       assert.deepEqual(state.deleted.sort(), [GUEST, HOST]);
       assert.equal(state.timers.size, 0);
       assert.ok(
@@ -989,13 +1020,13 @@ test("durable smoke rejects changed timer deadlines and still ends the series an
       if (request.url.pathname === "/matches/timer/start" && ++starts === 2) {
         const value: {
           ok: true;
-          timer: string;
+          timer: import("@mons/shared/timers").RunningMatchTimer;
           duration: number;
         } = await response.json();
         const timer = parseStrictMatchTimer(value.timer)!;
         return json({
           ...value,
-          timer: formatMatchTimer(timer.turnNumber, timer.targetTimestamp + 1),
+          timer: formatMatchTimer(timer.turnNumber, timer.deadlineAtMs + 1),
         });
       }
       return response;
@@ -1006,7 +1037,7 @@ test("durable smoke rejects changed timer deadlines and still ends the series an
     /timer retry changed its original deadline/,
   );
   assert.equal(starts, 2);
-  assert.ok(state.source()?.hostRematches.endsWith("x"));
+  assert.ok(state.source()?.hostRematches.state === "ended");
   assert.ok(state.sockets.every((socket) => socket.terminated));
   assert.deepEqual(state.deleted.sort(), [GUEST, HOST]);
   assert.equal(state.timers.size, 0);
@@ -1030,7 +1061,7 @@ test("durable smoke retries transient canonical reads through the same endpoint"
   const snapshots = state.requests.filter(
     (request) => request.url.pathname === "/matches/snapshot",
   );
-  assert.equal(snapshots[0].url.href, snapshots[1].url.href);
+  assert.equal(snapshots[0]!.url.href, snapshots[1]!.url.href);
   assert.ok(state.requests.every((request) => request.url.origin === API));
   assert.deepEqual(state.deleted.sort(), [GUEST, HOST]);
 });
@@ -1056,7 +1087,7 @@ test("durable smoke rejects malformed, private or mismatched canonical snapshots
         runSmoke({ baseUrl: API }, state.dependencies),
         /canonical match snapshot was invalid/,
       );
-      assert.ok(state.source()?.hostRematches.endsWith("x"));
+      assert.ok(state.source()?.hostRematches.state === "ended");
       assert.deepEqual(state.deleted.sort(), [GUEST, HOST]);
       assert.ok(!state.logs.join("\n").includes(TOKENS.get(HOST)!));
     });
@@ -1070,7 +1101,7 @@ test("durable smoke keeps reconnect revision checks and cleanup enabled", async 
     runSmoke({ baseUrl: API }, state.dependencies),
     /match socket received an invalid snapshot/,
   );
-  assert.ok(state.source()?.hostRematches.endsWith("x"));
+  assert.ok(state.source()?.hostRematches.state === "ended");
   assert.deepEqual(state.deleted.sort(), [GUEST, HOST]);
   assert.ok(state.sockets.every((socket) => socket.terminated));
   assert.equal(state.timers.size, 0);
@@ -1094,8 +1125,8 @@ test("runs the isolated lifecycle with API move and surrender replay", async () 
       "rematch-live-creation-moves-surrender-and-reconnect",
     ),
   );
-  const gameplaySockets = state.connections.filter(
-    (connection) => connection.protocol === MATCH_SYNC_SOCKET_PROTOCOL,
+  const gameplaySockets = state.connections.filter((connection) =>
+    connection.protocol.includes(MATCH_SYNC_SOCKET_PROTOCOL),
   );
   assert.equal(gameplaySockets.length, 8);
   assert.equal(
@@ -1120,8 +1151,14 @@ test("runs the isolated lifecycle with API move and surrender replay", async () 
   assert.ok(state.matches.get(`${HOST}/${INVITE}`)?.value.flatMovesString);
   assert.ok(state.matches.get(`${GUEST}/${INVITE}1`)?.value.flatMovesString);
   assert.equal(state.receipts.size, 5);
-  assert.equal(state.source()?.hostRematches, "1x");
-  assert.equal(state.source()?.guestRematches, "1");
+  assert.deepEqual(state.source()?.hostRematches, {
+    state: "ended",
+    indices: [1],
+  });
+  assert.deepEqual(state.source()?.guestRematches, {
+    state: "open",
+    indices: [1],
+  });
   assert.equal(state.source()?.revision, 5);
   assert.deepEqual(state.deleted.sort(), [GUEST, HOST]);
   assert.ok(state.sockets.every((socket) => socket.terminated));
@@ -1138,7 +1175,7 @@ test("runs the isolated lifecycle with API move and surrender replay", async () 
       request.headers.get("Authorization") === `Bearer ${TOKENS.get(HOST)}`,
   );
   assert.equal(hostReplays.length, 3);
-  assert.deepEqual(hostReplays[0].body, hostReplays[2].body);
+  assert.deepEqual(hostReplays[0]!.body, hostReplays[2]!.body);
   assert.equal(
     state.matches.get(`${HOST}/${INVITE}1`)?.value.status,
     "surrendered",
@@ -1165,8 +1202,8 @@ test("uncertain API move replays the identical request without applying it twice
     (request) => request.url.pathname === "/matches/move",
   );
   assert.equal(moves.length, 11);
-  assert.deepEqual(moves[0].body, moves[1].body);
-  assert.deepEqual(moves[0].body, moves[3].body);
+  assert.deepEqual(moves[0]!.body, moves[1]!.body);
+  assert.deepEqual(moves[0]!.body, moves[3]!.body);
   assert.equal(state.matches.get(`${HOST}/${INVITE}`)?.revision, 4);
   assert.deepEqual(state.deleted.sort(), [GUEST, HOST]);
 });
@@ -1202,7 +1239,7 @@ test("move smoke rejects changes to unrelated stored fields", async () => {
     intercept(request, response) {
       const result = response();
       if (request.url.pathname === "/matches/move") {
-        state.matches.get(`${HOST}/${INVITE}`)!.value.aura = "changed";
+        state.matches.get(`${HOST}/${INVITE}`)!.value.aura = "rainbow";
       }
       return result;
     },
@@ -1231,8 +1268,8 @@ test("replays an uncertain API surrender through the same endpoint", async () =>
     (request) => request.url.pathname === "/matches/surrender",
   );
   assert.equal(surrenders.length, 5);
-  assert.deepEqual(surrenders[0].body, surrenders[1].body);
-  assert.deepEqual(surrenders[0].body, surrenders[2].body);
+  assert.deepEqual(surrenders[0]!.body, surrenders[1]!.body);
+  assert.deepEqual(surrenders[0]!.body, surrenders[2]!.body);
   assert.equal(state.matches.get(`${HOST}/${INVITE}`)?.revision, 4);
 });
 
@@ -1264,7 +1301,7 @@ test("rejects API surrender that changes another persisted match field", async (
       const result = response();
       if (request.url.pathname === "/matches/surrender" && !changed) {
         changed = true;
-        state.matches.get(`${HOST}/${INVITE}`)!.value.aura = "changed";
+        state.matches.get(`${HOST}/${INVITE}`)!.value.aura = "rainbow";
       }
       return result;
     },
@@ -1296,7 +1333,7 @@ test("retries an uncertain mutation with the identical operation and never creat
   assert.ok(
     joins.every(
       (request) =>
-        JSON.stringify(request.body) === JSON.stringify(joins[0].body),
+        JSON.stringify(request.body) === JSON.stringify(joins[0]!.body),
     ),
   );
   assert.equal(state.receipts.size, 5);
@@ -1324,7 +1361,10 @@ test("rejects a changed replay receipt, settles the same isolated series, and de
     runSmoke({ baseUrl: API }, state.dependencies),
     /replay changed its receipt/,
   );
-  assert.equal(state.source()?.hostRematches, "x");
+  assert.deepEqual(state.source()?.hostRematches, {
+    state: "ended",
+    indices: [],
+  });
   assert.deepEqual(state.deleted.sort(), [GUEST, HOST]);
   assert.equal(state.timers.size, 0);
 });
@@ -1342,7 +1382,10 @@ test("rejects invalid socket metadata without exposing its payload and cleans up
     /invalid snapshot/,
   );
   assert.deepEqual(state.deleted.sort(), [GUEST, HOST]);
-  assert.equal(state.source()?.hostRematches, "x");
+  assert.deepEqual(state.source()?.hostRematches, {
+    state: "ended",
+    indices: [],
+  });
   assert.ok(state.sockets.every((socket) => socket.terminated));
   assert.ok(!state.logs.join("\n").includes(TOKENS.get(HOST)!));
 });
@@ -1353,7 +1396,10 @@ test("bounds each missing socket update without an overall release deadline", as
     runSmoke({ baseUrl: API }, state.dependencies),
     /metadata update timed out/,
   );
-  assert.equal(state.source()?.hostRematches, "x");
+  assert.deepEqual(state.source()?.hostRematches, {
+    state: "ended",
+    indices: [],
+  });
   assert.deepEqual(state.deleted.sort(), [GUEST, HOST]);
   assert.equal(state.timers.size, 0);
   assert.ok(
@@ -1431,7 +1477,10 @@ test("accepts the final rematch update after sixteen simulated seconds without r
       "rematch-live-creation-moves-surrender-and-reconnect",
     ),
   );
-  assert.equal(state.source()?.hostRematches, "1x");
+  assert.deepEqual(state.source()?.hostRematches, {
+    state: "ended",
+    indices: [1],
+  });
   assert.deepEqual(state.deleted.sort(), [GUEST, HOST]);
   assert.ok(state.sockets.every((socket) => socket.terminated));
   assert.equal(state.timers.size, 0);
@@ -1481,7 +1530,7 @@ test("bounds a permanently withheld final update at thirty simulated seconds and
     if (entry.value.flatMovesString)
       assert.ok(!error.message.includes(entry.value.flatMovesString));
   }
-  assert.ok(state.source()?.hostRematches.endsWith("x"));
+  assert.ok(state.source()?.hostRematches.state === "ended");
   assert.deepEqual(state.deleted.sort(), [GUEST, HOST]);
   assert.ok(state.sockets.every((socket) => socket.terminated));
   assert.equal(state.timers.size, 0);
@@ -1527,7 +1576,7 @@ test("renews an authenticated match channel with twenty seconds remaining before
   assert.equal(state.timers.size, 0);
 });
 
-test("redacts arbitrary status payloads from match timeout diagnostics", async () => {
+test("rejects arbitrary status payloads without exposing them", async () => {
   const state = harness({
     fastTimers: true,
     matchSocketFrame: (snapshot) => ({
@@ -1546,7 +1595,7 @@ test("redacts arbitrary status payloads from match timeout diagnostics", async (
     runSmoke({ baseUrl: API }, state.dependencies),
     (error) => {
       assert.ok(error instanceof Error);
-      assert.match(error.message, /currentHostStatus=other/);
+      assert.match(error.message, /invalid snapshot/);
       assert.ok(!error.message.includes(TOKENS.get(HOST)!));
       assert.ok(!error.message.includes(new Game().toFen()));
       return true;
@@ -1562,7 +1611,7 @@ test("socket close diagnostics expose only numeric codes and known server reason
     const connect = state.dependencies.connect;
     state.dependencies.connect = (url, options, protocol) => {
       const socket = connect(url, options, protocol);
-      if (protocol === MATCH_SYNC_SOCKET_PROTOCOL)
+      if (protocol.includes(MATCH_SYNC_SOCKET_PROTOCOL))
         queueMicrotask(() =>
           (socket as FakeSocket).emit("close", 1011, Buffer.from(reason)),
         );
@@ -1746,8 +1795,8 @@ test("rejects revision resets only on reconnect and cleans up every fixture", as
     /match socket received an invalid snapshot/,
   );
   assert.equal(revisions.length, 1);
-  assert.ok(revisions[0] > 1);
-  assert.ok(state.source()?.hostRematches.endsWith("x"));
+  assert.ok(revisions[0]! > 1);
+  assert.ok(state.source()?.hostRematches.state === "ended");
   assert.deepEqual(state.deleted.sort(), [GUEST, HOST]);
   assert.ok(state.sockets.every((socket) => socket.terminated));
   assert.equal(state.timers.size, 0);
@@ -1766,7 +1815,7 @@ test("accepts unchanged or advancing reconnect revisions without changing match 
       const report = await runSmoke({ baseUrl: API }, state.dependencies);
       assert.equal(reconnects, 2);
       assert.equal(report.checks.length, 17);
-      assert.ok(state.source()?.hostRematches.endsWith("x"));
+      assert.ok(state.source()?.hostRematches.state === "ended");
       assert.deepEqual(state.deleted.sort(), [GUEST, HOST]);
       assert.ok(state.sockets.every((socket) => socket.terminated));
       assert.equal(state.timers.size, 0);
@@ -1822,7 +1871,10 @@ test("bounds a nonresponsive request and preserves the same mutation IDs during 
     /request timed out/,
   );
   assert.equal(pendingRequests, 3);
-  assert.equal(state.source()?.hostRematches, "x");
+  assert.deepEqual(state.source()?.hostRematches, {
+    state: "ended",
+    indices: [],
+  });
   assert.deepEqual(state.deleted.sort(), [GUEST, HOST]);
   assert.equal(state.timers.size, 0);
   const creates = state.requests.filter(
@@ -1831,7 +1883,7 @@ test("bounds a nonresponsive request and preserves the same mutation IDs during 
   assert.ok(
     creates.every(
       (request) =>
-        JSON.stringify(request.body) === JSON.stringify(creates[0].body),
+        JSON.stringify(request.body) === JSON.stringify(creates[0]!.body),
     ),
   );
 });
@@ -1864,7 +1916,7 @@ test("attempts both account deletions and reports cleanup failure without return
           (
             state.requests.filter(
               (value) => value.url.pathname === "/auth/session/anonymous",
-            )[1].body as { sessionId: string }
+            )[1]!.body as { sessionId: string }
           ).sessionId
       )
         return json({ error: { message: TOKENS.get(GUEST) } }, 403);
@@ -1965,7 +2017,7 @@ test("retries a transient API move failure with the identical move payload", asy
     (request) => request.url.pathname === "/matches/move",
   );
   assert.equal(moves.length, 11);
-  assert.deepEqual(moves[0].body, moves[1].body);
+  assert.deepEqual(moves[0]!.body, moves[1]!.body);
   assert.equal(
     state.matches.get(`${HOST}/${INVITE}`)?.value.status,
     "surrendered",

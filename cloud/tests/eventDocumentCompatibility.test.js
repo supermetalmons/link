@@ -6,6 +6,8 @@ const {
   readEventDocument,
   readPlainEventDocument,
   readEventParticipantDocument,
+  readEventRoundDocument,
+  readEventMatchDocument,
   cloneEventDocument,
   copyEventParticipant,
   copyEventParticipantToMatchSlot,
@@ -13,259 +15,162 @@ const {
 const {
   applyMatchResolution,
   assignWinnerToNextRound,
-  buildScheduledEventDueUpdatesCore,
   recomputeRoundStatuses,
 } = require("../runtime/events/startTransitionCore");
-const { getEventPrizePlacements } = require("../runtime/events/bracket");
-const { getEventField } = require("../runtime/eventCommands");
-const { createSeededRandom } = require("../runtime/shared/ids");
+const {
+  event,
+  participant,
+  match,
+  round,
+} = require("./fixtures/canonicalEvents");
 
-test("event documents keep source identity and explicit clone serialization boundaries", () => {
-  const source = {
-    eventId: "event-one",
-    status: "scheduled",
-    participants: {},
-    extension: { retained: [true, null, 3] },
-    legacyUndefined: undefined,
-  };
-  const document = readEventDocument(source);
-  assert.strictEqual(document, source);
-  assert.deepEqual(Object.getOwnPropertySymbols(document), []);
+test("canonical event documents retain identity and clone only complete records", () => {
+  const source = event({ participants: { p1: participant("p1") } });
+  assert.strictEqual(readEventDocument(source), source);
   assert.strictEqual(readPlainEventDocument(source), source);
-  assert.equal(readPlainEventDocument([]), null);
-  const jsonClone = cloneEventDocument(document);
-  const structuredCopy = cloneEventDocument(document, "structured");
-  assert.notStrictEqual(jsonClone, source);
-  assert.notStrictEqual(jsonClone.extension, source.extension);
-  assert.equal(Object.hasOwn(jsonClone, "legacyUndefined"), false);
-  assert.equal(Object.hasOwn(structuredCopy, "legacyUndefined"), true);
-  assert.equal(JSON.stringify(jsonClone), JSON.stringify(source));
-  assert.deepEqual(structuredCopy, source);
+  for (const mode of /** @type {const} */ ([undefined, "structured"])) {
+    const copy = cloneEventDocument(source, mode);
+    assert.notStrictEqual(copy, source);
+    assert.notStrictEqual(copy.participants, source.participants);
+    assert.deepEqual(copy, source);
+  }
+  for (const invalid of [
+    [],
+    { eventId: source.eventId },
+    { ...source, extension: true },
+    { ...source, legacyUndefined: undefined },
+    { ...source, startAtMs: "1" },
+  ]) {
+    assert.equal(readEventDocument(invalid), null);
+    assert.equal(readPlainEventDocument(invalid), null);
+  }
 });
 
-test("participant copies retain raw legacy fields and change only their explicit patch", () => {
-  const source = {
-    loginUid: " u1 ",
-    displayName: " Player ",
-    emojiId: "7.9",
-    futureField: { retained: true },
-  };
-  const copied = copyEventParticipant(readEventParticipantDocument(source), {
-    profileId: "p1",
-  });
-  assert.deepEqual(copied, { ...source, profileId: "p1" });
+test("participant copies preserve exact fields and reject partial or extended source values", () => {
+  const source = participant("p1", { displayName: " Player ", emojiId: 7 });
+  const copied = copyEventParticipant(source, { profileId: "p2" });
+  assert.deepEqual(copied, { ...source, profileId: "p2" });
   assert.notStrictEqual(copied, source);
-  assert.strictEqual(copied.futureField, source.futureField);
-  assert.equal(Object.hasOwn(source, "profileId"), false);
-});
-
-test("slot copies preserve assigned undefined until the original JSON boundary", () => {
-  const match = { hostDisplayName: "previous", hostEmojiId: 9 };
-  assert.equal(
-    copyEventParticipantToMatchSlot(match, "host", {
-      profileId: "p1",
-      loginUid: "u1",
-    }),
-    true,
+  assert.equal(source.profileId, "p1");
+  for (const invalid of [
+    { loginUid: "u1" },
+    { ...source, emojiId: "7.9" },
+    { ...source, futureField: true },
+  ]) {
+    assert.equal(readEventParticipantDocument(invalid), null);
+  }
+  assert.throws(
+    () =>
+      Reflect.apply(copyEventParticipant, undefined, [
+        source,
+        { emojiId: "7.9" },
+      ]),
+    /invalid-canonical-event-participant/,
   );
-  assert.equal(Object.hasOwn(match, "hostDisplayName"), true);
-  assert.equal(Object.hasOwn(match, "hostEmojiId"), true);
-  assert.equal(match.hostDisplayName, undefined);
-  assert.equal(match.hostEmojiId, undefined);
-  assert.deepEqual(JSON.parse(JSON.stringify(match)), {
+});
+
+test("slot copies write complete appearance and clear every field explicitly", () => {
+  const target = match("0_0");
+  const player = participant("p1", {
+    loginUid: "u1",
+    displayName: "Player",
+    emojiId: 0,
+  });
+  assert.equal(copyEventParticipantToMatchSlot(target, "host", player), true);
+  assert.equal(copyEventParticipantToMatchSlot(target, "host", player), false);
+  assert.equal(target.hostDisplayName, "Player");
+  assert.equal(target.hostEmojiId, 0);
+  assert.equal(target.hostAura, "none");
+  assert.equal(copyEventParticipantToMatchSlot(target, "host", null), true);
+  assert.deepEqual(target, match("0_0"));
+});
+
+test("round readers reject absent, array and extension-based match containers", () => {
+  const valid = round(0, {
+    status: "upcoming",
+    matches: { "0_0": match("0_0") },
+  });
+  const { matches, ...missing } = valid;
+  assert.equal(Object.keys(matches).length, 1);
+  for (const invalid of [
+    missing,
+    { ...valid, matches: [] },
+    { ...valid, matches: { "0_0": "retained" } },
+    { ...valid, futureField: true },
+  ]) {
+    assert.equal(readEventRoundDocument(invalid), null);
+  }
+});
+
+test("round status recomputation preserves canonical timestamp and resolution semantics", () => {
+  const final = match("0_0", {
+    status: "pending",
     hostProfileId: "p1",
-    hostLoginUid: "u1",
-    hostAura: null,
-    hostSlotBlocked: false,
+    guestProfileId: "p2",
   });
-});
-
-test("round status updates distinguish missing matches from an empty array", () => {
-  const missing = { 0: { status: "active", futureField: true } };
-  const array = { 0: { status: "active", matches: [], futureField: true } };
-  assert.deepEqual(recomputeRoundStatuses({ rounds: missing, nowMs: 42 }), {
-    didChange: false,
-    finalRoundIndex: 0,
-    earliestUnresolvedRoundIndex: null,
-    finalRoundWinnerProfileId: null,
-  });
-  assert.deepEqual(missing, { 0: { status: "active", futureField: true } });
-  assert.deepEqual(recomputeRoundStatuses({ rounds: array, nowMs: 42 }), {
-    didChange: true,
-    finalRoundIndex: 0,
-    earliestUnresolvedRoundIndex: 0,
-    finalRoundWinnerProfileId: null,
-  });
-  assert.deepEqual(array, {
-    0: {
-      status: "upcoming",
-      matches: [],
-      futureField: true,
-      completedAtMs: null,
-    },
-  });
-});
-
-test("match resolution compares raw statuses but retains normalized identity equivalence", () => {
-  const match = {
-    status: " host ",
-    winnerProfileId: " p1 ",
-    resolvedAtMs: "12.9",
-    custom: { retained: true },
+  const rounds = {
+    0: round(0, { status: "active", matches: { "0_0": final } }),
   };
+  assert.ok(rounds[0].matches["0_0"]);
   assert.equal(
     applyMatchResolution(
-      match,
-      { status: "host", winnerProfileId: "p1", loserProfileId: null },
+      rounds[0].matches["0_0"],
+      { status: "host", winnerProfileId: "p1", loserProfileId: "p2" },
       42,
     ),
     true,
   );
-  assert.deepEqual(match, {
+  assert.deepEqual(recomputeRoundStatuses({ rounds, nowMs: 42 }), {
+    didChange: true,
+    finalRoundIndex: 0,
+    earliestUnresolvedRoundIndex: null,
+    finalRoundWinnerProfileId: "p1",
+  });
+  assert.equal(rounds[0].status, "completed");
+  assert.equal(rounds[0].completedAtMs, 42);
+  assert.equal(recomputeRoundStatuses({ rounds, nowMs: 99 }).didChange, false);
+  assert.equal(rounds[0].completedAtMs, 42);
+});
+
+test("match readers reject padded statuses, numeric timestamps and retained extension fields", () => {
+  const valid = match("0_0", {
     status: "host",
-    winnerProfileId: " p1 ",
-    resolvedAtMs: 42,
-    custom: { retained: true },
+    hostProfileId: "p1",
+    guestProfileId: "p2",
   });
-  assert.equal(Object.hasOwn(match, "loserProfileId"), false);
-});
-
-test("prize fallback retains truthy scalar match entries and string match containers", () => {
-  const participantsById = Object.fromEntries(
-    ["p1", "p2", "p3"].map((profileId) => [
-      profileId,
-      { profileId, loginUid: `${profileId}-login` },
-    ]),
-  );
-  for (const matches of [
-    { "0_0": "retained" },
-    { "0_0": 42 },
-    { "0_0": true },
-    "retained",
+  for (const patch of [
+    { status: " host " },
+    { winnerProfileId: " p1 " },
+    { resolvedAtMs: "1" },
+    { custom: { retained: true } },
   ]) {
-    assert.deepEqual(
-      getEventPrizePlacements({
-        event: { winnerProfileId: "p1" },
-        rounds: { 0: { matches } },
-        participantsById,
-      }),
-      [
-        { place: 1, profileId: "p1" },
-        { place: 2, profileId: "p2" },
-        { place: 3, profileId: "p3" },
-      ],
-    );
-  }
-  for (const matches of [{ "0_0": "" }, { "0_0": false }, { "0_0": 0 }, ""]) {
-    assert.deepEqual(
-      getEventPrizePlacements({
-        event: { winnerProfileId: "p1" },
-        rounds: { 0: { matches } },
-        participantsById,
-      }),
-      [],
-    );
+    assert.equal(readEventMatchDocument({ ...valid, ...patch }), null);
   }
 });
 
-test("advancing into a truthy scalar match retains the mutation failure", () => {
-  for (const value of ["retained", 42, true]) {
-    const rounds = { 1: { matches: { "1_0": value } } };
-    const before = structuredClone(rounds);
-    assert.throws(
-      () =>
-        assignWinnerToNextRound({
-          rounds,
-          roundIndex: 0,
-          matchIndex: 0,
-          winnerProfileId: "p1",
-          participantsById: { p1: { profileId: "p1", loginUid: "u1" } },
-        }),
-      TypeError,
-    );
-    assert.deepEqual(rounds, before);
-  }
-});
-
-test("scheduled plans keep participant fallback IDs and strict match-seed emoji behavior", async () => {
-  const eventId = "event-document-compatibility";
-  const participants = {
-    p1: {
-      loginUid: "u1",
-      displayName: " P1 ",
-      emojiId: "7.9",
-      aura: "",
-      futureField: { retained: true },
-    },
-    p2: {
-      profileId: "p2",
-      loginUid: "u2",
-      displayName: "P2",
-      emojiId: 8,
-      aura: null,
-    },
+test("winner advancement uses typed participant slots and does not overwrite unrelated slots", () => {
+  const first = participant("p1");
+  const second = participant("p2");
+  const rounds = {
+    1: round(1, {
+      status: "upcoming",
+      matches: {
+        "1_0": match("1_0", { guestProfileId: "p2" }, { p2: second }),
+      },
+    }),
   };
-  const event = {
-    eventId,
-    status: "scheduled",
-    startAtMs: 100,
-    updatedAtMs: 1,
-    participants,
-    rounds: {},
-  };
-  const ownershipSnapshot = {
-    canonicalProfileIdByProfileId: new Map([
-      ["p1", "p1"],
-      ["p2", "p2"],
-    ]),
-    loginOwnerByUid: new Map([
-      ["u1", { profileId: "p1", revision: 1 }],
-      ["u2", { profileId: "p2", revision: 1 }],
-    ]),
-    loginUidsByProfileId: new Map(),
-    profileById: new Map(),
-  };
-  const result = await buildScheduledEventDueUpdatesCore({
-    eventId,
-    event,
-    nowMs: 100,
-    random: createSeededRandom("event-document-compatibility"),
-    buildRandomGameSeed: () => ({ gameVariant: "Classic", fen: "start-fen" }),
-    ownershipSnapshot,
-  });
-  assert.equal(result.didChange, true);
-  assert.deepEqual(
-    result.updates.map((command) => command.field ?? command.kind),
-    [
-      "invite",
-      "match-creation",
-      "match-creation",
-      "status",
-      "startedAtMs",
-      "updatedAtMs",
-      "currentRoundIndex",
-      "bracketSize",
-      "roundCount",
-      "rounds",
-    ],
-  );
-  const firstPlayerMatch = result.updates.find(
-    (command) => command.kind === "match-creation" && command.playerId === "u1",
-  );
-  assert.equal(firstPlayerMatch.value.emojiId, 0);
   assert.equal(
-    getEventField(result.updates, eventId, "participants"),
-    undefined,
+    assignWinnerToNextRound({
+      rounds,
+      roundIndex: 0,
+      matchIndex: 0,
+      winnerProfileId: "p1",
+      participantsById: { p1: first, p2: second },
+    }),
+    true,
   );
-  assert.deepEqual(event.participants.p1, {
-    ...participants.p1,
-    profileId: "p1",
-  });
-  const match = getEventField(result.updates, eventId, "rounds")["0"].matches[
-    "0_0"
-  ];
-  const slot = match.hostProfileId === "p1" ? "host" : "guest";
-  assert.equal(match[`${slot}EmojiId`], "7.9");
-  assert.equal(match[`${slot}DisplayName`], " P1 ");
-  assert.equal(Object.hasOwn(participants.p1, "profileId"), false);
+  assert.ok(rounds[1].matches["1_0"]);
+  assert.equal(rounds[1].matches["1_0"].hostProfileId, "p1");
+  assert.equal(rounds[1].matches["1_0"].guestProfileId, "p2");
+  assert.equal(rounds[1].matches["1_0"].hostAura, "none");
 });

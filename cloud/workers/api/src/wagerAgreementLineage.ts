@@ -1,8 +1,11 @@
 import type { WagerKey } from "./wagerStateRepository.ts";
 import { lineageFingerprint } from "./wagerStateCommands.ts";
-import type { MiningMaterialName } from "@mons/shared/mining";
 import type { WagerAgreement } from "@mons/shared/wagers";
-import type { DecodedWager, WagerAgreementOperation } from "./wagerModel.ts";
+import type {
+  DecodedWager,
+  WagerAgreementOperation,
+  ReservationAdjustment,
+} from "./wagerModel.ts";
 import { isSafeRecordKey } from "./recordKeys.ts";
 import type { WagerWriteRepository } from "./gameplayRepository.ts";
 import type { WagerFrozenReadRepository } from "./wagerFrozenStore.ts";
@@ -12,17 +15,6 @@ import {
   readFrozenOperationForUid,
   updateFrozenMaterialsOnce,
 } from "./wagerReservationOperations.ts";
-
-type ReservationAdjustment = {
-  delta: number;
-  kind:
-    | "accept-proposer-adjustment"
-    | "send-proposer-adjustment"
-    | "send-self-adjustment";
-  material: MiningMaterialName;
-  operationId: string;
-  uid: string;
-};
 
 type LineageContext = {
   agreement: WagerAgreement;
@@ -36,21 +28,6 @@ type LineageContext = {
   selfAdjustmentOperationId: string;
 };
 
-function toPlainRecord(value: unknown): Record<string, unknown> | null {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
-  const prototype = Object.getPrototypeOf(value);
-  return prototype === Object.prototype || prototype === null
-    ? (value as Record<string, unknown>)
-    : null;
-}
-
-function hasExactKeys(value: Record<string, unknown>, keys: string[]): boolean {
-  const actual = Object.keys(value);
-  return (
-    actual.length === keys.length && actual.every((key) => keys.includes(key))
-  );
-}
-
 function validOperationId(value: unknown): value is string {
   return typeof value === "string" && /^[a-f0-9]{64}$/.test(value);
 }
@@ -60,9 +37,9 @@ function sameLineageReady(
   operationId: string,
   fingerprint: string,
 ): boolean {
-  const operation = value?.agreementOperation.value;
+  const operation = value?.agreementOperation;
   return Boolean(
-    operation?.raw.id === operationId &&
+    operation?.id === operationId &&
     operation.reservationLineageVersion === 1 &&
     operation.reservationLineageReady === true &&
     lineageFingerprint(value) === fingerprint,
@@ -74,7 +51,7 @@ async function createLineageContext(
   agreement: WagerAgreement | null,
   agreementOperation: WagerAgreementOperation,
 ): Promise<LineageContext | null> {
-  const operationId = agreementOperation.raw.id;
+  const operationId = agreementOperation.id;
   const proposerReservedCount = agreementOperation.proposerReservedCount;
   const { inviteId, matchId } = wagerKey;
   if (
@@ -128,13 +105,12 @@ async function validateProposerLineage(
     proposerCount,
     proposerReservationOperationId,
   } = context;
-  const operationIds = agreementOperation.raw.proposerReservationOperationIds;
+  const operationIds = agreementOperation.proposerReservationOperationIds;
   if (
     !Array.isArray(operationIds) ||
     operationIds.length !== 2 ||
     operationIds[0] !== context.proposerAdjustmentOperationId ||
-    operationIds[1] !== proposerReservationOperationId ||
-    Object.hasOwn(agreementOperation.raw, "proposerLegacyReservation")
+    operationIds[1] !== proposerReservationOperationId
   ) {
     return false;
   }
@@ -147,7 +123,7 @@ async function validateProposerLineage(
     reservation?.kind === "send-reserve" &&
     reservation.material === agreement.material &&
     reservation.count === proposerCount &&
-    agreementOperation.raw.proposerOperationId ===
+    agreementOperation.proposerOperationId ===
       (await createOperationId(
         "send",
         inviteId,
@@ -162,14 +138,12 @@ async function validateProposerLineage(
 async function validateAutoSendAccepter(
   repository: WagerFrozenReadRepository,
   context: LineageContext,
-  operationIds: unknown[],
+  operationIds: string[],
 ): Promise<ReservationAdjustment[] | null> {
-  const { agreement, agreementOperation, inviteId, matchId, proposerCount } =
-    context;
+  const { agreement, inviteId, matchId, proposerCount } = context;
   const reservationOperationId = operationIds[1];
   if (
     operationIds.length !== 2 ||
-    Object.hasOwn(agreementOperation.raw, "accepterLegacyReservation") ||
     reservationOperationId !==
       (await createWagerReservationOperationId(
         "send",
@@ -219,10 +193,9 @@ async function validateAutoSendAccepter(
 async function validateAcceptedAccepter(
   repository: WagerFrozenReadRepository,
   context: LineageContext,
-  operationIds: unknown[],
+  operationIds: string[],
 ): Promise<ReservationAdjustment[] | null> {
-  const { agreement, agreementOperation, inviteId, matchId, proposerCount } =
-    context;
+  const { agreement, inviteId, matchId, proposerCount } = context;
   const acceptReservationOperationId = await createWagerReservationOperationId(
     "accept",
     inviteId,
@@ -241,8 +214,7 @@ async function validateAcceptedAccepter(
     agreement.accepterId,
   );
   const hasOwnReservation =
-    reservation?.kind === "accept-reserve" &&
-    reservation.ownMaterial !== undefined;
+    reservation?.kind === "accept-reserve" && reservation.ownMaterial !== null;
   const ownReservation = hasOwnReservation
     ? await readFrozenOperationForUid(
         repository,
@@ -263,7 +235,6 @@ async function validateAcceptedAccepter(
     reservation.material !== agreement.material ||
     reservation.requestedCount !== proposerCount ||
     reservation.count !== agreement.count ||
-    Object.hasOwn(agreementOperation.raw, "accepterLegacyReservation") ||
     (!hasOwnReservation
       ? operationIds.length !== 1
       : operationIds.length !== 2 ||
@@ -285,7 +256,7 @@ async function validateAccepterLineage(
   isAutoSend: boolean;
 } | null> {
   const operationIds =
-    context.agreementOperation.raw.accepterReservationOperationIds;
+    context.agreementOperation.accepterReservationOperationIds;
   if (!Array.isArray(operationIds)) return null;
   const isAutoSend = operationIds[0] === context.selfAdjustmentOperationId;
   const adjustments = isAutoSend
@@ -295,47 +266,26 @@ async function validateAccepterLineage(
 }
 
 function validateStoredAdjustments(
-  value: unknown,
+  value: ReservationAdjustment[],
   expected: ReservationAdjustment[],
 ): boolean {
-  if (
-    !Array.isArray(value) ||
-    value.length !== expected.length ||
-    expected.length === 0
-  ) {
-    return false;
-  }
-  const byOperationId = new Map<string, Record<string, unknown>>();
-  for (const entry of value) {
-    const adjustment = toPlainRecord(entry);
-    const operationId = adjustment?.operationId;
-    if (
-      !adjustment ||
-      !validOperationId(operationId) ||
-      byOperationId.has(operationId)
-    ) {
-      return false;
-    }
-    byOperationId.set(operationId, adjustment);
-  }
-  return expected.every((adjustment) => {
-    const actual = byOperationId.get(adjustment.operationId);
-    return Boolean(
-      actual &&
-      hasExactKeys(actual, [
-        "uid",
-        "operationId",
-        "kind",
-        "material",
-        "delta",
-      ]) &&
-      actual.uid === adjustment.uid &&
-      actual.operationId === adjustment.operationId &&
-      actual.kind === adjustment.kind &&
-      actual.material === adjustment.material &&
-      actual.delta === adjustment.delta,
-    );
-  });
+  if (value.length !== expected.length) return false;
+  const byOperationId = new Map(
+    value.map((adjustment) => [adjustment.operationId, adjustment]),
+  );
+  return (
+    byOperationId.size === value.length &&
+    expected.every((adjustment) => {
+      const actual = byOperationId.get(adjustment.operationId);
+      return (
+        actual !== undefined &&
+        actual.uid === adjustment.uid &&
+        actual.kind === adjustment.kind &&
+        actual.material === adjustment.material &&
+        actual.delta === adjustment.delta
+      );
+    })
+  );
 }
 
 async function expectedReservationAdjustments(
@@ -368,7 +318,7 @@ async function expectedReservationAdjustments(
     });
   }
   return validateStoredAdjustments(
-    agreementOperation.raw.reservationAdjustments,
+    agreementOperation.reservationAdjustments,
     expected,
   )
     ? expected
@@ -406,7 +356,9 @@ export async function ensureWagerAgreementLineageReady(
   assertMutationAllowed?: () => Promise<void>,
 ): Promise<void> {
   const wager = await repository.wagers.readWager(wagerKey);
-  const agreementOperation = wager?.agreementOperation.value;
+  if (wager?.state === "blocked")
+    throw new Error("wager-manual-review-required");
+  const agreementOperation = wager?.agreementOperation;
   if (
     !agreementOperation ||
     agreementOperation.reservationLineageVersion !== 1 ||
@@ -419,7 +371,7 @@ export async function ensureWagerAgreementLineageReady(
   const adjustments = await expectedReservationAdjustments(
     repository,
     wagerKey,
-    wager?.agreed.value?.agreement ?? null,
+    wager?.agreed ?? null,
     agreementOperation,
   );
   if (!adjustments) {

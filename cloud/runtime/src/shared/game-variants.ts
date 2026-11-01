@@ -50,10 +50,7 @@ function createGameVariantHelpers<
   function normalizeStoredGameVariant(
     value: unknown,
   ): StoredGameVariant<TGameVariants> {
-    if (typeof value !== "string") {
-      return legacyDefaultGameVariant as StoredGameVariant<TGameVariants>;
-    }
-    const normalized = value.trim();
+    const normalized = getStoredGameVariantForPersistence(value).trim();
     return (
       (getAllGameVariantNames() as readonly string[]).includes(normalized)
         ? normalized
@@ -62,11 +59,9 @@ function createGameVariantHelpers<
   }
 
   function getStoredGameVariantForPersistence(value: unknown): string {
-    if (typeof value !== "string") {
-      return legacyDefaultGameVariant as StoredGameVariant<TGameVariants>;
-    }
-    const normalized = value.trim();
-    return normalized !== "" ? normalized : legacyDefaultGameVariant;
+    if (typeof value !== "string" || value === "")
+      throw new TypeError("invalid-game-variant");
+    return value;
   }
 
   function runtimeGameVariantFromStoredValue(

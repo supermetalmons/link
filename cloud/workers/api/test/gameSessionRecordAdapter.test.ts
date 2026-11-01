@@ -1,10 +1,10 @@
-import { retainedAutomatchSnapshotFixture } from "./automatchRecordFixture.ts";
+import {
+  retainedAutomatchSnapshotFixture,
+  canonicalAutomatchFixture,
+} from "./automatchRecordFixture.ts";
 import assert from "node:assert/strict";
 import test from "node:test";
-import {
-  decodeAutomatchEntry,
-  type AutomatchEntryRead,
-} from "../../../runtime/automatchRecords.js";
+import { decodeAutomatchEntry } from "../../../runtime/automatchRecords.js";
 import { createTypedGameSessionPort } from "../src/gameSessionRecordAdapter.ts";
 import { rawGameplayTestPort } from "./gameSessionTestPorts.ts";
 
@@ -12,7 +12,7 @@ function fixture(records: Map<string, unknown>) {
   const reads: Array<{ path: string; signal?: AbortSignal }> = [];
   const raw = rawGameplayTestPort({
     async getPath(path, _query, signal) {
-      reads.push({ path, signal });
+      reads.push({ path, ...(signal === undefined ? {} : { signal }) });
       signal?.throwIfAborted();
       return records.has(path) ? records.get(path) : null;
     },
@@ -73,46 +73,45 @@ test("claim adapters forward recovery snapshots and cancellation without seriali
     ),
     false,
   );
-  assert.equal(calls[0][4], signal);
-  assert.equal(calls[0][5], snapshot);
-  assert.equal(calls[1][4], signal);
-  assert.equal(calls[1][5], telegramSnapshot);
+  assert.equal(calls[0]![4], signal);
+  assert.equal(calls[0]![5], snapshot);
+  assert.equal(calls[1]![4], signal);
+  assert.equal(calls[1]![5], telegramSnapshot);
 });
 
-test("entry adapters preserve selected malformed rows, ordering, and read count", async () => {
+test("entry adapters expose canonical values and retain ordering and one read per request", async () => {
+  const first = canonicalAutomatchFixture("automatch", {
+    uid: "first",
+    timestamp: 1,
+  });
+  const second = canonicalAutomatchFixture("automatch", {
+    uid: "second",
+    timestamp: 2,
+  });
   const { port, reads } = fixture(
     new Map<string, unknown>([
-      [
-        "automatch",
-        { first: true, second: { uid: " guest ", timestamp: "1.5" } },
-      ],
-      ["automatch/first", true],
+      ["automatch", { first, second }],
+      ["automatch/first", first],
     ]),
   );
   const signal = new AbortController().signal;
-  const entries = await port.readFirstAutomatchEntry(signal);
-  assert.deepEqual(Object.keys(entries!), ["first", "second"]);
-  assert.deepEqual(entries!.first, {
-    isNull: false,
-    isTruthy: true,
-    record: null,
+  assert.deepEqual(await port.readFirstAutomatchEntry(signal), {
+    first,
+    second,
   });
-  assert.equal(entries!.second.record!.uid, " guest ");
-  assert.equal(entries!.second.record!.timestamp, 1.5);
-  assert.deepEqual(
-    await port.readAutomatchEntry("first", signal),
-    entries!.first,
-  );
+  assert.deepEqual(await port.readAutomatchEntry("first", signal), first);
   assert.deepEqual(reads, [
     { path: "automatch", signal },
     { path: "automatch/first", signal },
   ]);
 });
-
-test("receipt adapters preserve absent and malformed outcomes without extra reads", async () => {
+test("receipt adapters preserve explicit absence and fail closed before exposing malformed persistence", async () => {
   const { port, reads } = fixture(
-    new Map<string, unknown>([
-      ["gameplayMutationReceipts/broken", { schemaVersion: 1 }],
+    new Map([
+      [
+        "gameplayMutationReceipts/broken",
+        { schemaVersion: 1, unexpected: true },
+      ],
     ]),
   );
   assert.deepEqual(await port.readAutomatchReceipt("missing"), {
@@ -121,32 +120,30 @@ test("receipt adapters preserve absent and malformed outcomes without extra read
   assert.deepEqual(await port.readGameSessionMutationReceipt("missing"), {
     kind: "missing",
   });
-  assert.deepEqual(await port.readAutomatchReceipt("broken"), {
-    kind: "invalid",
-  });
-  assert.deepEqual(await port.readGameSessionMutationReceipt("broken"), {
-    kind: "invalid",
-  });
+  await assert.rejects(
+    port.readAutomatchReceipt("broken"),
+    /invalid-canonical/,
+  );
+  await assert.rejects(
+    port.readGameSessionMutationReceipt("broken"),
+    /invalid-canonical/,
+  );
   assert.equal(reads.length, 4);
 });
-
-test("outbox reads retain invalid raw request IDs for cancellation confirmation", async () => {
-  const rawOutbox = { requestId: " operation ", historicalMatches: false };
+test("outbox cancellation confirmation uses the exact canonical request identity", async () => {
+  const outbox = canonicalAutomatchFixture(
+    "profileGameProjectionOutbox/automatch",
+    { requestId: "operation" },
+  );
   const { port, reads } = fixture(
-    new Map<string, unknown>([
-      ["profileGameProjectionOutbox/automatch/invite", rawOutbox],
-    ]),
+    new Map([["profileGameProjectionOutbox/automatch/invite", outbox]]),
   );
   const snapshot = await port.readAutomatchProfileOutbox("invite");
-  assert.equal(snapshot.value, null);
-  assert.equal("raw" in snapshot, false);
+  assert.equal(snapshot.value?.requestId, "operation");
   assert.equal(snapshot.matchesCancellationRequest("operation"), true);
   assert.equal(snapshot.matchesCancellationRequest(" operation "), false);
+  assert.equal("raw" in snapshot, false);
   assert.equal(reads.length, 1);
-  assert.deepEqual(rawOutbox, {
-    requestId: " operation ",
-    historicalMatches: false,
-  });
 });
 
 test("typed reads preserve failures and cancellation from raw persistence", async () => {
@@ -188,15 +185,10 @@ test("normal ports expose typed operations and named recovery commands", () => {
   );
 });
 
-test("entry cancellation and navigation observations preserve raw JSON semantics", async () => {
-  const values = [null, undefined, false, 0, "", true, "invalid", [], {}];
-  for (const value of values) {
-    const { port } = fixture(
-      new Map<string, unknown>([["automatch/invite", value]]),
-    );
-    const actual: AutomatchEntryRead = await port.readAutomatchEntry("invite");
-    assert.equal(actual.isNull, value === null);
-    assert.equal(actual.isTruthy, Boolean(value));
-    assert.deepEqual(actual, decodeAutomatchEntry(value));
-  }
+test("canonical entry absence and presence are explicit for cancellation and navigation", () => {
+  assert.equal(decodeAutomatchEntry(null), null);
+  const entry = canonicalAutomatchFixture("automatch", { uid: "host" });
+  assert.deepEqual(decodeAutomatchEntry(entry), entry);
+  for (const invalid of [undefined, false, true, 0, "", {}, { uid: "host" }])
+    assert.throws(() => decodeAutomatchEntry(invalid), /invalid-canonical/);
 });

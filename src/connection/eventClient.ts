@@ -6,7 +6,10 @@ import {
   type EventSnapshotSeed,
   type LeaveEventResponse,
 } from "@mons/shared/events";
-import { isToggleEventPrizeSelectionRequest } from "@mons/shared/event-prizes";
+import {
+  isEventPrizeId,
+  isToggleEventPrizeSelectionRequest,
+} from "@mons/shared/event-prizes";
 import type {
   EventRecord,
   EventPrizeId,
@@ -22,16 +25,6 @@ import {
   type ConditionalRead,
   type ConditionalReadOptions,
 } from "../services/gameplayTransport";
-import {
-  mapDatabaseEventRecord,
-  mapEventPrizeAssignment,
-  normalizeEventPrizeId,
-} from "./eventMappers";
-import {
-  normalizeFiniteNumber,
-  normalizeString,
-  normalizeStringOrNull,
-} from "./valueNormalizers";
 import { EventPollingRegistry } from "./eventPollingRegistry";
 
 type BoundAuthTokenProvider = AuthTokenProvider & {
@@ -90,19 +83,7 @@ const mapKnownEventPrizeSelections = (
 ): EventPrizeSelections => {
   const known: EventPrizeSelections = {};
   for (const [profileId, value] of Object.entries(selections)) {
-    const prizeId = normalizeEventPrizeId(value, eventId);
-    if (prizeId) known[profileId] = prizeId;
-  }
-  return known;
-};
-
-const mapKnownProfileEventPrizes = (
-  prizes: Readonly<Record<string, unknown>>,
-): ProfileEventPrizes => {
-  const known: ProfileEventPrizes = {};
-  for (const [eventId, value] of Object.entries(prizes)) {
-    const assignment = mapEventPrizeAssignment(value, eventId);
-    if (assignment) known[eventId] = assignment;
+    if (isEventPrizeId(eventId, value)) known[profileId] = value;
   }
   return known;
 };
@@ -251,17 +232,15 @@ export class EventClient {
       const requestPayloadBase =
         typeof schedule === "number"
           ? {
-              startsInMinutes: this.normalizeFiniteNumber(schedule, 0),
+              startsInMinutes: schedule,
             }
           : {
-              scheduledDate: this.normalizeString(schedule.scheduledDate),
-              scheduledTime: this.normalizeString(schedule.scheduledTime),
+              scheduledDate: schedule.scheduledDate,
+              scheduledTime: schedule.scheduledTime,
               scheduledTimezone: schedule.scheduledTimezone,
-              ...(this.normalizeString(schedule.localTimezoneIana || "") !== ""
+              ...((schedule.localTimezoneIana ?? "") !== ""
                 ? {
-                    localTimezoneIana: this.normalizeString(
-                      schedule.localTimezoneIana || "",
-                    ),
+                    localTimezoneIana: schedule.localTimezoneIana ?? "",
                   }
                 : {}),
             };
@@ -283,10 +262,7 @@ export class EventClient {
       return {
         ok: data.ok,
         eventId: data.eventId,
-        event:
-          event === undefined
-            ? this.mapDatabaseEventRecord(data.event, data.eventId)
-            : event,
+        event: event === undefined ? data.event : event,
       };
     } catch (error) {
       console.error("Error creating event:", error);
@@ -404,10 +380,7 @@ export class EventClient {
           return {
             ok: data.ok,
             eventId: data.eventId,
-            event:
-              event === undefined
-                ? this.mapDatabaseEventRecord(data.event, data.eventId)
-                : event,
+            event: event === undefined ? data.event : event,
             postponeByMinutes: data.postponeByMinutes,
             startAtMs: data.startAtMs,
           };
@@ -479,10 +452,9 @@ export class EventClient {
             eventId: data.eventId,
             event:
               event === undefined
-                ? this.mapDatabaseEventRecord(
-                    "event" in data ? data.event : null,
-                    data.eventId,
-                  )
+                ? "event" in data
+                  ? (data.event ?? null)
+                  : null
                 : event,
             didDisqualify: data.didDisqualify,
             matchKey: data.matchKey,
@@ -496,7 +468,7 @@ export class EventClient {
   }
 
   public async syncEventState(eventId: string): Promise<EventSyncResponse> {
-    const normalizedEventId = this.normalizeString(eventId).trim();
+    const normalizedEventId = eventId.trim();
     if (!normalizedEventId) {
       return { ok: false, skipped: true, event: null };
     }
@@ -550,18 +522,12 @@ export class EventClient {
               tokenProvider,
             );
             const isSkipped = "skipped" in data;
-            const reason = this.normalizeEventSyncSkipReason(
-              isSkipped ? data.reason : undefined,
-            );
-            const parsed = {
+            const parsed: EventSyncResponse = {
               ok: data.ok,
-              didChange: isSkipped ? undefined : data.didChange,
-              skipped: isSkipped ? true : undefined,
-              reason,
-              event: this.mapDatabaseEventRecord(
-                "event" in data ? data.event : null,
-                normalizedEventId,
-              ),
+              ...(isSkipped
+                ? { skipped: true, reason: data.reason }
+                : { didChange: data.didChange }),
+              event: "event" in data ? (data.event ?? null) : null,
             };
             if (
               !parsed.skipped ||
@@ -616,22 +582,6 @@ export class EventClient {
     return reason === "locked" || reason === "rate-limited";
   }
 
-  private normalizeEventSyncSkipReason(
-    value: unknown,
-  ): EventSyncSkipReason | undefined {
-    if (value === "lock-lost") {
-      return "locked";
-    }
-    if (
-      value === "locked" ||
-      value === "rate-limited" ||
-      value === "not-participant"
-    ) {
-      return value;
-    }
-    return undefined;
-  }
-
   private isParticipantInEventRecord(
     eventRecord: EventRecord | null,
     profileId: string,
@@ -649,25 +599,20 @@ export class EventClient {
     if (!eventRecord) {
       return false;
     }
-    const normalizedProfileId = this.normalizeStringOrNull(profileId);
+    const normalizedProfileId = profileId;
     if (
       normalizedProfileId &&
-      this.normalizeString(eventRecord.createdByProfileId) ===
-        normalizedProfileId
+      eventRecord.createdByProfileId === normalizedProfileId
     ) {
       return true;
     }
-    const localLoginUid = this.normalizeString(
-      this.dependencies.getCurrentUser()?.uid ||
-        this.dependencies.getFallbackLoginUid() ||
-        "",
-    );
+    const localLoginUid =
+      this.dependencies.getCurrentUser()?.uid ??
+      this.dependencies.getFallbackLoginUid();
     if (!localLoginUid) {
       return false;
     }
-    return (
-      this.normalizeString(eventRecord.createdByLoginUid) === localLoginUid
-    );
+    return eventRecord.createdByLoginUid === localLoginUid;
   }
 
   private getEventSyncCooldownMs(eventRecord: EventRecord | null): number {
@@ -751,7 +696,7 @@ export class EventClient {
       this.eventPollingRegistry.adoptEventSnapshot(eventId, seed, generation)
     ) {
       const snapshot = this.eventPollingRegistry.getEventSnapshot(eventId);
-      return this.mapDatabaseEventRecord(snapshot?.event ?? null, eventId);
+      return snapshot?.event ?? null;
     }
     this.eventPollingRegistry.invalidateEvent(eventId);
   }
@@ -806,7 +751,15 @@ export class EventClient {
     }
     return this.eventPollingRegistry.subscribeToProfileEventPrizes(
       normalizedProfileId,
-      (response) => onUpdate(mapKnownProfileEventPrizes(response.prizes)),
+      (response) =>
+        onUpdate(
+          Object.fromEntries(
+            Object.entries(response.prizes).map(([eventId, prize]) => [
+              eventId,
+              { ...prize },
+            ]),
+          ),
+        ),
       onError,
     );
   }
@@ -815,8 +768,8 @@ export class EventClient {
     eventId: string,
     prizeId: string,
   ): Promise<EventPrizeId | null> {
-    const normalizedEventId = this.normalizeString(eventId).trim();
-    const normalizedPrizeId = this.normalizeString(prizeId).trim();
+    const normalizedEventId = eventId.trim();
+    const normalizedPrizeId = prizeId.trim();
     const profileId = (this.dependencies.getLocalProfileId() ?? "").trim();
     const request = {
       eventId: normalizedEventId,
@@ -882,34 +835,11 @@ export class EventClient {
     }
     return this.eventPollingRegistry.subscribeToEvent(
       normalizedEventId,
-      (rawEvent) => {
-        const mappedEvent = this.mapDatabaseEventRecord(
-          rawEvent,
-          normalizedEventId,
-        );
-        this.latestObservedEventById.set(normalizedEventId, mappedEvent);
-        onUpdate(mappedEvent);
+      (event) => {
+        this.latestObservedEventById.set(normalizedEventId, event);
+        onUpdate(event);
       },
       onError,
     );
-  }
-
-  private normalizeStringOrNull(value: unknown): string | null {
-    return normalizeStringOrNull(value);
-  }
-
-  private normalizeString(value: unknown): string {
-    return normalizeString(value);
-  }
-
-  private normalizeFiniteNumber(value: unknown, fallback = 0): number {
-    return normalizeFiniteNumber(value, fallback);
-  }
-
-  private mapDatabaseEventRecord(
-    rawValue: unknown,
-    fallbackEventId: string,
-  ): EventRecord | null {
-    return mapDatabaseEventRecord(rawValue, fallbackEventId);
   }
 }

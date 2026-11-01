@@ -1,15 +1,16 @@
+import { applyCanonicalTestMigrations } from "./canonicalTestMigrations.ts";
+import { evictCanonicalMatchRoom as evictDurableObject } from "./canonicalMatchTestFixture.ts";
+import { canonicalMatchEnvironment } from "./canonicalMatchTestFixture.ts";
+import { activateCanonicalApplicationFixture } from "./applicationRoomFixture.ts";
+import { runInCanonicalMatchRoom as runInDurableObject } from "./canonicalMatchTestFixture.ts";
 import type { UpdateMatchPresentationRequest } from "@mons/shared/match-presentation";
 import {
   REACTION_SOCKET_PROTOCOL,
   isInviteRoomMessage,
 } from "@mons/shared/reactions";
-import {
-  applyD1Migrations,
-  evictDurableObject,
-  runInDurableObject,
-  type D1Migration,
-} from "cloudflare:test";
-import { env } from "cloudflare:workers";
+import type { D1Migration } from "cloudflare:test";
+import { env as nativeEnv } from "cloudflare:workers";
+
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import {
   buildMatchPresentationRegistrationStatements,
@@ -32,6 +33,7 @@ import {
   readStoredPresentations,
   seedHistoricalPresentations,
 } from "./presentationStorageFixture.ts";
+const env = canonicalMatchEnvironment(nativeEnv);
 
 const testEnv = env as Env & { TEST_D1_MIGRATIONS: D1Migration[] };
 const db = env.PROFILE_GAMES_DB;
@@ -61,7 +63,7 @@ function creation(
     matchId,
     actorUid,
     emojiId,
-    aura: "",
+    aura: "none" as const,
     sourceId: `creation:${actorUid}:${matchId}`,
   };
 }
@@ -142,7 +144,7 @@ function acceptSocket(response: Response) {
 }
 
 beforeAll(async () => {
-  await applyD1Migrations(db, testEnv.TEST_D1_MIGRATIONS);
+  await applyCanonicalTestMigrations(db, testEnv.TEST_D1_MIGRATIONS);
 });
 
 beforeEach(async () => {
@@ -203,12 +205,12 @@ describe("match presentation registration", () => {
     const operation = update();
     const edited = await room.updatePresentation(hostUid, matchId, operation);
     const frozen = await freezeHistoricalPresentations(room, matchId, {
-      [hostUid]: { emojiId: 1, aura: "" },
+      [hostUid]: { emojiId: 1, aura: "none" as const },
     });
     const nextOperation = update({
       expectedRevision: 1,
       emojiId: 1001,
-      aura: "",
+      aura: "none" as const,
     });
     const current = await room.updatePresentation(
       hostUid,
@@ -316,7 +318,7 @@ describe("match presentation registration", () => {
       Object.keys((await readStoredPresentations(room, matchId)).players),
     ).toEqual([hostUid]);
     await expect(
-      commit([{ ...first[0], seedDigest: changed.seedDigest }]),
+      commit([{ ...first[0]!, seedDigest: changed.seedDigest }]),
     ).rejects.toThrow();
     expect(
       await listMatchPresentationRegistrations(db, inviteId, matchId),
@@ -328,7 +330,7 @@ describe("match presentation registration", () => {
           inviteId,
           matchId,
         )
-      ).players[hostUid].emojiId,
+      ).players[hostUid]!.emojiId,
     ).toBe(1);
   });
 
@@ -379,7 +381,7 @@ describe("match presentation registration", () => {
     const { inviteId, room } = fixture();
     const matchId = `${inviteId}1`;
     await seedHistoricalPresentations(room, matchId, {
-      [guestUid]: { emojiId: 2, aura: "" },
+      [guestUid]: { emojiId: 2, aura: "none" as const },
     });
     const rows = await prepareCreatedMatchPresentations(networkIsolatedEnv, [
       creation(inviteId, hostUid, matchId),
@@ -405,7 +407,10 @@ describe("match presentation registration", () => {
   });
 
   it("rejects a registered actor without current appearance or immutable DO proof without fallback", async () => {
-    for (const table of ["match_presentations", "match_presentation_seeds"]) {
+    for (const table of [
+      "match_presentations_canonical",
+      "match_presentation_seeds_canonical",
+    ]) {
       const { inviteId, matchId, room } = fixture();
       const rows = await prepareCreatedMatchPresentations(networkIsolatedEnv, [
         creation(inviteId),
@@ -443,7 +448,7 @@ describe("match presentation registration", () => {
     await room.updatePresentation(hostUid, matchId, update());
     await runInDurableObject(room, (_instance, state) => {
       state.storage.sql.exec(
-        "DELETE FROM match_presentations WHERE match_id = ?",
+        "DELETE FROM match_presentations_canonical WHERE match_id = ?",
         matchId,
       );
     });
@@ -468,7 +473,7 @@ describe("match presentation registration", () => {
       ...creation(inviteId),
       emojiId: 9,
     });
-    await commit([{ ...rows[0], seedDigest: differentDigest }]);
+    await commit([{ ...rows[0]!, seedDigest: differentDigest }]);
     await expect(
       readRegisteredMatchPresentations(networkIsolatedEnv, inviteId, matchId),
     ).rejects.toThrow("match-presentation-unavailable");
@@ -527,7 +532,7 @@ describe("match presentation registration", () => {
     const changed = await room.updatePresentation(
       guestUid,
       matchId,
-      update({ emojiId: 8, aura: "" }),
+      update({ emojiId: 8, aura: "none" as const }),
     );
     expect(JSON.parse(await client.read())).toEqual({
       schemaVersion: 2,
@@ -543,7 +548,7 @@ describe("match presentation registration", () => {
     });
     await runInDurableObject(room, (_instance, state) => {
       state.storage.sql.exec(
-        "DELETE FROM match_presentations WHERE match_id = ?",
+        "DELETE FROM match_presentations_canonical WHERE match_id = ?",
         matchId,
       );
     });
@@ -593,7 +598,7 @@ describe("match presentation registration", () => {
     const firstGuest = await room.updatePresentation(
       guestUid,
       matchId,
-      update({ emojiId: 8, aura: "" }),
+      update({ emojiId: 8, aura: "none" as const }),
     );
     const frozen = await freezeRegisteredMatchPresentations(
       networkIsolatedEnv,
@@ -606,7 +611,7 @@ describe("match presentation registration", () => {
     await room.updatePresentation(
       guestUid,
       matchId,
-      update({ expectedRevision: 1, emojiId: 9, aura: "" }),
+      update({ expectedRevision: 1, emojiId: 9, aura: "none" as const }),
     );
     expect(
       await freezeRegisteredMatchPresentations(
@@ -657,7 +662,7 @@ describe("match presentation registration", () => {
     await expect(
       db
         .prepare(
-          "UPDATE match_presentation_registrations SET source_id = 'changed' WHERE invite_id = ?",
+          "UPDATE match_presentation_registrations_canonical SET source_id = 'changed' WHERE invite_id = ?",
         )
         .bind(inviteId)
         .run(),
@@ -665,7 +670,7 @@ describe("match presentation registration", () => {
     await expect(
       db
         .prepare(
-          "DELETE FROM match_presentation_registrations WHERE invite_id = ?",
+          "DELETE FROM match_presentation_registrations_canonical WHERE invite_id = ?",
         )
         .bind(inviteId)
         .run(),
@@ -676,3 +681,5 @@ describe("match presentation registration", () => {
     expect(await readMatchPresentationControl(db)).toEqual(activated);
   });
 });
+
+beforeAll(activateCanonicalApplicationFixture);

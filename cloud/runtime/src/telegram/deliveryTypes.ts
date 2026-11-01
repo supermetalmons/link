@@ -19,7 +19,7 @@ export type TelegramApiGateResult = {
   acquired: boolean;
   reason: string;
   retryNotBeforeMs: number;
-  gate: TelegramApiGateDocument;
+  gate: TelegramApiGateDocument | null;
 };
 export type TelegramRetrySchedule = TelegramTaskPayload & {
   scheduleTimeMs?: number;

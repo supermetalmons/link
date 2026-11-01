@@ -1,3 +1,5 @@
+import { requireValue } from "./browserAssertions";
+import { applicationStorageKey } from "../../src/session/applicationDataStorage.ts";
 import React, { act, useLayoutEffect } from "react";
 import { createRoot } from "react-dom/client";
 import type { PlayerProfile } from "../../src/connection/connectionModels";
@@ -60,7 +62,7 @@ const nativeSetTimeout = window.setTimeout.bind(window);
 window.setTimeout = ((
   callback: TimerHandler,
   delay?: number,
-  ...args: any[]
+  ...args: unknown[]
 ) => {
   if (holdScrollResets && delay === 5 && typeof callback === "function") {
     scrollResets.push(() => callback(...args));
@@ -81,7 +83,7 @@ let options: Options = {
 };
 let current: ReturnType<typeof useLeaderboard> | null = null;
 let commits = 0;
-const root = createRoot(document.getElementById("root")!);
+const root = createRoot(requireValue(document.getElementById("root")));
 
 function Probe(props: Options) {
   const result = useLeaderboard(props);
@@ -103,84 +105,96 @@ async function update(run: () => void) {
 
 const writeStorage = (values: Record<string, unknown>) => {
   Object.entries(values).forEach(([key, value]) => {
-    if (value === null) localStorage.removeItem(key);
-    else localStorage.setItem(key, JSON.stringify(value));
+    if (value === null) localStorage.removeItem(applicationStorageKey(key));
+    else
+      localStorage.setItem(applicationStorageKey(key), JSON.stringify(value));
   });
 };
 const wrapper = () => document.querySelector("table")?.parentElement;
 
-Object.assign(window, {
-  leaderboardHarness: {
-    snapshot: () => ({
-      ...current,
-      commits,
-      requests: requests.map(({ type }) => type),
-      ensRequests: environment.ensRequests.map(({ address }) => address),
-      cache: Object.fromEntries(leaderboardCache),
-      cards,
-      cosmeticWrites,
-      scrollTop: wrapper()?.scrollTop ?? null,
-      scrollResets: scrollResets.length,
-    }),
-    render: (patch: Partial<Options> = {}) =>
-      update(() => {
-        options = { ...options, ...patch };
-        root.render(
-          <React.StrictMode>
-            {options.mode === "view" ? (
-              <Leaderboard {...options} />
-            ) : (
-              <Probe {...options} />
-            )}
-          </React.StrictMode>,
-        );
-      }),
-    writeStorage,
-    stashProfile: (loginId: string, profile: PlayerProfile) => {
-      profilesForUids[loginId] = profile;
-    },
-    seedCache: (type: LeaderboardType, profiles: PlayerProfile[]) => {
-      leaderboardCache.set(type, profilesToLeaderboardEntries(profiles));
-    },
-    resetCache: resetLeaderboardCache,
-    queueCosmetics: (values: Record<string, unknown>) => {
-      const revision = beginVerifiedProfileApplication();
-      queueDeferredProfilePresentation(
-        revision,
-        {
-          profileId: storage.getProfileId(""),
-          displayName: storage.getUsername(""),
-        },
-        () => true,
-        Object.entries(values).map(([key, value]) => ({
-          read: () => localStorage.getItem(key),
-          write: () => {
-            writeStorage({ [key]: value });
-            cosmeticWrites += 1;
-          },
-        })),
+export const leaderboardHarness = {
+  snapshot: () => ({
+    ...current,
+    commits,
+    requests: requests.map(({ type }) => type),
+    ensRequests: environment.ensRequests.map(({ address }) => address),
+    cache: Object.fromEntries(leaderboardCache),
+    cards,
+    cosmeticWrites,
+    scrollTop: wrapper()?.scrollTop ?? null,
+    scrollResets: scrollResets.length,
+  }),
+  render: (patch: Partial<Options> = {}) =>
+    update(() => {
+      options = { ...options, ...patch };
+      root.render(
+        <React.StrictMode>
+          {options.mode === "view" ? (
+            <Leaderboard {...options} />
+          ) : (
+            <Probe {...options} />
+          )}
+        </React.StrictMode>,
       );
-    },
-    complete: (index: number, profiles: PlayerProfile[]) =>
-      update(() => requests[index].resolve(profiles)),
-    reject: (index: number) =>
-      update(() =>
-        requests[index].reject(new Error("leaderboard-unavailable")),
-      ),
-    resolveEns: (index: number, name: string | null) =>
-      update(() => environment.ensRequests[index].resolve(name)),
-    holdScrollResets: () => {
-      holdScrollResets = true;
-    },
-    flushScrollResets: () =>
-      update(() => scrollResets.splice(0).forEach((callback) => callback())),
-    scrollTo: (top: number) => {
-      const element = wrapper();
-      if (element) {
-        element.scrollTop = top;
-        element.dispatchEvent(new Event("scroll"));
-      }
-    },
-    dispose: () => update(() => root.unmount()),
+    }),
+  writeStorage,
+  stashProfile: (loginId: string, profile: PlayerProfile) => {
+    profilesForUids[loginId] = profile;
   },
-});
+  stashRawProfile: (loginId: string, profile: unknown) => {
+    if (!Reflect.set(profilesForUids, loginId, profile))
+      throw new Error("fixture-profile-write-failed");
+  },
+  seedCache: (type: LeaderboardType, profiles: PlayerProfile[]) => {
+    leaderboardCache.set(type, profilesToLeaderboardEntries(profiles));
+  },
+  resetCache: resetLeaderboardCache,
+  queueCosmetics: (values: Record<string, unknown>) => {
+    const revision = beginVerifiedProfileApplication();
+    queueDeferredProfilePresentation(
+      revision,
+      {
+        profileId: storage.getProfileId(""),
+        displayName: storage.getUsername(""),
+      },
+      () => true,
+      Object.entries(values).map(([key, value]) => ({
+        read: () => localStorage.getItem(applicationStorageKey(key)),
+        write: () => {
+          writeStorage({ [key]: value });
+          cosmeticWrites += 1;
+        },
+      })),
+    );
+  },
+  complete: (index: number, profiles: PlayerProfile[]) =>
+    update(() => requireValue(requests[index]).resolve(profiles)),
+  completeRaw: (index: number, profiles: readonly unknown[]) =>
+    update(() => {
+      Reflect.apply(requireValue(requests[index]).resolve, undefined, [
+        profiles,
+      ]);
+    }),
+  reject: (index: number) =>
+    update(() =>
+      requireValue(requests[index]).reject(
+        new Error("leaderboard-unavailable"),
+      ),
+    ),
+  resolveEns: (index: number, name: string | null) =>
+    update(() => requireValue(environment.ensRequests[index]).resolve(name)),
+  holdScrollResets: () => {
+    holdScrollResets = true;
+  },
+  flushScrollResets: () =>
+    update(() => scrollResets.splice(0).forEach((callback) => callback())),
+  scrollTo: (top: number) => {
+    const element = wrapper();
+    if (element) {
+      element.scrollTop = top;
+      element.dispatchEvent(new Event("scroll"));
+    }
+  },
+  dispose: () => update(() => root.unmount()),
+};
+Object.assign(window, { leaderboardHarness: leaderboardHarness });

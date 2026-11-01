@@ -1,3 +1,6 @@
+import { MatchTimerMutationQueue } from "./matchTimerMutationQueue.ts";
+import { MatchWriterStore } from "./matchWriterStore.ts";
+import type { MatchWriterMutation } from "./matchWriterRecords.ts";
 import type { InviteDocument } from "@mons/shared/invite-records";
 import { matchWireValue } from "./matchRecordCodec.ts";
 import {
@@ -16,6 +19,26 @@ import {
   type InviteReaction,
 } from "@mons/shared/reactions";
 import { DurableObject } from "cloudflare:workers";
+import { ApplicationDataUnavailable } from "./applicationDataControl.ts";
+import type {
+  ApplicationAdmission,
+  ApplicationAdmissionKind,
+} from "./applicationAdmissions.ts";
+import {
+  applicationWaitUntil,
+  currentApplicationAdmission,
+  runApplicationOperation,
+  scopedApplicationEnv,
+} from "./applicationExecution.ts";
+import {
+  assertApplicationObjectAdmission,
+  fenceApplicationObjectStorage,
+  initializeApplicationObjectControl,
+} from "./applicationObjectStorage.ts";
+import {
+  readApplicationAdmissionHeader,
+  readApplicationRpcAdmission,
+} from "./applicationRoomRpc.ts";
 import { canReceiveInvite, InviteChannelsRoom } from "./inviteChannelsRoom.ts";
 import type { InviteMetadataReadResult } from "./inviteMetadata.ts";
 import { ensureInviteRoomSchema } from "./inviteRoomSchema.ts";
@@ -25,10 +48,8 @@ import {
   type MatchPresentationUpdateResult,
 } from "./matchPresentationStore.ts";
 
-import { createMatchTimerStartStore } from "./gameplayCoordinationD1.ts";
 import { InviteAlarmCoordinator } from "./inviteAlarmCoordinator.ts";
 import { createInviteSourceReader } from "./inviteSource.ts";
-import { parseNewMatchTimerStorage } from "./localMatchTimerStore.ts";
 import {
   createMatchEffectDelivery,
   MatchEffectsDispatcher,
@@ -91,20 +112,107 @@ const MAX_INVITE_ROOM_SPECTATOR_SOCKETS =
   PARTICIPANT_SOCKET_TAGS.length * MAX_INVITE_REACTION_SOCKETS_PER_PARTICIPANT;
 
 export class InviteReactions extends DurableObject<Env> {
-  private readonly matchSync: MatchSyncRoom;
-  private readonly matchState: MatchStateStore;
-  private readonly socketSessions: SocketSessions;
-  private readonly matchEffects: MatchEffectsDispatcher;
-  private inviteReader: (inviteId: string) => Promise<InviteDocument | null>;
-  private wagerReader: (inviteId: string) => Promise<WagerStateSnapshot[]>;
-  private readonly alarmCoordinator: InviteAlarmCoordinator;
-  private readonly reactions: ReactionChannel;
-  private readonly inviteChannels: InviteChannelsRoom;
-  private readonly presentations: MatchPresentationStore;
+  private readonly timerMutations = new MatchTimerMutationQueue();
+  private matchWriterStore: MatchWriterStore | null = null;
+  private initialization: Promise<void> | null = null;
+  private matchSync!: MatchSyncRoom;
+  private matchState!: MatchStateStore;
+  private socketSessions!: SocketSessions;
+  private matchEffects!: MatchEffectsDispatcher;
+  private inviteReader!: (inviteId: string) => Promise<InviteDocument | null>;
+  private wagerReader!: (inviteId: string) => Promise<WagerStateSnapshot[]>;
+  private alarmCoordinator!: InviteAlarmCoordinator;
+  private reactions!: ReactionChannel;
+  private inviteChannels!: InviteChannelsRoom;
+  private presentations!: MatchPresentationStore;
 
-  constructor(ctx: DurableObjectState, env: Env) {
-    super(ctx, env);
-    ensureInviteRoomSchema(ctx.storage);
+  private get matchWriter(): MatchWriterStore {
+    if (!this.matchWriterStore) throw new ApplicationDataUnavailable();
+    return this.matchWriterStore;
+  }
+
+  private async ensureRuntime(): Promise<void> {
+    const getAdmission = () => {
+      const admission = currentApplicationAdmission();
+      if (!admission) throw new ApplicationDataUnavailable();
+      return admission;
+    };
+    if (!this.initialization) {
+      this.initialization = (async () => {
+        const pristine =
+          this.ctx.storage.sql
+            .exec(
+              "SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name NOT GLOB 'sqlite_*' AND name NOT GLOB '_cf_*' LIMIT 1",
+            )
+            .toArray().length === 0 &&
+          Array.from(this.ctx.storage.kv.list({ limit: 1 })).length === 0 &&
+          (await this.ctx.storage.getAlarm()) === null;
+        const initialize = async () => {
+          await initializeApplicationObjectControl(
+            this.ctx.storage,
+            getAdmission(),
+          );
+          assertApplicationObjectAdmission(this.ctx.storage, getAdmission());
+          const storage = fenceApplicationObjectStorage(
+            this.ctx.storage,
+            getAdmission,
+          );
+          const context = new Proxy(this.ctx, {
+            get(target, property) {
+              if (property === "storage") return storage;
+              if (property === "waitUntil") return applicationWaitUntil;
+              const method: unknown = Reflect.get(target, property, target);
+              if (typeof method !== "function") return method;
+              return (...args: unknown[]): unknown => {
+                const result: unknown = Reflect.apply(method, target, args);
+                return result;
+              };
+            },
+          });
+          this.initializeRuntime(
+            context,
+            scopedApplicationEnv(this.env),
+            pristine,
+          );
+        };
+        if (pristine) await this.ctx.storage.transaction(initialize);
+        else await initialize();
+      })().catch((error: unknown) => {
+        this.initialization = null;
+        this.matchWriterStore = null;
+        throw error;
+      });
+    }
+    await this.initialization;
+    assertApplicationObjectAdmission(this.ctx.storage, getAdmission());
+  }
+
+  private withApplicationOperation<T>(
+    kind: ApplicationAdmissionKind,
+    work: () => Promise<T>,
+    parent?: ApplicationAdmission,
+  ): Promise<T> {
+    return runApplicationOperation(
+      this.env,
+      kind,
+      1,
+      async () => {
+        await this.ensureRuntime();
+        return work();
+      },
+      this.ctx,
+      parent,
+    );
+  }
+  private initializeRuntime(
+    ctx: DurableObjectState,
+    env: Env,
+    fresh: boolean,
+  ): void {
+    ensureInviteRoomSchema(ctx.storage, { fresh });
+    this.matchWriterStore = new MatchWriterStore(this.ctx.storage, ctx.storage);
+    this.matchWriter.initialize({ fresh });
+    if (fresh) this.matchWriter.initializeFreshLocalLayout();
     this.socketSessions = new SocketSessions(ctx);
     this.alarmCoordinator = new InviteAlarmCoordinator(ctx.storage, {
       expireSessions: () => this.socketSessions.nextExpiry(),
@@ -143,18 +251,15 @@ export class InviteReactions extends DurableObject<Env> {
       socketSessions: this.socketSessions,
       limits: INVITE_CHANNEL_SOCKET_LIMITS,
     });
-    this.matchState = new MatchStateStore(ctx.storage, {
-      timerStarts: createMatchTimerStartStore(env.PROFILE_GAMES_DB),
-      newMatchTimerStorage: parseNewMatchTimerStorage(
-        env.NEW_MATCH_TIMER_STORAGE,
-      ),
+    this.matchState = new MatchStateStore(this.matchWriter.guardStorage(), {
+      assertTimerWriter: () => this.matchWriter.assertWriter(),
+      recordTimerWriterOutcome: (result) =>
+        this.matchWriter.recordCommittedOutcome(result),
       scheduleAlarm: (atMs, transaction) =>
         this.alarmCoordinator.schedule(atMs, transaction),
     });
     this.matchEffects = new MatchEffectsDispatcher(this.matchState.effects, {
-      deliver: createMatchEffectDelivery(env, (effect) =>
-        this.matchState.cleanupRetainedTimerStarts(effect),
-      ),
+      deliver: createMatchEffectDelivery(env),
       scheduleAlarm: (atMs) => this.alarmCoordinator.schedule(atMs),
     });
     this.matchSync = new MatchSyncRoom(ctx, {
@@ -176,134 +281,248 @@ export class InviteReactions extends DurableObject<Env> {
   }
 
   async fetch(request: Request): Promise<Response> {
-    this.socketSessions.nextExpiry();
-    if (
-      request.method !== "GET" ||
-      request.headers.get("Upgrade")?.toLowerCase() !== "websocket"
-    ) {
-      return new Response("WebSocket upgrade required", { status: 426 });
-    }
-    const pathname = new URL(request.url).pathname;
-    if (pathname === "/matches/socket") return this.matchSync.fetch(request);
-    if (pathname === "/metadata/socket")
-      return this.inviteChannels.fetch(request, "metadata");
-    if (pathname === "/wagers/socket")
-      return this.inviteChannels.fetch(request, "wagers");
-    return this.reactions.fetch(request);
+    return this.withApplicationOperation(
+      "rpc",
+      async () => {
+        this.socketSessions.nextExpiry();
+        if (
+          request.method !== "GET" ||
+          request.headers.get("Upgrade")?.toLowerCase() !== "websocket"
+        ) {
+          return new Response("WebSocket upgrade required", { status: 426 });
+        }
+        const pathname = new URL(request.url).pathname;
+        if (pathname === "/matches/socket")
+          return this.matchSync.fetch(request);
+        if (pathname === "/metadata/socket")
+          return this.inviteChannels.fetch(request, "metadata");
+        if (pathname === "/wagers/socket")
+          return this.inviteChannels.fetch(request, "wagers");
+        return this.reactions.fetch(request);
+      },
+      readApplicationAdmissionHeader(request),
+    );
   }
 
-  async readMetadata(inviteId: string): Promise<InviteMetadataReadResult> {
-    return this.inviteChannels.readMetadata(inviteId);
+  async readMetadata(
+    inviteId: string,
+    parent?: ApplicationAdmission,
+  ): Promise<InviteMetadataReadResult> {
+    return this.withApplicationOperation(
+      "rpc",
+      async () => {
+        return this.inviteChannels.readMetadata(inviteId);
+      },
+      readApplicationRpcAdmission(parent),
+    );
   }
 
-  async readWagers(inviteId: string): Promise<InviteWagersReadResult> {
-    return this.inviteChannels.readWagers(inviteId);
+  async readWagers(
+    inviteId: string,
+    parent?: ApplicationAdmission,
+  ): Promise<InviteWagersReadResult> {
+    return this.withApplicationOperation(
+      "rpc",
+      async () => {
+        return this.inviteChannels.readWagers(inviteId);
+      },
+      readApplicationRpcAdmission(parent),
+    );
   }
 
   async readMatches(
     inviteId: string,
     matchId: string,
     options: { fresh?: boolean } = {},
+    parent?: ApplicationAdmission,
   ): Promise<MatchSyncReadResult> {
-    if (options.fresh) {
-      await this.inviteChannels.readMetadata(inviteId);
-      await this.matchSync.notify(inviteId, [matchId]);
-    }
-    return this.matchSync.read(inviteId, matchId, options.fresh);
-  }
-
-  async readCanonicalMatchRecord(input: MatchStateRecordRequest) {
-    return captureMatchStateRpc(() => {
-      this.inviteChannels.pinInvite(input.inviteId);
-      return matchWireValue(this.matchState.readRecord(input));
-    });
-  }
-
-  async readCanonicalMatchRecords(input: MatchStateRecordsRequest) {
-    return captureMatchStateRpc(() => {
-      if (
-        !Array.isArray(input.requests) ||
-        input.requests.length === 0 ||
-        input.requests.length > MAX_MATCH_STATE_RECORD_READS
-      ) {
-        throw new TypeError("match-state-invalid-read-batch");
-      }
-      this.inviteChannels.pinInvite(input.inviteId);
-      return this.matchState.readRecords(input).map(matchWireValue);
-    });
-  }
-
-  async readCanonicalMatchPair(input: MatchStatePairRequest) {
-    return captureMatchStateRpc(() => {
-      this.inviteChannels.pinInvite(input.inviteId);
-      return matchPairWire(this.matchState.readPair(input));
-    });
-  }
-
-  async createCanonicalMatch(input: MatchStateCreateWireRequest) {
-    return this.mutateCanonicalMatch(
-      input,
-      () => matchCreateWireResult(this.matchState.createRecords(input)),
-      (result) => result.changedMatchIds,
+    return this.withApplicationOperation(
+      "rpc",
+      async () => {
+        if (options.fresh) {
+          await this.inviteChannels.readMetadata(inviteId);
+          await this.matchSync.notify(inviteId, [matchId]);
+        }
+        return this.matchSync.read(inviteId, matchId, options.fresh);
+      },
+      readApplicationRpcAdmission(parent),
     );
   }
 
-  async submitCanonicalMove(input: MatchStateMoveRequest) {
-    return this.mutateCanonicalMatch(
-      input,
-      () => this.matchState.move(input),
-      () => [input.matchId],
+  async readCanonicalMatchRecord(
+    input: MatchStateRecordRequest,
+    parent?: ApplicationAdmission,
+  ) {
+    return this.withApplicationOperation(
+      "rpc",
+      async () => {
+        return captureMatchStateRpc(() => {
+          this.inviteChannels.pinInvite(input.inviteId);
+          return matchWireValue(this.matchState.readRecord(input));
+        });
+      },
+      readApplicationRpcAdmission(parent),
     );
   }
 
-  async surrenderCanonicalMatch(input: MatchStateSurrenderRequest) {
-    return this.mutateCanonicalMatch(
-      input,
-      () => this.matchState.surrender(input),
-      () => [input.matchId],
+  async readCanonicalMatchRecords(
+    input: MatchStateRecordsRequest,
+    parent?: ApplicationAdmission,
+  ) {
+    return this.withApplicationOperation(
+      "rpc",
+      async () => {
+        return captureMatchStateRpc(() => {
+          if (
+            !Array.isArray(input.requests) ||
+            input.requests.length === 0 ||
+            input.requests.length > MAX_MATCH_STATE_RECORD_READS
+          ) {
+            throw new TypeError("match-state-invalid-read-batch");
+          }
+          this.inviteChannels.pinInvite(input.inviteId);
+          return this.matchState.readRecords(input).map(matchWireValue);
+        });
+      },
+      readApplicationRpcAdmission(parent),
     );
   }
 
-  async startCanonicalMatchTimer(input: MatchStateStartTimerRequest) {
-    return this.mutateCanonicalMatch(
-      input,
-      () => this.matchState.startTimer(input),
-      () => [input.matchId],
+  async readCanonicalMatchPair(
+    input: MatchStatePairRequest,
+    parent?: ApplicationAdmission,
+  ) {
+    return this.withApplicationOperation(
+      "rpc",
+      async () => {
+        return captureMatchStateRpc(() => {
+          this.inviteChannels.pinInvite(input.inviteId);
+          return matchPairWire(this.matchState.readPair(input));
+        });
+      },
+      readApplicationRpcAdmission(parent),
     );
   }
 
-  async claimCanonicalMatchTimer(input: MatchStateClaimTimerRequest) {
-    return this.mutateCanonicalMatch(
-      input,
-      () => this.matchState.claimTimer(input),
-      () => [input.matchId],
+  async createCanonicalMatch(
+    input: MatchStateCreateWireRequest,
+    parent?: ApplicationAdmission,
+  ) {
+    return this.withApplicationOperation(
+      "rpc",
+      async () => {
+        return this.mutateCanonicalMatch(
+          { kind: "create", request: input },
+          () => matchCreateWireResult(this.matchState.createRecords(input)),
+          (result) => result.changedMatchIds,
+        );
+      },
+      readApplicationRpcAdmission(parent),
+    );
+  }
+
+  async submitCanonicalMove(
+    input: MatchStateMoveRequest,
+    parent?: ApplicationAdmission,
+  ) {
+    return this.withApplicationOperation(
+      "rpc",
+      async () => {
+        return this.mutateCanonicalMatch(
+          { kind: "move", request: input },
+          () => this.matchState.move(input),
+          () => [input.matchId],
+        );
+      },
+      readApplicationRpcAdmission(parent),
+    );
+  }
+
+  async surrenderCanonicalMatch(
+    input: MatchStateSurrenderRequest,
+    parent?: ApplicationAdmission,
+  ) {
+    return this.withApplicationOperation(
+      "rpc",
+      async () => {
+        return this.mutateCanonicalMatch(
+          { kind: "surrender", request: input },
+          () => this.matchState.surrender(input),
+          () => [input.matchId],
+        );
+      },
+      readApplicationRpcAdmission(parent),
+    );
+  }
+
+  async startCanonicalMatchTimer(
+    input: MatchStateStartTimerRequest,
+    parent?: ApplicationAdmission,
+  ) {
+    return this.withApplicationOperation(
+      "rpc",
+      async () => {
+        return this.mutateCanonicalMatch(
+          { kind: "start-timer", request: input },
+          () =>
+            this.timerMutations.run(input.matchId, () =>
+              this.matchState.startTimer(input),
+            ),
+          () => [input.matchId],
+        );
+      },
+      readApplicationRpcAdmission(parent),
+    );
+  }
+
+  async claimCanonicalMatchTimer(
+    input: MatchStateClaimTimerRequest,
+    parent?: ApplicationAdmission,
+  ) {
+    return this.withApplicationOperation(
+      "rpc",
+      async () => {
+        return this.mutateCanonicalMatch(
+          { kind: "claim-timer", request: input },
+          () => this.matchState.claimTimer(input),
+          () => [input.matchId],
+        );
+      },
+      readApplicationRpcAdmission(parent),
     );
   }
 
   async applyCanonicalMatchEventEffects(
     input: MatchStateEventEffectsWireRequest,
     options: { deferNotifications?: boolean } = {},
+    parent?: ApplicationAdmission,
   ) {
-    return this.mutateCanonicalMatch(
-      input,
-      () =>
-        Promise.resolve(
-          matchCreateWireResult(this.matchState.applyEventEffects(input)),
-        ),
-      (result) => (options.deferNotifications ? null : result.changedMatchIds),
+    return this.withApplicationOperation(
+      "rpc",
+      async () => {
+        return this.mutateCanonicalMatch(
+          { kind: "event-effects", request: input },
+          async () =>
+            matchCreateWireResult(
+              await this.matchState.applyEventEffects(input),
+            ),
+          (result) =>
+            options.deferNotifications ? null : result.changedMatchIds,
+        );
+      },
+      readApplicationRpcAdmission(parent),
     );
   }
 
   private mutateCanonicalMatch<T>(
-    input: { inviteId: string },
+    mutation: Exclude<MatchWriterMutation, { kind: "alarm" }>,
     mutate: () => T | Promise<T>,
     changedMatchIds: (result: T) => string[] | null,
   ) {
     return captureMatchStateRpc(async () => {
-      const inviteId = input.inviteId;
+      const inviteId = mutation.request.inviteId;
       this.inviteChannels.pinInvite(inviteId);
-      const mutation = mutate();
-      const result = mutation instanceof Promise ? await mutation : mutation;
+      const result = await this.matchWriter.runWriter(mutation, mutate);
       const matchIds = changedMatchIds(result);
       if (matchIds !== null)
         await this.notifyCanonicalMatches(inviteId, matchIds);
@@ -329,34 +548,77 @@ export class InviteReactions extends DurableObject<Env> {
   async notifyMatchesChanged(
     inviteId: string,
     matchIds?: string[],
+    parent?: ApplicationAdmission,
   ): Promise<void> {
-    await this.matchSync.notify(inviteId, matchIds);
-  }
-
-  async notifyMetadataChanged(inviteId: string): Promise<void> {
-    this.inviteChannels.invalidate();
-    await this.matchSync.notify(inviteId);
-    await this.inviteChannels.refreshIfSubscribed(inviteId);
-  }
-
-  async notifySessionCommitted(inviteId: string): Promise<void> {
-    this.inviteChannels.pinInvite(inviteId);
-    this.inviteChannels.invalidate();
-    await this.matchSync.notify(inviteId);
-    await this.inviteChannels.refreshCommittedMetadata(
-      inviteId,
-      this.matchSync.hasSubscribers(),
+    return this.withApplicationOperation(
+      "rpc",
+      async () => {
+        await this.matchSync.notify(inviteId, matchIds);
+      },
+      readApplicationRpcAdmission(parent),
     );
-    await this.matchSync.refreshSubscribed(inviteId);
   }
 
-  async notifyWagersChanged(inviteId: string): Promise<void> {
-    this.inviteChannels.invalidateWagers();
-    await this.inviteChannels.refreshIfSubscribed(inviteId, "wagers");
+  async notifyMetadataChanged(
+    inviteId: string,
+    parent?: ApplicationAdmission,
+  ): Promise<void> {
+    return this.withApplicationOperation(
+      "rpc",
+      async () => {
+        this.inviteChannels.invalidate();
+        await this.matchSync.notify(inviteId);
+        await this.inviteChannels.refreshIfSubscribed(inviteId);
+      },
+      readApplicationRpcAdmission(parent),
+    );
+  }
+
+  async notifySessionCommitted(
+    inviteId: string,
+    parent?: ApplicationAdmission,
+  ): Promise<void> {
+    return this.withApplicationOperation(
+      "rpc",
+      async () => {
+        this.inviteChannels.pinInvite(inviteId);
+        this.inviteChannels.invalidate();
+        await this.matchSync.notify(inviteId);
+        await this.inviteChannels.refreshCommittedMetadata(
+          inviteId,
+          this.matchSync.hasSubscribers(),
+        );
+        await this.matchSync.refreshSubscribed(inviteId);
+      },
+      readApplicationRpcAdmission(parent),
+    );
+  }
+
+  async notifyWagersChanged(
+    inviteId: string,
+    parent?: ApplicationAdmission,
+  ): Promise<void> {
+    return this.withApplicationOperation(
+      "rpc",
+      async () => {
+        this.inviteChannels.invalidateWagers();
+        await this.inviteChannels.refreshIfSubscribed(inviteId, "wagers");
+      },
+      readApplicationRpcAdmission(parent),
+    );
   }
 
   async alarm(): Promise<void> {
-    return this.alarmCoordinator.run();
+    return this.withApplicationOperation(
+      "alarm",
+      async () => {
+        return this.matchWriter.runWriter(
+          { kind: "alarm", request: { objectId: this.ctx.id.toString() } },
+          () => this.alarmCoordinator.run(),
+        );
+      },
+      undefined,
+    );
   }
 
   private matchRoomFull(role: SocketRole, ip: string): boolean {
@@ -394,72 +656,162 @@ export class InviteReactions extends DurableObject<Env> {
   async publish(
     senderUid: string,
     reaction: InviteReaction,
+    parent?: ApplicationAdmission,
   ): Promise<InviteReactionPublishResult> {
-    return this.reactions.publish(senderUid, reaction);
+    return this.withApplicationOperation(
+      "rpc",
+      async () => {
+        return this.reactions.publish(senderUid, reaction);
+      },
+      readApplicationRpcAdmission(parent),
+    );
   }
 
   async registerPresentationSeeds(
     inviteId: string,
     seeds: MatchPresentationSeedRegistration[],
+    parent?: ApplicationAdmission,
   ): Promise<MatchPresentationRegistration[]> {
-    return this.presentations.registerPresentationSeeds(inviteId, seeds);
+    return this.withApplicationOperation(
+      "rpc",
+      async () => {
+        return this.presentations.registerPresentationSeeds(inviteId, seeds);
+      },
+      readApplicationRpcAdmission(parent),
+    );
   }
 
   async getRegisteredPresentationSnapshot(
     matchId: string,
+    parent?: ApplicationAdmission,
   ): Promise<RegisteredMatchPresentationSnapshot> {
-    return this.presentations.getRegisteredPresentationSnapshot(matchId);
+    return this.withApplicationOperation(
+      "rpc",
+      async () => {
+        return this.presentations.getRegisteredPresentationSnapshot(matchId);
+      },
+      readApplicationRpcAdmission(parent),
+    );
   }
 
   async getFrozenPresentationSnapshot(
     matchId: string,
+    parent?: ApplicationAdmission,
   ): Promise<MatchPresentationSnapshot> {
-    return this.presentations.getFrozenPresentationSnapshot(matchId);
+    return this.withApplicationOperation(
+      "rpc",
+      async () => {
+        return this.presentations.getFrozenPresentationSnapshot(matchId);
+      },
+      readApplicationRpcAdmission(parent),
+    );
   }
 
   async freezeRegisteredPresentations(
     matchId: string,
     actorUids: string[],
+    parent?: ApplicationAdmission,
   ): Promise<MatchPresentationSnapshot> {
-    return this.presentations.freezeRegisteredPresentations(matchId, actorUids);
+    return this.withApplicationOperation(
+      "rpc",
+      async () => {
+        return this.presentations.freezeRegisteredPresentations(
+          matchId,
+          actorUids,
+        );
+      },
+      readApplicationRpcAdmission(parent),
+    );
   }
 
   async updatePresentation(
     actorUid: string,
     matchId: string,
     request: UpdateMatchPresentationRequest,
+    parent?: ApplicationAdmission,
   ): Promise<MatchPresentationUpdateResult> {
-    const result = this.presentations.updatePresentation(
-      actorUid,
-      matchId,
-      request,
+    return this.withApplicationOperation(
+      "rpc",
+      async () => {
+        const result = this.presentations.updatePresentation(
+          actorUid,
+          matchId,
+          request,
+        );
+        if (result.status === "updated") {
+          this.reactions.broadcastPresentation(matchId, result.presentation);
+        }
+        return result;
+      },
+      readApplicationRpcAdmission(parent),
     );
-    if (result.status === "updated") {
-      this.reactions.broadcastPresentation(matchId, result.presentation);
-    }
-    return result;
   }
 
-  webSocketMessage(socket: WebSocket, message: string | ArrayBuffer): void {
-    if (!this.socketSessions.active(socket)) {
-      this.matchSync.closed(socket);
-      return;
+  async webSocketMessage(
+    socket: WebSocket,
+    message: string | ArrayBuffer,
+  ): Promise<void> {
+    try {
+      await this.withApplicationOperation(
+        "socket",
+        async () => {
+          if (!this.socketSessions.active(socket)) {
+            this.matchSync.closed(socket);
+            return;
+          }
+          if (message === REACTION_HEARTBEAT_REQUEST) {
+            this.socketSessions.send(socket, REACTION_HEARTBEAT_RESPONSE);
+            return;
+          }
+          socket.close(1008, "Reaction sockets are receive-only");
+          this.matchSync.closed(socket);
+        },
+        undefined,
+      );
+    } catch (error) {
+      if (error instanceof ApplicationDataUnavailable) {
+        socket.close(1012, "Service maintenance");
+        return;
+      }
+      throw error;
     }
-    if (message === REACTION_HEARTBEAT_REQUEST) {
-      this.socketSessions.send(socket, REACTION_HEARTBEAT_RESPONSE);
-      return;
-    }
-    socket.close(1008, "Reaction sockets are receive-only");
-    this.matchSync.closed(socket);
   }
 
-  webSocketClose(socket: WebSocket): void {
-    socket.close();
-    this.matchSync.closed(socket);
+  async webSocketClose(socket: WebSocket): Promise<void> {
+    try {
+      await this.withApplicationOperation(
+        "socket",
+        async () => {
+          socket.close();
+          this.matchSync.closed(socket);
+        },
+        undefined,
+      );
+    } catch (error) {
+      if (error instanceof ApplicationDataUnavailable) {
+        socket.close(1012, "Service maintenance");
+        return;
+      }
+      throw error;
+    }
   }
 
-  webSocketError(socket: WebSocket): void {
-    socket.close(1011, "Reaction connection failed");
-    this.matchSync.closed(socket);
+  async webSocketError(socket: WebSocket): Promise<void> {
+    try {
+      await this.withApplicationOperation(
+        "socket",
+        async () => {
+          socket.close(1011, "Reaction connection failed");
+          this.matchSync.closed(socket);
+        },
+        undefined,
+      );
+    } catch (error) {
+      if (error instanceof ApplicationDataUnavailable) {
+        socket.close(1012, "Service maintenance");
+        return;
+      }
+      throw error;
+    }
   }
 }

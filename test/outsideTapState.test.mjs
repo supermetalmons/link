@@ -20,13 +20,17 @@ const { outputText } = ts.transpileModule(
 for (const mobile of [false, true]) {
   test(`first board input is available before a real popup dismissal (${mobile ? "mobile" : "desktop"})`, () => {
     let now = 0;
-    const exports = {};
+    const evaluated = {};
     new Function("exports", "require", "Date", outputText)(
-      exports,
-      (specifier) =>
+      evaluated,
+      (/** @type {string} */ specifier) =>
         specifier === "../../utils/misc" ? { isMobile: mobile } : timing,
       { now: () => now },
     );
+    const exports =
+      /** @type {typeof import("../src/ui/controls/outsideTapState.ts")} */ (
+        evaluated
+      );
     assert.equal(exports.didNotDismissAnythingWithOutsideTapJustNow(), true);
     exports.resetOutsideTapDismissTimeout();
     assert.equal(exports.didNotDismissAnythingWithOutsideTapJustNow(), true);

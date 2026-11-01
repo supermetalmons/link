@@ -2,14 +2,13 @@ import type {
   EventPrizeId,
   EventPrizeSelections,
   EventRecord,
-  PlayerProfile,
 } from "../../src/connection/connectionModels";
 import { getCurrentViewUrl } from "../../src/navigation/routeState";
 
 export type PendingRequest = {
   kind: string;
   args: unknown[];
-  resolve: (value?: any) => void;
+  resolve: (value?: unknown) => void;
   reject: (error: Error) => void;
 };
 export const environment = {
@@ -33,9 +32,9 @@ export const environment = {
   fresh: true,
   canonicalIds: {} as Record<string, string>,
   deferredCanonicalIds: false,
-  stashedProfiles: {} as Record<string, PlayerProfile>,
+  stashedProfiles: {} as Record<string, unknown>,
   popups: [] as string[],
-  cards: [] as { profile: PlayerProfile; name: string }[],
+  cards: [] as { profile: unknown; name: string }[],
   copies: [] as string[],
   connections: [] as string[],
   alerts: [] as string[],
@@ -44,7 +43,7 @@ export const environment = {
   confirmations: [] as string[],
   confirmAnswers: [] as boolean[],
 };
-const request = (kind: string, ...args: unknown[]): Promise<any> =>
+const request = (kind: string, ...args: unknown[]): Promise<unknown> =>
   new Promise((resolve, reject) =>
     environment.requests.push({ kind, args, resolve, reject }),
   );
@@ -107,7 +106,7 @@ export const connection = {
 export const openProfileSignInPopupForEvent = () => {
   environment.popups.push("signin");
 };
-export const showShinyCard = async (profile: PlayerProfile, name: string) => {
+export const showShinyCard = async (profile: unknown, name: string) => {
   environment.cards.push({ profile, name });
 };
 export const getStashedPlayerProfile = (id: string) =>

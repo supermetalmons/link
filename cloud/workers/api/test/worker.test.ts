@@ -1,3 +1,4 @@
+import { applicationRequest } from "./testEnv.ts";
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
@@ -32,7 +33,7 @@ const env = {
 function post(body: unknown, headers?: HeadersInit) {
   const requestHeaders = new Headers(headers);
   requestHeaders.set("Content-Type", "application/json");
-  return new Request("https://api.mons.link/nfts", {
+  return applicationRequest("https://api.mons.link/nfts", {
     method: "POST",
     headers: requestHeaders,
     body: typeof body === "string" ? body : JSON.stringify(body),
@@ -80,7 +81,7 @@ function providerErrorBody(onCancel: () => void) {
 function responseWithBody(body: BodyInit, status = 200, headers?: HeadersInit) {
   return new Response(body, {
     status,
-    headers,
+    ...(headers === undefined ? {} : { headers }),
   });
 }
 
@@ -112,7 +113,7 @@ test("routes OPTIONS, rejected methods, and unknown paths without Helius", async
   } as Env;
 
   const options = await handleRequest(
-    new Request("https://api.mons.link/nfts", { method: "OPTIONS" }),
+    applicationRequest("https://api.mons.link/nfts", { method: "OPTIONS" }),
     routingEnv,
     { providerFetch },
   );
@@ -125,7 +126,7 @@ test("routes OPTIONS, rejected methods, and unknown paths without Helius", async
   assert.equal(options.headers.get("Cache-Control"), "no-store");
 
   const get = await handleRequest(
-    new Request("https://api.mons.link/nfts", { method: "GET" }),
+    applicationRequest("https://api.mons.link/nfts", { method: "GET" }),
     routingEnv,
     { providerFetch },
   );
@@ -134,14 +135,14 @@ test("routes OPTIONS, rejected methods, and unknown paths without Helius", async
   assert.equal(get.headers.get("Access-Control-Allow-Origin"), "*");
 
   const missing = await handleRequest(
-    new Request("https://api.mons.link/other", { method: "OPTIONS" }),
+    applicationRequest("https://api.mons.link/other", { method: "OPTIONS" }),
     routingEnv,
     { providerFetch },
   );
   assert.equal(missing.status, 404);
 
   const xCallback = await handleRequest(
-    new Request("https://api.mons.link/auth/x/callback"),
+    applicationRequest("https://api.mons.link/auth/x/callback"),
     routingEnv,
     { providerFetch },
   );
@@ -155,7 +156,7 @@ test("removed manual event prize announcement route cannot send", async (t) => {
   const providerFetch = t.mock.method(globalThis, "fetch", async () => {
     throw new Error("removed route must not call a provider");
   });
-  const request = new Request(
+  const request = applicationRequest(
     "https://api.mons.link/internal/telegram/event-prize-announcement",
     {
       method: "POST",
@@ -294,7 +295,7 @@ test("does not wait for malformed-body cancellation", async () => {
       return cancellation;
     },
   });
-  const request = new Request("https://api.mons.link/nfts", {
+  const request = applicationRequest("https://api.mons.link/nfts", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body,
@@ -321,14 +322,17 @@ test("rejects declared and streamed oversized bodies before calling Helius", asy
     calls += 1;
     return jsonResult([]);
   };
-  const declaredOversizedRequest = new Request("https://api.mons.link/nfts", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "Content-Length": "4097",
+  const declaredOversizedRequest = applicationRequest(
+    "https://api.mons.link/nfts",
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Content-Length": "4097",
+      },
+      body: "{}",
     },
-    body: "{}",
-  });
+  );
 
   const declaredResponse = await handleRequest(declaredOversizedRequest, env, {
     providerFetch,

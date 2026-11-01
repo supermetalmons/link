@@ -1,4 +1,3 @@
-import { readPlainEventDocument } from "../../../runtime/events/documents.js";
 import type { EventReads } from "../../../runtime/eventReads.js";
 import {
   listProfileEventPrizeAssignments,
@@ -12,16 +11,12 @@ import {
 
 export function createEventReadRepository(db: EventD1Connection): EventReads {
   return {
-    readEvent: async (eventId) =>
-      readPlainEventDocument(await readEvent(db, eventId)),
+    readEvent: (eventId) => readEvent(db, eventId),
     readEventPrizeSelections: (eventId) =>
       readEventPrizeSelections(db, eventId),
     readProfileEventPrizeAssignment: (profileId, eventId) =>
       readProfileEventPrizeAssignment(db, profileId, eventId),
-    readEventSnapshot: async (eventId) => {
-      const snapshot = await readEventSnapshot(db, eventId);
-      return { ...snapshot, event: readPlainEventDocument(snapshot.event) };
-    },
+    readEventSnapshot: (eventId) => readEventSnapshot(db, eventId),
     readProfileEventPrizes: (profileId) =>
       readProfileEventPrizes(db, profileId),
     listProfileEventPrizeAssignments: (profileId, query) =>

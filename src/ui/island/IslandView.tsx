@@ -69,6 +69,7 @@ import {
   isInsideWalkArea,
   pointInPolygon,
   pointInTriangle,
+  type Point,
 } from "./geometry";
 import {
   ALTERNATE_DUDE_X_SHIFT,
@@ -1226,10 +1227,10 @@ function IslandButton({ imageUrl = DEFAULT_URL, dimmed = false }: Props) {
     center: { x: number; y: number } | null;
   }>({ lastAngle: null, totalRotation: 0, direction: null, center: null });
   const [hotspotVisible, setHotspotVisible] = useState<boolean[]>(() =>
-    new Array(ISLAND_HOTSPOTS.length).fill(false),
+    new Array<boolean>(ISLAND_HOTSPOTS.length).fill(false),
   );
   const hotspotTimersRef = useRef<number[]>(
-    new Array(ISLAND_HOTSPOTS.length).fill(0),
+    new Array<number>(ISLAND_HOTSPOTS.length).fill(0),
   );
   const lastTouchAtRef = useRef<number>(0);
   const flashEntriesRef = useRef<((indices: Set<number>) => void) | null>(null);
@@ -1263,7 +1264,7 @@ function IslandButton({ imageUrl = DEFAULT_URL, dimmed = false }: Props) {
       const w = Math.max(1, rect.width);
       const h = Math.max(1, rect.height);
       for (let i = 0; i < ISLAND_HOTSPOTS.length; i++) {
-        const c = ISLAND_HOTSPOTS[i];
+        const c = ISLAND_HOTSPOTS[i]!;
         const cx = c.cxPct * w;
         const cy = c.cyPct * h;
         const r = (c.dPct * Math.min(w, h)) / 2;
@@ -1276,9 +1277,7 @@ function IslandButton({ imageUrl = DEFAULT_URL, dimmed = false }: Props) {
     const getMaterialsInsideSet = (clientX: number, clientY: number) => {
       const set = new Set<MaterialName>();
       const refs = materialItemRefs.current;
-      const names = MATERIALS as readonly MaterialName[];
-      for (let i = 0; i < names.length; i++) {
-        const n = names[i];
+      for (const n of MATERIALS) {
         const el = refs[n];
         if (!el) continue;
         const r = el.getBoundingClientRect();
@@ -1302,8 +1301,8 @@ function IslandButton({ imageUrl = DEFAULT_URL, dimmed = false }: Props) {
       indices.forEach((i) => {
         const originalLabel = HOTSPOT_LABELS[i] ?? i + 1;
         let sound: RockSound | null = null;
-        const pick = (arr: RockSound[]) =>
-          arr[Math.floor(Math.random() * arr.length)];
+        const pick = (arr: readonly [RockSound, ...RockSound[]]) =>
+          arr[Math.floor(Math.random() * arr.length)]!;
         switch (originalLabel) {
           case 11:
             sound = pick([RockSound.S1A, RockSound.S1B, RockSound.S1C]);
@@ -1389,14 +1388,16 @@ function IslandButton({ imageUrl = DEFAULT_URL, dimmed = false }: Props) {
       if (walkingDragActiveRef.current) return;
       let clientX = 0;
       let clientY = 0;
-      if ((ev as TouchEvent).touches && (ev as TouchEvent).touches.length) {
-        clientX = (ev as TouchEvent).touches[0].clientX;
-        clientY = (ev as TouchEvent).touches[0].clientY;
+      if ("touches" in ev) {
+        const touch = ev.touches[0];
+        if (!touch) return;
+        clientX = touch.clientX;
+        clientY = touch.clientY;
         lastTouchAtRef.current = now;
       } else {
         if (now - lastTouchAtRef.current < 600) return;
-        clientX = (ev as MouseEvent).clientX;
-        clientY = (ev as MouseEvent).clientY;
+        clientX = ev.clientX;
+        clientY = ev.clientY;
       }
       const inside = getInsideSet(clientX, clientY);
       lastInsideRef.current = inside;
@@ -1466,41 +1467,29 @@ function IslandButton({ imageUrl = DEFAULT_URL, dimmed = false }: Props) {
       if (matEntrants.length) matEntrants.forEach((n) => tapMaterialByName(n));
       lastMaterialsInsideRef.current = mats;
     };
-    window.addEventListener("mousedown", onDown as any, { capture: true });
+    window.addEventListener("mousedown", onDown, { capture: true });
     window.addEventListener("mouseup", onUp, { capture: true });
-    window.addEventListener("touchstart", onDown as any, {
+    window.addEventListener("touchstart", onDown, {
       passive: true,
       capture: true,
     });
     window.addEventListener("touchend", onUp, { capture: true });
     window.addEventListener("touchcancel", onUp, { capture: true });
     window.addEventListener("mousemove", onMoveMouse, { capture: true });
-    window.addEventListener("touchmove", onMoveTouch as any, {
+    window.addEventListener("touchmove", onMoveTouch, {
       passive: true,
       capture: true,
     });
     return () => {
-      window.removeEventListener(
-        "mousedown",
-        onDown as any,
-        { capture: true } as any,
-      );
-      window.removeEventListener("mouseup", onUp, { capture: true } as any);
-      window.removeEventListener(
-        "touchstart",
-        onDown as any,
-        { capture: true } as any,
-      );
-      window.removeEventListener("touchend", onUp, { capture: true } as any);
-      window.removeEventListener("touchcancel", onUp, { capture: true } as any);
+      window.removeEventListener("mousedown", onDown, { capture: true });
+      window.removeEventListener("mouseup", onUp, { capture: true });
+      window.removeEventListener("touchstart", onDown, { capture: true });
+      window.removeEventListener("touchend", onUp, { capture: true });
+      window.removeEventListener("touchcancel", onUp, { capture: true });
       window.removeEventListener("mousemove", onMoveMouse, {
         capture: true,
-      } as any);
-      window.removeEventListener(
-        "touchmove",
-        onMoveTouch as any,
-        { capture: true } as any,
-      );
+      });
+      window.removeEventListener("touchmove", onMoveTouch, { capture: true });
     };
   }, [activateMaterial, islandOverlayVisible, islandClosing, islandOpening]);
 
@@ -1615,8 +1604,8 @@ function IslandButton({ imageUrl = DEFAULT_URL, dimmed = false }: Props) {
   const latestMonKeyRef = useRef<string | null>(null);
   const updateMonStripSizing = useCallback(() => {
     const wrap = monWrapRef.current as HTMLDivElement | null;
-    const frameWrap = monFrameWrapRef.current as HTMLDivElement | null;
-    const stripImg = monStripImgRef.current as HTMLImageElement | null;
+    const frameWrap = monFrameWrapRef.current;
+    const stripImg = monStripImgRef.current;
     const nat = monNaturalSizeRef.current;
     if (!wrap || !frameWrap || !stripImg || !nat.w || !nat.h) return;
     const frameWidth = nat.w / MON_FRAME_COUNT;
@@ -2001,7 +1990,7 @@ function IslandButton({ imageUrl = DEFAULT_URL, dimmed = false }: Props) {
 
   useEffect(() => {
     let cancelled = false;
-    const win: any = typeof window !== "undefined" ? (window as any) : null;
+    const win = typeof window !== "undefined" ? window : null;
     const schedule = (fn: () => void) => {
       if (!win) {
         const t = setTimeout(() => {
@@ -2032,9 +2021,7 @@ function IslandButton({ imageUrl = DEFAULT_URL, dimmed = false }: Props) {
           const img = new Image();
           img.src = url;
           const p: Promise<void> =
-            typeof (img as any).decode === "function"
-              ? (img as any).decode()
-              : Promise.resolve();
+            typeof img.decode === "function" ? img.decode() : Promise.resolve();
           p.then(() => {
             if (!cancelled) decodedMaterialsRef.current.add(name);
           }).catch(() => {});
@@ -2791,15 +2778,15 @@ function IslandButton({ imageUrl = DEFAULT_URL, dimmed = false }: Props) {
         const t = Math.min(1, (now - start) / durationMs);
         const e = easeOutCubic(t);
         for (let i = 0; i < els.length; i++) {
-          const dx = Math.cos(angles[i]) * distances[i] * e;
+          const dx = Math.cos(angles[i]!) * distances[i]! * e;
           const dy =
-            Math.sin(angles[i]) * distances[i] * e +
-            0.35 * distances[i] * e * e;
+            Math.sin(angles[i]!) * distances[i]! * e +
+            0.35 * distances[i]! * e * e;
           const s = 1 - 0.35 * e;
-          const r = rotations[i] * 90 * e;
-          els[i].style.transform =
+          const r = rotations[i]! * 90 * e;
+          els[i]!.style.transform =
             `translate(${startX - baseSize / 2 + dx}px, ${startY - baseSize / 2 + dy}px) scale(${s}) rotate(${r}deg)`;
-          els[i].style.opacity = `${1 - e}`;
+          els[i]!.style.opacity = `${1 - e}`;
         }
         if (t < 1) {
           requestAnimationFrame(step);
@@ -2904,8 +2891,8 @@ function IslandButton({ imageUrl = DEFAULT_URL, dimmed = false }: Props) {
     const queue = materialPullQueueRef.current;
     if (!queue.length) return;
     materialPullQueueRef.current = [];
-    for (let i = 0; i < queue.length; i++) {
-      pullMaterialToBar(queue[i].name, queue[i].rect);
+    for (const item of queue) {
+      pullMaterialToBar(item.name, item.rect);
     }
   }, [pullMaterialToBar]);
 
@@ -3261,8 +3248,8 @@ function IslandButton({ imageUrl = DEFAULT_URL, dimmed = false }: Props) {
   const handleIslandClose = useCallback(
     (event?: React.MouseEvent | React.TouchEvent) => {
       if (event) {
-        const targetNode = (event.target as Node) || null;
-        if (targetNode) {
+        const targetNode = event.target;
+        if (targetNode instanceof Node) {
           const safeHitbox = safeHitboxRef.current;
           if (safeHitbox && safeHitbox.contains(targetNode)) {
             return;
@@ -3747,7 +3734,7 @@ function IslandButton({ imageUrl = DEFAULT_URL, dimmed = false }: Props) {
         direction === "ccw"
           ? (currentIndex + 1) % typeOrder.length
           : (currentIndex - 1 + typeOrder.length) % typeOrder.length;
-      const nextType = typeOrder[nextIndex];
+      const nextType = typeOrder[nextIndex]!;
       storage.setIslandMonType(nextType);
 
       teleportFXStart();
@@ -3972,7 +3959,7 @@ function IslandButton({ imageUrl = DEFAULT_URL, dimmed = false }: Props) {
               rect: MaterialPullRect;
             }> = [];
             for (let i = 0; i < materialDropsRef.current.length; i++) {
-              const m = materialDropsRef.current[i];
+              const m = materialDropsRef.current[i]!;
               if (!m.el.isConnected) {
                 collected.push(i);
                 continue;
@@ -4004,8 +3991,7 @@ function IslandButton({ imageUrl = DEFAULT_URL, dimmed = false }: Props) {
               }
             }
             if (collected.length > 0) {
-              for (let i = 0; i < collected.length; i++) {
-                const idx = collected[i];
+              for (const idx of collected) {
                 const drop = materialDropsRef.current[idx];
                 if (!drop) continue;
                 try {
@@ -4020,15 +4006,14 @@ function IslandButton({ imageUrl = DEFAULT_URL, dimmed = false }: Props) {
               const collectedSet = new Set<number>(collected);
               for (let i = 0; i < materialDropsRef.current.length; i++) {
                 if (collectedSet.has(i)) {
-                  const name = materialDropsRef.current[i].name;
+                  const name = materialDropsRef.current[i]!.name;
                   delta[name] = (delta[name] || 0)! + 1;
                 } else {
-                  nextArr.push(materialDropsRef.current[i]);
+                  nextArr.push(materialDropsRef.current[i]!);
                 }
               }
               materialDropsRef.current = nextArr;
-              for (let i = 0; i < collectedPulls.length; i++) {
-                const item = collectedPulls[i];
+              for (const item of collectedPulls) {
                 queueMaterialPull(item.name, item.rect);
               }
               playSounds([Sound.CollectingMaterials]);
@@ -4467,15 +4452,12 @@ function IslandButton({ imageUrl = DEFAULT_URL, dimmed = false }: Props) {
   const isDraggingRef = useRef(false);
 
   const handlePointerStart = useCallback(
-    (
-      event:
-        React.MouseEvent<HTMLDivElement> | React.TouchEvent<HTMLDivElement>,
-    ) => {
+    (event: React.MouseEvent | React.TouchEvent) => {
       if (!islandOverlayVisible || islandClosing || islandOpening) {
         return;
       }
       walkingDragCleanupRef.current = null;
-      const eventTarget = (event.target as Node) || null;
+      const eventTarget = event.target instanceof Node ? event.target : null;
       const skipForProtectedUi = isMaterialTarget(eventTarget);
       const isInsideRockBox = (nx: number, ny: number) => {
         if (!rockAvailable) return false;
@@ -4508,13 +4490,15 @@ function IslandButton({ imageUrl = DEFAULT_URL, dimmed = false }: Props) {
       const skipDueToCircleGesture = circlesGestureActiveRef.current;
       let clientX = 0;
       let clientY = 0;
-      const anyEvent = event as any;
-      if (anyEvent.touches && anyEvent.touches[0]) {
-        clientX = anyEvent.touches[0].clientX;
-        clientY = anyEvent.touches[0].clientY;
+      const touch = "touches" in event ? event.touches[0] : undefined;
+      if (touch) {
+        clientX = touch.clientX;
+        clientY = touch.clientY;
+      } else if ("clientX" in event) {
+        clientX = event.clientX;
+        clientY = event.clientY;
       } else {
-        clientX = (event as React.MouseEvent).clientX;
-        clientY = (event as React.MouseEvent).clientY;
+        return;
       }
       const nxxEarly = (clientX - rect.left) / width;
       const nyyEarly = (clientY - rect.top) / height;
@@ -4527,7 +4511,7 @@ function IslandButton({ imageUrl = DEFAULT_URL, dimmed = false }: Props) {
       if (!inside && !isInsideSafeAreaEarly) {
         if (!skipForProtectedUi) {
           const vw = window.innerWidth;
-          const isTouchEvent = !!(anyEvent.touches && anyEvent.touches[0]);
+          const isTouchEvent = touch !== undefined;
           const isAtScreenEdge =
             isTouchEvent &&
             (clientX <= TOUCH_EDGE_DEADZONE_PX ||
@@ -4535,9 +4519,7 @@ function IslandButton({ imageUrl = DEFAULT_URL, dimmed = false }: Props) {
           if (isAtScreenEdge) {
             return;
           }
-          handleIslandClose(
-            event as unknown as React.MouseEvent | React.TouchEvent,
-          );
+          handleIslandClose(event);
           return;
         }
       }
@@ -4548,7 +4530,7 @@ function IslandButton({ imageUrl = DEFAULT_URL, dimmed = false }: Props) {
 
       const isInAnyHotspot = (() => {
         for (let i = 0; i < ISLAND_HOTSPOTS.length; i++) {
-          const c = ISLAND_HOTSPOTS[i];
+          const c = ISLAND_HOTSPOTS[i]!;
           const dx = nx - c.cxPct;
           const dy = ny - c.cyPct;
           const r = c.dPct * 0.5;
@@ -4740,7 +4722,7 @@ function IslandButton({ imageUrl = DEFAULT_URL, dimmed = false }: Props) {
             rockRef.current?.tap();
           } catch {}
         }
-        if ((event as any).preventDefault) (event as any).preventDefault();
+        event.preventDefault();
         return;
       }
       if (
@@ -4749,7 +4731,7 @@ function IslandButton({ imageUrl = DEFAULT_URL, dimmed = false }: Props) {
         isInsideMonBox(nx, ny)
       ) {
         if (shouldSuppressInputNearLastRock(nx, ny)) {
-          if ((event as any).preventDefault) (event as any).preventDefault();
+          event.preventDefault();
           return;
         }
         const detailed = getMonBoundsWithExpansion();
@@ -4759,7 +4741,7 @@ function IslandButton({ imageUrl = DEFAULT_URL, dimmed = false }: Props) {
         const top = detailed.expanded.top;
         const bottom = detailed.expanded.bottom;
         const clampedY = Math.max(top, Math.min(bottom, dudePos.y));
-        const candidates = [
+        const candidates: [Point, Point] = [
           { x: leftX, y: clampedY },
           { x: rightX, y: clampedY },
         ];
@@ -4767,11 +4749,11 @@ function IslandButton({ imageUrl = DEFAULT_URL, dimmed = false }: Props) {
         let bestDist = Math.hypot(dudePos.x - best.x, dudePos.y - best.y);
         for (let i = 1; i < candidates.length; i++) {
           const d = Math.hypot(
-            dudePos.x - candidates[i].x,
-            dudePos.y - candidates[i].y,
+            dudePos.x - candidates[i]!.x,
+            dudePos.y - candidates[i]!.y,
           );
           if (d < bestDist) {
-            best = candidates[i];
+            best = candidates[i]!;
             bestDist = d;
           }
         }
@@ -4801,7 +4783,7 @@ function IslandButton({ imageUrl = DEFAULT_URL, dimmed = false }: Props) {
           petMon();
           scheduleTeleportOverlapCheck();
         }
-        if ((event as any).preventDefault) (event as any).preventDefault();
+        event.preventDefault();
         return;
       }
 
@@ -4857,8 +4839,8 @@ function IslandButton({ imageUrl = DEFAULT_URL, dimmed = false }: Props) {
             cx = e.touches[0].clientX;
             cy = e.touches[0].clientY;
           } else if ("clientX" in e) {
-            cx = (e as MouseEvent).clientX;
-            cy = (e as MouseEvent).clientY;
+            cx = e.clientX;
+            cy = e.clientY;
           }
           const rxx = Math.floor(cx - rect.left);
           const ryy = Math.floor(cy - rect.top);
@@ -4934,15 +4916,15 @@ function IslandButton({ imageUrl = DEFAULT_URL, dimmed = false }: Props) {
           dragModeRef.current = "none";
           lastEllipsePointerRef.current = { x: -1, y: -1 };
           resetCircleTracking();
-          window.removeEventListener("mousemove", handleMove as any);
-          window.removeEventListener("mouseup", handleEnd as any);
-          window.removeEventListener("touchmove", handleMove as any);
-          window.removeEventListener("touchend", handleEnd as any);
-          window.removeEventListener("touchcancel", handleEnd as any);
-          window.removeEventListener("blur", handleEnd as any);
+          window.removeEventListener("mousemove", handleMove);
+          window.removeEventListener("mouseup", handleEnd);
+          window.removeEventListener("touchmove", handleMove);
+          window.removeEventListener("touchend", handleEnd);
+          window.removeEventListener("touchcancel", handleEnd);
+          window.removeEventListener("blur", handleEnd);
           document.removeEventListener(
             "visibilitychange",
-            handleVisibilityChange as any,
+            handleVisibilityChange,
           );
           if (!moveAnimRef.current) {
             const wAnim =
@@ -4967,20 +4949,17 @@ function IslandButton({ imageUrl = DEFAULT_URL, dimmed = false }: Props) {
           }
         };
 
-        window.addEventListener("mousemove", handleMove as any, {
+        window.addEventListener("mousemove", handleMove, {
           passive: false,
         });
-        window.addEventListener("mouseup", handleEnd as any);
-        window.addEventListener("touchmove", handleMove as any, {
+        window.addEventListener("mouseup", handleEnd);
+        window.addEventListener("touchmove", handleMove, {
           passive: false,
         });
-        window.addEventListener("touchend", handleEnd as any);
-        window.addEventListener("touchcancel", handleEnd as any);
-        window.addEventListener("blur", handleEnd as any);
-        document.addEventListener(
-          "visibilitychange",
-          handleVisibilityChange as any,
-        );
+        window.addEventListener("touchend", handleEnd);
+        window.addEventListener("touchcancel", handleEnd);
+        window.addEventListener("blur", handleEnd);
+        document.addEventListener("visibilitychange", handleVisibilityChange);
 
         if ("preventDefault" in event) {
           event.preventDefault();
@@ -4991,9 +4970,7 @@ function IslandButton({ imageUrl = DEFAULT_URL, dimmed = false }: Props) {
         pointInTriangle(nx, ny, DISMISS_ALLOWED_TRIANGLE_A) ||
         pointInTriangle(nx, ny, DISMISS_ALLOWED_TRIANGLE_B);
       if (!skipForProtectedUi && !skipDueToCircleGesture && inDismissTriangle) {
-        handleIslandClose(
-          event as unknown as React.MouseEvent | React.TouchEvent,
-        );
+        handleIslandClose(event);
         return;
       }
       const allowStarDrag = allowStarsInteraction;
@@ -5005,28 +4982,28 @@ function IslandButton({ imageUrl = DEFAULT_URL, dimmed = false }: Props) {
             cx2 = e.touches[0].clientX;
             cy2 = e.touches[0].clientY;
           } else if ("clientX" in e) {
-            cx2 = (e as MouseEvent).clientX;
-            cy2 = (e as MouseEvent).clientY;
+            cx2 = e.clientX;
+            cy2 = e.clientY;
           }
           const rxx2 = Math.floor(cx2 - rect.left);
           const ryy2 = Math.floor(cy2 - rect.top);
           const nxx2 = rxx2 / Math.max(1, rect.width);
           const nyy2 = ryy2 / Math.max(1, rect.height);
           updateStarInteractionAt(nxx2, nyy2);
-          if ("preventDefault" in e) (e as any).preventDefault();
+          e.preventDefault();
         };
         const handleEnd = () => {
           isDraggingRef.current = false;
           finalizeStarInteraction();
-          window.removeEventListener("mousemove", handleMove as any);
-          window.removeEventListener("mouseup", handleEnd as any);
-          window.removeEventListener("touchmove", handleMove as any);
-          window.removeEventListener("touchend", handleEnd as any);
-          window.removeEventListener("touchcancel", handleEnd as any);
-          window.removeEventListener("blur", handleEnd as any);
+          window.removeEventListener("mousemove", handleMove);
+          window.removeEventListener("mouseup", handleEnd);
+          window.removeEventListener("touchmove", handleMove);
+          window.removeEventListener("touchend", handleEnd);
+          window.removeEventListener("touchcancel", handleEnd);
+          window.removeEventListener("blur", handleEnd);
           document.removeEventListener(
             "visibilitychange",
-            handleVisibilityChange as any,
+            handleVisibilityChange,
           );
         };
         const handleVisibilityChange = () => {
@@ -5034,24 +5011,21 @@ function IslandButton({ imageUrl = DEFAULT_URL, dimmed = false }: Props) {
             handleEnd();
           }
         };
-        window.addEventListener("mousemove", handleMove as any, {
+        window.addEventListener("mousemove", handleMove, {
           passive: false,
         });
-        window.addEventListener("mouseup", handleEnd as any);
-        window.addEventListener("touchmove", handleMove as any, {
+        window.addEventListener("mouseup", handleEnd);
+        window.addEventListener("touchmove", handleMove, {
           passive: false,
         });
-        window.addEventListener("touchend", handleEnd as any);
-        window.addEventListener("touchcancel", handleEnd as any);
-        window.addEventListener("blur", handleEnd as any);
-        document.addEventListener(
-          "visibilitychange",
-          handleVisibilityChange as any,
-        );
+        window.addEventListener("touchend", handleEnd);
+        window.addEventListener("touchcancel", handleEnd);
+        window.addEventListener("blur", handleEnd);
+        document.addEventListener("visibilitychange", handleVisibilityChange);
         isDraggingRef.current = true;
         resetStarInteractionState();
         startStarInteractionAt(nx, ny);
-        if ("preventDefault" in event) (event as any).preventDefault();
+        event.preventDefault();
         return;
       }
     },
@@ -5086,13 +5060,12 @@ function IslandButton({ imageUrl = DEFAULT_URL, dimmed = false }: Props) {
 
   const handleSafeHitboxPointerDown = useCallback(
     (event: React.MouseEvent | React.TouchEvent) => {
-      if (!isMaterialTarget((event.target as Node) || null)) {
+      if (
+        !isMaterialTarget(event.target instanceof Node ? event.target : null)
+      ) {
         return;
       }
-      handlePointerStart(
-        event as
-          React.MouseEvent<HTMLDivElement> | React.TouchEvent<HTMLDivElement>,
-      );
+      handlePointerStart(event);
     },
     [handlePointerStart, isMaterialTarget],
   );
@@ -5282,7 +5255,7 @@ function IslandButton({ imageUrl = DEFAULT_URL, dimmed = false }: Props) {
                       return (
                         <HotspotCircle
                           key={`glow-${i}`}
-                          $visible={hotspotVisible[i]}
+                          $visible={hotspotVisible[i] ?? false}
                           style={{
                             left: `${left}%`,
                             top: `${top}%`,
@@ -5366,10 +5339,10 @@ function IslandButton({ imageUrl = DEFAULT_URL, dimmed = false }: Props) {
                 >
                   <DudeSpriteFrame
                     $facingLeft={dudeFacingLeft}
-                    ref={miningFrameWrapRef as any}
+                    ref={miningFrameWrapRef}
                   >
                     <DudeSpriteStrip
-                      ref={miningStripImgRef as any}
+                      ref={miningStripImgRef}
                       src={`data:image/png;base64,${islandMonsMining}`}
                       alt=""
                       draggable={false}
@@ -5435,10 +5408,10 @@ function IslandButton({ imageUrl = DEFAULT_URL, dimmed = false }: Props) {
                             >
                               <MonSpriteFrame
                                 $facingLeft={monFacingLeft}
-                                ref={monFrameWrapRef as any}
+                                ref={monFrameWrapRef}
                               >
                                 <MonSpriteStrip
-                                  ref={monStripImgRef as any}
+                                  ref={monStripImgRef}
                                   src={`data:image/webp;base64,${monSpriteData}`}
                                   alt=""
                                   draggable={false}
@@ -5455,7 +5428,7 @@ function IslandButton({ imageUrl = DEFAULT_URL, dimmed = false }: Props) {
                     >
                       <Rock
                         key={rockRenderKey}
-                        ref={rockRef as any}
+                        ref={rockRef}
                         heightPct={75}
                         src={rockImageUrl}
                         onOpened={() => {
@@ -5508,7 +5481,7 @@ function IslandButton({ imageUrl = DEFAULT_URL, dimmed = false }: Props) {
                                 return spawnMaterialDrop(name, 0, {
                                   ...baseCommon,
                                   angle,
-                                } as any);
+                                });
                               },
                             );
                             Promise.all(promises).then(() => {});

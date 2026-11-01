@@ -2,249 +2,223 @@
 
 const assert = require("node:assert/strict");
 const test = require("node:test");
-
 const {
   decodeAutomatchEntry,
   decodeAutomatchEntries,
-  emptyAutomatchEntryFields,
 } = require("../runtime/automatchRecords");
 const { getDisplayNameFromAddress } = require("../runtime/telegramDisplay");
 const {
   createProfileGamesProjectionCore,
 } = require("../runtime/profileGamesProjectionCore");
+const { invite, profile } = require("./fixtures/canonicalProfileGames");
 
-test("entry reads retain stored strings and normalize only numeric values", () => {
-  const raw = {
-    uid: " host ",
-    timestamp: "123.75",
-    rating: "1450.5",
-    hostColor: " white ",
-    password: " secret ",
-    gameVariant: " classic ",
-    telegramDeliveryVersion: 2,
-    username: " name ",
-    ethAddress: "0x1234",
-    solAddress: "",
-    emojiId: "1",
-    extra: { retained: true },
-  };
+/** @param {Record<string, unknown>} [patch] @returns {Record<string, unknown>} */
+const entry = (patch = {}) => ({
+  schemaVersion: 1,
+  uid: "host-login",
+  profileId: "host-profile",
+  timestamp: 123,
+  rating: 1450,
+  hostColor: "white",
+  password: " secret ",
+  gameVariant: "Classic",
+  telegramDeliveryVersion: 2,
+  username: " name ",
+  ethAddress: "0x1234",
+  solAddress: "",
+  emojiId: 1,
+  ...patch,
+});
+
+/** @param {unknown} value */
+function presentEntry(value) {
+  const decoded = decodeAutomatchEntry(value);
+  assert.ok(decoded);
+  return decoded;
+}
+
+test("entry reads retain exact canonical values without mutating their source", () => {
+  const raw = entry();
   const before = structuredClone(raw);
-  const decoded = decodeAutomatchEntry(raw);
-  assert.deepEqual(decoded, {
-    isNull: false,
-    isTruthy: true,
-    record: {
-      uid: " host ",
-      timestamp: 123.75,
-      numericTimestamp: null,
-      rating: 1450.5,
-      hostColor: " white ",
-      password: " secret ",
-      gameVariant: " classic ",
-      telegramDeliveryVersion: 2,
-      display: {
-        username: " name ",
-        ethAddress: "0x1234",
-        solAddress: "",
-        rating: "1450.5",
-        emojiId: "1",
-      },
-    },
-  });
-  assert.equal(decoded.record.uid.trim(), "host");
-  assert.equal(Math.floor(decoded.record.timestamp), 123);
+  assert.strictEqual(decodeAutomatchEntry(raw), raw);
   assert.deepEqual(raw, before);
+  assert.equal(presentEntry(entry({ profileId: null })).profileId, null);
 });
 
-test("entry reads retain exact null and truthiness independently of record shape", () => {
-  for (const raw of [null, undefined, false, 0, "", true, 1, "malformed", []]) {
-    assert.deepEqual(decodeAutomatchEntry(raw), {
-      isNull: raw === null,
-      isTruthy: Boolean(raw),
-      record: null,
-    });
+test("entry reads accept absence and reject malformed records and missing fields", () => {
+  assert.equal(decodeAutomatchEntry(null), null);
+  for (const raw of [undefined, false, 0, "", true, 1, "malformed", [], {}])
+    assert.throws(
+      () => decodeAutomatchEntry(raw),
+      /invalid-canonical-automatch/,
+    );
+  for (const field of Object.keys(entry())) {
+    const raw = entry();
+    delete raw[field];
+    assert.throws(
+      () => decodeAutomatchEntry(raw),
+      /invalid-canonical-automatch/,
+    );
   }
-  const empty = decodeAutomatchEntry({});
-  assert.equal(empty.isNull, false);
-  assert.equal(empty.isTruthy, true);
-  assert.equal(empty.record.uid, "");
-  assert.equal(empty.record.timestamp, 0);
-  assert.equal(empty.record.numericTimestamp, null);
-  assert.equal(empty.record.rating, 0);
+  assert.throws(
+    () => decodeAutomatchEntry(entry({ extra: true })),
+    /invalid-canonical-automatch/,
+  );
 });
 
-test("entry reads preserve numeric fallbacks and strict Telegram version checks", () => {
-  for (const raw of [
-    null,
-    undefined,
-    false,
-    true,
-    {},
-    [],
-    "invalid",
-    "Infinity",
-  ]) {
-    const record = decodeAutomatchEntry({
-      uid: raw,
-      timestamp: raw,
-      rating: raw,
-      hostColor: raw,
-      password: raw,
-      gameVariant: raw,
-      telegramDeliveryVersion: raw,
-    }).record;
-    assert.equal(record.timestamp, 0);
-    assert.equal(record.numericTimestamp, null);
-    assert.equal(record.rating, 0);
-    assert.equal(record.telegramDeliveryVersion, null);
-    assert.equal(record.uid, typeof raw === "string" ? raw : "");
-    assert.equal(record.hostColor, typeof raw === "string" ? raw : "");
-    assert.equal(record.password, typeof raw === "string" ? raw : "");
-    assert.equal(record.gameVariant, typeof raw === "string" ? raw : "");
+test("entry reads reject numeric coercions and unsupported Telegram versions", () => {
+  for (const field of /** @type {const} */ (["timestamp", "rating"])) {
+    for (const value of [
+      null,
+      undefined,
+      false,
+      true,
+      {},
+      [],
+      "123",
+      "0x10",
+      NaN,
+      Infinity,
+      -Infinity,
+      -1,
+    ])
+      assert.throws(
+        () => decodeAutomatchEntry(entry({ [field]: value })),
+        /invalid-canonical-automatch/,
+      );
+    assert.equal(presentEntry(entry({ [field]: 0 }))[field], 0);
   }
+  assert.throws(
+    () => decodeAutomatchEntry(entry({ timestamp: 1.5 })),
+    /invalid-canonical-automatch/,
+  );
+  for (const rating of [1.5, 1512.5, Number.MIN_VALUE, Number.MAX_VALUE])
+    assert.equal(presentEntry(entry({ rating })).rating, rating);
+  for (const value of ["2", 1, false, {}])
+    assert.throws(
+      () => decodeAutomatchEntry(entry({ telegramDeliveryVersion: value })),
+      /invalid-canonical-automatch/,
+    );
   assert.equal(
-    decodeAutomatchEntry({ telegramDeliveryVersion: "2" }).record
+    presentEntry(entry({ telegramDeliveryVersion: null }))
       .telegramDeliveryVersion,
     null,
   );
-  assert.equal(
-    decodeAutomatchEntry({ timestamp: -1.25 }).record.timestamp,
-    -1.25,
-  );
-  assert.equal(
-    decodeAutomatchEntry({ timestamp: -1.25 }).record.numericTimestamp,
-    -1.25,
-  );
-  assert.equal(decodeAutomatchEntry({ timestamp: "  " }).record.timestamp, 0);
-  assert.equal(decodeAutomatchEntry({ rating: "0x10" }).record.rating, 16);
 });
 
-test("entry display fields retain raw JSON without eager display formatting", () => {
-  const raw = {
-    username: { legacy: ["name"] },
-    ethAddress: ["address"],
-    solAddress: false,
-    rating: true,
-    emojiId: { legacy: 1 },
-  };
-  const record = decodeAutomatchEntry(raw).record;
-  assert.deepEqual(record.display, raw);
-  assert.equal(record.rating, 0);
-  assert.equal(record.display.username, raw.username);
-  assert.equal(record.display.ethAddress, raw.ethAddress);
+test("entry display fields require canonical text and emoji before formatting", () => {
+  for (const [field, value] of /** @type {[string, unknown][]} */ ([
+    ["username", { legacy: ["name"] }],
+    ["ethAddress", ["address"]],
+    ["solAddress", false],
+    ["emojiId", { legacy: 1 }],
+    ["emojiId", "1"],
+    ["emojiId", 156],
+  ]))
+    assert.throws(
+      () => decodeAutomatchEntry(entry({ [field]: value })),
+      /invalid-canonical-automatch/,
+    );
+  const decoded = presentEntry(entry({ username: "Alice" }));
   assert.equal(
-    getDisplayNameFromAddress("name", "", "", record.rating, null),
-    "name",
-  );
-  assert.equal(
-    getDisplayNameFromAddress("name", "", "", record.display.rating, null),
-    "name (1)",
-  );
-  const malformedAddress = decodeAutomatchEntry({ ethAddress: 1 }).record;
-  assert.throws(
-    () =>
-      getDisplayNameFromAddress(
-        malformedAddress.display.username,
-        malformedAddress.display.ethAddress,
-        malformedAddress.display.solAddress,
-        malformedAddress.display.rating,
-        malformedAddress.display.emojiId,
-      ),
-    TypeError,
+    getDisplayNameFromAddress(
+      decoded.username,
+      decoded.ethAddress,
+      decoded.solAddress,
+      decoded.rating,
+      null,
+    ),
+    "Alice (1450)",
   );
 });
 
-test("entry collections retain ordering, malformed heads, and null collections", () => {
-  const raw = {
-    10: { uid: "ten" },
-    2: null,
-    malformed: "entry",
-    valid: { uid: "host" },
-  };
+test("entry collections retain canonical ordering and exact null entries", () => {
+  const raw = { 10: entry({ uid: "ten" }), 2: null, valid: entry() };
   const decoded = decodeAutomatchEntries(raw);
+  assert.ok(decoded);
   assert.deepEqual(Object.keys(decoded), Object.keys(raw));
-  assert.deepEqual(decoded["2"], {
-    isNull: true,
-    isTruthy: false,
-    record: null,
-  });
-  assert.deepEqual(decoded.malformed, {
-    isNull: false,
-    isTruthy: true,
-    record: null,
-  });
-  assert.equal(decoded.valid.record.uid, "host");
-  for (const malformed of [null, undefined, false, 0, "", true, 1, "entry", []])
-    assert.equal(decodeAutomatchEntries(malformed), null);
+  assert.equal(decoded["2"], null);
+  assert.deepEqual(decoded.valid, raw.valid);
+  assert.equal(decodeAutomatchEntries(null), null);
   assert.deepEqual(decodeAutomatchEntries({}), {});
+  for (const malformed of [
+    undefined,
+    false,
+    0,
+    "",
+    true,
+    1,
+    "entry",
+    [],
+    { "bad/key": entry() },
+  ])
+    assert.throws(
+      () => decodeAutomatchEntries(malformed),
+      /invalid-canonical-automatch-entries/,
+    );
 });
 
-test("malformed head fallback creates independent empty field objects", () => {
-  const decoded = decodeAutomatchEntries({
-    malformed: false,
-    valid: { uid: "host" },
-  });
-  const [inviteId, entry] = Object.entries(decoded)[0];
-  const fields = entry.record || emptyAutomatchEntryFields();
-  assert.equal(inviteId, "malformed");
-  assert.deepEqual(fields, {
-    uid: "",
-    timestamp: 0,
-    numericTimestamp: null,
-    rating: 0,
-    hostColor: "",
-    password: "",
-    gameVariant: "",
-    telegramDeliveryVersion: null,
-    display: {},
-  });
-  fields.display.username = "changed";
-  assert.deepEqual(emptyAutomatchEntryFields().display, {});
+test("a malformed collection head rejects the collection without an empty fallback", () => {
+  for (const malformed of [false, "entry", {}, { uid: "host" }])
+    assert.throws(
+      () => decodeAutomatchEntries({ malformed, valid: entry() }),
+      /invalid-canonical-automatch/,
+    );
 });
 
-test("profile projections retain malformed queue truthiness and numeric timestamp rules", async () => {
+test("profile projections use canonical queue timestamps and reject malformed entries without writes", async () => {
   const inviteId = "auto_abcdefghijk";
-  for (const [raw, expectedSort] of [
-    [null, null],
-    [false, null],
-    [0, null],
-    ["", null],
-    [true, 100],
-    ["malformed", 100],
-    [[], 100],
-    [{}, 100],
-    [{ timestamp: "123.75" }, 100],
-    [{ timestamp: 123.75 }, 123],
+  for (const raw of [
+    null,
+    entry({ timestamp: 123 }),
+    false,
+    {},
+    entry({ timestamp: "123" }),
   ]) {
+    /** @type {import("../runtime/profileGamesProjectionCore").ProjectionWrite[]} */
     const writes = [];
     const core = createProfileGamesProjectionCore({
+      logger: { error() {} },
+      wait: async () => undefined,
       repository: {
-        commitProjectionWrites: async (next) => writes.push(...next),
+        commitProjectionWrites: async (next) => {
+          writes.push(...next);
+        },
         getProjections: async () => new Map(),
-        readInviteMetadata: async () => ({
-          hostId: "host-login",
-          automatchStateHint: "canceled",
-        }),
+        readInviteMetadata: async () =>
+          invite({
+            kind: "automatch",
+            password: "secret",
+            automatchStateHint: "canceled",
+            automatchCanceledAt: 1,
+          }),
         readAutomatchEntry: async () => decodeAutomatchEntry(raw),
         hasCompletedRatingUpdate: async () => false,
         readProfileOwnershipSnapshot: async () => ({
           profileDataById: new Map([
-            ["host-profile", { username: "host", emoji: 1 }],
+            ["host-profile", profile({ username: "host", emoji: 1 })],
           ]),
           profileIdByLoginUid: new Map([["host-login", "host-profile"]]),
         }),
       },
     });
-    const result = await core.recomputeInviteProjection(inviteId, "test", {
-      eventTimestampMs: 100,
-    });
-    assert.equal(result.shouldProject, Boolean(raw));
-    if (expectedSort === null) {
+    const recompute = () =>
+      core.recomputeInviteProjection(inviteId, "test", {
+        eventTimestampMs: 100,
+      });
+    if (raw !== null && (typeof raw === "boolean" || raw.timestamp !== 123)) {
+      await assert.rejects(recompute(), /invalid-canonical-automatch/);
       assert.deepEqual(writes, []);
-    } else {
+      continue;
+    }
+    const result = await recompute();
+    assert.equal(result.shouldProject, raw !== null);
+    if (raw === null) assert.deepEqual(writes, []);
+    else {
       assert.equal(writes.length, 1);
+      assert.ok(writes[0] && writes[0].type !== "delete");
       assert.equal(writes[0].data.status, "pending");
-      assert.equal(writes[0].data.listSortAt, expectedSort);
+      assert.equal(writes[0].data.listSortAt, 123);
     }
   }
 });

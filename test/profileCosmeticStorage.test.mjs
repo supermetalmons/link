@@ -1,3 +1,5 @@
+import { canonicalAppearance } from "./fixtures/canonicalData.mjs";
+import { applicationStorageKey } from "../src/session/applicationDataStorage.ts";
 import assert from "node:assert/strict";
 import test from "node:test";
 import { storage } from "../src/utils/storage.ts";
@@ -7,9 +9,13 @@ const previousLocalStorage = Object.getOwnPropertyDescriptor(
   globalThis,
   "localStorage",
 );
+/** @type {Map<string, string>} */
 const values = new Map();
+/** @type {string[]} */
 const reads = [];
+/** @type {string[]} */
 const writes = [];
+/** @type {Pick<Storage, "getItem" | "setItem" | "removeItem">} */
 const localStorage = {
   getItem: (key) => {
     reads.push(key);
@@ -31,14 +37,15 @@ Object.defineProperty(globalThis, "localStorage", {
 const createProfileCosmeticWrites = bindProfileCosmeticStorage(
   storage,
   localStorage,
+  applicationStorageKey,
 );
-const cosmeticKeys = [
+const cosmeticKeys = /** @type {const} */ ([
   "cardBackgroundId",
   "cardStickers",
   "cardSubtitleId",
   "profileCounter",
   "profileMons",
-];
+]);
 
 test.beforeEach(() => {
   values.clear();
@@ -49,66 +56,71 @@ test.after(() => {
   if (previousLocalStorage) {
     Object.defineProperty(globalThis, "localStorage", previousLocalStorage);
   } else {
-    delete globalThis.localStorage;
+    Reflect.deleteProperty(globalThis, "localStorage");
   }
 });
 
 test("cosmetic descriptors are lazy and retain raw storage baselines", () => {
   const rawStickers = '{ "mana": "blue-mana" }';
-  values.set("cardStickers", rawStickers);
-  const fields = createProfileCosmeticWrites({ cardBackgroundId: 0 });
+  values.set(applicationStorageKey("cardStickers"), rawStickers);
+  const fields = createProfileCosmeticWrites(
+    canonicalAppearance({ cardBackgroundId: 0 }),
+  );
   assert.deepEqual(reads, []);
   assert.deepEqual(writes, []);
 
-  values.set("cardBackgroundId", "7");
+  values.set(applicationStorageKey("cardBackgroundId"), "7");
   assert.deepEqual(
     fields.map((field) => field.read()),
     ["7", rawStickers, null, null, null],
   );
-  assert.deepEqual(reads, cosmeticKeys);
+  assert.deepEqual(reads, cosmeticKeys.map(applicationStorageKey));
   assert.deepEqual(writes, []);
 });
 
-test("authoritative cosmetics persist zero and empty values and remove omitted fields", () => {
+test("authoritative cosmetics persist structured values and clear an explicit default mon selection", () => {
   for (const cosmetics of [
-    {
-      cardBackgroundId: 0,
-      cardStickers: "",
-      cardSubtitleId: 0,
-      profileCounter: "gp",
-      profileMons: "",
-    },
-    {},
+    canonicalAppearance({ cardBackgroundId: 0, cardSubtitleId: 0 }),
+    canonicalAppearance({
+      cardStickers: { mana: "blue-mana" },
+      profileMons: { demon: 1, angel: 2, drainer: 3, spirit: 0, mystic: 1 },
+    }),
   ]) {
-    cosmeticKeys.forEach((key) => values.set(key, "stale"));
-    values.set("profileId", "owner");
-    values.set("playerRating", "1777");
+    cosmeticKeys.forEach((key) =>
+      values.set(applicationStorageKey(key), "stale"),
+    );
+    values.set(applicationStorageKey("profileId"), "owner");
+    values.set(applicationStorageKey("playerRating"), "1777");
     writes.length = 0;
     createProfileCosmeticWrites(cosmetics).forEach((field) => field.write());
-    assert.deepEqual(writes, cosmeticKeys);
+    assert.deepEqual(writes, cosmeticKeys.map(applicationStorageKey));
     for (const key of cosmeticKeys) {
       assert.equal(
-        values.get(key),
-        key in cosmetics ? String(cosmetics[key]) : undefined,
+        values.get(applicationStorageKey(key)),
+        cosmetics[key] === null ? undefined : JSON.stringify(cosmetics[key]),
       );
     }
-    assert.equal(values.get("profileId"), "owner");
-    assert.equal(values.get("playerRating"), "1777");
+    assert.equal(values.get(applicationStorageKey("profileId")), "owner");
+    assert.equal(values.get(applicationStorageKey("playerRating")), "1777");
   }
 });
 
-test("emoji storage preserves numeric and string representations without normalization", () => {
-  assert.equal(storage.getPlayerEmojiId("missing"), "missing");
-  for (const [input, serialized, restored] of [
-    [1009, "1009", 1009],
-    ["1009", "1009", 1009],
-    ["001", "001", "001"],
-    ["legacy-emoji", "legacy-emoji", "legacy-emoji"],
-  ]) {
-    storage.setPlayerEmojiId(input);
-    assert.equal(values.get("playerEmojiId"), serialized);
-    assert.equal(storage.getPlayerEmojiId("missing"), restored);
+test("emoji storage accepts only numeric catalog IDs and preserves zero", () => {
+  assert.equal(storage.getPlayerEmojiId(null), null);
+  for (const id of [0, 1, 155, 1000, 1466]) {
+    storage.setPlayerEmojiId(id);
+    assert.equal(
+      values.get(applicationStorageKey("playerEmojiId")),
+      JSON.stringify(id),
+    );
+    assert.equal(storage.getPlayerEmojiId(1), id);
   }
-  values.set("playerEmojiId", JSON.stringify("1009"));
-  assert.equal(storage.getPlayerEmojiId("missing"), "1009");
+  for (const value of ["1009", "001", "named-emoji", -1, 10000]) {
+    assert.throws(
+      () => Reflect.apply(storage.setPlayerEmojiId, storage, [value]),
+      /invalid-application-storage-value/,
+    );
+    values.set(applicationStorageKey("playerEmojiId"), JSON.stringify(value));
+    assert.equal(storage.getPlayerEmojiId(1), 1);
+  }
 });

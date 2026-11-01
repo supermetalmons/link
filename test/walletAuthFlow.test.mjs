@@ -1,24 +1,38 @@
+import { canonicalAppearance, required } from "./fixtures/canonicalData.mjs";
+import { createTimerHandle } from "./fixtures/timerHandle.mjs";
 import assert from "node:assert/strict";
 import test from "node:test";
 import { createWalletAuthFlowController } from "../src/ui/identity/walletAuthFlowController.ts";
 
+/**
+ * @template [T=WalletProof | null]
+ * @returns {PromiseWithResolvers<T>}
+ */
 const deferred = () => {
-  let resolve;
-  let reject;
-  const promise = new Promise((resolvePromise, rejectPromise) => {
-    resolve = resolvePromise;
-    reject = rejectPromise;
-  });
-  return { promise, resolve, reject };
+  return Promise.withResolvers();
 };
 const flush = () => new Promise((resolve) => setImmediate(resolve));
 
+/** @typedef {{signature: string; intentId: string}} WalletProof */
+/** @param {Partial<Parameters<typeof createWalletAuthFlowController<WalletProof>>[0]["dependencies"]>} [dependencies]
+ * @param {Partial<import("../src/ui/identity/walletAuthFlowController.ts").WalletAuthFlowOptions>} [options] */
 const harness = (dependencies = {}, options = {}, notFoundDurationMs = 500) => {
+  /** @type {Array<[string, ...unknown[]]>} */
   const calls = [];
+  /** @type {Map<ReturnType<typeof createTimerHandle>, {callback: () => void; delay: number}>} */
   const timers = new Map();
-  let nextTimer = 0;
   const proof = { signature: "signature", intentId: "intent" };
-  const result = { ok: true, uid: "user" };
+  /** @type {import("@mons/shared/auth").AuthProfileResponse} */
+  const result = {
+    ok: true,
+    uid: "user",
+    profileId: "profile",
+    username: null,
+    linkedMethods: { apple: true, eth: false, sol: false, x: false },
+    appleLinked: true,
+    opId: "operation",
+    ...canonicalAppearance(),
+  };
   const controller = createWalletAuthFlowController({
     notFoundDurationMs,
     dependencies: {
@@ -30,12 +44,25 @@ const harness = (dependencies = {}, options = {}, notFoundDurationMs = 500) => {
         calls.push(["verify", value]);
         return result;
       },
-      setTimeout: (callback, delay) => {
-        const id = ++nextTimer;
-        timers.set(id, { callback, delay });
-        return id;
+      setTimeout: new Proxy(setTimeout, {
+        apply(_target, _receiver, /** @type {unknown[]} */ args) {
+          const [callback, delay = 0, ...values] = args;
+          assert.ok(
+            typeof callback === "function" && typeof delay === "number",
+          );
+          const id = createTimerHandle();
+          timers.set(id, {
+            callback: () => {
+              Reflect.apply(callback, undefined, values);
+            },
+            delay,
+          });
+          return id;
+        },
+      }),
+      clearTimeout: (id) => {
+        if (typeof id === "object" && id !== null) timers.delete(id);
       },
-      clearTimeout: (id) => timers.delete(id),
       ...dependencies,
     },
   });
@@ -44,9 +71,14 @@ const harness = (dependencies = {}, options = {}, notFoundDurationMs = 500) => {
     onStart: () => calls.push(["start"]),
     onVerified: (...args) => calls.push(["verified", ...args]),
     onError: (error) => calls.push(["error", error]),
-    onSettled: (mounted) => calls.push(["settled", mounted]),
+    onSettled: (mounted) => {
+      calls.push(["settled", mounted]);
+    },
     ...options,
   });
+  /**
+   * @type {string[]}
+   */
   const states = [];
   controller.subscribe(() => states.push(controller.getSnapshot()));
   return { controller, calls, states, timers, proof, result };
@@ -54,6 +86,7 @@ const harness = (dependencies = {}, options = {}, notFoundDurationMs = 500) => {
 
 test("one wallet action connects and verifies once despite duplicate starts", async () => {
   const connecting = deferred();
+  /** @type {PromiseWithResolvers<import("@mons/shared/auth").AuthVerificationResponse>} */
   const verifying = deferred();
   let connectCalls = 0;
   const h = harness({
@@ -108,7 +141,7 @@ for (const duration of [500, 650]) {
     await h.controller.start();
     assert.equal(h.controller.getSnapshot(), "not-found");
     assert.equal(h.timers.size, 1);
-    const { callback, delay } = [...h.timers.values()][0];
+    const { callback, delay } = required([...h.timers.values()][0]);
     assert.equal(delay, duration);
     assert.deepEqual(h.calls, [["start"], ["error", error], ["settled", true]]);
     callback();
@@ -126,7 +159,7 @@ test("a retry clears not-found feedback and its old timer cannot reset the new a
         : connecting.promise,
   });
   await h.controller.start();
-  const oldTimer = [...h.timers.values()][0].callback;
+  const oldTimer = required([...h.timers.values()][0]).callback;
   const retry = h.controller.start();
   assert.equal(h.timers.size, 0);
   oldTimer();
@@ -183,7 +216,7 @@ test("separate wallet controllers can run independently or honor a shared settin
   const second = harness({}, options);
   const action = first.controller.start();
   await second.controller.start();
-  assert.deepEqual(second.calls, []);
+  assert.deepEqual([...second.calls], []);
   pending.resolve(null);
   await action;
   await second.controller.start();
@@ -193,15 +226,29 @@ test("separate wallet controllers can run independently or honor a shared settin
   );
 });
 
-for (const phase of ["connect", "verify"]) {
+for (const phase of /** @type {const} */ (["connect", "verify"])) {
   test(`detach during ${phase} preserves completion policy without UI notifications`, async () => {
-    const pending = deferred();
-    const h = harness({ [phase]: () => pending.promise });
+    const pending = pendingForPhase(phase);
+    const h =
+      pending.phase === "connect"
+        ? harness({
+            connect: () => {
+              assert.ok(pending.phase === "connect");
+              return pending.promise;
+            },
+          })
+        : harness({
+            verify: () => {
+              assert.ok(pending.phase === "verify");
+              return pending.promise;
+            },
+          });
     const action = h.controller.start();
     await flush();
     h.controller.detach();
     const stateCount = h.states.length;
-    pending.resolve(phase === "connect" ? h.proof : h.result);
+    if (pending.phase === "connect") pending.resolve(h.proof);
+    else pending.resolve(h.result);
     await action;
     assert.equal(h.states.length, stateCount);
     assert.deepEqual(h.calls.slice(-2), [
@@ -230,22 +277,36 @@ test("detaching clears timers and suppresses late errors", async () => {
   assert.equal(h.timers.size, 0);
 });
 
-for (const phase of ["connect", "verify"]) {
+for (const phase of /** @type {const} */ (["connect", "verify"])) {
   test(`invalidating during ${phase} fences stale completion without blocking a new attempt`, async () => {
-    const pending = deferred();
+    const pending = pendingForPhase(phase);
     let attempts = 0;
-    const h = harness({
-      [phase]: () =>
-        ++attempts === 1
-          ? pending.promise
-          : Promise.resolve(phase === "connect" ? h.proof : h.result),
-    });
+    /** @type {ReturnType<typeof harness>} */
+    const h =
+      pending.phase === "connect"
+        ? harness({
+            connect: () => {
+              assert.ok(pending.phase === "connect");
+              return ++attempts === 1
+                ? pending.promise
+                : Promise.resolve(h.proof);
+            },
+          })
+        : harness({
+            verify: () => {
+              assert.ok(pending.phase === "verify");
+              return ++attempts === 1
+                ? pending.promise
+                : Promise.resolve(h.result);
+            },
+          });
     const stale = h.controller.start();
     await flush();
     h.controller.invalidateAction();
     await h.controller.start();
     const calls = [...h.calls];
-    pending.resolve(phase === "connect" ? h.proof : h.result);
+    if (pending.phase === "connect") pending.resolve(h.proof);
+    else pending.resolve(h.result);
     await stale;
     assert.deepEqual(h.calls, calls);
     assert.equal(h.calls.filter(([name]) => name === "verified").length, 1);
@@ -259,6 +320,7 @@ test("attach after the StrictMode cleanup permits actions with current callbacks
   h.controller.attach();
   await h.controller.start();
   assert.deepEqual(h.calls, []);
+  /** @type {Array<[result: import("@mons/shared/auth").AuthVerificationResponse, mounted: boolean]>} */
   const verified = [];
   h.controller.setOptions({
     canStart: () => true,
@@ -269,3 +331,15 @@ test("attach after the StrictMode cleanup permits actions with current callbacks
   await h.controller.start();
   assert.deepEqual(verified, [[h.result, true]]);
 });
+
+/** @param {"connect" | "verify"} phase */
+function pendingForPhase(phase) {
+  if (phase === "connect") {
+    /** @type {PromiseWithResolvers<WalletProof | null>} */
+    const pending = deferred();
+    return { phase: /** @type {const} */ ("connect"), ...pending };
+  }
+  /** @type {PromiseWithResolvers<import("@mons/shared/auth").AuthVerificationResponse>} */
+  const pending = deferred();
+  return { phase: /** @type {const} */ ("verify"), ...pending };
+}

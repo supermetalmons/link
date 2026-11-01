@@ -1,8 +1,11 @@
+import { required } from "./fixtures/canonicalData.mjs";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { registerHooks } from "node:module";
 import test from "node:test";
 import ts from "typescript";
+import { Game } from "mons-rules";
+import { PrimaryActionType } from "../src/ui/controls/primaryAction.ts";
 import { deriveBoardViewControls } from "../src/game/boardViewPolicy.ts";
 import { MATCH_TIMER_TERMINAL } from "@mons/shared/timers";
 import { createMatchTimerHarness } from "./fixtures/matchTimerHarness.mjs";
@@ -54,17 +57,43 @@ const declarations = [
   const declaration = source.statements.find(
     (node) => ts.isFunctionDeclaration(node) && node.name?.text === name,
   );
+  assert.ok(declaration && ts.isFunctionDeclaration(declaration));
   assert.ok(declaration, name);
   return declaration.getText(source).replace(/^export /, "");
 });
 
+/**
+ * @typedef {import("../src/game/boardViewPolicy.ts").BoardViewMode} ViewMode
+ * @typedef {import("@mons/shared/game-sessions").HistoricalMatchPair} MatchPair
+ * @typedef {import("../src/game/gameControlsModel.ts").GameControlsSnapshot} ControlsSnapshot
+ * @typedef {import("../src/ui/controls/bottomControlsState.ts").GameControlsState} ControlsState
+ * @typedef {{ selectedProblem: null, puzzleMode: boolean, boardViewMode: ViewMode, isOnlineGame: boolean, isWatchOnly: boolean, isGameWithBot: boolean, isGameOver: boolean, isWaitingForRematchResponse: boolean, isReconnect: boolean, boardViewDebugLogsEnabled: boolean, boardRenderSessionId: number, flashbackMode: boolean, flashbackStateGame: Game | { fen: string } | null, currentInputs: string[], moveHistoryFlipOverrideEnabled: boolean, moveHistoryFlipOverrideSessionId: number | null, moveHistoryFlipOverrideBaseBoardFlipped: boolean | null, game: Game }} InitialState
+ * @typedef {InitialState & { selection: ReturnType<ReturnType<typeof createRematchViewingHarness>["getSelection"]> }} HarnessState
+ * @typedef {{ state(): HarnessState, setWaiting(value: boolean): void, wait(): void, restore(): void, prepareLocal(): void, history(matchId: string, pair: MatchPair, game: Game, sessionId: number): boolean, applyUi(): void, selectMove: typeof import("../src/game/gameController.ts").didSelectVerboseTrackingEntity }} HarnessApi
+ * @typedef {{ name: string, args: unknown[], state: HarnessState, snapshot: ControlsSnapshot, notifications: number }} RecordedEvent
+ */
+/** @param {string} id */
+const labelledGame = (id) => Object.assign(new Game(), { id });
+/** @param {string} matchId @returns {MatchPair} */
+const matchPair = (matchId) => ({
+  matchId,
+  hostPlayerId: "host",
+  guestPlayerId: null,
+  hostMatch: null,
+  guestMatch: null,
+});
+
+/** @param {Partial<InitialState>} [overrides] @param {ControlsState} [initialControls] @param {{ rejectHistoricalCommit?: boolean }} [options] */
 function harness(
   overrides = {},
   initialControls = createGameControlsState(timerConfig),
   { rejectHistoricalCommit = false } = {},
 ) {
+  /** @type {RecordedEvent[]} */
   const events = [];
+  /** @type {(Partial<import("../src/game/gameControlsModel.ts").GameControlsContext>)[]} */
   const contexts = [];
+  /** @type {InitialState} */
   const initial = {
     selectedProblem: null,
     puzzleMode: false,
@@ -78,24 +107,28 @@ function harness(
     boardViewDebugLogsEnabled: false,
     boardRenderSessionId: 5,
     flashbackMode: true,
-    flashbackStateGame: { id: "old" },
+    flashbackStateGame: labelledGame("old"),
     currentInputs: ["selected"],
     moveHistoryFlipOverrideEnabled: true,
     moveHistoryFlipOverrideSessionId: 5,
     moveHistoryFlipOverrideBaseBoardFlipped: false,
-    game: { winner: undefined },
+    game: new Game(),
     ...overrides,
   };
   const controlsStore = createGameControlsStore(timerConfig);
   controlsStore.updateContext({
-    ...Object.fromEntries(
-      Object.keys(controlsStore.getSnapshot().context)
-        .filter((key) => Object.hasOwn(initial, key))
-        .map((key) => [key, initial[key]]),
-    ),
+    isOnlineGame: initial.isOnlineGame,
+    isWatchOnly: initial.isWatchOnly,
+    isGameWithBot: initial.isGameWithBot,
+    puzzleMode: initial.puzzleMode,
+    isGameOver: initial.isGameOver,
+    boardViewMode: initial.boardViewMode,
     sessionId: 1,
   });
   controlsStore.updatePresentation({ gameControls: initialControls });
+  /**
+   * @type {import("../src/game/gameControlsModel.ts").GameControlsSnapshot[]}
+   */
   const observedSnapshots = [];
   controlsStore.subscribe(() =>
     observedSnapshots.push(controlsStore.getSnapshot()),
@@ -103,24 +136,27 @@ function harness(
   const rematchViewing = createRematchViewingHarness({
     selection: {
       matchId: "old",
-      pair: { matchId: "old" },
-      game: { id: "old" },
+      pair: matchPair("old"),
+      game: labelledGame("old"),
     },
   });
   if (rejectHistoricalCommit) {
     rematchViewing.commitSelection = () => false;
   }
+  /** @type {HarnessApi | undefined} */
   let api;
+  /** @param {string} name @returns {(...args: unknown[]) => void} */
   const record =
     (name) =>
-    (...args) =>
+    (...args) => {
       events.push({
         name,
         args,
-        state: api.state(),
+        state: required(api).state(),
         snapshot: controlsStore.getSnapshot(),
         notifications: observedSnapshots.length,
       });
+    };
   let seedingTimer = true;
   const timerHarness = createMatchTimerHarness(
     { activeMatchId: "live" },
@@ -142,21 +178,25 @@ function harness(
     "live",
   );
   seedingTimer = false;
-  const board = Object.fromEntries(
-    [
-      "setBoardMetadataDisplaySwapped",
-      "setBoardFlipped",
-      "removeHighlights",
+  const board = {
+    setBoardMetadataDisplaySwapped: record("setBoardMetadataDisplaySwapped"),
+    setBoardFlipped: record("setBoardFlipped"),
+    removeHighlights: record("removeHighlights"),
+    hideItemSelectionOrConfirmationOverlay: record(
       "hideItemSelectionOrConfirmationOverlay",
+    ),
+    stopMonsBoardAsDisplayAnimations: record(
       "stopMonsBoardAsDisplayAnimations",
+    ),
+    runMonsBoardAsDisplayWaitingAnimation: record(
       "runMonsBoardAsDisplayWaitingAnimation",
-      "showBoardPlayersInfo",
-      "hideBoardPlayersInfo",
-      "hideTimerCountdownDigits",
-      "hideAllMoveStatuses",
-    ].map((name) => [name, record(name)]),
-  );
-  board.hasMonsBoardDisplayAnimationRunning = () => false;
+    ),
+    showBoardPlayersInfo: record("showBoardPlayersInfo"),
+    hideBoardPlayersInfo: record("hideBoardPlayersInfo"),
+    hideTimerCountdownDigits: record("hideTimerCountdownDigits"),
+    hideAllMoveStatuses: record("hideAllMoveStatuses"),
+    hasMonsBoardDisplayAnimationRunning: () => false,
+  };
   const dependencies = {
     rematchViewing,
     matchTimers: {
@@ -169,7 +209,9 @@ function harness(
     getCurrentSessionId: () => 1,
     isGameConnectionBound: () => false,
     batchGameControlsUpdates: controlsStore.batchUpdates,
-    updateGameControlsContext: (context) => {
+    updateGameControlsContext: (
+      /** @type {Partial<import("../src/game/gameControlsModel.ts").GameControlsContext>} */ context,
+    ) => {
       controlsStore.updateContext(context);
       contexts.push(context);
     },
@@ -182,62 +224,79 @@ function harness(
     },
     activeBoardShouldBeFlipped: () => false,
     getViewedMatchBoardFlipped: () => true,
-    MonsRules: { Game: { fromFen: (fen) => ({ fen }) } },
+    MonsRules: { Game: { fromFen: (/** @type {string} */ fen) => ({ fen }) } },
     getMoveHistorySourceGame: () => ({
       trackingEntries: [{ fen: "earlier" }, { fen: "latest" }],
     }),
-    ...Object.fromEntries(
-      [
-        "setEndMatchVisible",
-        "setEndMatchConfirmed",
-        "showVoiceReactionButton",
-        "disableAndHideUndoResignAndTimerControls",
-        "hideTimerButtons",
-        "showWaitingStateText",
-        "setAutomoveActionVisible",
-        "setUndoVisible",
-        "setUndoEnabled",
-        "syncInviteBotIntoLocalGameButton",
-        "refreshDisplayedMatchPresentation",
-        "triggerMoveHistoryPopupReload",
-        "setNewBoard",
-        "applyWagerState",
-        "markKnownWagerInitialStateReceived",
-        "updateUndoButtonBasedOnGameState",
-        "scheduleHistoricalMatchArchiveRefresh",
-        "updateWagerDisplayForMoveNavigation",
-      ].map((name) => [name, record(name)]),
+    syncInviteBotIntoLocalGameButton: record(
+      "syncInviteBotIntoLocalGameButton",
     ),
+    refreshDisplayedMatchPresentation: record(
+      "refreshDisplayedMatchPresentation",
+    ),
+    triggerMoveHistoryPopupReload: record("triggerMoveHistoryPopupReload"),
+    setNewBoard: record("setNewBoard"),
+    applyWagerState: record("applyWagerState"),
+    markKnownWagerInitialStateReceived: record(
+      "markKnownWagerInitialStateReceived",
+    ),
+    updateUndoButtonBasedOnGameState: record(
+      "updateUndoButtonBasedOnGameState",
+    ),
+    scheduleHistoricalMatchArchiveRefresh: record(
+      "scheduleHistoricalMatchArchiveRefresh",
+    ),
+    updateWagerDisplayForMoveNavigation: record(
+      "updateWagerDisplayForMoveNavigation",
+    ),
+    disableAndHideUndoResignAndTimerControls() {
+      record("disableAndHideUndoResignAndTimerControls")();
+      controlsStore.dispatchGameControls({ type: "hideGameControls" });
+    },
+    /** @param {boolean} visible */
+    setAutomoveActionVisible(visible) {
+      record("setAutomoveActionVisible")(visible);
+      controlsStore.dispatchGameControls({
+        type: "setAutomoveVisible",
+        visible,
+      });
+    },
+    /** @param {boolean} visible */
+    setUndoVisible(visible) {
+      record("setUndoVisible")(visible);
+      controlsStore.dispatchGameControls({ type: "setUndoVisible", visible });
+    },
+    /** @param {boolean} enabled */
+    setUndoEnabled(enabled) {
+      record("setUndoEnabled")(enabled);
+      controlsStore.dispatchGameControls({ type: "setUndoEnabled", enabled });
+    },
+    hideTimerButtons() {
+      record("hideTimerButtons")();
+      controlsStore.dispatchGameControls({ type: "hideTimers" });
+    },
+    /** @param {boolean} value */
+    setEndMatchVisible(value) {
+      controlsStore.updatePresentation({ endMatchVisible: value });
+      record("setEndMatchVisible")(value);
+    },
+    /** @param {boolean} value */
+    setEndMatchConfirmed(value) {
+      controlsStore.updatePresentation({ endMatchConfirmed: value });
+      record("setEndMatchConfirmed")(value);
+    },
+    /** @param {boolean} value */
+    showVoiceReactionButton(value) {
+      controlsStore.updatePresentation({ voiceReactionVisible: value });
+      record("showVoiceReactionButton")(value);
+    },
+    /** @param {string} value */
+    showWaitingStateText(value) {
+      controlsStore.updatePresentation({ waitingText: value });
+      record("showWaitingStateText")(value);
+    },
   };
-  for (const [name, action] of [
-    [
-      "disableAndHideUndoResignAndTimerControls",
-      () => ({ type: "hideGameControls" }),
-    ],
-    [
-      "setAutomoveActionVisible",
-      (visible) => ({ type: "setAutomoveVisible", visible }),
-    ],
-    ["setUndoVisible", (visible) => ({ type: "setUndoVisible", visible })],
-    ["setUndoEnabled", (enabled) => ({ type: "setUndoEnabled", enabled })],
-    ["hideTimerButtons", () => ({ type: "hideTimers" })],
-  ]) {
-    dependencies[name] = (...args) => {
-      record(name)(...args);
-      controlsStore.dispatchGameControls(action(...args));
-    };
-  }
-  for (const [name, key] of Object.entries({
-    setEndMatchVisible: "endMatchVisible",
-    setEndMatchConfirmed: "endMatchConfirmed",
-    showVoiceReactionButton: "voiceReactionVisible",
-    showWaitingStateText: "waitingText",
-  })) {
-    dependencies[name] = (value) => {
-      controlsStore.updatePresentation({ [key]: value });
-      record(name)(value);
-    };
-  }
+
   const { outputText } = ts.transpileModule(
     `${Object.keys(initial)
       .map((name) => `let ${name} = initial.${name};`)
@@ -259,8 +318,10 @@ function harness(
     };`,
     { compilerOptions: { target: ts.ScriptTarget.ES2022 } },
   );
-  api = new Function(...Object.keys(dependencies), outputText)(
-    ...Object.values(dependencies),
+  api = /** @type {HarnessApi} */ (
+    new Function(...Object.keys(dependencies), outputText)(
+      ...Object.values(dependencies),
+    )
   );
   return {
     ...api,
@@ -273,6 +334,7 @@ function harness(
   };
 }
 
+/** @param {ReturnType<typeof harness>} h @param {ViewMode} mode */
 function assertLivePreparation(h, mode) {
   const state = h.state();
   assert.equal(state.boardViewMode, mode);
@@ -289,12 +351,12 @@ function assertLivePreparation(h, mode) {
     "setBoardFlipped",
   ]);
   const wagerView = h.events.find(({ name }) => name === "wagerView");
-  assert.deepEqual(wagerView.args, [null]);
-  assert.equal(wagerView.state.selection, null);
-  assert.equal(wagerView.snapshot.context.boardViewMode, mode);
+  assert.deepEqual(required(wagerView).args, [null]);
+  assert.equal(required(wagerView).state.selection, null);
+  assert.equal(required(wagerView).snapshot.context.boardViewMode, mode);
   const flip = h.events.find(({ name }) => name === "setBoardFlipped");
-  assert.equal(flip.state.flashbackMode, false);
-  assert.deepEqual(flip.state.currentInputs, []);
+  assert.equal(required(flip).state.flashbackMode, false);
+  assert.deepEqual(required(flip).state.currentInputs, []);
 }
 
 test("waiting entry clears historical input and orientation before waiting UI and appearance", () => {
@@ -303,7 +365,7 @@ test("waiting entry clears historical input and orientation before waiting UI an
   assert.deepEqual(h.observedSnapshots, [h.controlsStore.getSnapshot()]);
   assert.ok(h.events.every(({ notifications }) => notifications === 0));
   assertLivePreparation(h, "waitingLive");
-  assert.equal(h.contexts.at(-1).boardViewMode, "waitingLive");
+  assert.equal(required(h.contexts.at(-1)).boardViewMode, "waitingLive");
   assert.deepEqual(h.names().slice(5), [
     "cancelTimerVictoryClaim",
     "runMonsBoardAsDisplayWaitingAnimation",
@@ -329,10 +391,13 @@ test("active restoration refreshes appearance before rendering and restores time
   assert.deepEqual(h.observedSnapshots, [h.controlsStore.getSnapshot()]);
   assert.ok(h.events.every(({ notifications }) => notifications === 0));
   const rendered = h.events.find(({ name }) => name === "setNewBoard");
-  assert.equal(rendered.snapshot.context.boardViewMode, "activeLive");
-  assert.equal(rendered.snapshot.presentation.voiceReactionVisible, true);
+  assert.equal(required(rendered).snapshot.context.boardViewMode, "activeLive");
+  assert.equal(
+    required(rendered).snapshot.presentation.voiceReactionVisible,
+    true,
+  );
   assertLivePreparation(h, "activeLive");
-  assert.equal(h.contexts.at(-1).boardViewMode, "activeLive");
+  assert.equal(required(h.contexts.at(-1)).boardViewMode, "activeLive");
   const refreshIndex = h.names().indexOf("refreshDisplayedMatchPresentation");
   assert.deepEqual(h.names().slice(refreshIndex), [
     "refreshDisplayedMatchPresentation",
@@ -343,10 +408,10 @@ test("active restoration refreshes appearance before rendering and restores time
     "updateUndoButtonBasedOnGameState",
     "triggerMoveHistoryPopupReload",
   ]);
-  assert.deepEqual(h.events.find(({ name }) => name === "restoreTimer").args, [
-    true,
-    "white",
-  ]);
+  assert.deepEqual(
+    required(h.events.find(({ name }) => name === "restoreTimer")).args,
+    [true, "white"],
+  );
 });
 
 test("pending restoration stays waiting without restoring a live board or consuming its timer", () => {
@@ -365,10 +430,10 @@ test("pending restoration stays waiting without restoring a live board or consum
   assert.equal(h.names().includes("restoreTimer"), false);
   h.setWaiting(false);
   h.restore();
-  assert.deepEqual(h.events.find(({ name }) => name === "restoreTimer").args, [
-    true,
-    "white",
-  ]);
+  assert.deepEqual(
+    required(h.events.find(({ name }) => name === "restoreTimer")).args,
+    [true, "white"],
+  );
 });
 
 test("new local preparation stops after base UI without restoring the previous game's timer or appearance", () => {
@@ -383,12 +448,15 @@ test("new local preparation stops after base UI without restoring the previous g
 
 test("historical entry installs the selection before effects and renders before archive refresh", () => {
   const h = harness({ boardViewMode: "activeLive", flashbackMode: false });
-  const pair = { matchId: "older" };
-  const historicalGame = { id: "older" };
+  const pair = matchPair("older");
+  const historicalGame = labelledGame("older");
   assert.equal(h.history("older", pair, historicalGame, 5), true);
   assert.deepEqual(h.observedSnapshots, [h.controlsStore.getSnapshot()]);
   assert.ok(h.events.every(({ notifications }) => notifications === 0));
-  assert.equal(h.events[0].snapshot.context.boardViewMode, "historicalView");
+  assert.equal(
+    required(h.events[0]).snapshot.context.boardViewMode,
+    "historicalView",
+  );
   const state = h.state();
   assert.equal(state.boardViewMode, "historicalView");
   assert.equal(state.boardRenderSessionId, 5);
@@ -399,10 +467,13 @@ test("historical entry installs the selection before effects and renders before 
     "removeHighlights",
     "hideItemSelectionOrConfirmationOverlay",
   ]);
-  assert.equal(h.events[0].state.selection.matchId, "older");
-  assert.equal(h.events[1].state.selection.pair, pair);
-  assert.equal(h.events[2].state.flashbackMode, true);
-  assert.deepEqual(h.events[2].state.currentInputs, []);
+  assert.equal(
+    required(required(h.events[0]).state.selection).matchId,
+    "older",
+  );
+  assert.equal(required(required(h.events[1]).state.selection).pair, pair);
+  assert.equal(required(h.events[2]).state.flashbackMode, true);
+  assert.deepEqual(required(h.events[2]).state.currentInputs, []);
   assert.deepEqual(h.names().slice(-5), [
     "applyWagerState",
     "refreshDisplayedMatchPresentation",
@@ -411,8 +482,10 @@ test("historical entry installs the selection before effects and renders before 
     "triggerMoveHistoryPopupReload",
   ]);
   assert.deepEqual(
-    h.events.find(
-      ({ name }) => name === "scheduleHistoricalMatchArchiveRefresh",
+    required(
+      h.events.find(
+        ({ name }) => name === "scheduleHistoricalMatchArchiveRefresh",
+      ),
     ).args,
     [],
   );
@@ -422,7 +495,10 @@ test("a stale historical entry cannot change state or emit effects", () => {
   const h = harness();
   const before = h.state();
   const snapshot = h.controlsStore.getSnapshot();
-  assert.equal(h.history("older", {}, {}, 4), false);
+  assert.equal(
+    Reflect.apply(h.history, undefined, ["older", {}, {}, 4]),
+    false,
+  );
   assert.deepEqual(h.state(), before);
   assert.deepEqual(h.events, []);
   assert.equal(h.controlsStore.getSnapshot(), snapshot);
@@ -471,19 +547,26 @@ test("active online UI changes only reaction visibility between board appearance
       "syncInviteBotIntoLocalGameButton",
     ]);
     assert.deepEqual(
-      h.events.find(({ name }) => name === "showVoiceReactionButton").args,
+      required(h.events.find(({ name }) => name === "showVoiceReactionButton"))
+        .args,
       [!isWatchOnly],
     );
   }
 });
 
 test("view controls preserve independent timer and action state while clearing mode-specific controls", () => {
-  for (const confirmation of ["none", "resign", "timer", "claim"]) {
+  for (const confirmation of /** @type {const} */ ([
+    "none",
+    "resign",
+    "timer",
+    "claim",
+  ])) {
+    /** @type {ControlsState} */
     const initial = {
       undo: { visible: true, enabled: true },
       automove: { visible: true, enabled: false },
       resignVisible: true,
-      primaryAction: "rematch",
+      primaryAction: PrimaryActionType.Rematch,
       timer: {
         mode: "progressing",
         config: timerConfig,
@@ -492,11 +575,11 @@ test("view controls preserve independent timer and action state while clearing m
       },
       confirmation,
     };
-    for (const boardViewMode of [
+    for (const boardViewMode of /** @type {const} */ ([
       "activeLive",
       "waitingLive",
       "historicalView",
-    ]) {
+    ])) {
       const h = harness({ boardViewMode }, initial);
       h.applyUi();
       const controls = h.controls();
@@ -543,7 +626,10 @@ test("a rejected historical selection publishes its changed context once without
   );
   const before = h.state();
   h.controlsStore.batchUpdates(() => {
-    assert.equal(h.history("older", {}, {}, 5), false);
+    assert.equal(
+      Reflect.apply(h.history, undefined, ["older", {}, {}, 5]),
+      false,
+    );
     assert.equal(
       h.controlsStore.getSnapshot().context.boardViewMode,
       "historicalView",

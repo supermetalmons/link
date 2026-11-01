@@ -70,17 +70,13 @@ function errorExitCode(error: unknown): number | undefined {
 test("parses every frontend deployment mode and rejects invalid combinations", () => {
   assert.deepEqual(parseArgs(["dry-run"]), {
     mode: "dry-run",
-    tokenFile: undefined,
-    versionId: undefined,
   });
   assert.deepEqual(parseArgs(["preview", "--token-file", "/tmp/token"]), {
     mode: "preview",
     tokenFile: "/tmp/token",
-    versionId: undefined,
   });
   assert.deepEqual(parseArgs(["production", "--version-id", "version-1"]), {
     mode: "production",
-    tokenFile: undefined,
     versionId: "version-1",
   });
 
@@ -206,14 +202,14 @@ test("dry-run builds first and invokes the pinned Wrangler without authenticatio
       },
     ],
   );
-  assert.equal(dependencies.commands[0].env.CLOUDFLARE_API_TOKEN, undefined);
-  assert.equal(dependencies.commands[1].env.CLOUDFLARE_API_TOKEN, undefined);
+  assert.equal(dependencies.commands[0]!.env.CLOUDFLARE_API_TOKEN, undefined);
+  assert.equal(dependencies.commands[1]!.env.CLOUDFLARE_API_TOKEN, undefined);
   assert.equal(
-    dependencies.commands[1].env.WRANGLER_LOG_PATH,
+    dependencies.commands[1]!.env.WRANGLER_LOG_PATH,
     resolve(REPOSITORY_ROOT, ".cache/wrangler-logs"),
   );
-  assert.equal(dependencies.commands[1].env.WRANGLER_LOG_SANITIZE, "true");
-  assert.equal(dependencies.commands[1].env.WRANGLER_SEND_METRICS, "false");
+  assert.equal(dependencies.commands[1]!.env.WRANGLER_LOG_SANITIZE, "true");
+  assert.equal(dependencies.commands[1]!.env.WRANGLER_SEND_METRICS, "false");
   assert.deepEqual(dependencies.directories, [
     resolve(REPOSITORY_ROOT, ".cache/wrangler-logs"),
   ]);
@@ -233,9 +229,12 @@ test("preview reads a token file only for the Wrangler upload", () => {
   execute(["preview", "--token-file", tokenFile], dependencies);
 
   assert.equal(dependencies.commands.length, 2);
-  assert.equal(dependencies.commands[0].env.CLOUDFLARE_API_TOKEN, undefined);
-  assert.equal(dependencies.commands[1].env.CLOUDFLARE_API_TOKEN, "file-token");
-  assert.deepEqual(dependencies.commands[1].args, [
+  assert.equal(dependencies.commands[0]!.env.CLOUDFLARE_API_TOKEN, undefined);
+  assert.equal(
+    dependencies.commands[1]!.env.CLOUDFLARE_API_TOKEN,
+    "file-token",
+  );
+  assert.deepEqual(dependencies.commands[1]!.args, [
     "versions",
     "upload",
     "--config",
@@ -262,7 +261,7 @@ test("production can deploy an exact existing version without rebuilding", () =>
   execute(["production", "--version-id", "candidate-version"], dependencies);
 
   assert.equal(dependencies.commands.length, 1);
-  assert.deepEqual(dependencies.commands[0].args, [
+  assert.deepEqual(dependencies.commands[0]!.args, [
     "versions",
     "deploy",
     "--version-id",
@@ -274,7 +273,7 @@ test("production can deploy an exact existing version without rebuilding", () =>
     "wrangler.jsonc",
   ]);
   assert.equal(
-    dependencies.commands[0].env.CLOUDFLARE_API_TOKEN,
+    dependencies.commands[0]!.env.CLOUDFLARE_API_TOKEN,
     "cloudflare-token",
   );
   assert.equal(
@@ -333,11 +332,11 @@ test("production uploads, reads the latest metadata record, then deploys it", ()
     ],
   );
   assert.equal(
-    dependencies.commands[1].env.WRANGLER_OUTPUT_FILE_PATH,
+    dependencies.commands[1]!.env.WRANGLER_OUTPUT_FILE_PATH,
     outputFile,
   );
   assert.equal(
-    dependencies.commands[2].env.WRANGLER_OUTPUT_FILE_PATH,
+    dependencies.commands[2]!.env.WRANGLER_OUTPUT_FILE_PATH,
     outputFile,
   );
   assert.equal(

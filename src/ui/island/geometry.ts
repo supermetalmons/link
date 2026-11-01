@@ -84,13 +84,13 @@ export const ISLAND_HOTSPOTS: IslandHotspot[] = [
 
 export const HOTSPOT_LABELS = [2, 1, 5, 4, 8, 9, 11, 10, 3, 7, 6];
 
-export const DISMISS_ALLOWED_TRIANGLE_A: Point[] = [
+export const DISMISS_ALLOWED_TRIANGLE_A: [Point, Point, Point] = [
   { x: 0, y: 0.7287 },
   { x: 0.2087, y: 1 },
   { x: 0, y: 1 },
 ];
 
-export const DISMISS_ALLOWED_TRIANGLE_B: Point[] = [
+export const DISMISS_ALLOWED_TRIANGLE_B: [Point, Point, Point] = [
   { x: 1, y: 0.5753 },
   { x: 1, y: 1 },
   { x: 0.6977, y: 1 },
@@ -143,8 +143,7 @@ export function getPolygonBounds(points: Point[]) {
   let maxX = 0;
   let minY = 1;
   let maxY = 0;
-  for (let index = 0; index < points.length; index += 1) {
-    const point = points[index];
+  for (const point of points) {
     if (point.x < minX) minX = point.x;
     if (point.x > maxX) maxX = point.x;
     if (point.y < minY) minY = point.y;
@@ -153,7 +152,11 @@ export function getPolygonBounds(points: Point[]) {
   return { minX, maxX, minY, maxY };
 }
 
-export function pointInTriangle(px: number, py: number, triangle: Point[]) {
+export function pointInTriangle(
+  px: number,
+  py: number,
+  triangle: [Point, Point, Point],
+) {
   const a = triangle[0];
   const b = triangle[1];
   const c = triangle[2];
@@ -172,8 +175,8 @@ export function pointInPolygon(x: number, y: number, polygon: Point[]) {
     index < polygon.length;
     previous = index++
   ) {
-    const currentPoint = polygon[index];
-    const previousPoint = polygon[previous];
+    const currentPoint = polygon[index]!;
+    const previousPoint = polygon[previous]!;
     const intersect =
       currentPoint.y > y !== previousPoint.y > y &&
       x <
@@ -189,9 +192,9 @@ export function getPolygonCentroid(polygon: Point[]): Point {
   if (polygon.length === 0) return { x: 0.5, y: 0.5 };
   let x = 0;
   let y = 0;
-  for (let index = 0; index < polygon.length; index += 1) {
-    x += polygon[index].x;
-    y += polygon[index].y;
+  for (const point of polygon) {
+    x += point.x;
+    y += point.y;
   }
   return { x: x / polygon.length, y: y / polygon.length };
 }
@@ -266,8 +269,8 @@ export function projectOutsideHole(point: Point): Point | null {
   if (NO_WALK_TETRAGON.length === 0) return null;
   let best: (Point & { d2: number }) | null = null;
   for (let index = 0; index < NO_WALK_TETRAGON.length; index += 1) {
-    const a = NO_WALK_TETRAGON[index];
-    const b = NO_WALK_TETRAGON[(index + 1) % NO_WALK_TETRAGON.length];
+    const a = NO_WALK_TETRAGON[index]!;
+    const b = NO_WALK_TETRAGON[(index + 1) % NO_WALK_TETRAGON.length]!;
     const vectorX = b.x - a.x;
     const vectorY = b.y - a.y;
     const lengthSquared = vectorX * vectorX + vectorY * vectorY || 1;

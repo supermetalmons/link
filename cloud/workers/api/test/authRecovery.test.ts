@@ -42,7 +42,7 @@ function createAuthRecoveryService(
     "prizeStore"
   > & { prizeStore?: AuthRecoveryPrizeStore } = {},
 ) {
-  const fixture = dependencies.prizeStore;
+  const { prizeStore: fixture, ...options } = dependencies;
   const prizeStore: TypedAuthRecoveryPrizeStore | undefined = fixture
     ? {
         readProfileEventPrizeAssignment:
@@ -79,7 +79,10 @@ function createAuthRecoveryService(
           >,
       }
     : undefined;
-  return createAuthRecoveryServiceImpl(env, { ...dependencies, prizeStore });
+  return createAuthRecoveryServiceImpl(env, {
+    ...options,
+    ...(prizeStore === undefined ? {} : { prizeStore }),
+  });
 }
 
 async function rejectLegacyPrizeRead(): Promise<never> {
@@ -601,7 +604,9 @@ function recoveryPrizeStore(input: {
     if ("commit" in decision) {
       return {
         committed: false,
-        decision: decision.decision,
+        ...(decision.decision === undefined
+          ? {}
+          : { decision: decision.decision }),
         value: current,
       };
     }
@@ -609,7 +614,9 @@ function recoveryPrizeStore(input: {
     else values.set(path, decision.value);
     return {
       committed: true,
-      decision: decision.decision,
+      ...(decision.decision === undefined
+        ? {}
+        : { decision: decision.decision }),
       value: decision.value,
     };
   };
@@ -675,7 +682,6 @@ test("event prize recovery rereads the source entitlement under its lease", asyn
   const profile = recoveryProfileDb();
   const liveAssignment = {
     ...prizeAssignment("1111", 200),
-    delivery: { channel: "wallet", revision: 2 },
   };
   const prizeStore = recoveryPrizeStore({
     liveAssignment,
@@ -693,7 +699,6 @@ test("event prize recovery rereads the source entitlement under its lease", asyn
     place: 1,
     prizeId: "1111",
     assignedAtMs: 200,
-    delivery: { channel: "wallet", revision: 2 },
   });
   assert.deepEqual(prizeStore.guardedPaths, [prizeStore.targetPath]);
   assert.deepEqual(prizeStore.prizeReads.slice(0, 2), [
@@ -742,7 +747,6 @@ test("event prize recovery preserves assignments removed from the current catalo
   const profile = recoveryProfileDb();
   const assignment = {
     ...prizeAssignment("retired-prize", 200),
-    delivery: { channel: "wallet", revision: 2 },
   };
   const prizeStore = recoveryPrizeStore({ liveAssignment: assignment });
   const service = prizeRecoveryService(profile.db, prizeStore.client);
@@ -760,10 +764,8 @@ test("event prize recovery leaves equivalent reordered metadata unwritten", asyn
   const profile = recoveryProfileDb();
   const assignment = {
     ...prizeAssignment("1092", 200),
-    delivery: { z: [2, 1], a: { channel: "wallet", revision: 2 } },
   };
   const targetAssignment = {
-    delivery: { a: { revision: 2, channel: "wallet" }, z: [2, 1] },
     ...prizeAssignment("1092", 200),
     profileId: "target-profile",
   };
@@ -778,17 +780,15 @@ test("event prize recovery leaves equivalent reordered metadata unwritten", asyn
   assert.deepEqual(prizeStore.guardedPaths, [prizeStore.targetPath]);
 });
 
-test("event prize recovery replaces metadata only for the same assignment", async () => {
+test("event prize recovery preserves equivalent assignments and defers conflicting assignments", async () => {
   for (const sameAssignment of [true, false]) {
     const profile = recoveryProfileDb();
     const assignment = {
       ...prizeAssignment("1092", 200),
-      delivery: { revision: 2 },
     };
     const targetAssignment = {
       ...prizeAssignment(sameAssignment ? "1092" : "1111", 200),
       profileId: "target-profile",
-      delivery: { revision: 1 },
     };
     const prizeStore = recoveryPrizeStore({
       liveAssignment: assignment,
@@ -801,7 +801,7 @@ test("event prize recovery replaces metadata only for the same assignment", asyn
       sameAssignment ? "continued" : "deferred",
     );
     if (sameAssignment) {
-      assert.notStrictEqual(
+      assert.strictEqual(
         prizeStore.value(prizeStore.targetPath),
         targetAssignment,
       );
@@ -897,7 +897,9 @@ test("final prize recovery copies at most one page", async () => {
       if ("commit" in decision) {
         return {
           committed: false,
-          decision: decision.decision,
+          ...(decision.decision === undefined
+            ? {}
+            : { decision: decision.decision }),
           value: current,
         };
       }
@@ -905,7 +907,9 @@ test("final prize recovery copies at most one page", async () => {
       else values.set(path, decision.value);
       return {
         committed: true,
-        decision: decision.decision,
+        ...(decision.decision === undefined
+          ? {}
+          : { decision: decision.decision }),
         value: decision.value,
       };
     },
@@ -986,12 +990,20 @@ test("event prize recovery aborts a stalled mutation before lease expiry", async
         | { commit: false; decision?: string }
         | { value: unknown; decision?: string };
       if ("commit" in decision) {
-        return { committed: false, decision: decision.decision, value: lock };
+        return {
+          committed: false,
+          ...(decision.decision === undefined
+            ? {}
+            : { decision: decision.decision }),
+          value: lock,
+        };
       }
       lock = decision.value;
       return {
         committed: true,
-        decision: decision.decision,
+        ...(decision.decision === undefined
+          ? {}
+          : { decision: decision.decision }),
         value: decision.value,
       };
     },

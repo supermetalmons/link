@@ -3,6 +3,7 @@ import type {
   EventParticipant,
   EventParticipants,
 } from "./model.js";
+import type { Aura, EmojiId } from "../shared/appearance.js";
 import {
   eventState,
   eventParticipants,
@@ -13,8 +14,8 @@ import {
   copyEventParticipant,
 } from "./documents.js";
 export type EventOwnershipProfile = {
-  aura: string;
-  emoji: number | string;
+  aura: Aura;
+  emoji: EmojiId;
   eth: string;
   profileId: string;
   rating: number;
@@ -39,7 +40,7 @@ export type EventOwnershipResolutionSnapshot = Pick<
 > &
   Partial<Pick<EventOwnershipSnapshot, "profileById">>;
 type Signature_buildEventOwnershipQuery = (
-  event: EventData,
+  event: EventData | null,
   extras?: { loginUids?: string[]; profileIds?: string[] },
 ) => { loginUids: string[]; profileIds: string[] };
 type Signature_canonicalizeEventParticipants = (
@@ -106,7 +107,9 @@ const profileOwnershipUnavailable = () => {
 const uniqueStrings = (values: readonly unknown[]) =>
   Array.from(new Set(values.map(normalizeString).filter(Boolean)));
 
-const participantEntries = (event: EventData | null | undefined) =>
+const participantEntries = (
+  event: Pick<EventData, "participants"> | null | undefined,
+) =>
   eventParticipantEntries(eventParticipants(event)).map(
     ([profileId, participant]) => {
       const value = eventParticipantState(participant);
@@ -322,8 +325,8 @@ const canonicalizeEventParticipants: Signature_canonicalizeEventParticipants = (
   const participantsById: Record<string, EventParticipant> = {};
   let didChange = false;
   for (let index = 0; index < entries.length; index += 1) {
-    const entry = entries[index];
-    const canonicalProfileId = canonicalProfileIds[index];
+    const entry = entries[index]!;
+    const canonicalProfileId = canonicalProfileIds[index]!;
     participantsById[canonicalProfileId] = copyEventParticipant(
       entry.participant,
       {
@@ -344,7 +347,7 @@ const canonicalizeEventParticipants: Signature_canonicalizeEventParticipants = (
 };
 
 const canonicalizeEventPrizeSelections = <T>(
-  event: EventData,
+  event: Pick<EventData, "participants">,
   value: Record<string, T> | null | undefined,
   snapshot: EventOwnershipSnapshot | null,
 ): { didChange: boolean; selectionsByProfileId: Record<string, T> } => {
@@ -396,7 +399,7 @@ const canonicalizeEventPrizeSelections = <T>(
     for (const { entry } of matchingEntries) {
       const resolvedProfileId = resolveOwnedProfileReferences(snapshot, [
         { loginUid: entry.loginUid, profileId: entry.profileId },
-      ])[0];
+      ])[0]!;
       if (canonicalProfileId && canonicalProfileId !== resolvedProfileId) {
         throw profileOwnershipUnavailable();
       }

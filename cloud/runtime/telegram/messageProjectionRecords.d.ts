@@ -32,5 +32,5 @@ export declare function projectEventMessage(
   current: TelegramMessageDocument | null,
   value: EventTelegramDesiredChange["value"],
   expectedGeneration: number,
-  expectedApplied?: TelegramAppliedDocument,
+  expectedApplied?: TelegramAppliedDocument | null,
 ): TransactionDecision<TelegramMessageDocument>;

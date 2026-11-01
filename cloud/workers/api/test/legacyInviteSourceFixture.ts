@@ -1,11 +1,12 @@
+import { inviteDocumentFixture } from "./inviteDocumentFixture.ts";
 import {
   createInviteSourceD1Store,
   normalizeInviteSource,
 } from "../src/inviteSourceD1.ts";
 import { isSafeRecordKey } from "../src/recordKeys.ts";
-import { STATE_VALUE_FIELD } from "../src/stateCompatibility.ts";
 import type { StateQuery } from "../test/stateRepositoryTestTypes.ts";
 import type { InviteSourceMutation } from "../src/inviteSourceD1.ts";
+const STATE_VALUE_FIELD = ".sv";
 const RETIRED_FIELDS = new Set([
   "reactions",
   "wagers",
@@ -162,7 +163,7 @@ export function createLegacyInviteSourceD1Store(
         const owned = inviteSourcePath(path);
         if (!owned) throw new TypeError("invalid-invite-source-path");
         const fields = owned.nested.length
-          ? [owned.nested[0]]
+          ? [owned.nested[0]!]
           : record(value)
             ? Object.keys(value)
             : [];
@@ -201,7 +202,10 @@ export function createLegacyInviteSourceD1Store(
             );
           }
         }
-        mutations.push({ current, value: normalizeInviteSource(next) });
+        mutations.push({
+          current,
+          value: normalizeInviteSource(inviteDocumentFixture(next)),
+        });
       }
       return mutations;
     },

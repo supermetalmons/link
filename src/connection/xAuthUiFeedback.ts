@@ -1,3 +1,4 @@
+import { applicationStorageKey } from "../session/applicationDataStorage.ts";
 type XAuthUiFeedbackTarget = "signin" | "settings";
 type XAuthUiFeedbackKind = "error" | "success";
 
@@ -7,7 +8,7 @@ export type XAuthUiFeedback = {
   message: string;
 };
 
-const STORAGE_KEY = "xAuthUiFeedbackV1";
+const STORAGE_KEY = applicationStorageKey("xAuthUiFeedbackV1");
 
 let pendingFeedback: XAuthUiFeedback | null = null;
 const listeners = new Set<(feedback: XAuthUiFeedback) => void>();
@@ -29,7 +30,12 @@ const normalizeKind = (value: unknown): XAuthUiFeedbackKind | null => {
 };
 
 const normalizeFeedback = (value: unknown): XAuthUiFeedback | null => {
-  if (!value || typeof value !== "object") {
+  if (
+    !value ||
+    typeof value !== "object" ||
+    Array.isArray(value) ||
+    Object.keys(value).length !== 3
+  ) {
     return null;
   }
   const target = normalizeTarget((value as { target?: unknown }).target);

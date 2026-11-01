@@ -62,6 +62,8 @@ export const useWagerProposal = ({
     : undefined;
   const playerHasProfile = isAuthenticated && profileId !== "";
   const opponentHasProfile = !!(opponentProfile && opponentProfile.id);
+  const wagerRequiresManualReview =
+    wagerState?.blocked?.requiresManualReview === true;
   const hasAgreedWager = !!wagerState?.agreed;
   const hasResolvedWager = !!wagerState?.resolved;
   const playerHasProposed =
@@ -80,6 +82,7 @@ export const useWagerProposal = ({
   const canSubmitWager =
     hasConfirmedInviteWagers &&
     isEligibleForWager &&
+    !wagerRequiresManualReview &&
     !hasAgreedWager &&
     !hasResolvedWager &&
     !playerHasProposed;
@@ -126,5 +129,10 @@ export const useWagerProposal = ({
     onSubmit: handleWagerSubmit,
   };
 
-  return { canSubmitWager, handleWagerModeToggle, pickerProps };
+  return {
+    canSubmitWager,
+    wagerRequiresManualReview,
+    handleWagerModeToggle,
+    pickerProps,
+  };
 };

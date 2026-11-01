@@ -1,3 +1,6 @@
+const {
+  APPLICATION_DATA_SOCKET_PROTOCOL,
+}: typeof import("@mons/shared/data-contract") = require("@mons/shared/data-contract");
 const { WebSocket }: typeof import("ws") = require("ws");
 const {
   normalizeRecordKey,
@@ -26,7 +29,7 @@ type Dependencies = {
   connect: (
     url: string,
     options: import("ws").ClientOptions,
-    protocol: string,
+    protocol: string[],
   ) => import("ws").WebSocket;
   log: (message: string) => void;
   setTimeout: typeof setTimeout;
@@ -111,7 +114,7 @@ async function smokeConnection(
           maxPayload: maxMessageBytes,
           perMessageDeflate: false,
         },
-        REACTION_SOCKET_PROTOCOL,
+        [REACTION_SOCKET_PROTOCOL, APPLICATION_DATA_SOCKET_PROTOCOL],
       );
     } catch {
       reject(new Error("Reaction smoke could not open its WebSocket."));

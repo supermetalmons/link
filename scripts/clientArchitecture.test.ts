@@ -112,18 +112,18 @@ function collectDependencyMetadata(path: string): DependencyMetadata {
       typescript.isCallExpression(node) &&
       node.expression.kind === typescript.SyntaxKind.ImportKeyword &&
       node.arguments.length === 1 &&
-      typescript.isStringLiteralLike(node.arguments[0])
+      typescript.isStringLiteralLike(node.arguments[0]!)
     ) {
-      dynamic.push(node.arguments[0].text);
+      dynamic.push(node.arguments[0]!.text);
     }
     if (
       typescript.isCallExpression(node) &&
       typescript.isIdentifier(node.expression) &&
       node.expression.text === "require" &&
       node.arguments.length === 1 &&
-      typescript.isStringLiteralLike(node.arguments[0])
+      typescript.isStringLiteralLike(node.arguments[0]!)
     ) {
-      dynamic.push(node.arguments[0].text);
+      dynamic.push(node.arguments[0]!.text);
     }
     typescript.forEachChild(node, visit);
   }
@@ -311,7 +311,7 @@ function assertAcyclic(kind: DependencyGraphKind): void {
     (component) =>
       component.length > 1 ||
       (component.length === 1 &&
-        graph.get(component[0])?.includes(component[0])),
+        graph.get(component[0]!)?.includes(component[0]!)),
   );
   if (cyclicComponents.length === 0) {
     assert.ok(true);

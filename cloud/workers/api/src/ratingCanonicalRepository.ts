@@ -1,3 +1,4 @@
+import { createWagerStateD1Store } from "./wagerStateD1.ts";
 import type {
   RatingEventProgressRepository,
   RatingGameplayReader,
@@ -22,8 +23,15 @@ export function createCanonicalRatingRepository(
   options: CanonicalRepositoryOptions,
 ): Omit<CanonicalRatingRepository, "putEventProgressOutbox"> {
   const attempts = retryCount(options.maxAttempts);
+  const wagers = createWagerStateD1Store(db);
   return {
     readInviteMetadata: gameplay.readInviteMetadata,
+    async readWagerAgreement(inviteId, matchId) {
+      const { wager } = await wagers.read({ inviteId, matchId });
+      return wager?.agreed
+        ? { material: wager.agreed.material, count: wager.agreed.count }
+        : null;
+    },
     readMatchRecord: gameplay.readMatchRecord,
     readMatchPair: gameplay.readMatchPair,
     readProfileOwnershipSnapshot: gameplay.readProfileOwnershipSnapshot,

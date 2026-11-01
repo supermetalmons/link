@@ -1,4 +1,5 @@
 import { isSessionId } from "@mons/shared/session-auth";
+import { isCanonicalLoginUid, isSafeRecordKey } from "./recordKeys.ts";
 import type { SocketSession } from "./socketSession.ts";
 import { isParticipantSocketTag, type SocketRole } from "./socketTags.ts";
 
@@ -25,125 +26,159 @@ export type ReactionSocketAttachment = {
 } & SocketSession;
 export type RoomSocketAttachment =
   InviteSocketAttachment | MatchSocketAttachment | ReactionSocketAttachment;
+export type SocketAttachment = RoomSocketAttachment | null;
+export type SocketMatchKey = string | null;
+export type SocketInviteKey = string | null;
 
-declare const retainedAttachment: unique symbol;
-declare const retainedKey: unique symbol;
-export type RetainedSocketAttachment = {
-  readonly [retainedAttachment]: true;
-};
-export type RetainedInviteKey = { readonly [retainedKey]: "invite" };
-export type RetainedMatchKey = { readonly [retainedKey]: "match" };
-export type SocketMatchKey = string | RetainedMatchKey;
-export type SocketInviteKey = string | RetainedInviteKey;
-
-type AttachmentFields = {
-  channel?: unknown;
-  schemaVersion?: unknown;
-  authenticated?: unknown;
-  sid?: unknown;
-  authExpiresAtMs?: unknown;
-  inviteId?: unknown;
-  matchId?: unknown;
-  role?: unknown;
-  actorUid?: unknown;
-};
-
-function fields(value: RetainedSocketAttachment): AttachmentFields {
-  const retained: unknown = value;
-  return retained as AttachmentFields;
+export function decodeSocketAttachment(value: unknown): SocketAttachment {
+  if (value === null || typeof value !== "object" || Array.isArray(value))
+    return null;
+  const row = Object.fromEntries(Object.entries(value));
+  const session: SocketSession | null =
+    row.authenticated === false
+      ? { authenticated: false }
+      : row.authenticated === true &&
+          isSessionId(row.sid) &&
+          typeof row.authExpiresAtMs === "number" &&
+          Number.isSafeInteger(row.authExpiresAtMs) &&
+          row.authExpiresAtMs > 0
+        ? {
+            authenticated: true,
+            sid: row.sid,
+            authExpiresAtMs: row.authExpiresAtMs,
+          }
+        : null;
+  if (!session) return null;
+  const sessionKeys = session.authenticated
+    ? ["authenticated", "sid", "authExpiresAtMs"]
+    : ["authenticated"];
+  const keys =
+    row.channel === "reaction"
+      ? ["channel", "schemaVersion", "matchId", ...sessionKeys]
+      : [
+          "channel",
+          "schemaVersion",
+          "inviteId",
+          "role",
+          "actorUid",
+          ...sessionKeys,
+          ...(row.channel === "matches" ? ["matchId"] : []),
+        ];
+  if (
+    Object.keys(row).length !== keys.length ||
+    !keys.every((key) => Object.hasOwn(row, key))
+  )
+    return null;
+  if (row.channel === "reaction")
+    return row.schemaVersion === 2 && isSafeRecordKey(row.matchId)
+      ? {
+          channel: row.channel,
+          schemaVersion: 2,
+          matchId: row.matchId,
+          ...session,
+        }
+      : null;
+  if (
+    (row.channel !== "matches" &&
+      row.channel !== "metadata" &&
+      row.channel !== "wagers") ||
+    row.schemaVersion !== 1 ||
+    !isSafeRecordKey(row.inviteId) ||
+    (row.role !== "host" && row.role !== "guest" && row.role !== "spectator") ||
+    (row.role === "spectator"
+      ? row.actorUid !== null
+      : !session.authenticated || !isCanonicalLoginUid(row.actorUid))
+  )
+    return null;
+  const actorUid = typeof row.actorUid === "string" ? row.actorUid : null;
+  if (row.channel === "matches")
+    return isSafeRecordKey(row.matchId)
+      ? {
+          channel: row.channel,
+          schemaVersion: 1,
+          inviteId: row.inviteId,
+          matchId: row.matchId,
+          role: row.role,
+          actorUid,
+          ...session,
+        }
+      : null;
+  return {
+    channel: row.channel,
+    schemaVersion: 1,
+    inviteId: row.inviteId,
+    role: row.role,
+    actorUid,
+    ...session,
+  };
 }
-
 export function readSocketAttachment(
   socket: Pick<WebSocket, "deserializeAttachment">,
-): RetainedSocketAttachment {
-  const value: unknown = socket.deserializeAttachment();
-  return value as RetainedSocketAttachment;
+): SocketAttachment {
+  try {
+    return decodeSocketAttachment(socket.deserializeAttachment());
+  } catch {
+    return null;
+  }
 }
-
 export function readOptionalSocketAttachment(
   socket: Pick<WebSocket, "deserializeAttachment"> | undefined,
-): RetainedSocketAttachment {
-  const value: unknown = socket?.deserializeAttachment();
-  return value as RetainedSocketAttachment;
+): SocketAttachment {
+  return socket ? readSocketAttachment(socket) : null;
 }
-
 export function socketAttachmentChannel(
-  value: RetainedSocketAttachment,
-): unknown {
-  return fields(value)?.channel;
+  value: SocketAttachment,
+): RoomSocketAttachment["channel"] | null {
+  return value?.channel ?? null;
 }
-
 export function socketAttachmentSchemaVersion(
-  value: RetainedSocketAttachment,
-): unknown {
-  return fields(value)?.schemaVersion;
+  value: SocketAttachment,
+): 1 | 2 | null {
+  return value?.schemaVersion ?? null;
 }
-
 export function socketAttachmentMatchKey(
-  value: RetainedSocketAttachment,
-): RetainedMatchKey {
-  return fields(value).matchId as RetainedMatchKey;
+  value: SocketAttachment,
+): SocketMatchKey {
+  return value && "matchId" in value ? value.matchId : null;
 }
-
 export function readSocketMatchGroupKey(
   socket: Pick<WebSocket, "deserializeAttachment">,
-): RetainedMatchKey {
-  const { matchId } = socket.deserializeAttachment() as { matchId: unknown };
-  return matchId as RetainedMatchKey;
+): SocketMatchKey {
+  return socketAttachmentMatchKey(readSocketAttachment(socket));
 }
-
 export function socketAttachmentInviteKey(
-  value: RetainedSocketAttachment,
-): RetainedInviteKey {
-  return fields(value)?.inviteId as RetainedInviteKey;
+  value: SocketAttachment,
+): SocketInviteKey {
+  return value && "inviteId" in value ? value.inviteId : null;
 }
-
 export function socketAttachmentMatches(
-  value: RetainedSocketAttachment,
+  value: SocketAttachment,
   matchId: SocketMatchKey,
 ): boolean {
-  return fields(value).matchId === matchId;
+  return value !== null && "matchId" in value && value.matchId === matchId;
 }
-
 export function unsupportedReactionAttachment(
-  value: RetainedSocketAttachment,
+  value: SocketAttachment,
 ): boolean {
-  const attachment = fields(value);
-  return (
-    (attachment?.channel === undefined || attachment.channel === "reaction") &&
-    attachment?.schemaVersion !== 2
-  );
+  return value === null;
 }
-
 export function socketAttachmentRequiresSession(
-  value: RetainedSocketAttachment,
+  value: SocketAttachment,
   tags: () => string[],
 ): boolean {
-  const attachment = fields(value);
-  return (
-    attachment?.authenticated === true || tags().some(isParticipantSocketTag)
-  );
+  return value?.authenticated === true || tags().some(isParticipantSocketTag);
 }
-
 export function socketAttachmentSessionCurrent(
-  value: RetainedSocketAttachment,
+  value: SocketAttachment,
 ): boolean {
-  const attachment = fields(value);
-  return (
-    attachment?.authenticated === true &&
-    isSessionId(attachment.sid) &&
-    Number.isSafeInteger(attachment.authExpiresAtMs) &&
-    (attachment.authExpiresAtMs as number) > Date.now()
-  );
+  return value?.authenticated === true && value.authExpiresAtMs > Date.now();
 }
-
 export function nextSocketAttachmentExpiry(
   next: number | null,
-  value: RetainedSocketAttachment,
+  value: SocketAttachment,
 ): number | null {
-  const attachment = fields(value);
-  return attachment?.authenticated === true
-    ? Math.min(next ?? Infinity, attachment.authExpiresAtMs as number)
+  return value?.authenticated === true
+    ? Math.min(next ?? Infinity, value.authExpiresAtMs)
     : next;
 }
 
@@ -157,43 +192,36 @@ export type InviteSocketAccessSource = {
 };
 export type InviteSocketAccessPolicy<
   Source extends InviteSocketAccessSource = InviteSocketAccessSource,
-> = {
-  (attachment: InviteSocketAccess, source: Source): boolean;
-  (attachment: RetainedSocketAttachment, source: Source): unknown;
-};
-
-export function retainedSocketCanReceiveInvite(
-  value: InviteSocketAccess | RetainedSocketAttachment,
+> = (
+  attachment: InviteSocketAccess | SocketAttachment,
+  source: Source,
+) => boolean;
+export function socketCanReceiveInvite(
+  attachment: InviteSocketAccess | SocketAttachment,
   source: InviteSocketAccessSource,
-): unknown {
-  const retained: unknown = value;
-  const attachment = retained as AttachmentFields;
-  if (attachment.role === "host") {
+): boolean {
+  if (attachment === null || !("role" in attachment)) return false;
+  if (attachment.role === "host")
     return (
       attachment.authenticated && attachment.actorUid === source.snapshot.hostId
     );
-  }
-  if (attachment.role === "guest") {
+  if (attachment.role === "guest")
     return (
       attachment.authenticated &&
       source.snapshot.guestId !== null &&
       attachment.actorUid === source.snapshot.guestId
     );
-  }
   return (
     source.snapshot.guestId !== null ||
     (attachment.authenticated && !source.passwordProtected)
   );
 }
-
 export function untrimmedSocketInviteKey(inviteId: SocketInviteKey): boolean {
-  return inviteId !== (inviteId as unknown as { trim(): unknown }).trim();
+  return inviteId === null || inviteId !== inviteId.trim();
 }
-
 export function untrimmedSocketMatchKey(matchId: SocketMatchKey): boolean {
-  return matchId !== (matchId as unknown as { trim(): unknown }).trim();
+  return matchId === null || matchId !== matchId.trim();
 }
-
-export function socketMatchKeyBinding(matchId: SocketMatchKey): unknown {
+export function socketMatchKeyBinding(matchId: SocketMatchKey): string | null {
   return matchId;
 }

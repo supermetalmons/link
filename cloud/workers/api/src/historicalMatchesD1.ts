@@ -7,6 +7,7 @@ import {
   buildHistoricalMatchPair,
   type HistoricalMatchSource,
 } from "./historicalMatches.ts";
+import { canonicalJson } from "./canonicalJson.ts";
 
 const HISTORICAL_MATCH_SCHEMA_VERSION = 1;
 
@@ -51,6 +52,12 @@ function canonicalPair(pair: HistoricalMatchPair): HistoricalMatchPair | null {
   });
 }
 
+function pairJson(pair: HistoricalMatchPair): string {
+  return canonicalJson(pair, () => {
+    throw new HistoricalMatchCorruption();
+  });
+}
+
 function parseRow(row: HistoricalMatchRow): HistoricalMatchSnapshot {
   let pair: unknown;
   try {
@@ -87,7 +94,7 @@ function historicalMatchReadStatement(
 ): D1PreparedStatement {
   return db
     .prepare(
-      `SELECT * FROM historical_match_pairs
+      `SELECT * FROM historical_match_pairs_canonical
        WHERE invite_id = ? AND match_id = ?`,
     )
     .bind(inviteId, matchId);
@@ -136,11 +143,11 @@ export async function writeHistoricalMatchSnapshot(
   ) {
     throw new TypeError("invalid-historical-match-snapshot");
   }
-  const snapshotJson = JSON.stringify(pair);
+  const snapshotJson = pairJson(pair);
   const results = await db.batch<HistoricalMatchRow>([
     db
       .prepare(
-        `INSERT INTO historical_match_pairs (
+        `INSERT INTO historical_match_pairs_canonical (
          invite_id, match_id, snapshot_json, source_kind, finalized_at_ms,
          archived_at_ms, schema_version, revision
        ) VALUES (?, ?, ?, ?, ?, ?, ?, 1)
@@ -150,10 +157,10 @@ export async function writeHistoricalMatchSnapshot(
          finalized_at_ms = excluded.finalized_at_ms,
          archived_at_ms = excluded.archived_at_ms,
          schema_version = excluded.schema_version,
-         revision = historical_match_pairs.revision + 1
+         revision = historical_match_pairs_canonical.revision + 1
        WHERE excluded.source_kind = 'rating'
-         AND historical_match_pairs.source_kind != 'rating'
-         AND (? IS NULL OR historical_match_pairs.revision = ?)`,
+         AND historical_match_pairs_canonical.source_kind != 'rating'
+         AND (? IS NULL OR historical_match_pairs_canonical.revision = ?)`,
       )
       .bind(
         input.inviteId,
@@ -177,7 +184,7 @@ export async function writeHistoricalMatchSnapshot(
   }
   const storedPair = canonicalPair(stored.pair);
   if (!storedPair) throw new HistoricalMatchCorruption();
-  if (JSON.stringify(storedPair) !== snapshotJson) {
+  if (pairJson(storedPair) !== snapshotJson) {
     throw new HistoricalMatchConflict();
   }
   return stored;

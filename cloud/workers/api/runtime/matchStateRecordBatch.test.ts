@@ -1,13 +1,18 @@
-import { timerStartStoreFixture } from "../test/matchClaimFixture.ts";
+import { uncheckedMatchStorageFixture } from "./canonicalMatchTestFixture.ts";
+import { matchDocumentFixture } from "../test/matchRecordFixture.ts";
+import {
+  runInCanonicalMatchWriterFixture as runInDurableObject,
+  canonicalMatchRpc as getMatchStateRpc,
+} from "./canonicalMatchTestFixture.ts";
 import {
   matchRecordFixture,
   unwrapMatchStateWireFixture,
 } from "../test/matchRecordFixture.ts";
 import { env } from "cloudflare:workers";
-import { runInDurableObject, type D1Migration } from "cloudflare:test";
+import { type D1Migration } from "cloudflare:test";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { buildMatchStateRouteStatements } from "../src/matchStateD1.ts";
-import { getMatchStateRpc } from "../src/matchStateRpc.ts";
+
 import { createMatchStateSource } from "../src/matchStateSource.ts";
 import { MatchStateStore } from "../src/matchStateStore.ts";
 import {
@@ -40,19 +45,19 @@ async function roomFixture() {
       matchId: inviteId,
       playerId: "host-login",
       marker: "host-created",
-      value: { color: "white", fen: "host-position" },
+      value: matchDocumentFixture({ color: "white", fen: "host-position" }),
     },
     {
       matchId: inviteId,
       playerId: "guest-login",
       marker: "guest-created",
-      value: { color: "black", fen: "guest-position" },
+      value: matchDocumentFixture({ color: "black", fen: "guest-position" }),
     },
     {
       matchId: `${inviteId}1`,
       playerId: "host-login",
       marker: "rematch-created",
-      value: { color: "black", fen: "rematch-position" },
+      value: matchDocumentFixture({ color: "black", fen: "rematch-position" }),
     },
   ];
   const created = unwrapMatchStateWireFixture(
@@ -68,8 +73,8 @@ async function roomFixture() {
       buildMatchStateRouteStatements(
         db,
         indices.map((index) => ({
-          actorUid: targets[index].playerId,
-          matchId: targets[index].matchId,
+          actorUid: targets[index]!.playerId,
+          matchId: targets[index]!.matchId,
           kind: "durable" as const,
           inviteId,
           epoch: 2,
@@ -182,16 +187,7 @@ function observedStore(storage: DurableObjectStorage) {
       return typeof value === "function" ? value.bind(target) : value;
     },
   });
-  const store = new MatchStateStore(measuredStorage, {
-    timerStarts: timerStartStoreFixture({
-      getOrAdvance: () => {
-        throw new Error("unexpected-timer-write");
-      },
-      deletePair: () => {
-        throw new Error("unexpected-timer-write");
-      },
-    }),
-  });
+  const store = new MatchStateStore(measuredStorage, {});
   calls.length = 0;
   return { store, calls };
 }
@@ -202,33 +198,33 @@ describe("routed match record batches", () => {
     await fixture.register([0, 1, 2]);
     const { source, calls, d1Calls } = observedSource();
     const targets = [
-      fixture.targets[2],
+      fixture.targets[2]!,
       { playerId: "missing-login", matchId: fixture.inviteId },
-      fixture.targets[0],
-      fixture.targets[1],
+      fixture.targets[0]!,
+      fixture.targets[1]!,
     ];
     expect(await source.readMatchRecords(targets)).toEqual([
-      fixture.values[2],
+      fixture.values[2]!,
       null,
-      fixture.values[0],
-      fixture.values[1],
+      fixture.values[0]!,
+      fixture.values[1]!,
     ]);
     expect(calls).toHaveLength(1);
     expect(d1Calls).toHaveLength(2);
-    expect(d1Calls[0].queries).toHaveLength(targets.length + 1);
-    expect(d1Calls[0].queries[0]).toContain("FROM match_state_control");
+    expect(d1Calls[0]!.queries).toHaveLength(targets.length + 1);
+    expect(d1Calls[0]!.queries[0]!).toContain("FROM match_state_control");
     expect(
-      d1Calls[0].queries
+      d1Calls[0]!.queries
         .slice(1)
-        .every((query) => query.includes("FROM match_state_routes")),
+        .every((query) => query.includes("FROM match_state_routes_canonical")),
     ).toBe(true);
-    expect(d1Calls[1].queries).toHaveLength(1);
-    expect(d1Calls[1].queries[0]).toContain("FROM match_state_control");
-    expect(d1Calls[0].session).not.toBe(d1Calls[1].session);
+    expect(d1Calls[1]!.queries).toHaveLength(1);
+    expect(d1Calls[1]!.queries[0]!).toContain("FROM match_state_control");
+    expect(d1Calls[0]!.session).not.toBe(d1Calls[1]!.session);
     d1Calls.length = 0;
-    expect(await source.readMatchRecord(targets[1])).toBeNull();
+    expect(await source.readMatchRecord(targets[1]!)).toBeNull();
     expect(d1Calls.map(({ queries }) => queries.length)).toEqual([2, 1]);
-    expect(d1Calls[0].session).not.toBe(d1Calls[1].session);
+    expect(d1Calls[0]!.session).not.toBe(d1Calls[1]!.session);
     expect(calls).toHaveLength(1);
   });
 
@@ -237,13 +233,15 @@ describe("routed match record batches", () => {
     await runInDurableObject(
       env.INVITE_REACTIONS.getByName(fixture.inviteId),
       (_instance, state) => {
+        uncheckedMatchStorageFixture(state.storage, "claims");
+        uncheckedMatchStorageFixture(state.storage, "records");
         state.storage.sql.exec(
-          "INSERT INTO match_state_claims(match_id, value_json) VALUES (?, ?)",
+          "INSERT INTO match_state_claims_canonical(match_id, value_json) VALUES (?, ?)",
           fixture.inviteId,
           "invalid-json",
         );
         state.storage.sql.exec(
-          "INSERT INTO match_state_records(match_id, player_id, value_json) VALUES (?, ?, ?)",
+          "INSERT INTO match_state_records_canonical(match_id, player_id, value_json) VALUES (?, ?, ?)",
           fixture.inviteId,
           "unrelated-login",
           "invalid-json",
@@ -257,14 +255,19 @@ describe("routed match record batches", () => {
           inviteId: fixture.inviteId,
           epoch: 2,
           requests: [
-            fixture.targets[1],
-            fixture.targets[0],
+            fixture.targets[1]!,
+            fixture.targets[0]!,
             missing,
-            fixture.targets[1],
+            fixture.targets[1]!,
           ],
         }),
       ),
-    ).toEqual([fixture.values[1], fixture.values[0], null, fixture.values[1]]);
+    ).toEqual([
+      fixture.values[1]!,
+      fixture.values[0]!,
+      null,
+      fixture.values[1]!,
+    ]);
     expect(
       unwrapMatchStateWireFixture(
         await fixture.rpc.readCanonicalMatchRecords({
@@ -272,15 +275,15 @@ describe("routed match record batches", () => {
           epoch: 2,
           requests: Array.from(
             { length: MAX_MATCH_STATE_RECORD_READS },
-            () => fixture.targets[0],
+            () => fixture.targets[0]!,
           ),
         }),
       ),
-    ).toEqual(Array(MAX_MATCH_STATE_RECORD_READS).fill(fixture.values[0]));
+    ).toEqual(Array(MAX_MATCH_STATE_RECORD_READS).fill(fixture.values[0]!));
     await fixture.register([0]);
     const { source } = observedSource();
-    expect(await source.readMatchRecord(fixture.targets[0])).toEqual(
-      fixture.values[0],
+    expect(await source.readMatchRecord(fixture.targets[0]!)).toEqual(
+      fixture.values[0]!,
     );
   });
 
@@ -290,11 +293,12 @@ describe("routed match record batches", () => {
     await runInDurableObject(
       env.INVITE_REACTIONS.getByName(fixture.inviteId),
       (_instance, state) => {
+        uncheckedMatchStorageFixture(state.storage, "records");
         state.storage.sql.exec(
-          "UPDATE match_state_records SET value_json = ? WHERE match_id = ? AND player_id = ?",
+          "UPDATE match_state_records_canonical SET value_json = ? WHERE match_id = ? AND player_id = ?",
           "invalid-json",
-          fixture.targets[1].matchId,
-          fixture.targets[1].playerId,
+          fixture.targets[1]!.matchId,
+          fixture.targets[1]!.playerId,
         );
       },
     );
@@ -302,7 +306,7 @@ describe("routed match record batches", () => {
       await fixture.rpc.readCanonicalMatchRecords({
         inviteId: fixture.inviteId,
         epoch: 2,
-        requests: [fixture.targets[0], fixture.targets[1]],
+        requests: [fixture.targets[0]!, fixture.targets[1]!],
       }),
     ).toEqual({
       ok: false,
@@ -314,15 +318,21 @@ describe("routed match record batches", () => {
 
   it("returns independently parsed duplicate records with retained JSON intact", async () => {
     const fixture = await roomFixture();
-    const value = { nested: { absent: null, retained: [1, true] }, timer: "" };
+    const value = matchDocumentFixture({
+      reaction: {
+        uuid: "11111111-1111-4111-8111-111111111111",
+        kind: "gg",
+        variation: 1,
+      },
+    });
     await runInDurableObject(
       env.INVITE_REACTIONS.getByName(fixture.inviteId),
       (_instance, state) => {
         state.storage.sql.exec(
-          "UPDATE match_state_records SET value_json = ? WHERE match_id = ? AND player_id = ?",
+          "UPDATE match_state_records_canonical SET value_json = ? WHERE match_id = ? AND player_id = ?",
           JSON.stringify(value),
-          fixture.targets[0].matchId,
-          fixture.targets[0].playerId,
+          fixture.targets[0]!.matchId,
+          fixture.targets[0]!.playerId,
         );
       },
     );
@@ -330,13 +340,13 @@ describe("routed match record batches", () => {
       await fixture.rpc.readCanonicalMatchRecords({
         inviteId: fixture.inviteId,
         epoch: 2,
-        requests: [fixture.targets[0], fixture.targets[0]],
+        requests: [fixture.targets[0]!, fixture.targets[0]!],
       }),
     );
     expect(records).toEqual([value, value]);
-    expect(records[0]).not.toBe(records[1]);
-    expect(matchRecordFixture(records[0])?.nested).not.toBe(
-      matchRecordFixture(records[1])?.nested,
+    expect(records[0]!).not.toBe(records[1]!);
+    expect(matchRecordFixture(records[0]!)?.reaction).not.toBe(
+      matchRecordFixture(records[1]!)?.reaction,
     );
   });
 
@@ -347,7 +357,7 @@ describe("routed match record batches", () => {
       null,
       {},
       [],
-      Array(MAX_MATCH_STATE_RECORD_READS + 1).fill(fixture.targets[0]),
+      Array(MAX_MATCH_STATE_RECORD_READS + 1).fill(fixture.targets[0]!),
     ]) {
       expect(
         await fixture.rpc.readCanonicalMatchRecords({
@@ -361,7 +371,7 @@ describe("routed match record batches", () => {
       await fixture.rpc.readCanonicalMatchRecords({
         inviteId: fixture.inviteId,
         epoch: 3,
-        requests: [fixture.targets[0]],
+        requests: [fixture.targets[0]!],
       }),
     ).toMatchObject({
       ok: false,
@@ -388,7 +398,7 @@ describe("routed match record batches", () => {
       (_instance, state) => {
         expect(
           state.storage.sql
-            .exec("SELECT invite_id FROM invite_metadata")
+            .exec("SELECT invite_id FROM invite_metadata_canonical")
             .toArray(),
         ).toEqual([]);
       },
@@ -406,7 +416,7 @@ describe("routed match record batches", () => {
           null,
           {},
           [],
-          Array(MAX_MATCH_STATE_RECORD_READS + 1).fill(fixture.targets[0]),
+          Array(MAX_MATCH_STATE_RECORD_READS + 1).fill(fixture.targets[0]!),
         ]) {
           expect(() =>
             store.readRecords({
@@ -420,13 +430,13 @@ describe("routed match record batches", () => {
           store.readRecords({
             ...input,
             requests: [
-              fixture.targets[0],
+              fixture.targets[0]!,
               { matchId: "different-invite", playerId: "host-login" },
             ],
           }),
         ).toThrow("match-state-invalid-target");
         expect(calls).toHaveLength(1);
-        expect(calls[0].query).toContain("FROM match_state_source");
+        expect(calls[0]!.query).toContain("FROM match_state_source_canonical");
       },
     );
     expect(
@@ -434,7 +444,7 @@ describe("routed match record batches", () => {
         inviteId: fixture.inviteId,
         epoch: 2,
         requests: [
-          fixture.targets[0],
+          fixture.targets[0]!,
           { matchId: "different-invite", playerId: "host-login" },
         ],
       }),
@@ -456,10 +466,10 @@ describe("routed match record batches", () => {
         );
         for (const request of requests) {
           state.storage.sql.exec(
-            "INSERT INTO match_state_records(match_id, player_id, value_json) VALUES (?, ?, ?)",
+            "INSERT INTO match_state_records_canonical(match_id, player_id, value_json) VALUES (?, ?, ?)",
             request.matchId,
             request.playerId,
-            JSON.stringify({ match: request.matchId }),
+            JSON.stringify(matchDocumentFixture({ fen: request.matchId })),
           );
         }
         const input = { inviteId: fixture.inviteId, epoch: 2, requests };
@@ -478,8 +488,8 @@ describe("routed match record batches", () => {
         calls.length = 0;
         expect(store.readRecords(input)).toEqual(values);
         expect(calls).toHaveLength(2);
-        expect(calls[0].query).toContain("FROM match_state_source");
-        expect(calls[1].bindings).toHaveLength(
+        expect(calls[0]!.query).toContain("FROM match_state_source_canonical");
+        expect(calls[1]!.bindings).toHaveLength(
           2 * MAX_MATCH_STATE_RECORD_READS,
         );
         const rowsRead = calls.reduce(
@@ -490,10 +500,10 @@ describe("routed match record batches", () => {
         expect(calls.every((call) => call.cursor.rowsWritten === 0)).toBe(true);
         for (let index = 0; index < 256; index++) {
           state.storage.sql.exec(
-            "INSERT INTO match_state_records(match_id, player_id, value_json) VALUES (?, ?, ?)",
+            "INSERT INTO match_state_records_canonical(match_id, player_id, value_json) VALUES (?, ?, ?)",
             `${fixture.inviteId}${index + 100}`,
             "unrelated-login",
-            "invalid-json",
+            JSON.stringify(matchDocumentFixture({ fen: "unrelated" })),
           );
         }
         calls.length = 0;
@@ -514,36 +524,38 @@ describe("routed match record batches", () => {
     await second.register([0]);
     const { source, calls } = observedSource();
     const requests = [
-      first.targets[2],
-      second.targets[0],
-      first.targets[1],
-      first.targets[0],
+      first.targets[2]!,
+      second.targets[0]!,
+      first.targets[1]!,
+      first.targets[0]!,
     ];
     expect(await source.readMatchRecords(requests)).toEqual([
-      first.values[2],
-      second.values[0],
-      first.values[1],
-      first.values[0],
+      first.values[2]!,
+      second.values[0]!,
+      first.values[1]!,
+      first.values[0]!,
     ]);
     expect(calls).toHaveLength(2);
     expect(
       calls.find((call) => call.inviteId === first.inviteId)?.requests,
-    ).toEqual([first.targets[2], first.targets[1], first.targets[0]]);
+    ).toEqual([first.targets[2]!, first.targets[1]!, first.targets[0]!]);
     expect(calls.every((call) => call.epoch === 2)).toBe(true);
-    expect(await source.readMatchRecord(first.targets[2])).toEqual(
-      first.values[2],
+    expect(await source.readMatchRecord(first.targets[2]!)).toEqual(
+      first.values[2]!,
     );
     expect(calls.at(-1)).toEqual({
       inviteId: first.inviteId,
       epoch: 2,
-      requests: [first.targets[2]],
+      requests: [first.targets[2]!],
     });
   });
 
-  it("preserves mixed legacy values, duplicate requests and durable records in order", async () => {
+  it("preserves mixed archived values, duplicate requests and durable records in order", async () => {
     const fixture = await roomFixture();
     await fixture.register([0]);
-    const legacyValues = [[1, { legacy: true }], null, false];
+    const legacyValues = ["first", "second", "third"].map((fen) =>
+      matchDocumentFixture({ fen }),
+    );
     const legacy = legacyValues.map(() => ({
       playerId: "legacy-login",
       matchId: `legacy-${crypto.randomUUID()}`,
@@ -554,7 +566,7 @@ describe("routed match record batches", () => {
         legacy.map(({ playerId, matchId }) => ({
           actorUid: playerId,
           matchId,
-          kind: "legacy",
+          kind: "archive",
           inviteId: null,
           epoch: 2,
         })),
@@ -562,7 +574,7 @@ describe("routed match record batches", () => {
       ...legacy.map(({ playerId, matchId }, index) =>
         db
           .prepare(
-            "INSERT INTO match_state_legacy_records VALUES (?, ?, ?, ?, ?, ?)",
+            "INSERT INTO match_state_records_canonical VALUES (?, ?, ?, ?, ?, ?)",
           )
           .bind(
             playerId,
@@ -580,31 +592,31 @@ describe("routed match record batches", () => {
     const { source, calls } = observedSource();
     expect(
       await source.readMatchRecords([
-        legacy[2],
-        fixture.targets[0],
-        legacy[0],
-        fixture.targets[1],
-        legacy[1],
-        legacy[2],
-        fixture.targets[0],
-        legacy[0],
+        legacy[2]!,
+        fixture.targets[0]!,
+        legacy[0]!,
+        fixture.targets[1]!,
+        legacy[1]!,
+        legacy[2]!,
+        fixture.targets[0]!,
+        legacy[0]!,
       ]),
     ).toEqual([
-      false,
-      fixture.values[0],
-      legacyValues[0],
+      legacyValues[2]!,
+      fixture.values[0]!,
+      legacyValues[0]!,
       null,
-      null,
-      false,
-      fixture.values[0],
-      legacyValues[0],
+      legacyValues[1]!,
+      legacyValues[2]!,
+      fixture.values[0]!,
+      legacyValues[0]!,
     ]);
     for (let index = 0; index < legacy.length; index++) {
-      expect(await source.readMatchRecord(legacy[index])).toEqual(
+      expect(await source.readMatchRecord(legacy[index]!)).toEqual(
         legacyValues[index],
       );
     }
-    expect(await source.readMatchRecord(fixture.targets[1])).toBeNull();
+    expect(await source.readMatchRecord(fixture.targets[1]!)).toBeNull();
     expect(
       await source.readMatchRecord({
         playerId: "missing-login",
@@ -612,11 +624,14 @@ describe("routed match record batches", () => {
       }),
     ).toBeNull();
     expect(calls).toHaveLength(1);
-    expect(calls[0].requests).toEqual([fixture.targets[0], fixture.targets[0]]);
+    expect(calls[0]!.requests).toEqual([
+      fixture.targets[0]!,
+      fixture.targets[0]!,
+    ]);
     expect(network).not.toHaveBeenCalled();
   });
 
-  it.each(["durable", "legacy"] as const)(
+  it.each(["durable", "archive"] as const)(
     "fails closed when a %s route has no physical record",
     async (kind) => {
       const fixture = await roomFixture();
@@ -636,12 +651,12 @@ describe("routed match record batches", () => {
       await expect(source.readMatchRecords([missing])).rejects.toThrow(
         kind === "durable"
           ? "match-state-record-unavailable"
-          : "match-state-legacy-record-unavailable",
+          : "match-state-archive-record-unavailable",
       );
       await expect(source.readMatchRecord(missing)).rejects.toThrow(
         kind === "durable"
           ? "match-state-record-unavailable"
-          : "match-state-legacy-record-unavailable",
+          : "match-state-archive-record-unavailable",
       );
     },
   );
@@ -667,11 +682,11 @@ describe("routed match record batches", () => {
       )
       .run();
     const { source, calls } = observedSource();
-    expect(await source.readMatchRecords([fixture.targets[0]])).toEqual([
-      fixture.values[0],
+    expect(await source.readMatchRecords([fixture.targets[0]!])).toEqual([
+      fixture.values[0]!,
     ]);
-    expect(await source.readMatchRecord(fixture.targets[0])).toEqual(
-      fixture.values[0],
+    expect(await source.readMatchRecord(fixture.targets[0]!)).toEqual(
+      fixture.values[0]!,
     );
     const callsBefore = calls.length;
     await expect(source.readMatchRecords([stale])).rejects.toThrow(

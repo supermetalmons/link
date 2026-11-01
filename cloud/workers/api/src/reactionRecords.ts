@@ -1,17 +1,18 @@
-import type { InviteRoomSnapshot } from "@mons/shared/reactions";
+import {
+  isInviteReaction,
+  type InviteReaction,
+  type InviteRoomSnapshot,
+} from "@mons/shared/reactions";
 
-declare const storedReaction: unique symbol;
-export type StoredReactionDocument = { readonly [storedReaction]: true };
-export type StoredReactionSnapshot = Omit<InviteRoomSnapshot, "reactions"> & {
-  reactions: Record<string, StoredReactionDocument>;
-};
+export type StoredReactionDocument = InviteReaction;
+export type StoredReactionSnapshot = InviteRoomSnapshot;
 
 export function decodeStoredReaction(value: string): StoredReactionDocument {
   const parsed: unknown = JSON.parse(value);
-  return parsed as StoredReactionDocument;
+  if (!isInviteReaction(parsed)) throw new TypeError("invalid-stored-reaction");
+  return parsed;
 }
 
-export function storedReactionUuid(value: StoredReactionDocument): unknown {
-  const retained: unknown = value;
-  return (retained as { uuid?: unknown }).uuid;
+export function storedReactionUuid(value: StoredReactionDocument): string {
+  return value.uuid;
 }

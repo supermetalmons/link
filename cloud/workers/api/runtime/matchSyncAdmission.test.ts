@@ -1,22 +1,31 @@
+import { inviteDocumentFixture } from "../test/inviteDocumentFixture.ts";
+import {
+  evictCanonicalMatchRoom as evictDurableObject,
+  runCanonicalMatchAlarm as runDurableObjectAlarm,
+} from "./canonicalMatchTestFixture.ts";
+import { canonicalMatchEnvironment } from "./canonicalMatchTestFixture.ts";
+import { activateCanonicalApplicationFixture } from "./applicationRoomFixture.ts";
+import { runInCanonicalMatchRoom as runInDurableObject } from "./canonicalMatchTestFixture.ts";
 import { matchDocumentFixture } from "../test/matchRecordFixture.ts";
 import { INVITE_METADATA_SOCKET_PROTOCOL } from "@mons/shared/invite-metadata";
 import { INVITE_WAGERS_SOCKET_PROTOCOL } from "@mons/shared/invite-wagers";
 import { MATCH_SYNC_SOCKET_PROTOCOL } from "@mons/shared/match-sync";
-import {
-  evictDurableObject,
-  runDurableObjectAlarm,
-  runInDurableObject,
-} from "cloudflare:test";
-import { env } from "cloudflare:workers";
-import { afterEach, describe, expect, it, vi } from "vitest";
+
+import { env as nativeEnv } from "cloudflare:workers";
+
+import { beforeAll, afterEach, describe, expect, it, vi } from "vitest";
 import type { InviteReactions } from "../src/inviteReactions.ts";
 import type {
   MatchStateSyncReadRequest,
   MatchStateSyncReadResult,
 } from "../src/matchStateTypes.ts";
-import { MAX_CACHED_MATCH_SYNC_STATES } from "../src/matchSyncRoom.ts";
+import {
+  MAX_CACHED_MATCH_SYNC_STATES,
+  type MatchSyncRoom,
+} from "../src/matchSyncRoom.ts";
 import { socketTestSessionHeaders } from "../test/socketTestSession.ts";
 import { reactionSocketTestHeaders } from "./presentationStorageFixture.ts";
+const env = canonicalMatchEnvironment(nativeEnv);
 
 type Room = DurableObjectStub<InviteReactions>;
 type Source = {
@@ -42,7 +51,8 @@ async function install(room: Room, source: Source) {
         ) => Promise<MatchStateSyncReadResult>;
       };
     };
-    mutable.inviteReader = async () => structuredClone(source.invite);
+    mutable.inviteReader = async () =>
+      inviteDocumentFixture(structuredClone(source.invite));
     mutable.wagerReader = async () => [];
     const readMatch = (playerId: string) => {
       source.reads++;
@@ -50,7 +60,7 @@ async function install(room: Room, source: Source) {
         version: 2,
         color: playerId === "host-login" ? "white" : "black",
         emojiId: 1,
-        aura: "",
+        aura: "none" as const,
         gameVariant: "standard",
         fen: source.fen,
         status: "",
@@ -298,8 +308,8 @@ describe("live match socket admission", () => {
     const rematch = request(inviteId, { "X-Mons-Match-Match": `${inviteId}1` });
     await expectFull(rematch);
     await expectFull(spectator(inviteId));
-    await close(hosts[0]);
-    await close(viewers[0]);
+    await close(hosts[0]!);
+    await close(viewers[0]!);
     accept(await room.fetch(rematch));
     accept(await room.fetch(spectator(inviteId)));
     expect(
@@ -425,6 +435,8 @@ describe("live match socket admission", () => {
       const target = instance as unknown as {
         matchSync: {
           dependencies: { scheduleAlarm: (atMs: number) => Promise<void> };
+          read: MatchSyncRoom["read"];
+          notify: MatchSyncRoom["notify"];
         };
       };
       const schedule = vi
@@ -444,7 +456,7 @@ describe("live match socket admission", () => {
         registered: state.getWebSockets("channel:matches").length,
         due: state.storage.sql
           .exec<{ next_at_ms: number | null }>(
-            "SELECT next_at_ms FROM match_sync_snapshots WHERE match_id = ?",
+            "SELECT next_at_ms FROM match_sync_snapshots_canonical WHERE match_id = ?",
             inviteId,
           )
           .one().next_at_ms,
@@ -491,7 +503,7 @@ describe("live match socket admission", () => {
           admitting: target.matchSync.admissions.has(inviteId),
           due: state.storage.sql
             .exec<{ next_at_ms: number | null }>(
-              "SELECT next_at_ms FROM match_sync_snapshots WHERE match_id = ?",
+              "SELECT next_at_ms FROM match_sync_snapshots_canonical WHERE match_id = ?",
               inviteId,
             )
             .one().next_at_ms,
@@ -524,6 +536,8 @@ describe("live match socket admission", () => {
       const target = instance as unknown as {
         matchSync: {
           dependencies: { scheduleAlarm: (atMs: number) => Promise<void> };
+          read: MatchSyncRoom["read"];
+          notify: MatchSyncRoom["notify"];
         };
       };
       const schedule = target.matchSync.dependencies.scheduleAlarm;
@@ -538,7 +552,7 @@ describe("live match socket admission", () => {
             index <= MAX_CACHED_MATCH_SYNC_STATES + 1;
             index++
           ) {
-            await instance.readMatches(inviteId, `${inviteId}${index}`);
+            await target.matchSync.read(inviteId, `${inviteId}${index}`);
           }
         }
         await schedule(atMs);
@@ -560,6 +574,8 @@ describe("live match socket admission", () => {
       const target = instance as unknown as {
         matchSync: {
           dependencies: { scheduleAlarm: (atMs: number) => Promise<void> };
+          read: MatchSyncRoom["read"];
+          notify: MatchSyncRoom["notify"];
         };
       };
       const schedule = target.matchSync.dependencies.scheduleAlarm;
@@ -569,7 +585,7 @@ describe("live match socket admission", () => {
       ).mockImplementation(async (atMs) => {
         if (!invalidated) {
           invalidated = true;
-          await instance.notifyMatchesChanged(inviteId, [inviteId]);
+          await target.matchSync.notify(inviteId, [inviteId]);
         }
         await schedule(atMs);
       });
@@ -585,7 +601,7 @@ describe("live match socket admission", () => {
         alarm: await state.storage.getAlarm(),
         due: state.storage.sql
           .exec<{ next_at_ms: number | null }>(
-            "SELECT next_at_ms FROM match_sync_snapshots WHERE match_id = ?",
+            "SELECT next_at_ms FROM match_sync_snapshots_canonical WHERE match_id = ?",
             inviteId,
           )
           .one().next_at_ms,
@@ -613,3 +629,5 @@ describe("live match socket admission", () => {
     });
   });
 });
+
+beforeAll(activateCanonicalApplicationFixture);

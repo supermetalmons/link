@@ -1,10 +1,14 @@
 import type { InviteMetadataSnapshot } from "@mons/shared/invite-metadata";
 import {
   parseRematchIndices,
+  type RematchSeries,
   rematchSeriesEnded,
 } from "@mons/shared/rematches";
 
-function extendsRematches(next: string, previous: string): boolean {
+function extendsRematches(
+  next: RematchSeries,
+  previous: RematchSeries,
+): boolean {
   const nextIndices = parseRematchIndices(next);
   const previousIndices = parseRematchIndices(previous);
   return previousIndices.every(
@@ -16,11 +20,11 @@ export class InviteMetadataState {
   private value: InviteMetadataSnapshot;
 
   constructor(snapshot: InviteMetadataSnapshot) {
-    this.value = { ...snapshot };
+    this.value = structuredClone(snapshot);
   }
 
   get snapshot(): InviteMetadataSnapshot {
-    return { ...this.value };
+    return structuredClone(this.value);
   }
 
   accept(snapshot: InviteMetadataSnapshot): boolean {
@@ -48,19 +52,20 @@ export class InviteMetadataState {
       rematchSeriesEnded(previous) &&
       !rematchSeriesEnded({ hostRematches, guestRematches })
     ) {
-      if (previous.hostRematches.endsWith("x")) hostRematches += "x";
-      else guestRematches += "x";
+      if (previous.hostRematches.state === "ended")
+        hostRematches = { ...hostRematches, state: "ended" };
+      else guestRematches = { ...guestRematches, state: "ended" };
     }
-    this.value = {
+    this.value = structuredClone({
       ...snapshot,
       guestId: previous.guestId ?? snapshot.guestId,
       hostRematches,
       guestRematches,
-    };
+    });
     return true;
   }
 
-  confirmRematches(actorUid: string, rematches: string): void {
+  confirmRematches(actorUid: string, rematches: RematchSeries): void {
     const field =
       actorUid === this.value.hostId
         ? "hostRematches"
@@ -69,8 +74,22 @@ export class InviteMetadataState {
           : null;
     if (!field) return;
     this.accept({ ...this.value, [field]: rematches });
-    if (rematches.endsWith("x") && !rematchSeriesEnded(this.value)) {
-      this.value = { ...this.value, [field]: `${this.value[field]}x` };
+    if (rematches.state === "ended" && !rematchSeriesEnded(this.value)) {
+      this.value = {
+        ...this.value,
+        [field]: { ...this.value[field], state: "ended" },
+      };
     }
   }
+}
+
+export function rematchSeriesEqual(
+  left: RematchSeries,
+  right: RematchSeries,
+): boolean {
+  return (
+    left.state === right.state &&
+    left.indices.length === right.indices.length &&
+    left.indices.every((index, position) => index === right.indices[position])
+  );
 }

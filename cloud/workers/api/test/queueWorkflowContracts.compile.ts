@@ -128,9 +128,7 @@ export function progressCommands(
     { kind: "progress-outbox", outboxId: "id", value: null },
     { kind: "progress-dead", outboxId: "id", value: null },
   ];
-  // @ts-expect-error Retained pending evidence exposes no domain fields.
   void pending.eventId;
-  // @ts-expect-error Retained dead evidence exposes no dictionary access.
   void dead["reason"];
   // @ts-expect-error Dead records cannot be published as pending work.
   accepted.push({ kind: "progress-outbox", outboxId: "id", value: dead });
@@ -167,20 +165,19 @@ export function workflowFamilies(
   env.EVENT_PROGRESS_WORKFLOW.create({ params: progress });
   env.EVENT_PRIZE_WITHDRAWAL_WORKFLOW.create({ params: withdrawal });
   env.EVENT_PRIZE_WITHDRAWAL_WORKFLOW.create({
-    params: { schemaVersion: 1, kind: "preflight" },
+    params: { schemaVersion: 2, dataEpoch: 1, kind: "preflight" },
   });
   // @ts-expect-error Workflow families remain concrete.
   env.EVENT_PROGRESS_WORKFLOW.create({ params: withdrawal });
   // @ts-expect-error Workflow families remain concrete.
   env.EVENT_PRIZE_WITHDRAWAL_WORKFLOW.create({ params: progress });
-  // @ts-expect-error Retained progress parameters require the explicit private compatibility transport.
   env.EVENT_PROGRESS_WORKFLOW.create({ params: retained });
   // @ts-expect-error Fresh progress builders reject arbitrary parameter fields.
   buildEventProgressPlan({ eventId: 3, sourceKey: "source", reason: "reason" });
   buildRetainedEventProgressPlan({
-    eventId: 3,
-    sourceKey: null,
-    reason: false,
+    eventId: "event",
+    sourceKey: "source",
+    reason: "reason",
   });
 }
 
@@ -192,20 +189,20 @@ export function publicProgressPorts(store: EventStore) {
 }
 
 type StoredProgress = ReturnType<typeof validateEventProgressOutbox>;
-export type PartialStorageValidationIsNotFresh = Assert<
-  Equal<StoredProgress extends EventProgressOutboxRecord ? true : false, false>
+export type StorageValidationIsCanonical = Assert<
+  Equal<StoredProgress, EventProgressOutboxRecord>
 >;
-export type RetainedReasonRemainsUnknown = Assert<
-  Equal<StoredProgress["reason"], unknown>
+export type StoredReasonIsString = Assert<
+  Equal<StoredProgress["reason"], string>
 >;
-export type RetainedFirstQueuedAtRemainsUnknown = Assert<
-  Equal<StoredProgress["firstQueuedAtMs"], unknown>
+export type StoredFirstQueuedAtIsNumber = Assert<
+  Equal<StoredProgress["firstQueuedAtMs"], number>
 >;
 export function retainedWorkflowEvidence(params: RetainedEventProgressParams) {
-  // @ts-expect-error Retained Workflow parameters expose no domain fields.
   void params.eventId;
-  // @ts-expect-error Retained Workflow parameters expose no dictionary index.
   void params["sourceKey"];
+  // @ts-expect-error Canonical workflow params have no arbitrary extension fields.
+  void params.extra;
 }
 export function strictClaimBatch(env: Env, messages: QueueMessages) {
   claimAndEnqueueProjectionTasks({

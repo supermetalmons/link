@@ -16,42 +16,92 @@ const {
   createTelegramRepository,
 } = require("../runtime/telegram/repositoryCore");
 const { runStateDecisionTransaction } = require("./legacyStateFixture");
+const {
+  readTelegramMessageDocument,
+  readTelegramControlDocument,
+} = require("../runtime/telegram/recordCodec");
+/**
+ * @template Document
+ * @param {unknown} value
+ * @param {(value: unknown) => Document | null} parse
+ * @returns {Document | null}
+ */
+function storedDocument(value, parse) {
+  if (value == null) return null;
+  const document = parse(value);
+  assert.ok(document);
+  return document;
+}
+/** @param {ReturnType<typeof createColdDatabase>} database */
+function storedMessage(database) {
+  const document = storedDocument(
+    database.read("telegramMessages/key"),
+    readTelegramMessageDocument,
+  );
+  assert.ok(document);
+  return document;
+}
 
-const clone = (value) =>
-  value === undefined ? undefined : structuredClone(value);
+/** @template Value @param {Value} value @returns {Value} */
+const clone = (value) => (value === undefined ? value : structuredClone(value));
 
+/** @param {ReturnType<typeof createColdDatabase>} database */
 const createMemoryRepository = (database) =>
   createTelegramRepository({
     async readMessage(messageKey) {
+      /** @param {unknown} value */
       const snapshot = await database
         .ref(`telegramMessages/${messageKey}`)
         .once("value");
-      return snapshot.exists() ? snapshot.val() : null;
-    },
-    transactMessage(messageKey, updater) {
-      return runStateDecisionTransaction(
-        database.ref(`telegramMessages/${messageKey}`),
-        updater,
+      return storedDocument(
+        snapshot.exists() ? snapshot.val() : null,
+        readTelegramMessageDocument,
       );
     },
+    async transactMessage(messageKey, updater) {
+      const result = await runStateDecisionTransaction(
+        database.ref(`telegramMessages/${messageKey}`),
+        (current) =>
+          updater(storedDocument(current, readTelegramMessageDocument)),
+      );
+      return {
+        committed: result.committed,
+        value: storedDocument(result.value, readTelegramMessageDocument),
+        ...(result.decision === undefined ? {} : { decision: result.decision }),
+      };
+    },
     async readControl() {
+      /** @param {unknown} value */
       const snapshot = await database
         .ref("telegramDeliveryControl")
         .once("value");
-      return snapshot.exists() ? snapshot.val() : null;
-    },
-    transactControl(updater) {
-      return runStateDecisionTransaction(
-        database.ref("telegramDeliveryControl"),
-        updater,
+      return storedDocument(
+        snapshot.exists() ? snapshot.val() : null,
+        readTelegramControlDocument,
       );
+    },
+    async transactControl(updater) {
+      const result = await runStateDecisionTransaction(
+        database.ref("telegramDeliveryControl"),
+        (current) =>
+          updater(storedDocument(current, readTelegramControlDocument)),
+      );
+      return {
+        committed: result.committed,
+        value: storedDocument(result.value, readTelegramControlDocument),
+        ...(result.decision === undefined ? {} : { decision: result.decision }),
+      };
     },
   });
 
+/** @param {Record<string, unknown>} [initial] */
 const createColdDatabase = (initial = {}) => {
+  /** @type {unknown} */
   let root = clone(initial);
+  /** @type {{path: string, argumentCount: number, inputs: unknown[]}[]} */
   const transactionCalls = [];
 
+  /** @param {string} path @returns {unknown} */
   const readPath = (path) => {
     if (!path) {
       return clone(root);
@@ -65,18 +115,19 @@ const createColdDatabase = (initial = {}) => {
       ) {
         return null;
       }
-      current = current[segment];
+      current = /** @type {Record<string, unknown>} */ (current)[segment];
     }
     return clone(current);
   };
 
+  /** @param {string} path @param {unknown} value */
   const writePath = (path, value) => {
     const segments = path ? path.split("/") : [];
     if (segments.length === 0) {
       root = value === null ? {} : clone(value);
       return;
     }
-    let parent = root;
+    let parent = /** @type {Record<string, unknown>} */ (root);
     for (const segment of segments.slice(0, -1)) {
       if (
         !parent[segment] ||
@@ -85,9 +136,10 @@ const createColdDatabase = (initial = {}) => {
       ) {
         parent[segment] = {};
       }
-      parent = parent[segment];
+      parent = /** @type {Record<string, unknown>} */ (parent[segment]);
     }
     const key = segments.at(-1);
+    assert.ok(key !== undefined);
     if (value === null) {
       delete parent[key];
     } else {
@@ -95,6 +147,7 @@ const createColdDatabase = (initial = {}) => {
     }
   };
 
+  /** @param {unknown} value */
   const snapshot = (value) => ({
     exists: () => value !== null && value !== undefined,
     val: () => (value === undefined ? null : clone(value)),
@@ -103,13 +156,17 @@ const createColdDatabase = (initial = {}) => {
   const database = {
     ref(path = "") {
       return {
+        /** @param {string} eventType */
         async once(eventType) {
           assert.equal(eventType, "value");
           return snapshot(readPath(path));
         },
+        /** @param {(current: unknown) => unknown} updater @param {unknown[]} extra */
         async transaction(updater, ...extra) {
+          /** @type {{path: string, argumentCount: number, inputs: unknown[]}} */
           const call = { path, argumentCount: 1 + extra.length, inputs: [] };
           transactionCalls.push(call);
+          /** @param {unknown} value */
           const invoke = (value) => {
             call.inputs.push(clone(value));
             return updater(clone(value));
@@ -133,6 +190,7 @@ const createColdDatabase = (initial = {}) => {
         },
       };
     },
+    /** @param {string} path */
     read(path) {
       return readPath(path);
     },
@@ -150,6 +208,7 @@ const sendDesired = () =>
     sourceRevision: "waiting-1",
   });
 
+/** @param {{database: ReturnType<typeof createColdDatabase>, client: import("../runtime/telegram/client").TelegramClient, now?: () => number}} input */
 const createEngine = ({ database, client, now = () => 10_000 }) => {
   const repository = createMemoryRepository(database);
   return createTelegramDeliveryEngine({
@@ -165,6 +224,7 @@ const createEngine = ({ database, client, now = () => 10_000 }) => {
 
 test("decision transactions rerun logical aborts against authoritative state", async () => {
   const database = createColdDatabase({ record: { value: 1 } });
+  /** @type {unknown[]} */
   const inputs = [];
   const result = await runStateDecisionTransaction(
     database.ref("record"),
@@ -181,6 +241,7 @@ test("decision transactions rerun logical aborts against authoritative state", a
     value: { value: 1 },
   });
   assert.deepEqual(database.read("record"), { value: 1 });
+  assert.ok(database.transactionCalls[0]);
   assert.equal(database.transactionCalls[0].argumentCount, 1);
 });
 
@@ -213,7 +274,7 @@ test("decision transactions validate writes and allow null deletion", async () =
 test("cold transactions complete send marker, receipt, and finalization once", async () => {
   const desired = sendDesired();
   const database = createColdDatabase({
-    telegramMessages: { key: { desired } },
+    telegramMessages: { key: { schemaVersion: 1, desired } },
   });
   let sends = 0;
   const engine = createEngine({
@@ -221,7 +282,7 @@ test("cold transactions complete send marker, receipt, and finalization once", a
     client: {
       async sendTelegramMessage() {
         sends += 1;
-        return { ok: true, outcome: "sent", messageId: 7 };
+        return { ok: true, outcome: "sent", messageId: 7, httpStatus: 200 };
       },
       async editTelegramMessage() {
         throw new Error("unexpected edit");
@@ -240,7 +301,8 @@ test("cold transactions complete send marker, receipt, and finalization once", a
     "settled",
   );
   assert.equal(sends, 1);
-  const record = database.read("telegramMessages/key");
+  const record = storedMessage(database);
+  assert.ok(record.applied && record.delivery);
   assert.equal(record.applied.messageId, 7);
   assert.equal(record.delivery.status, "delivered");
   assert.equal(record.delivery.sendInFlight, undefined);
@@ -267,6 +329,7 @@ test("cold transactions finalize idempotent edit and delete operations", async (
     const database = createColdDatabase({
       telegramMessages: {
         key: {
+          schemaVersion: 1,
           desired,
           applied: {
             destination: "community",
@@ -275,6 +338,7 @@ test("cold transactions finalize idempotent edit and delete operations", async (
             instanceKey: desired.instanceKey,
             revision: "old",
             contentHash: "old",
+            appliedAtMs: 1,
           },
         },
       },
@@ -288,7 +352,7 @@ test("cold transactions finalize idempotent edit and delete operations", async (
         },
         async editTelegramMessage() {
           edits += 1;
-          return { ok: true, outcome: "edited" };
+          return { ok: true, outcome: "edited", httpStatus: 200 };
         },
         async deleteTelegramMessage() {
           throw new Error("unexpected delete");
@@ -305,7 +369,7 @@ test("cold transactions finalize idempotent edit and delete operations", async (
     );
     assert.equal(edits, 1);
     assert.equal(
-      database.read("telegramMessages/key").applied.contentHash,
+      storedMessage(database).applied?.contentHash,
       desired.contentHash,
     );
   });
@@ -318,6 +382,7 @@ test("cold transactions finalize idempotent edit and delete operations", async (
     const database = createColdDatabase({
       telegramMessages: {
         key: {
+          schemaVersion: 1,
           desired,
           applied: {
             destination: "community",
@@ -326,6 +391,7 @@ test("cold transactions finalize idempotent edit and delete operations", async (
             instanceKey: "waiting:invite-1",
             revision: "old",
             contentHash: "old",
+            appliedAtMs: 1,
           },
         },
       },
@@ -342,7 +408,7 @@ test("cold transactions finalize idempotent edit and delete operations", async (
         },
         async deleteTelegramMessage() {
           deletes += 1;
-          return { ok: true, outcome: "deleted" };
+          return { ok: true, outcome: "deleted", httpStatus: 200 };
         },
       },
     });
@@ -355,13 +421,14 @@ test("cold transactions finalize idempotent edit and delete operations", async (
       "settled",
     );
     assert.equal(deletes, 1);
-    assert.equal(database.read("telegramMessages/key").applied, undefined);
+    assert.equal(storedMessage(database).applied, undefined);
   });
 });
 
 test("cold logical no-ops preserve active leases", async () => {
   const desired = sendDesired();
   const initialRecord = {
+    schemaVersion: 1,
     desired,
     delivery: {
       status: "processing",
@@ -398,12 +465,14 @@ test("cold logical no-ops preserve active leases", async () => {
   const messageTransaction = database.transactionCalls.find(
     (call) => call.path === "telegramMessages/key",
   );
+  assert.ok(messageTransaction);
   assert.deepEqual(messageTransaction.inputs, [undefined, initialRecord]);
 });
 
 test("cold delivery-control transactions rerun owner fences authoritatively", async () => {
   const matchingDatabase = createColdDatabase({
     telegramDeliveryControl: {
+      schemaVersion: 1,
       retryNotBeforeMs: 5_000,
       apiGate: {
         owner: "gate-a",
@@ -420,6 +489,7 @@ test("cold delivery-control transactions rerun owner fences authoritatively", as
 
   const proofDatabase = createColdDatabase({
     telegramDeliveryControl: {
+      schemaVersion: 1,
       retryNotBeforeMs: 5_000,
       apiGate: {
         owner: "gate-a",
@@ -439,15 +509,17 @@ test("cold delivery-control transactions rerun owner fences authoritatively", as
     {
       applied: true,
       retryNotBeforeMs: 20_000,
-      gate: {},
+      gate: null,
     },
   );
   assert.deepEqual(proofDatabase.read("telegramDeliveryControl"), {
+    schemaVersion: 1,
     retryNotBeforeMs: 20_000,
   });
 
   const staleDatabase = createColdDatabase({
     telegramDeliveryControl: {
+      schemaVersion: 1,
       apiGate: {
         owner: "gate-b",
         messageKey: "key",
@@ -464,11 +536,13 @@ test("cold delivery-control transactions rerun owner fences authoritatively", as
     retryNotBeforeMs: 20_000,
   });
   assert.equal(staleProof.applied, false);
+  assert.ok(staleProof.gate);
   assert.equal(staleProof.gate.owner, "gate-b");
-  assert.equal(
-    staleDatabase.read("telegramDeliveryControl/apiGate").owner,
-    "gate-b",
+  const staleGate = staleDatabase.read("telegramDeliveryControl/apiGate");
+  assert.ok(
+    staleGate !== null && typeof staleGate === "object" && "owner" in staleGate,
   );
+  assert.equal(staleGate.owner, "gate-b");
   assert.equal(
     staleDatabase.transactionCalls.every(
       (call) => call.inputs[0] === undefined,

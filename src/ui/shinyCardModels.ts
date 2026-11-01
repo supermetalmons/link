@@ -1,6 +1,16 @@
-import type { EmojiId } from "../content/emojis";
-import type { MonType } from "../utils/namedMons";
-import type { StickerType } from "../utils/stickers";
+import type {
+  Aura,
+  CardBackgroundId,
+  CardSubtitleId,
+  EmojiId,
+  ProfileCounter,
+  SelectedMons,
+  StickerSlot,
+  StickerName,
+  StickerMap,
+  MonSelectionKind,
+} from "@mons/shared/appearance";
+import { isEmojiId } from "@mons/shared/appearance";
 
 export type ShinyCardUpdateSource = "default" | "inventory";
 
@@ -8,12 +18,11 @@ export type UndoIntent<T> =
   { readonly kind: "record"; readonly value: T } | { readonly kind: "skip" };
 
 type ShinyCardValues = {
-  profileCounter: string;
-  emojiAndAura: { emojiId: EmojiId; aura: string };
-  bg: number;
-  subtitle: number;
-} & Record<MonType, number> &
-  Record<StickerType, string | undefined>;
+  profileCounter: ProfileCounter;
+  emojiAndAura: { emojiId: EmojiId; aura: Aura };
+  bg: CardBackgroundId;
+  subtitle: CardSubtitleId;
+} & SelectedMons & { [Slot in StickerSlot]: StickerName<Slot> | undefined };
 
 export type ShinyCardChange = {
   [Type in keyof ShinyCardValues]: {
@@ -43,26 +52,38 @@ export const getShinyCardUndoEntry = (
     case "emojiAndAura":
       return { contentType: edit.contentType, value: edit.undo.value };
     case "bg":
+      return { contentType: edit.contentType, value: edit.undo.value };
     case "subtitle":
+      return { contentType: edit.contentType, value: edit.undo.value };
     case "demon":
+      return { contentType: edit.contentType, value: edit.undo.value };
     case "angel":
+      return { contentType: edit.contentType, value: edit.undo.value };
     case "drainer":
+      return { contentType: edit.contentType, value: edit.undo.value };
     case "spirit":
+      return { contentType: edit.contentType, value: edit.undo.value };
     case "mystic":
       return { contentType: edit.contentType, value: edit.undo.value };
     case "big-mon-top-right":
+      return { contentType: edit.contentType, value: edit.undo.value };
     case "bottom-left":
+      return { contentType: edit.contentType, value: edit.undo.value };
     case "bottom-right":
+      return { contentType: edit.contentType, value: edit.undo.value };
     case "mana":
+      return { contentType: edit.contentType, value: edit.undo.value };
     case "middle-left":
+      return { contentType: edit.contentType, value: edit.undo.value };
     case "middle-right":
+      return { contentType: edit.contentType, value: edit.undo.value };
     case "mini-logo":
+      return { contentType: edit.contentType, value: edit.undo.value };
     case "type-logo":
       return { contentType: edit.contentType, value: edit.undo.value };
     default: {
       const unhandled: never = edit;
-      void unhandled;
-      return null;
+      return unhandled;
     }
   }
 };
@@ -85,9 +106,7 @@ export class ProfileScopedUndoHistory {
     entry: ShinyCardUndoEntry,
   ): void {
     this.synchronize(currentProfileId);
-    if (profileId && profileId === currentProfileId) {
-      this.entries.push(entry);
-    }
+    if (profileId && profileId === currentProfileId) this.entries.push(entry);
   }
 
   pop(profileId: string | null): ShinyCardUndoEntry | undefined {
@@ -100,29 +119,107 @@ export class ProfileScopedUndoHistory {
   }
 }
 
-export const parseStickerMap = (json: string): Record<string, string> => {
-  try {
-    const parsed: unknown = JSON.parse(json);
-    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-      return {};
-    }
-    return Object.fromEntries(
-      Object.entries(parsed).filter(
-        (entry): entry is [string, string] =>
-          typeof entry[0] === "string" && typeof entry[1] === "string",
-      ),
-    );
-  } catch {
-    return {};
+export function createMonCardEdit(
+  kind: MonSelectionKind,
+  current: SelectedMons,
+  next: SelectedMons,
+): ShinyCardEdit {
+  switch (kind) {
+    case "demon":
+      return {
+        contentType: kind,
+        value: next[kind],
+        undo: { kind: "record", value: current[kind] },
+      };
+    case "angel":
+      return {
+        contentType: kind,
+        value: next[kind],
+        undo: { kind: "record", value: current[kind] },
+      };
+    case "drainer":
+      return {
+        contentType: kind,
+        value: next[kind],
+        undo: { kind: "record", value: current[kind] },
+      };
+    case "spirit":
+      return {
+        contentType: kind,
+        value: next[kind],
+        undo: { kind: "record", value: current[kind] },
+      };
+    case "mystic":
+      return {
+        contentType: kind,
+        value: next[kind],
+        undo: { kind: "record", value: current[kind] },
+      };
   }
-};
+}
+
+export function createStickerCardEdit(
+  slot: StickerSlot,
+  current: StickerMap,
+  next: StickerMap,
+): ShinyCardEdit {
+  switch (slot) {
+    case "big-mon-top-right":
+      return {
+        contentType: slot,
+        value: next[slot],
+        undo: { kind: "record", value: current[slot] },
+      };
+    case "bottom-left":
+      return {
+        contentType: slot,
+        value: next[slot],
+        undo: { kind: "record", value: current[slot] },
+      };
+    case "bottom-right":
+      return {
+        contentType: slot,
+        value: next[slot],
+        undo: { kind: "record", value: current[slot] },
+      };
+    case "mana":
+      return {
+        contentType: slot,
+        value: next[slot],
+        undo: { kind: "record", value: current[slot] },
+      };
+    case "middle-left":
+      return {
+        contentType: slot,
+        value: next[slot],
+        undo: { kind: "record", value: current[slot] },
+      };
+    case "middle-right":
+      return {
+        contentType: slot,
+        value: next[slot],
+        undo: { kind: "record", value: current[slot] },
+      };
+    case "mini-logo":
+      return {
+        contentType: slot,
+        value: next[slot],
+        undo: { kind: "record", value: current[slot] },
+      };
+    case "type-logo":
+      return {
+        contentType: slot,
+        value: next[slot],
+        undo: { kind: "record", value: current[slot] },
+      };
+  }
+}
 
 export const isInventoryEmojiId = (
-  emojiId: string | number | undefined,
+  emojiId: EmojiId | null | undefined,
   inventoryStartId: number,
 ): boolean => {
-  const parsed = Number.parseInt(`${emojiId ?? ""}`, 10);
-  return Number.isFinite(parsed) && parsed >= inventoryStartId;
+  return isEmojiId(emojiId) && emojiId >= inventoryStartId;
 };
 
 export const getNextRegularId = (
@@ -160,14 +257,12 @@ export const getShinyCardUndoUpdateSource = (
       : "default";
   }
   if (entry.contentType === "bg") {
-    return Number(entry.value) === options.inventoryBackgroundId
+    return entry.value === options.inventoryBackgroundId
       ? "inventory"
       : "default";
   }
   if (entry.contentType === "drainer") {
-    return Number(entry.value) === options.inventoryDrainerId
-      ? "inventory"
-      : "default";
+    return entry.value === options.inventoryDrainerId ? "inventory" : "default";
   }
   if (entry.contentType === options.inventoryStickerType) {
     return entry.value === options.inventoryStickerName

@@ -1,12 +1,13 @@
 // Generated from src/automatchRecords.ts. Run npm run generate:runtime.
-import type {
-  CreateInviteResponse,
-  EndRematchResponse,
-  EnsureMatchResponse,
-  JoinInviteResponse,
-  ProposeRematchResponse,
+import { type Aura, type EmojiId } from "./shared/appearance.js";
+import {
+  type CreateInviteResponse,
+  type EndRematchResponse,
+  type EnsureMatchResponse,
+  type JoinInviteResponse,
+  type ProposeRematchResponse,
 } from "./shared/game-sessions.js";
-import type { StartAutomatchResponse } from "./shared/navigation.js";
+import { type StartAutomatchResponse } from "./shared/navigation.js";
 export type AutomatchRecordRoot =
   | "automatch"
   | "telegramAutomatches"
@@ -14,77 +15,70 @@ export type AutomatchRecordRoot =
   | "profileGameProjectionOutbox/automatch"
   | "gameplayMutationReceipts"
   | "gameplayMutationReceiptExpirations";
-declare const retainedAutomatchRecord: unique symbol;
-export type RetainedAutomatchValue<Root extends AutomatchRecordRoot> = {
-  readonly [retainedAutomatchRecord]: Root;
+export type SessionTimestampOperation = {
+  readonly kind: "timestamp";
 };
-export type JsonValue =
-  | null
-  | boolean
-  | number
-  | string
-  | JsonValue[]
-  | {
-      [key: string]: JsonValue;
-    };
-export type SessionTimestamp =
-  | number
-  | {
-      readonly ".sv": "timestamp";
-    };
-export type SessionCounter =
-  | number
-  | {
-      readonly ".sv": {
-        increment: number;
-      };
-    };
-export type AutomatchEntryFields = {
+export type SessionIncrementOperation = {
+  readonly kind: "increment";
+  readonly delta: number;
+};
+export type SessionTimestamp = number | SessionTimestampOperation;
+export type SessionCounter = number | SessionIncrementOperation;
+export type AutomatchEntryRecord = {
+  schemaVersion: 1;
   uid: string;
+  profileId: string | null;
   timestamp: number;
-  numericTimestamp: number | null;
   rating: number;
-  hostColor: string;
+  hostColor: "white" | "black";
   password: string;
   gameVariant: string;
   telegramDeliveryVersion: 2 | null;
-  display: {
-    username?: JsonValue;
-    ethAddress?: JsonValue;
-    solAddress?: JsonValue;
-    rating?: JsonValue;
-    emojiId?: JsonValue;
-  };
-};
-export type AutomatchEntryRead = {
-  isNull: boolean;
-  isTruthy: boolean;
-  record: AutomatchEntryFields | null;
-};
-export type AutomatchEntryWrite = {
-  uid: string;
-  rating: number;
-  timestamp: SessionTimestamp;
   username: string;
   ethAddress: string;
   solAddress: string;
-  profileId: string;
-  hostColor: "white" | "black";
-  password: string;
-  emojiId: number | string;
-  gameVariant: string;
-  telegramDeliveryVersion: 2;
+  emojiId: EmojiId;
 };
-export type AutomatchTelegramSourceWrite = {
+export type AutomatchEntryFields = AutomatchEntryRecord;
+export type AutomatchEntryRead = AutomatchEntryRecord | null;
+export type AutomatchEntryWrite = Omit<AutomatchEntryRecord, "timestamp"> & {
+  timestamp: SessionTimestamp;
+};
+export type AutomatchTelegramResult = {
+  completedAtMs: number;
+  text: string;
+};
+export type AutomatchTelegramSourceRecord = {
+  schemaVersion: 1;
   version: 2;
   generation: number;
-  lifecycle: "pending";
+  lifecycle: "pending" | "matched" | "canceled";
   waitingText: string;
   canceledText: string;
   waitingInstanceKey: string;
+  matchedText: string | null;
+  matchedInstanceKey: string | null;
+  createdAtMs: number;
+  updatedAtMs: number;
+  results: Record<string, AutomatchTelegramResult>;
+};
+export type AutomatchTelegramSourceWrite = Omit<
+  AutomatchTelegramSourceRecord,
+  "createdAtMs" | "updatedAtMs"
+> & {
   createdAtMs: SessionTimestamp;
   updatedAtMs: SessionTimestamp;
 };
+export type RetiredGameplayEffects = {
+  state: "retired";
+  retiredAtMs: number;
+  sourceDigest: string;
+};
+export type GameplayEffectsState =
+  | {
+      state: "enabled";
+    }
+  | RetiredGameplayEffects;
 export type SuccessfulStartAutomatchResponse = Extract<
   StartAutomatchResponse,
   {
@@ -92,17 +86,18 @@ export type SuccessfulStartAutomatchResponse = Extract<
   }
 >;
 export type AutomatchReceiptView = {
-  aura: string;
-  completedAtMs: number;
-  emojiId: number;
-  inviteId: string;
+  schemaVersion: 2;
   kind: "automatch-start";
+  aura: Aura;
+  completedAtMs: number;
+  emojiId: EmojiId;
+  inviteId: string;
   operationId: string;
   profileProjectionRequestId: string | null;
   requesterUid: string;
   response: SuccessfulStartAutomatchResponse;
-  schemaVersion: 1;
   telegramProjection: boolean;
+  effects: GameplayEffectsState;
 };
 export type AutomatchReceiptWrite = Omit<
   AutomatchReceiptView,
@@ -110,32 +105,15 @@ export type AutomatchReceiptWrite = Omit<
 > & {
   completedAtMs: SessionTimestamp;
 };
-export type GameSessionMutationKind =
-  | "invite-create"
-  | "invite-join"
-  | "match-ensure"
-  | "rematch-end"
-  | "rematch-propose";
-export type GameSessionResponse =
+type SessionResponseUnion =
   | CreateInviteResponse
-  | EndRematchResponse
-  | EnsureMatchResponse
   | JoinInviteResponse
+  | EnsureMatchResponse
+  | EndRematchResponse
   | ProposeRematchResponse;
-export type GameSessionMutationReceiptView = {
-  completedAtMs: number;
-  fingerprint: string;
-  inviteId: string;
-  kind: string;
-  operationId: string;
-  projectionRequestId: string | null;
-  requesterUid: string;
-  response: GameSessionResponse;
-  schemaVersion: 1;
-};
 type ResponseKeys<Response> = Response extends unknown ? keyof Response : never;
 type ReceiptResponse<Response> = Response & {
-  [Key in Exclude<ResponseKeys<GameSessionResponse>, keyof Response>]?: never;
+  [Key in Exclude<ResponseKeys<SessionResponseUnion>, keyof Response>]?: never;
 };
 export type GameSessionMutationResponseMap = {
   "invite-create": ReceiptResponse<CreateInviteResponse>;
@@ -144,34 +122,143 @@ export type GameSessionMutationResponseMap = {
   "rematch-end": ReceiptResponse<EndRematchResponse>;
   "rematch-propose": ReceiptResponse<ProposeRematchResponse>;
 };
+export type GameSessionMutationKind = keyof GameSessionMutationResponseMap;
+export type GameSessionResponse =
+  GameSessionMutationResponseMap[GameSessionMutationKind];
+type GameSessionMutationReceiptFields = {
+  schemaVersion: 2;
+  completedAtMs: number;
+  fingerprint: string;
+  inviteId: string;
+  operationId: string;
+  projectionRequestId: string | null;
+  requesterUid: string;
+  effects: GameplayEffectsState;
+};
+export type GameSessionMutationReceiptView = {
+  [Kind in GameSessionMutationKind]: GameSessionMutationReceiptFields & {
+    kind: Kind;
+    response: GameSessionMutationResponseMap[Kind];
+  };
+}[GameSessionMutationKind];
 export type GameSessionMutationReceiptWrite<
   Kind extends GameSessionMutationKind = GameSessionMutationKind,
 > = {
-  [Key in Kind]: Omit<
-    GameSessionMutationReceiptView,
-    "completedAtMs" | "kind" | "response"
-  > & {
-    completedAtMs: SessionTimestamp;
+  [Key in Kind]: Omit<GameSessionMutationReceiptFields, "completedAtMs"> & {
     kind: Key;
     response: GameSessionMutationResponseMap[Key];
+    completedAtMs: SessionTimestamp;
   };
 }[Kind];
+export type MutationReceiptRecord =
+  AutomatchReceiptView | GameSessionMutationReceiptView;
 export type MutationReceiptWrite =
   AutomatchReceiptWrite | GameSessionMutationReceiptWrite;
+export type MutationReceiptExpirationRecord = {
+  schemaVersion: 1;
+  completedAtMs: number;
+};
 export type MutationReceiptExpirationWrite = {
+  schemaVersion: 1;
   completedAtMs: SessionTimestamp;
-  schemaVersion?: never;
-  kind?: never;
-  response?: never;
 };
 export type HistoricalMatchDescriptorWrite = {
   finalizedAtMs: number;
   guestPlayerId: string;
   hostPlayerId: string;
-  retryNotBeforeMs?: number;
+  retryNotBeforeMs: number | null;
   source: "backfill" | "rating" | "transition";
 };
-export declare function emptyAutomatchEntryFields(): AutomatchEntryFields;
+export type AutomatchTelegramOutboxRecord =
+  | {
+      schemaVersion: 2;
+      status: "pending";
+      requestId: string;
+      updatedAtMs: number;
+    }
+  | {
+      schemaVersion: 2;
+      status: "dead";
+      requestId: string;
+      updatedAtMs: null;
+      deadAtMs: number;
+      reason: string;
+    }
+  | {
+      schemaVersion: 2;
+      status: "cancelled";
+      requestId: string;
+      updatedAtMs: null;
+      sourceUpdatedAtMs: number;
+      retirement: RetiredGameplayEffects;
+    };
+export type AutomatchProfileOutboxRecord =
+  | {
+      schemaVersion: 2;
+      status: "pending";
+      requestId: string;
+      reason: string;
+      sourceUpdatedAtMs: number;
+      lastQueuedAtMs: number;
+      historicalMatches: Record<string, HistoricalMatchDescriptorWrite>;
+      archiveRetry: {
+        requestId: string;
+        notBeforeMs: number;
+      } | null;
+    }
+  | {
+      schemaVersion: 2;
+      status: "cancelled";
+      requestId: string;
+      reason: string;
+      sourceUpdatedAtMs: number;
+      lastQueuedAtMs: number;
+      historicalMatches: Record<string, HistoricalMatchDescriptorWrite>;
+      archiveRetry: {
+        requestId: string;
+        notBeforeMs: number;
+      } | null;
+      retirement: RetiredGameplayEffects;
+    };
+export type AutomatchRecordMap = {
+  automatch: AutomatchEntryRecord;
+  telegramAutomatches: AutomatchTelegramSourceRecord;
+  "telegramProjectionOutbox/automatch": AutomatchTelegramOutboxRecord;
+  "profileGameProjectionOutbox/automatch": AutomatchProfileOutboxRecord;
+  gameplayMutationReceipts: MutationReceiptRecord;
+  gameplayMutationReceiptExpirations: MutationReceiptExpirationRecord;
+};
+export declare function isAutomatchEntryRecord(
+  value: unknown,
+): value is AutomatchEntryRecord;
+export declare function isAutomatchTelegramSourceRecord(
+  value: unknown,
+): value is AutomatchTelegramSourceRecord;
+export declare function isGameplayEffectsState(
+  value: unknown,
+): value is GameplayEffectsState;
+export declare function isAutomatchReceiptRecord(
+  value: unknown,
+): value is AutomatchReceiptView;
+export declare function isGameSessionMutationReceiptRecord(
+  value: unknown,
+): value is GameSessionMutationReceiptView;
+export declare function isMutationReceiptExpirationRecord(
+  value: unknown,
+): value is MutationReceiptExpirationRecord;
+export declare function isHistoricalMatchDescriptorWrite(
+  value: unknown,
+): value is HistoricalMatchDescriptorWrite;
+export declare function isAutomatchTelegramOutboxRecord(
+  value: unknown,
+): value is AutomatchTelegramOutboxRecord;
+export declare function isAutomatchProfileOutboxRecord(
+  value: unknown,
+): value is AutomatchProfileOutboxRecord;
+export declare function parseAutomatchRecord<Root extends AutomatchRecordRoot>(
+  root: Root,
+  value: unknown,
+): AutomatchRecordMap[Root] | null;
 export declare function decodeAutomatchEntry(
   value: unknown,
 ): AutomatchEntryRead;

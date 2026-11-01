@@ -1,12 +1,27 @@
 // Generated from src/shared/rematches.ts. Run npm run generate:runtime.
+export type RematchSeries = {
+  state: "open" | "ended";
+  indices: number[];
+};
 export interface RematchInviteData {
-  hostRematches?: unknown;
-  guestRematches?: unknown;
+  hostRematches: RematchSeries;
+  guestRematches: RematchSeries;
 }
-declare const parseRematchIndices: (rawValue: unknown) => number[];
-declare const rematchSeriesEnded: (inviteData: unknown) => boolean;
+export declare function isRematchSeries(value: unknown): value is RematchSeries;
+declare const parseRematchIndices: (
+  value: RematchSeries | null | undefined,
+) => number[];
+declare const rematchSeriesEnded: (
+  inviteData: RematchInviteData | null | undefined,
+) => boolean;
 declare const inviteMatchesPlayers: (
-  inviteData: unknown,
+  inviteData:
+    | {
+        hostId: string;
+        guestId: string | null;
+      }
+    | null
+    | undefined,
   playerId: string,
   opponentId: string,
 ) => boolean;
@@ -29,8 +44,8 @@ declare const getLatestApprovedRematchIndex: (
 declare const selectInviteMatch: (
   inviteId: string,
   inviteData: RematchInviteData & {
-    hostId?: unknown;
-    guestId?: unknown;
+    hostId: string;
+    guestId: string | null;
   },
   actorUid: string | null,
   options?: {

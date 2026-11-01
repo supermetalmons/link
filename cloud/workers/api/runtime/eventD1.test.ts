@@ -1,11 +1,19 @@
-import { retainEventProgressRecord } from "../../../runtime/eventProgressRecords.js";
+import { eventProjectionStateFixture as projectionState } from "../test/eventProjectionFixture.ts";
+import { createHash } from "node:crypto";
+import {
+  readEventProgressPending,
+  type EventProgressDeadLetter,
+} from "../../../runtime/eventProgressRecords.js";
 import { eventProjectionOutboxFixture } from "../test/profileDataBoundaryFixture.ts";
 import { eventIntentFixture } from "../test/transitionIntentFixture.ts";
-import { eventRoundFixture } from "../test/eventCompatibilityFixture.ts";
+import {
+  eventRoundFixture,
+  eventDocumentFixture,
+} from "../test/eventCompatibilityFixture.ts";
 import { commitEventMutations } from "../src/eventD1.ts";
 import { commitEventMutationsInternal } from "../src/eventD1/commit.ts";
 import { readProfilePrizeMutationSnapshots } from "../src/eventD1/reads.ts";
-import { decodeEventUpdates } from "../src/eventCompatibilityCodec.ts";
+import { decodeEventUpdates } from "../test/eventLegacyFixtureCodec.ts";
 import { buildEventProgressPlan } from "../src/eventProgressCodec.ts";
 import type { EventMutation } from "../../../runtime/eventCommands.js";
 import { classifyD1Failure } from "../src/d1Failure.ts";
@@ -56,8 +64,8 @@ const prizeId = "1092";
 const profileId = "profile-one";
 
 function eventRecord(overrides: Record<string, unknown> = {}) {
-  return {
-    schemaVersion: 2,
+  return eventDocumentFixture({
+    schemaVersion: 3,
     eventId,
     status: "scheduled",
     createdAtMs: 100,
@@ -74,10 +82,8 @@ function eventRecord(overrides: Record<string, unknown> = {}) {
         state: "active",
       },
     },
-    rounds: {},
-    unknownFutureField: { retained: true },
     ...overrides,
-  };
+  });
 }
 
 function assignment(targetProfileId = profileId) {
@@ -172,25 +178,27 @@ function observePrizeMutationBatches(
 async function readPrizeStorage() {
   const results = await testEnv.EVENT_DB.batch<Record<string, unknown>>([
     testEnv.EVENT_DB.prepare(
-      "SELECT * FROM event_prize_selections ORDER BY event_id, profile_id",
+      "SELECT * FROM event_prize_selections_canonical ORDER BY event_id, profile_id",
     ),
     testEnv.EVENT_DB.prepare(
-      "SELECT * FROM profile_event_prizes ORDER BY profile_id, event_id",
+      "SELECT * FROM profile_event_prizes_canonical ORDER BY profile_id, event_id",
     ),
     testEnv.EVENT_DB.prepare(
-      "SELECT * FROM profile_event_prize_revisions ORDER BY profile_id",
+      "SELECT * FROM profile_event_prize_revisions_canonical ORDER BY profile_id",
     ),
-    testEnv.EVENT_DB.prepare("SELECT * FROM event_records ORDER BY event_id"),
     testEnv.EVENT_DB.prepare(
-      "SELECT * FROM event_progress_outboxes ORDER BY outbox_id",
+      "SELECT * FROM event_records_canonical ORDER BY event_id",
+    ),
+    testEnv.EVENT_DB.prepare(
+      "SELECT * FROM event_progress_outboxes_canonical ORDER BY outbox_id",
     ),
   ]);
   return {
-    selections: results[0].results,
-    prizes: results[1].results,
-    profileRevisions: results[2].results,
-    events: results[3].results,
-    outboxes: results[4].results,
+    selections: results[0]!.results,
+    prizes: results[1]!.results,
+    profileRevisions: results[2]!.results,
+    events: results[3]!.results,
+    outboxes: results[4]!.results,
   };
 }
 
@@ -200,7 +208,6 @@ async function seedPrizeRows() {
     ...assignment(),
     eventId: otherEventId,
     prizeId: "1866",
-    archivedMetadata: { edition: 1, labels: ["first", "second"] },
   };
   await patchEventOwnedPaths(
     testEnv.EVENT_DB,
@@ -219,7 +226,7 @@ async function seedPrizeRows() {
     { now: () => 200 },
   );
   await testEnv.EVENT_DB.prepare(
-    "UPDATE profile_event_prizes SET assignment_json = ? WHERE profile_id = ? AND event_id = ?",
+    "UPDATE profile_event_prizes_canonical SET assignment_json = ? WHERE profile_id = ? AND event_id = ?",
   )
     .bind(JSON.stringify(otherAssignment, null, 2), profileId, otherEventId)
     .run();
@@ -277,6 +284,22 @@ function createEventTransitionIntent(
   );
 }
 
+function archivedProgress(
+  source: unknown,
+  deadAtMs: number,
+): EventProgressDeadLetter {
+  return {
+    schemaVersion: 1,
+    dataEpoch: 1,
+    deadAtMs,
+    sourceDigest: createHash("sha256")
+      .update(JSON.stringify(source) ?? "null")
+      .digest("hex"),
+    originalRecord: readEventProgressPending(source),
+    reason: "invalid-event-progress-outbox",
+  };
+}
+
 describe("event D1 store", () => {
   beforeAll(async () => {
     await applyEventTestMigrations(
@@ -288,15 +311,19 @@ describe("event D1 store", () => {
   beforeEach(async () => {
     await testEnv.EVENT_DB.batch([
       testEnv.EVENT_DB.prepare(
-        "UPDATE event_records SET pending_transition_id = NULL",
+        "UPDATE event_records_canonical SET pending_transition_id = NULL",
       ),
-      testEnv.EVENT_DB.prepare("DELETE FROM event_transition_intents"),
+      testEnv.EVENT_DB.prepare(
+        "DELETE FROM event_transition_intents_canonical",
+      ),
       testEnv.EVENT_DB.prepare("DELETE FROM event_leases"),
       testEnv.EVENT_DB.prepare("DELETE FROM event_sync_throttles"),
       testEnv.EVENT_DB.prepare("DELETE FROM event_write_admissions"),
-      testEnv.EVENT_DB.prepare("DELETE FROM event_progress_outboxes"),
-      testEnv.EVENT_DB.prepare("DELETE FROM event_records"),
-      testEnv.EVENT_DB.prepare("DELETE FROM profile_event_prize_revisions"),
+      testEnv.EVENT_DB.prepare("DELETE FROM event_progress_outboxes_canonical"),
+      testEnv.EVENT_DB.prepare("DELETE FROM event_records_canonical"),
+      testEnv.EVENT_DB.prepare(
+        "DELETE FROM profile_event_prize_revisions_canonical",
+      ),
     ]);
   });
 
@@ -311,7 +338,7 @@ describe("event D1 store", () => {
           const observed = observeD1FailureDatabase(testEnv.EVENT_DB, {
             async beforeWriteBatch() {
               await testEnv.EVENT_DB.prepare(
-                "UPDATE event_records SET revision = revision + 1 WHERE event_id = ?",
+                "UPDATE event_records_canonical SET revision = revision + 1 WHERE event_id = ?",
               )
                 .bind(eventId)
                 .run();
@@ -330,8 +357,8 @@ describe("event D1 store", () => {
                 {
                   kind: "event-field",
                   eventId,
-                  field: "status",
-                  value: "active",
+                  field: "updatedAtMs",
+                  value: 200,
                 },
               ],
               { admission },
@@ -379,14 +406,13 @@ describe("event D1 store", () => {
         mode === "expired admission" ? { nowMs: 1, ttlMs: 1 } : {},
       );
       const observed = observeD1FailureDatabase(testEnv.EVENT_DB, {
-        diagnosticFailure:
-          mode === "diagnostic unavailable"
-            ? new Error("session-unavailable")
-            : undefined,
+        ...(mode === "diagnostic unavailable"
+          ? { diagnosticFailure: new Error("session-unavailable") }
+          : {}),
       });
       if (mode === "SQL failure") {
         await testEnv.EVENT_DB.prepare(
-          `CREATE TRIGGER guard_test_event_update BEFORE UPDATE ON event_records
+          `CREATE TRIGGER guard_test_event_update BEFORE UPDATE ON event_records_canonical
              BEGIN SELECT RAISE(ABORT, 'event pending transition is unavailable'); END`,
         ).run();
       }
@@ -395,10 +421,10 @@ describe("event D1 store", () => {
         const failure = await transactEventField(
           observed.database,
           eventId,
-          "status",
+          "updatedAtMs",
           () => {
             decisions++;
-            return { value: "active" };
+            return { value: 200 };
           },
           {
             admission,
@@ -477,12 +503,12 @@ describe("event D1 store", () => {
               : createEventTransitionIntentRaw(
                   observed.database,
                   eventIntentFixture({
-                    schemaVersion: 1,
+                    schemaVersion: 3,
                     transitionId: "test-transition",
                     eventId,
                     expectedRevision: 1,
                     canonicalUpdates: {},
-                    rtdbEffects: {},
+                    effects: {},
                     createdAtMs: 1,
                     updatedAtMs: 1,
                   }),
@@ -571,7 +597,9 @@ describe("event D1 store", () => {
             { admission },
           ),
         ),
-      ).rejects.toThrow("invalid-event-path");
+      ).rejects.toThrow(
+        /invalid-event-path|invalid-canonical-event-command|unsupported-test-event-path/,
+      );
     }
     expect(await readEventSnapshot(testEnv.EVENT_DB, eventId)).toEqual(before);
   });
@@ -604,7 +632,7 @@ describe("event D1 store", () => {
         testEnv.EVENT_DB,
         `events/${eventId}/unknownFutureField`,
       )) as unknown,
-    ).toEqual({ retained: true });
+    ).toBeNull();
   });
 
   it("reads only the requested event or prize rows", async () => {
@@ -625,21 +653,23 @@ describe("event D1 store", () => {
 
     await expect(readEvent(db, eventId)).resolves.toEqual(eventRecord());
     expect(queries).toHaveLength(1);
-    expect(queries[0]).toContain("FROM event_records WHERE event_id = ?");
+    expect(queries[0]).toContain(
+      "FROM event_records_canonical WHERE event_id = ?",
+    );
     queries.length = 0;
 
     await expect(readEventPrizeSelections(db, eventId)).resolves.toEqual({
       [profileId]: prizeId,
     });
     expect(queries).toHaveLength(1);
-    expect(queries[0]).toContain("FROM event_prize_selections");
+    expect(queries[0]).toContain("FROM event_prize_selections_canonical");
     queries.length = 0;
 
     await expect(
       readProfileEventPrizeAssignment(db, profileId, eventId),
     ).resolves.toEqual(assignment());
     expect(queries).toHaveLength(1);
-    expect(queries[0]).toContain("FROM profile_event_prizes");
+    expect(queries[0]).toContain("FROM profile_event_prizes_canonical");
     expect(queries[0]).toContain("WHERE profile_id = ? AND event_id = ?");
     queries.length = 0;
 
@@ -670,10 +700,10 @@ describe("event D1 store", () => {
       expect(session.getBookmark()).toBeTypeOf("string");
       if (knownRevision === 1) {
         expect(result).toEqual({ notModified: true, revision: 1 });
-        expect(batches[0][0].results).toEqual([
+        expect(batches[0]![0]!.results).toEqual([
           expect.objectContaining({ revision: 1, record_json: null }),
         ]);
-        expect(batches[0][1].results).toEqual([]);
+        expect(batches[0]![1]!.results).toEqual([]);
       } else {
         expect(result).toEqual({
           notModified: false,
@@ -684,10 +714,10 @@ describe("event D1 store", () => {
             revision: 1,
           },
         });
-        expect(batches[0][0].results).toEqual([
+        expect(batches[0]![0]!.results).toEqual([
           expect.objectContaining({ record_json: expect.any(String) }),
         ]);
-        expect(batches[0][1].results).toHaveLength(1);
+        expect(batches[0]![1]!.results).toHaveLength(1);
       }
     }
   });
@@ -706,11 +736,11 @@ describe("event D1 store", () => {
       );
       expect(batches).toHaveLength(1);
       expect(batches[0]).toHaveLength(2);
-      expect(batches[0][1].results).toEqual([{ revision: 1 }]);
+      expect(batches[0]![1]!.results).toEqual([{ revision: 1 }]);
       expect(session.getBookmark()).toBeTypeOf("string");
       if (knownRevision === 1) {
         expect(result).toEqual({ notModified: true, revision: 1 });
-        expect(batches[0][0].results).toEqual([]);
+        expect(batches[0]![0]!.results).toEqual([]);
       } else {
         expect(result).toEqual({
           notModified: false,
@@ -720,7 +750,7 @@ describe("event D1 store", () => {
             revision: 1,
           },
         });
-        expect(batches[0][0].results).toEqual([
+        expect(batches[0]![0]!.results).toEqual([
           expect.objectContaining({ assignment_json: expect.any(String) }),
         ]);
       }
@@ -746,7 +776,7 @@ describe("event D1 store", () => {
         notModified: true,
         revision: 1,
       });
-      const baselineRowsRead = baseline.batches[0].reduce(
+      const baselineRowsRead = baseline.batches[0]!.reduce(
         (total, result) => total + result.meta.rows_read,
         0,
       );
@@ -757,32 +787,32 @@ describe("event D1 store", () => {
           `WITH RECURSIVE entries(n) AS (
              SELECT 1 UNION ALL SELECT n + 1 FROM entries WHERE n < 127
            )
-           INSERT INTO event_records (
+           INSERT INTO event_records_canonical (
              event_id, status, start_at_ms, updated_at_ms, revision, record_json
            )
            SELECT 'poll-event-' || n, status, start_at_ms, updated_at_ms, 1,
                   json_set(record_json, '$.eventId', 'poll-event-' || n)
-           FROM entries CROSS JOIN event_records WHERE event_id = ?`,
+           FROM entries CROSS JOIN event_records_canonical WHERE event_id = ?`,
         ).bind(eventId),
         testEnv.EVENT_DB.prepare(
-          `INSERT INTO event_prize_selections (
+          `INSERT INTO event_prize_selections_canonical (
              event_id, profile_id, prize_id, updated_at_ms
            )
-           SELECT ?, event_id, ?, updated_at_ms FROM event_records
+           SELECT ?, event_id, ?, updated_at_ms FROM event_records_canonical
            WHERE event_id LIKE 'poll-event-%'`,
         ).bind(eventId, prizeId),
         testEnv.EVENT_DB.prepare(
-          `INSERT INTO profile_event_prizes (
+          `INSERT INTO profile_event_prizes_canonical (
              profile_id, event_id, assignment_json, updated_at_ms
            )
            SELECT ?, event_id, json_set(?, '$.eventId', event_id), updated_at_ms
-           FROM event_records WHERE event_id LIKE 'poll-event-%'`,
+           FROM event_records_canonical WHERE event_id LIKE 'poll-event-%'`,
         ).bind(profileId, JSON.stringify(assignment())),
         testEnv.EVENT_DB.prepare(
-          "UPDATE event_records SET revision = 2 WHERE event_id = ?",
+          "UPDATE event_records_canonical SET revision = 2 WHERE event_id = ?",
         ).bind(eventId),
         testEnv.EVENT_DB.prepare(
-          "UPDATE profile_event_prize_revisions SET revision = 2 WHERE profile_id = ?",
+          "UPDATE profile_event_prize_revisions_canonical SET revision = 2 WHERE profile_id = ?",
         ).bind(profileId),
       ]);
 
@@ -791,17 +821,17 @@ describe("event D1 store", () => {
         const result = await read(db, resourceId, knownRevision);
         expect(batches).toHaveLength(1);
         expect(batches[0]).toHaveLength(2);
-        const rowsRead = batches[0].reduce(
+        const rowsRead = batches[0]!.reduce(
           (total, row) => total + row.meta.rows_read,
           0,
         );
         if (knownRevision === 2) {
           expect(result).toEqual({ notModified: true, revision: 2 });
-          expect(batches[0][childResultIndex].results).toEqual([]);
+          expect(batches[0]![childResultIndex]!.results).toEqual([]);
           expect(rowsRead).toBeLessThanOrEqual(baselineRowsRead);
         } else {
           expect(result.notModified).toBe(false);
-          expect(batches[0][childResultIndex].results).toHaveLength(128);
+          expect(batches[0]![childResultIndex]!.results).toHaveLength(128);
           expect(rowsRead).toBeGreaterThan(baselineRowsRead);
         }
       }
@@ -824,13 +854,13 @@ describe("event D1 store", () => {
       snapshot: { revision: 2, prizeSelections: { [profileId]: "1111" } },
     });
     await patchEventOwnedPaths(testEnv.EVENT_DB, {
-      [`events/${eventId}/status`]: "active",
+      [`events/${eventId}/updatedAtMs`]: 200,
     });
     await expect(
       readEventSnapshotIfChanged(testEnv.EVENT_DB, eventId, 2),
     ).resolves.toMatchObject({
       notModified: false,
-      snapshot: { revision: 3, event: { status: "active" } },
+      snapshot: { revision: 3, event: { updatedAtMs: 200 } },
     });
     await patchEventOwnedPaths(testEnv.EVENT_DB, {
       [`profileEventPrizes/${profileId}/${eventId}`]: {
@@ -860,7 +890,7 @@ describe("event D1 store", () => {
       [`profileEventPrizes/${profileId}/${eventId}`]: assignment(),
     });
     await testEnv.EVENT_DB.prepare(
-      "DELETE FROM event_records WHERE event_id = ?",
+      "DELETE FROM event_records_canonical WHERE event_id = ?",
     )
       .bind(eventId)
       .run();
@@ -918,7 +948,7 @@ describe("event D1 store", () => {
       [`profileEventPrizes/${profileId}/${eventId}`]: assignment(),
     });
     await testEnv.EVENT_DB.prepare(
-      "DELETE FROM profile_event_prize_revisions WHERE profile_id = ?",
+      "DELETE FROM profile_event_prize_revisions_canonical WHERE profile_id = ?",
     )
       .bind(profileId)
       .run();
@@ -930,10 +960,10 @@ describe("event D1 store", () => {
       revision: 0,
     });
     expect(batches).toHaveLength(1);
-    expect(batches[0][0].results).toHaveLength(1);
-    expect(batches[0][1].results).toEqual([]);
+    expect(batches[0]![0]!.results).toHaveLength(1);
+    expect(batches[0]![1]!.results).toEqual([]);
     await testEnv.EVENT_DB.prepare(
-      "UPDATE profile_event_prizes SET assignment_json = '{}' WHERE profile_id = ?",
+      "UPDATE profile_event_prizes_canonical SET assignment_json = json_set(assignment_json, '$.invalidExtension', 1) WHERE profile_id = ?",
     )
       .bind(profileId)
       .run();
@@ -949,10 +979,10 @@ describe("event D1 store", () => {
     });
     await testEnv.EVENT_DB.batch([
       testEnv.EVENT_DB.prepare(
-        "UPDATE event_records SET record_json = '{}' WHERE event_id = ?",
+        "UPDATE event_records_canonical SET record_json = json_set(record_json, '$.invalidExtension', 1) WHERE event_id = ?",
       ).bind(eventId),
       testEnv.EVENT_DB.prepare(
-        "UPDATE profile_event_prizes SET assignment_json = '{}' WHERE profile_id = ?",
+        "UPDATE profile_event_prizes_canonical SET assignment_json = json_set(assignment_json, '$.invalidExtension', 1) WHERE profile_id = ?",
       ).bind(profileId),
     ]);
     await expect(
@@ -980,20 +1010,22 @@ describe("event D1 store", () => {
       [`events/${eventId}`]: eventRecord(),
       [`profileEventPrizes/${profileId}/${eventId}`]: assignment(),
     });
-    await testEnv.EVENT_DB.batch([
-      testEnv.EVENT_DB.prepare(
-        "UPDATE event_records SET revision = 9007199254740992 WHERE event_id = ?",
-      ).bind(eventId),
-      testEnv.EVENT_DB.prepare(
-        "UPDATE profile_event_prize_revisions SET revision = 9007199254740992 WHERE profile_id = ?",
-      ).bind(profileId),
-    ]);
+    await expect(
+      testEnv.EVENT_DB.batch([
+        testEnv.EVENT_DB.prepare(
+          "UPDATE event_records_canonical SET revision = 9007199254740992 WHERE event_id = ?",
+        ).bind(eventId),
+        testEnv.EVENT_DB.prepare(
+          "UPDATE profile_event_prize_revisions_canonical SET revision = 9007199254740992 WHERE profile_id = ?",
+        ).bind(profileId),
+      ]),
+    ).rejects.toThrow("CHECK constraint failed");
     await expect(
       readEventSnapshotIfChanged(testEnv.EVENT_DB, eventId, 1),
-    ).rejects.toThrow("invalid-event-integer");
+    ).resolves.toEqual({ notModified: true, revision: 1 });
     await expect(
       readProfileEventPrizesIfChanged(testEnv.EVENT_DB, profileId, 1),
-    ).rejects.toThrow("invalid-event-integer");
+    ).resolves.toEqual({ notModified: true, revision: 1 });
   });
 
   it.each([-1, 0.5, NaN, Infinity, Number.MAX_SAFE_INTEGER + 1])(
@@ -1047,7 +1079,7 @@ describe("event D1 store", () => {
       [`eventPrizeSelections/${eventId}/${profileId}`]: prizeId,
     });
     await testEnv.EVENT_DB.prepare(
-      "UPDATE event_prize_selections SET prize_id = ? WHERE event_id = ?",
+      "UPDATE event_prize_selections_canonical SET prize_id = ? WHERE event_id = ?",
     )
       .bind("invalid#prize", eventId)
       .run();
@@ -1061,23 +1093,27 @@ describe("event D1 store", () => {
       "invalid-event-prize-selection",
     );
 
-    await testEnv.EVENT_DB.batch([
-      testEnv.EVENT_DB.prepare(
-        "UPDATE event_prize_selections SET prize_id = ? WHERE event_id = ?",
-      ).bind(prizeId, eventId),
-      testEnv.EVENT_DB.prepare(
-        "UPDATE event_records SET status = 'active' WHERE event_id = ?",
-      ).bind(eventId),
-    ]);
-    await expect(readEvent(testEnv.EVENT_DB, eventId)).rejects.toThrow(
-      "event-row-mismatch",
+    await testEnv.EVENT_DB.prepare(
+      "UPDATE event_prize_selections_canonical SET prize_id = ? WHERE event_id = ?",
+    )
+      .bind(prizeId, eventId)
+      .run();
+    await expect(
+      testEnv.EVENT_DB.batch([
+        testEnv.EVENT_DB.prepare(
+          "UPDATE event_records_canonical SET status = 'active' WHERE event_id = ?",
+        ).bind(eventId),
+      ]),
+    ).rejects.toThrow("CHECK constraint failed");
+    await expect(readEvent(testEnv.EVENT_DB, eventId)).resolves.toEqual(
+      eventRecord(),
     );
     await expect(
       readEventPrizeSelections(testEnv.EVENT_DB, eventId),
     ).resolves.toEqual({ [profileId]: prizeId });
-    await expect(readEventSnapshot(testEnv.EVENT_DB, eventId)).rejects.toThrow(
-      "event-row-mismatch",
-    );
+    await expect(
+      readEventSnapshot(testEnv.EVENT_DB, eventId),
+    ).resolves.toMatchObject({ event: eventRecord() });
   });
 
   it("reads one assignment without validating unrelated profile prizes", async () => {
@@ -1088,11 +1124,20 @@ describe("event D1 store", () => {
       [`profileEventPrizes/${profileId}/${eventId}`]: assignment(),
     });
     await testEnv.EVENT_DB.prepare(
-      `INSERT INTO profile_event_prizes (
+      `INSERT INTO profile_event_prizes_canonical (
          profile_id, event_id, assignment_json, updated_at_ms
        ) VALUES (?, ?, ?, ?)`,
     )
-      .bind(profileId, otherEventId, JSON.stringify(assignment()), 2_000)
+      .bind(
+        profileId,
+        otherEventId,
+        JSON.stringify({
+          ...assignment(),
+          eventId: otherEventId,
+          invalidExtension: true,
+        }),
+        2_000,
+      )
       .run();
 
     await expect(
@@ -1141,7 +1186,7 @@ describe("event D1 store", () => {
     await testEnv.EVENT_DB.batch(
       eventIds.map((id) =>
         testEnv.EVENT_DB.prepare(
-          `INSERT INTO profile_event_prizes (
+          `INSERT INTO profile_event_prizes_canonical (
              profile_id, event_id, assignment_json, updated_at_ms
            ) VALUES (?, ?, ?, ?)`,
         ).bind(
@@ -1223,7 +1268,7 @@ describe("event D1 store", () => {
       await testEnv.EVENT_DB.batch(
         eventIds.map((id) =>
           testEnv.EVENT_DB.prepare(
-            `INSERT INTO profile_event_prizes (
+            `INSERT INTO profile_event_prizes_canonical (
                profile_id, event_id, assignment_json, updated_at_ms
              ) VALUES (?, ?, ?, ?)`,
           ).bind(
@@ -1264,7 +1309,7 @@ describe("event D1 store", () => {
         ),
       ).toEqual(expectedOrder.slice(0, 3));
       await testEnv.EVENT_DB.prepare(
-        "DELETE FROM profile_event_prizes WHERE profile_id = ? AND event_id = ?",
+        "DELETE FROM profile_event_prizes_canonical WHERE profile_id = ? AND event_id = ?",
       )
         .bind(profileId, emojiId)
         .run();
@@ -1354,13 +1399,13 @@ describe("event D1 store", () => {
     });
     await patchEventOwnedPaths(
       testEnv.EVENT_DB,
-      { [`events/${eventId}/status`]: "active" },
+      { [`events/${eventId}/updatedAtMs`]: 200 },
       { expectedEventRevisions: { [eventId]: 1 } },
     );
     await expect(
       patchEventOwnedPaths(
         testEnv.EVENT_DB,
-        { [`events/${eventId}/status`]: "ended" },
+        { [`events/${eventId}/updatedAtMs`]: 300 },
         { expectedEventRevisions: { [eventId]: 1 } },
       ),
     ).rejects.toBeInstanceOf(EventD1Conflict);
@@ -1405,7 +1450,7 @@ describe("event D1 store", () => {
 
   it.each([
     ["events", ""],
-    ["events", "/unknownFutureField"],
+    ["events", "/updatedAtMs"],
     ["eventPrizeSelections", ""],
     ["eventPrizeSelections", `/${profileId}`],
   ])("reuses the snapshot for %s%s transactions", async (root, suffix) => {
@@ -1427,8 +1472,9 @@ describe("event D1 store", () => {
       `${root}/${eventId}${suffix}`,
       (current) => {
         if (root === "events") {
+          if (suffix) return { value: 300 };
           const value = current as Record<string, unknown>;
-          value.transactionValue = { retained: [1, 2, 3] };
+          value.updatedAtMs = 300;
           return { value };
         }
         if (suffix) return { value: "1514" };
@@ -1443,10 +1489,7 @@ describe("event D1 store", () => {
     const stored = await readEventSnapshot(testEnv.EVENT_DB, eventId);
     expect(stored.revision).toBe(2);
     if (root === "events") {
-      const value = suffix ? stored.event!.unknownFutureField : stored.event;
-      expect(value).toMatchObject({
-        transactionValue: { retained: [1, 2, 3] },
-      });
+      expect(stored.event!.updatedAtMs).toBe(300);
       expect(stored.prizeSelections).toEqual({
         [profileId]: prizeId,
         "profile-two": "1111",
@@ -1464,14 +1507,14 @@ describe("event D1 store", () => {
       await seedPrizeRows();
       const raw = JSON.stringify(eventRecord(), null, 2).replace(
         '"createdAtMs": 100',
-        '"createdAtMs": 1e2',
+        '"createdAtMs": 100',
       );
       await testEnv.EVENT_DB.batch([
         testEnv.EVENT_DB.prepare(
-          "UPDATE event_records SET record_json = ? WHERE event_id = ?",
+          "UPDATE event_records_canonical SET record_json = ? WHERE event_id = ?",
         ).bind(raw, eventId),
         testEnv.EVENT_DB.prepare(
-          "UPDATE event_prize_selections SET prize_id = 'invalid#sibling' WHERE event_id = ? AND profile_id = 'profile-two'",
+          "UPDATE event_prize_selections_canonical SET prize_id = 'invalid#sibling' WHERE event_id = ? AND profile_id = 'profile-two'",
         ).bind(eventId),
       ]);
       const before = await readPrizeStorage();
@@ -1528,12 +1571,12 @@ describe("event D1 store", () => {
       expect(observed.readBatches).toHaveLength(values.length);
       for (const batch of observed.readBatches) {
         const selectionReads = batch.statements.filter(({ query }) =>
-          query.includes("FROM event_prize_selections"),
+          query.includes("FROM event_prize_selections_canonical"),
         );
         expect(selectionReads).toHaveLength(1);
-        expect(selectionReads[0].query).toMatch(/event_id\s*=\s*\?/);
-        expect(selectionReads[0].query).toMatch(/profile_id\s*=\s*\?/);
-        expect(selectionReads[0].values).toEqual([eventId, targetProfileId]);
+        expect(selectionReads[0]!.query).toMatch(/event_id\s*=\s*\?/);
+        expect(selectionReads[0]!.query).toMatch(/profile_id\s*=\s*\?/);
+        expect(selectionReads[0]!.values).toEqual([eventId, targetProfileId]);
         expect(
           batch.results.every((result) => result.results.length <= 1),
         ).toBe(true);
@@ -1591,12 +1634,12 @@ describe("event D1 store", () => {
       async (timing) => {
         await seedPrizeRows();
         const intent = {
-          schemaVersion: 1 as const,
+          schemaVersion: 3 as const,
           transitionId: "selection-pending-transition",
           eventId,
           expectedRevision: 1,
           canonicalUpdates: { [`events/${eventId}/status`]: "active" },
-          rtdbEffects: {},
+          effects: {},
           createdAtMs: 200,
           updatedAtMs: 200,
         };
@@ -1630,7 +1673,7 @@ describe("event D1 store", () => {
         );
         expect(
           await listPendingEventTransitionIntents(testEnv.EVENT_DB),
-        ).toEqual([{ ...intent, attempts: 0 }]);
+        ).toEqual([{ ...eventIntentFixture(intent), attempts: 0 }]);
       },
     );
 
@@ -1698,7 +1741,7 @@ describe("event D1 store", () => {
         expect(await readPrizeStorage()).toEqual(before);
       }
       await testEnv.EVENT_DB.prepare(
-        "UPDATE event_prize_selections SET prize_id = 'invalid#prize' WHERE event_id = ? AND profile_id = ?",
+        "UPDATE event_prize_selections_canonical SET prize_id = 'invalid#prize' WHERE event_id = ? AND profile_id = ?",
       )
         .bind(eventId, profileId)
         .run();
@@ -1721,7 +1764,7 @@ describe("event D1 store", () => {
     it("allows reading and removing a stored prize that is no longer in the catalog", async () => {
       await seedPrizeRows();
       await testEnv.EVENT_DB.prepare(
-        "UPDATE event_prize_selections SET prize_id = 'retired-prize' WHERE event_id = ? AND profile_id = ?",
+        "UPDATE event_prize_selections_canonical SET prize_id = 'retired-prize' WHERE event_id = ? AND profile_id = ?",
       )
         .bind(eventId, profileId)
         .run();
@@ -1856,7 +1899,9 @@ describe("event D1 store", () => {
           ? kind === "progress"
             ? { [path]: plan.outbox }
             : {
-                [`eventTelegramProjections/${eventId}`]: { retained: true },
+                [`eventTelegramProjections/${eventId}`]: projectionState({
+                  upcomingText: "retained",
+                }),
                 [`eventTelegramProjectionGenerations/${eventId}`]: 3,
               }
           : {}),
@@ -1872,10 +1917,10 @@ describe("event D1 store", () => {
       let reads = 0;
       const table =
         kind === "progress"
-          ? "event_progress_outboxes"
-          : "event_telegram_projection_state";
+          ? "event_progress_outboxes_canonical"
+          : "event_telegram_projection_state_canonical";
       const observed = observeD1FailureDatabase(testEnv.EVENT_DB, {
-        beforeWriteBatch,
+        ...(beforeWriteBatch ? { beforeWriteBatch } : {}),
         async afterRead(query) {
           if (!/^\s*SELECT\b/i.test(query) || !query.includes(`FROM ${table}`))
             return;
@@ -1892,15 +1937,12 @@ describe("event D1 store", () => {
       };
     }
 
-    it("marks progress dispatched with one read and retains raw JSON fields and the original announcement time", async () => {
+    it("marks progress dispatched with one read and retains canonical fields and the original announcement time", async () => {
       const { outboxId, path, outbox } = await seed("progress");
-      const original = { ...outbox, unknownFutureField: { retained: [1, 2] } };
-      const raw = JSON.stringify(original, null, 2).replace(
-        '"firstQueuedAtMs": 100',
-        '"firstQueuedAtMs": 1e2',
-      );
+      const original = outbox;
+      const raw = JSON.stringify(original, null, 2);
       await testEnv.EVENT_DB.prepare(
-        "UPDATE event_progress_outboxes SET record_json = ? WHERE outbox_id = ? AND status = 'pending'",
+        "UPDATE event_progress_outboxes_canonical SET record_json = ? WHERE outbox_id = ? AND status = 'pending'",
       )
         .bind(raw, outboxId)
         .run();
@@ -1938,23 +1980,19 @@ describe("event D1 store", () => {
               ? JSON.stringify({
                   ...outbox,
                   firstQueuedAtMs: 50,
-                  concurrent: true,
                 })
-              : JSON.stringify(outbox, null, 2).replace(
-                  '"firstQueuedAtMs": 100',
-                  '"firstQueuedAtMs": 1e2',
-                );
+              : JSON.stringify(outbox, null, 2);
         const observed = observe("progress", undefined, async (read) => {
           if (read !== 1) return;
           if (racedJson === null) {
             await testEnv.EVENT_DB.prepare(
-              "DELETE FROM event_progress_outboxes WHERE outbox_id = ? AND status = 'pending'",
+              "DELETE FROM event_progress_outboxes_canonical WHERE outbox_id = ? AND status = 'pending'",
             )
               .bind(outboxId)
               .run();
           } else {
             await testEnv.EVENT_DB.prepare(
-              "UPDATE event_progress_outboxes SET record_json = ? WHERE outbox_id = ? AND status = 'pending'",
+              "UPDATE event_progress_outboxes_canonical SET record_json = ? WHERE outbox_id = ? AND status = 'pending'",
             )
               .bind(racedJson, outboxId)
               .run();
@@ -1969,8 +2007,8 @@ describe("event D1 store", () => {
                 {
                   kind: "event-field",
                   eventId,
-                  field: "status",
-                  value: "active",
+                  field: "updatedAtMs",
+                  value: 200,
                 },
               ],
               { admission },
@@ -1981,7 +2019,7 @@ describe("event D1 store", () => {
         expect(observed.writeBatches).toHaveLength(1);
         expect(
           await testEnv.EVENT_DB.prepare(
-            "SELECT record_json FROM event_progress_outboxes WHERE outbox_id = ? AND status = 'pending'",
+            "SELECT record_json FROM event_progress_outboxes_canonical WHERE outbox_id = ? AND status = 'pending'",
           )
             .bind(outboxId)
             .first("record_json"),
@@ -2070,7 +2108,6 @@ describe("event D1 store", () => {
           ...outbox,
           firstQueuedAtMs: 400,
           lastQueuedAtMs: 500,
-          replaced: true,
         };
         const direct: EventMutation = {
           kind: "progress-outbox",
@@ -2085,7 +2122,7 @@ describe("event D1 store", () => {
         const observed = observe("progress", undefined, async (read) => {
           if (position !== "after" || read !== 1) return;
           await testEnv.EVENT_DB.prepare(
-            "UPDATE event_progress_outboxes SET record_json = ? WHERE outbox_id = ? AND status = 'pending'",
+            "UPDATE event_progress_outboxes_canonical SET record_json = ? WHERE outbox_id = ? AND status = 'pending'",
           )
             .bind(JSON.stringify({ ...outbox, firstQueuedAtMs: 50 }), outboxId)
             .run();
@@ -2113,11 +2150,11 @@ describe("event D1 store", () => {
 
     it.each([
       ["missing", null, "event-progress-not-found"],
-      ["JSON null", "null", "event-progress-not-found"],
+      ["JSON null", "null", "invalid-canonical-event-progress-record"],
       [
         "invalid record",
         '{"schemaVersion":2,"eventId":"event-one","runAtMs":null}',
-        "invalid-event-progress-outbox",
+        "invalid-canonical-event-progress-record",
       ],
       ["invalid JSON", "{", "invalid-event-json"],
     ] as const)(
@@ -2179,7 +2216,7 @@ describe("event D1 store", () => {
             : kind === "progress"
               ? { ...outbox, lastQueuedAtMs: 200 }
               : kind === "state"
-                ? { updated: true }
+                ? projectionState({ startedText: "updated" })
                 : 4;
         await expect(
           transactEventOwnedPath(observed.db, path, () => ({ value: next })),
@@ -2205,8 +2242,8 @@ describe("event D1 store", () => {
                     kind === "state"
                       ? next
                       : mode === "missing"
-                        ? {}
-                        : { retained: true },
+                        ? projectionState()
+                        : projectionState({ upcomingText: "retained" }),
                 },
           );
         }
@@ -2220,7 +2257,9 @@ describe("event D1 store", () => {
         const observed = observe(kind, async (attempt) => {
           if (attempt !== 1) return;
           await patchEventOwnedPaths(testEnv.EVENT_DB, {
-            [`eventTelegramProjections/${eventId}`]: { concurrent: true },
+            [`eventTelegramProjections/${eventId}`]: projectionState({
+              upcomingText: "concurrent",
+            }),
             [`eventTelegramProjectionGenerations/${eventId}`]: 8,
           });
         });
@@ -2229,12 +2268,15 @@ describe("event D1 store", () => {
           inputs.push(structuredClone(current));
           if (kind === "generation") return { value: Number(current) + 1 };
           const value = current as Record<string, unknown>;
-          value.updated = true;
+          value.startedText = "updated";
           return { value };
         });
         expect(inputs).toEqual(
           kind === "state"
-            ? [{ retained: true }, { concurrent: true }]
+            ? [
+                projectionState({ upcomingText: "retained" }),
+                projectionState({ upcomingText: "concurrent" }),
+              ]
             : [3, 8],
         );
         expect(observed.reads).toBe(2);
@@ -2246,8 +2288,11 @@ describe("event D1 store", () => {
           revision: 3,
           state:
             kind === "state"
-              ? { concurrent: true, updated: true }
-              : { concurrent: true },
+              ? projectionState({
+                  upcomingText: "concurrent",
+                  startedText: "updated",
+                })
+              : projectionState({ upcomingText: "concurrent" }),
         });
       },
     );
@@ -2276,17 +2321,17 @@ describe("event D1 store", () => {
               kind === "progress"
                 ? { [path]: inserted }
                 : {
-                    [`eventTelegramProjections/${eventId}`]: {
-                      concurrent: true,
-                    },
+                    [`eventTelegramProjections/${eventId}`]: projectionState({
+                      upcomingText: "concurrent",
+                    }),
                     [`eventTelegramProjectionGenerations/${eventId}`]: 8,
                   },
             );
           } else {
             await testEnv.EVENT_DB.prepare(
               kind === "progress"
-                ? "DELETE FROM event_progress_outboxes WHERE outbox_id = ? AND status = 'pending'"
-                : "DELETE FROM event_telegram_projection_state WHERE event_id = ?",
+                ? "DELETE FROM event_progress_outboxes_canonical WHERE outbox_id = ? AND status = 'pending'"
+                : "DELETE FROM event_telegram_projection_state_canonical WHERE event_id = ?",
             )
               .bind(kind === "progress" ? outboxId : eventId)
               .run();
@@ -2300,11 +2345,11 @@ describe("event D1 store", () => {
               kind === "generation"
                 ? Number(current) + 1
                 : kind === "state"
-                  ? {
+                  ? projectionState({
                       ...(current as Record<string, unknown> | null),
-                      updated: true,
-                    }
-                  : { ...outbox, firstQueuedAtMs: 400, lastQueuedAtMs: 300 },
+                      startedText: "updated",
+                    })
+                  : { ...outbox, firstQueuedAtMs: 200, lastQueuedAtMs: 300 },
           };
         });
         expect(observed.reads).toBe(2);
@@ -2315,7 +2360,7 @@ describe("event D1 store", () => {
           );
           expect(await readEventOwnedPath(testEnv.EVENT_DB, path)).toEqual({
             ...outbox,
-            firstQueuedAtMs: race === "insert" ? 50 : 400,
+            firstQueuedAtMs: race === "insert" ? 50 : 200,
             lastQueuedAtMs: 300,
           });
           expect(
@@ -2331,8 +2376,8 @@ describe("event D1 store", () => {
                 ? [0, 8]
                 : [3, 0]
               : race === "insert"
-                ? [null, { concurrent: true }]
-                : [{ retained: true }, null],
+                ? [null, projectionState({ upcomingText: "concurrent" })]
+                : [projectionState({ upcomingText: "retained" }), null],
           );
           expect(
             await readEventTelegramProjectionState(testEnv.EVENT_DB, eventId),
@@ -2340,22 +2385,22 @@ describe("event D1 store", () => {
             generation:
               (race === "insert" ? 8 : 0) + (kind === "generation" ? 1 : 0),
             revision: race === "insert" ? 2 : 1,
-            state: {
-              ...(race === "insert" ? { concurrent: true } : {}),
-              ...(kind === "state" ? { updated: true } : {}),
-            },
+            state: projectionState({
+              ...(race === "insert" ? { upcomingText: "concurrent" } : {}),
+              ...(kind === "state" ? { startedText: "updated" } : {}),
+            }),
           });
         }
       },
     );
 
-    it("retries progress transactions with the latest raw snapshot and quarantines only the replaced record", async () => {
+    it("retries progress transactions with the latest canonical snapshot", async () => {
       const { path, outboxId, outbox } = await seed("progress");
-      const raced = { ...outbox, schemaVersion: 2, concurrent: true };
+      const raced = { ...outbox, firstQueuedAtMs: 50 };
       const observed = observe("progress", async (attempt) => {
         if (attempt !== 1) return;
         await testEnv.EVENT_DB.prepare(
-          "UPDATE event_progress_outboxes SET record_json = ? WHERE outbox_id = ? AND status = 'pending'",
+          "UPDATE event_progress_outboxes_canonical SET record_json = ? WHERE outbox_id = ? AND status = 'pending'",
         )
           .bind(JSON.stringify(raced, null, 2), outboxId)
           .run();
@@ -2370,6 +2415,7 @@ describe("event D1 store", () => {
       expect(observed.writeBatches).toHaveLength(2);
       expect(await readEventOwnedPath(testEnv.EVENT_DB, path)).toEqual({
         ...outbox,
+        firstQueuedAtMs: 50,
         lastQueuedAtMs: 200,
       });
       expect(
@@ -2377,20 +2423,14 @@ describe("event D1 store", () => {
           testEnv.EVENT_DB,
           `eventProgressOutboxDead/${outboxId}`,
         ),
-      ).toMatchObject({
-        reason: "invalid-event-progress-outbox",
-        originalRecord: raced,
-      });
+      ).toBeNull();
     });
 
     it("keeps raw progress JSON and the earliest timestamp independent of in-place updater mutations", async () => {
       const { path, outboxId, outbox } = await seed("progress");
-      const storedJson = JSON.stringify(outbox, null, 2).replace(
-        '"firstQueuedAtMs": 100',
-        '"firstQueuedAtMs": 1e2',
-      );
+      const storedJson = JSON.stringify(outbox, null, 2);
       await testEnv.EVENT_DB.prepare(
-        "UPDATE event_progress_outboxes SET record_json = ? WHERE outbox_id = ? AND status = 'pending'",
+        "UPDATE event_progress_outboxes_canonical SET record_json = ? WHERE outbox_id = ? AND status = 'pending'",
       )
         .bind(storedJson, outboxId)
         .run();
@@ -2477,9 +2517,12 @@ describe("event D1 store", () => {
         const observed = observe(kind, async (attempt) => {
           if (kind === "progress") {
             await testEnv.EVENT_DB.prepare(
-              "UPDATE event_progress_outboxes SET record_json = ? WHERE outbox_id = ? AND status = 'pending'",
+              "UPDATE event_progress_outboxes_canonical SET record_json = ? WHERE outbox_id = ? AND status = 'pending'",
             )
-              .bind(JSON.stringify({ ...outbox, attempt }), outboxId)
+              .bind(
+                JSON.stringify({ ...outbox, firstQueuedAtMs: 100 - attempt }),
+                outboxId,
+              )
               .run();
           } else {
             await patchEventOwnedPaths(testEnv.EVENT_DB, {
@@ -2492,7 +2535,12 @@ describe("event D1 store", () => {
             value:
               kind === "generation"
                 ? 100
-                : { ...(current as Record<string, unknown>), discarded: true },
+                : kind === "progress"
+                  ? { ...outbox, lastQueuedAtMs: 300 }
+                  : projectionState({
+                      ...(current as Record<string, unknown>),
+                      startedText: "discarded",
+                    }),
           })),
         ).rejects.toBeInstanceOf(EventD1Conflict);
         expect(observed.reads).toBe(12);
@@ -2500,7 +2548,7 @@ describe("event D1 store", () => {
         if (kind === "progress") {
           expect(await readEventOwnedPath(testEnv.EVENT_DB, path)).toEqual({
             ...outbox,
-            attempt: 12,
+            firstQueuedAtMs: 88,
           });
           expect(
             await readEventOwnedPath(
@@ -2514,7 +2562,7 @@ describe("event D1 store", () => {
           ).toEqual({
             generation: 15,
             revision: 13,
-            state: { retained: true },
+            state: projectionState({ upcomingText: "retained" }),
           });
         }
       },
@@ -2538,9 +2586,9 @@ describe("event D1 store", () => {
       ).rejects.toBe(reason);
       expect(observed.reads).toBe(1);
       expect(observed.writeBatches).toHaveLength(0);
-      expect(await readEventOwnedPath(testEnv.EVENT_DB, path)).toEqual({
-        retained: true,
-      });
+      expect(await readEventOwnedPath(testEnv.EVENT_DB, path)).toEqual(
+        projectionState({ upcomingText: "retained" }),
+      );
     });
 
     it("preserves cancellation after the final transaction conflict", async () => {
@@ -2557,7 +2605,7 @@ describe("event D1 store", () => {
         transactEventOwnedPath(
           observed.db,
           path,
-          () => ({ value: { discarded: true } }),
+          () => ({ value: projectionState({ startedText: "discarded" }) }),
           { signal: controller.signal },
         ),
       ).rejects.toBe(reason);
@@ -2569,7 +2617,7 @@ describe("event D1 store", () => {
       ).toEqual({
         generation: 15,
         revision: 13,
-        state: { retained: true },
+        state: projectionState({ upcomingText: "retained" }),
       });
     });
 
@@ -2579,7 +2627,7 @@ describe("event D1 store", () => {
       const observed = observe("state", async () => {
         controller.abort(new Error("cancelled-during-commit"));
       });
-      const next = { updated: true };
+      const next = projectionState({ startedText: "updated" });
       await expect(
         transactEventOwnedPath(
           observed.db,
@@ -2644,7 +2692,7 @@ describe("event D1 store", () => {
                     [`events/${eventId}`]: {
                       ...(await readEventSnapshot(testEnv.EVENT_DB, eventId))
                         .event,
-                      sibling: { retained: true },
+                      isSundayMons: true,
                     },
                   }
                 : { [`eventPrizeSelections/${eventId}/sibling`]: "1111" },
@@ -2655,22 +2703,26 @@ describe("event D1 store", () => {
       };
       await transactEventOwnedPath(db, `${root}/${eventId}`, (current) => {
         const value = current as Record<string, unknown>;
-        observed.push(value.sibling);
+        observed.push(root === "events" ? value.isSundayMons : value.sibling);
         changeSibling = observed.length === 1;
-        value.transactionValue =
-          root === "events" ? { retained: true } : "1514";
+        if (root === "events") value.updatedAtMs = 300;
+        else value.transactionValue = "1514";
         return { value };
       });
-      const sibling = root === "events" ? { retained: true } : "1111";
-      expect(observed).toEqual([undefined, sibling]);
+      const sibling = root === "events" ? true : "1111";
+      expect(observed).toEqual([
+        root === "events" ? false : undefined,
+        sibling,
+      ]);
       const stored = await readEventSnapshot(testEnv.EVENT_DB, eventId);
       expect(stored.revision).toBe(3);
       expect(
         root === "events" ? stored.event : stored.prizeSelections,
-      ).toMatchObject({
-        sibling,
-        transactionValue: root === "events" ? { retained: true } : "1514",
-      });
+      ).toMatchObject(
+        root === "events"
+          ? { isSundayMons: true, updatedAtMs: 300 }
+          : { sibling, transactionValue: "1514" },
+      );
     },
   );
 
@@ -2680,11 +2732,11 @@ describe("event D1 store", () => {
       await seedPrizeRows();
       const before = await readEventSnapshot(testEnv.EVENT_DB, eventId);
       const intent = {
-        schemaVersion: 1 as const,
+        schemaVersion: 3 as const,
         transitionId: "transition-attached-after-read",
         eventId,
         expectedRevision: before.revision,
-        rtdbEffects: { "invites/pending": { eventId } },
+        effects: {},
         canonicalUpdates: { [`events/${eventId}/status`]: "active" },
         createdAtMs: 200,
         updatedAtMs: 200,
@@ -2708,7 +2760,8 @@ describe("event D1 store", () => {
         transactEventOwnedPath(db, `${root}/${eventId}`, (current) => {
           attachIntent = true;
           const value = current as Record<string, unknown>;
-          value.transactionValue = root === "events" ? true : "1514";
+          if (root === "events") value.updatedAtMs = 300;
+          else value.transactionValue = "1514";
           return { value };
         }),
       ).rejects.toThrow("event-transition-pending");
@@ -2717,11 +2770,11 @@ describe("event D1 store", () => {
         before,
       );
       expect(await listPendingEventTransitionIntents(testEnv.EVENT_DB)).toEqual(
-        [{ ...intent, attempts: 0 }],
+        [{ ...eventIntentFixture(intent), attempts: 0 }],
       );
       expect(
         await testEnv.EVENT_DB.prepare(
-          "SELECT pending_transition_id FROM event_records WHERE event_id = ?",
+          "SELECT pending_transition_id FROM event_records_canonical WHERE event_id = ?",
         )
           .bind(eventId)
           .first("pending_transition_id"),
@@ -2739,9 +2792,9 @@ describe("event D1 store", () => {
         }),
       });
       await testEnv.EVENT_DB.prepare(
-        `INSERT INTO profile_event_prizes (
+        `INSERT INTO profile_event_prizes_canonical (
            profile_id, event_id, assignment_json, updated_at_ms
-         ) VALUES (?, ?, '{}', 200)`,
+         ) VALUES (?, ?, json_object('eventId', ?2, 'profileId', ?1, 'place', 1, 'prizeId', '1092', 'assignedAtMs', 100, 'invalidExtension', 1), 200)`,
       )
         .bind(profileId, malformedEventId)
         .run();
@@ -2781,8 +2834,8 @@ describe("event D1 store", () => {
         [otherProfileId]: 1,
       });
       expect(observed.readBatches).toHaveLength(1);
-      expect(observed.readBatches[0].statements).toHaveLength(2);
-      expect(observed.readBatches[0].results[0].results).toHaveLength(2);
+      expect(observed.readBatches[0]!.statements).toHaveLength(2);
+      expect(observed.readBatches[0]!.results[0]!.results).toHaveLength(2);
       expect(observed.writeBatches).toHaveLength(1);
       const after = await readPrizeStorage();
       expect(
@@ -2814,25 +2867,25 @@ describe("event D1 store", () => {
         readProfilePrizeMutationSnapshots(baseline.database, requested),
       ).resolves.toEqual(expected);
       const baselineRowsRead =
-        baseline.readBatches[0].results[0].meta.rows_read;
+        baseline.readBatches[0]!.results[0]!.meta.rows_read;
       expect(baselineRowsRead).toBeGreaterThan(0);
       await testEnv.EVENT_DB.batch([
         testEnv.EVENT_DB.prepare(
           `WITH RECURSIVE entries(n) AS (
              SELECT 1 UNION ALL SELECT n + 1 FROM entries WHERE n < 512
            )
-           INSERT INTO event_records (
+           INSERT INTO event_records_canonical (
              event_id, status, start_at_ms, updated_at_ms, revision, record_json
            )
            SELECT 'prize-history-' || n, status, start_at_ms, updated_at_ms, 1,
                   json_set(record_json, '$.eventId', 'prize-history-' || n)
-           FROM entries CROSS JOIN event_records WHERE event_id = ?`,
+           FROM entries CROSS JOIN event_records_canonical WHERE event_id = ?`,
         ).bind(eventId),
         testEnv.EVENT_DB.prepare(
-          `INSERT INTO profile_event_prizes (
+          `INSERT INTO profile_event_prizes_canonical (
              profile_id, event_id, assignment_json, updated_at_ms
            )
-           SELECT ?, event_id, '{}', updated_at_ms FROM event_records
+           SELECT ?, event_id, json_object('eventId', event_id, 'profileId', ?1, 'place', 1, 'prizeId', '1092', 'assignedAtMs', 100, 'invalidExtension', 1), updated_at_ms FROM event_records_canonical
            WHERE event_id LIKE 'prize-history-%'`,
         ).bind(profileId),
       ]);
@@ -2842,13 +2895,13 @@ describe("event D1 store", () => {
       ).resolves.toEqual(expected);
       expect(observed.readBatches).toHaveLength(1);
       expect(
-        observed.readBatches[0].results[0].meta.rows_read,
+        observed.readBatches[0]!.results[0]!.meta.rows_read,
       ).toBeLessThanOrEqual(baselineRowsRead);
-      const read = observed.readBatches[0].statements[0];
+      const read = observed.readBatches[0]!.statements[0]!;
       const plan = await testEnv.EVENT_DB.prepare(
-        `EXPLAIN QUERY PLAN ${read.query}`,
+        `EXPLAIN QUERY PLAN ${read!.query}`,
       )
-        .bind(...read.values)
+        .bind(...read!.values)
         .all<{ detail: string }>();
       expect(
         plan.results.some(({ detail }) =>
@@ -2872,7 +2925,7 @@ describe("event D1 store", () => {
         });
         if (hasAssignment) {
           await testEnv.EVENT_DB.prepare(
-            `INSERT INTO profile_event_prizes (
+            `INSERT INTO profile_event_prizes_canonical (
              profile_id, event_id, assignment_json, updated_at_ms
            ) VALUES (?, ?, ?, 200)`,
           )
@@ -2881,7 +2934,7 @@ describe("event D1 store", () => {
         }
         if (hasRevision) {
           await testEnv.EVENT_DB.prepare(
-            `INSERT INTO profile_event_prize_revisions (
+            `INSERT INTO profile_event_prize_revisions_canonical (
              profile_id, revision, updated_at_ms
            ) VALUES (?, 7, 200)`,
           )
@@ -2904,24 +2957,26 @@ describe("event D1 store", () => {
       await seedPrizeRows();
       const requested = new Map([[profileId, new Set([eventId])]]);
       await testEnv.EVENT_DB.prepare(
-        "UPDATE profile_event_prizes SET assignment_json = '{}' WHERE profile_id = ? AND event_id = ?",
+        "UPDATE profile_event_prizes_canonical SET assignment_json = json_set(assignment_json, '$.invalidExtension', 1) WHERE profile_id = ? AND event_id = ?",
       )
         .bind(profileId, eventId)
         .run();
       await expect(
         readProfilePrizeMutationSnapshots(testEnv.EVENT_DB, requested),
       ).rejects.toThrow("invalid-event-prize-assignment");
-      await testEnv.EVENT_DB.batch([
-        testEnv.EVENT_DB.prepare(
-          "UPDATE profile_event_prizes SET assignment_json = ? WHERE profile_id = ? AND event_id = ?",
-        ).bind(JSON.stringify(assignment()), profileId, eventId),
-        testEnv.EVENT_DB.prepare(
-          "UPDATE profile_event_prize_revisions SET revision = 9007199254740992 WHERE profile_id = ?",
-        ).bind(profileId),
-      ]);
+      await expect(
+        testEnv.EVENT_DB.batch([
+          testEnv.EVENT_DB.prepare(
+            "UPDATE profile_event_prizes_canonical SET assignment_json = ? WHERE profile_id = ? AND event_id = ?",
+          ).bind(JSON.stringify(assignment()), profileId, eventId),
+          testEnv.EVENT_DB.prepare(
+            "UPDATE profile_event_prize_revisions_canonical SET revision = 9007199254740992 WHERE profile_id = ?",
+          ).bind(profileId),
+        ]),
+      ).rejects.toThrow("CHECK constraint failed");
       await expect(
         readProfilePrizeMutationSnapshots(testEnv.EVENT_DB, requested),
-      ).rejects.toThrow("invalid-event-integer");
+      ).rejects.toThrow("invalid-event-prize-assignment");
     });
 
     it("chunks 41 profiles without splitting scattered mutations for one profile", async () => {
@@ -2952,7 +3007,7 @@ describe("event D1 store", () => {
       expect(
         observed.readBatches.map(({ statements }) => statements.length),
       ).toEqual([40, 1]);
-      expect(observed.readBatches[0].results[0].results).toHaveLength(2);
+      expect(observed.readBatches[0]!.results[0]!.results).toHaveLength(2);
       expect(observed.writeBatches).toHaveLength(1);
       expect(Object.keys(result.profilePrizeRevisions)).toHaveLength(41);
       expect(result.profilePrizeRevisions[profileId]).toBe(2);
@@ -3014,7 +3069,7 @@ describe("event D1 store", () => {
         [`events/${unicodeEventId}`]: eventRecord({ eventId: unicodeEventId }),
       });
       await testEnv.EVENT_DB.prepare(
-        `INSERT INTO profile_event_prizes (
+        `INSERT INTO profile_event_prizes_canonical (
            profile_id, event_id, assignment_json, updated_at_ms
          ) VALUES (?, ?, ?, 200)`,
       )
@@ -3032,7 +3087,7 @@ describe("event D1 store", () => {
         [`profileEventPrizes/${profileId}/${unicodeEventId}`]: null,
       });
       expect(targeted.readBatches).toHaveLength(1);
-      expect(targeted.readBatches[0].statements).toHaveLength(1);
+      expect(targeted.readBatches[0]!.statements).toHaveLength(1);
       await expect(
         readProfileEventPrizeAssignment(
           testEnv.EVENT_DB,
@@ -3041,7 +3096,7 @@ describe("event D1 store", () => {
         ),
       ).resolves.toBeNull();
       await testEnv.EVENT_DB.prepare(
-        "UPDATE profile_event_prizes SET assignment_json = '{}' WHERE profile_id = ? AND event_id = ?",
+        "UPDATE profile_event_prizes_canonical SET assignment_json = json_set(assignment_json, '$.invalidExtension', 1) WHERE profile_id = ? AND event_id = ?",
       )
         .bind(profileId, otherEventId)
         .run();
@@ -3064,7 +3119,7 @@ describe("event D1 store", () => {
         ),
       ).rejects.toThrow("invalid-event-prize-assignment");
       expect(fallback.readBatches).toHaveLength(1);
-      expect(fallback.readBatches[0].statements).toHaveLength(2);
+      expect(fallback.readBatches[0]!.statements).toHaveLength(2);
       expect(fallback.writeBatches).toHaveLength(0);
       expect(await readPrizeStorage()).toEqual(before);
     });
@@ -3073,14 +3128,10 @@ describe("event D1 store", () => {
   it("transacts one profile prize in one read despite a malformed sibling", async () => {
     const { otherEventId, otherAssignment } = await seedPrizeRows();
     await testEnv.EVENT_DB.prepare(
-      "UPDATE profile_event_prizes SET assignment_json = ? WHERE profile_id = ? AND event_id = ?",
+      "UPDATE profile_event_prizes_canonical SET assignment_json = ? WHERE profile_id = ? AND event_id = ?",
     )
       .bind(
-        JSON.stringify(
-          { ...otherAssignment, eventId: "mismatched-event" },
-          null,
-          2,
-        ),
+        JSON.stringify({ ...otherAssignment, invalidExtension: true }, null, 2),
         profileId,
         otherEventId,
       )
@@ -3129,7 +3180,6 @@ describe("event D1 store", () => {
     const changed = {
       ...otherAssignment,
       assignedAtMs: 3_000,
-      archivedMetadata: { edition: 1, labels: ["first", "second", "third"] },
     };
     const result = await transactEventOwnedPath(
       testEnv.EVENT_DB,
@@ -3137,7 +3187,6 @@ describe("event D1 store", () => {
       (current) => {
         const prize = current as typeof otherAssignment;
         prize.assignedAtMs = 3_000;
-        prize.archivedMetadata.labels.push("third");
         return { value: prize };
       },
       { now: () => 300 },
@@ -3323,7 +3372,6 @@ describe("event D1 store", () => {
     const changedAssignment = {
       ...assignment(),
       assignedAtMs: 3_000,
-      futureMetadata: { nested: ["retained", { enabled: true }] },
     };
     const result = await patchEventOwnedPaths(
       testEnv.EVENT_DB,
@@ -3460,7 +3508,6 @@ describe("event D1 store", () => {
     const { otherEventId, otherAssignment } = await seedPrizeRows();
     const before = await readPrizeStorage();
     const reorderedAssignment = {
-      archivedMetadata: { labels: ["first", "second"], edition: 1 },
       assignedAtMs: otherAssignment.assignedAtMs,
       prizeId: otherAssignment.prizeId,
       place: otherAssignment.place,
@@ -3522,7 +3569,7 @@ describe("event D1 store", () => {
     }
     const changed = {
       ...otherAssignment,
-      archivedMetadata: { edition: 1, labels: ["second", "first"] },
+      assignedAtMs: 5_000,
     };
     await patchEventOwnedPaths(
       testEnv.EVENT_DB,
@@ -3544,10 +3591,10 @@ describe("event D1 store", () => {
     const retiredAssignment = { ...otherAssignment, prizeId: "retired-prize" };
     await testEnv.EVENT_DB.batch([
       testEnv.EVENT_DB.prepare(
-        "UPDATE event_prize_selections SET prize_id = ? WHERE event_id = ? AND profile_id = ?",
+        "UPDATE event_prize_selections_canonical SET prize_id = ? WHERE event_id = ? AND profile_id = ?",
       ).bind("retired-prize", eventId, "profile-two"),
       testEnv.EVENT_DB.prepare(
-        "UPDATE profile_event_prizes SET assignment_json = ? WHERE profile_id = ? AND event_id = ?",
+        "UPDATE profile_event_prizes_canonical SET assignment_json = ? WHERE profile_id = ? AND event_id = ?",
       ).bind(
         JSON.stringify(retiredAssignment, null, 2),
         profileId,
@@ -3610,6 +3657,15 @@ describe("event D1 store", () => {
     async (failure) => {
       const { otherEventId } = await seedPrizeRows();
       const before = await readPrizeStorage();
+      const progress = await buildEventProgressPlan(
+        {
+          eventId: failure === "SQL failure" ? "missing-event" : eventId,
+          sourceKey: "atomic-prizes",
+          reason: "match-rating-updated",
+          runAtMs: 1000,
+        },
+        300,
+      );
       await withD1Admission(async (active) => {
         const admission =
           failure === "expired admission"
@@ -3630,13 +3686,7 @@ describe("event D1 store", () => {
                   assignedAtMs: 3_000,
                 },
                 [`profileEventPrizes/${profileId}/${otherEventId}`]: null,
-                "eventProgressOutbox/atomic-prizes": {
-                  schemaVersion: 1,
-                  eventId:
-                    failure === "SQL failure" ? "missing-event" : eventId,
-                  runAtMs: 1_000,
-                  lastQueuedAtMs: 300,
-                },
+                [`eventProgressOutbox/${progress.outboxId}`]: progress.outbox,
               },
               {
                 admission,
@@ -3671,24 +3721,23 @@ describe("event D1 store", () => {
     const retiredAssignment = {
       ...assignment(),
       prizeId: retiredPrizeId,
-      archivedMetadata: { edition: 1 },
     };
     await patchEventOwnedPaths(testEnv.EVENT_DB, {
       [`events/${eventId}`]: eventRecord({ status: "ended" }),
     });
     await testEnv.EVENT_DB.batch([
       testEnv.EVENT_DB.prepare(
-        `INSERT INTO event_prize_selections (
+        `INSERT INTO event_prize_selections_canonical (
            event_id, profile_id, prize_id, updated_at_ms
          ) VALUES (?, ?, ?, ?)`,
       ).bind(eventId, profileId, retiredPrizeId, 2_000),
       testEnv.EVENT_DB.prepare(
-        `INSERT INTO profile_event_prizes (
+        `INSERT INTO profile_event_prizes_canonical (
            profile_id, event_id, assignment_json, updated_at_ms
          ) VALUES (?, ?, ?, ?)`,
       ).bind(profileId, eventId, JSON.stringify(retiredAssignment), 2_000),
       testEnv.EVENT_DB.prepare(
-        `INSERT INTO profile_event_prize_revisions (
+        `INSERT INTO profile_event_prize_revisions_canonical (
            profile_id, revision, updated_at_ms
          ) VALUES (?, ?, ?)`,
       ).bind(profileId, 1, 2_000),
@@ -3737,9 +3786,9 @@ describe("event D1 store", () => {
       patchEventOwnedPaths(testEnv.EVENT_DB, {
         [`events/${eventId}`]: null,
       }),
-    ).rejects.toThrow("event-deletion-unsupported");
+    ).rejects.toThrow("invalid-canonical-event-command");
     await testEnv.EVENT_DB.prepare(
-      "DELETE FROM event_records WHERE event_id = ?",
+      "DELETE FROM event_records_canonical WHERE event_id = ?",
     )
       .bind(eventId)
       .run();
@@ -3846,12 +3895,12 @@ describe("event D1 store", () => {
       [`events/${eventId}`]: eventRecord(),
     });
     const intent = {
-      schemaVersion: 1 as const,
+      schemaVersion: 3 as const,
       transitionId: "transition-one",
       eventId,
       expectedRevision: 1,
-      rtdbEffects: { [`invites/invite-one`]: { eventId } },
-      canonicalUpdates: { [`events/${eventId}/status`]: "active" },
+      effects: {},
+      canonicalUpdates: { [`events/${eventId}/updatedAtMs`]: 200 },
       createdAtMs: 200,
       updatedAtMs: 200,
     };
@@ -3864,7 +3913,7 @@ describe("event D1 store", () => {
       eventIntentFixture(intent),
     );
     expect(await listPendingEventTransitionIntents(testEnv.EVENT_DB)).toEqual([
-      { ...intent, attempts: 0 },
+      { ...eventIntentFixture(intent), attempts: 0 },
     ]);
     await patchEventOwnedPaths(testEnv.EVENT_DB, intent.canonicalUpdates, {
       expectedEventRevisions: { [eventId]: 1 },
@@ -3875,7 +3924,7 @@ describe("event D1 store", () => {
     );
     expect(await readEventSnapshot(testEnv.EVENT_DB, eventId)).toMatchObject({
       revision: 2,
-      event: { status: "active" },
+      event: { updatedAtMs: 200 },
     });
   });
 
@@ -3884,11 +3933,11 @@ describe("event D1 store", () => {
       [`events/${eventId}`]: eventRecord(),
     });
     const intent = {
-      schemaVersion: 1 as const,
+      schemaVersion: 3 as const,
       transitionId: "transition-pending",
       eventId,
       expectedRevision: 1,
-      rtdbEffects: { "invites/pending": { eventId } },
+      effects: {},
       canonicalUpdates: { [`events/${eventId}/status`]: "active" },
       createdAtMs: 200,
       updatedAtMs: 200,
@@ -3900,7 +3949,7 @@ describe("event D1 store", () => {
 
     await expect(
       testEnv.EVENT_DB.prepare(
-        "DELETE FROM event_transition_intents WHERE transition_id = ?",
+        "DELETE FROM event_transition_intents_canonical WHERE transition_id = ?",
       )
         .bind(intent.transitionId)
         .run(),
@@ -3911,7 +3960,7 @@ describe("event D1 store", () => {
       }),
     ).rejects.toThrow("event-transition-pending");
     expect(await listPendingEventTransitionIntents(testEnv.EVENT_DB)).toEqual([
-      { ...intent, attempts: 0 },
+      { ...eventIntentFixture(intent), attempts: 0 },
     ]);
     expect(await readEventSnapshot(testEnv.EVENT_DB, eventId)).toMatchObject({
       event: { status: "scheduled", updatedAtMs: 100 },
@@ -3919,7 +3968,7 @@ describe("event D1 store", () => {
     });
     expect(
       await testEnv.EVENT_DB.prepare(
-        "SELECT pending_transition_id FROM event_records WHERE event_id = ?",
+        "SELECT pending_transition_id FROM event_records_canonical WHERE event_id = ?",
       )
         .bind(eventId)
         .first<string>("pending_transition_id"),
@@ -3960,16 +4009,12 @@ describe("event D1 store", () => {
           [`profileGameProjectionOutbox/event/${eventId}`]: profileOutbox,
           [`telegramProjectionOutbox/event/${eventId}`]: telegramOutbox,
           [`eventTelegramProjectionGenerations/${eventId}`]: 1,
-          [`eventTelegramProjections/${eventId}`]: { version: "before" },
+          [`eventTelegramProjections/${eventId}`]: projectionState({
+            upcomingText: "before",
+          }),
         },
         { now: () => 100 },
       );
-      const malformedProgress = { ...progress, schemaVersion: 2 };
-      await testEnv.EVENT_DB.prepare(
-        "UPDATE event_progress_outboxes SET record_json = ? WHERE outbox_id = ? AND status = 'pending'",
-      )
-        .bind(JSON.stringify(malformedProgress), outboxId)
-        .run();
       const nextProgress = { ...progress, lastQueuedAtMs: 300 };
       const nextProfileOutbox = {
         ...profileOutbox,
@@ -3982,13 +4027,9 @@ describe("event D1 store", () => {
         updatedAtMs: 300,
       };
       const nextAssignment = { ...assignment(), assignedAtMs: 300 };
-      const dead = {
-        deadAtMs: 300,
-        originalRecord: progress,
-        reason: "mixed-family-dead-letter",
-      };
+      const dead = archivedProgress(progress, 300);
       const updates = {
-        [`events/${eventId}/status`]: "active",
+        [`events/${eventId}/updatedAtMs`]: 300,
         [`eventPrizeSelections/${eventId}/${profileId}`]: "1514",
         [`profileEventPrizes/${profileId}/${eventId}`]: nextAssignment,
         [`eventProgressOutbox/${outboxId}`]: nextProgress,
@@ -3996,14 +4037,25 @@ describe("event D1 store", () => {
         [`profileGameProjectionOutbox/event/${eventId}`]: nextProfileOutbox,
         [`telegramProjectionOutbox/event/${eventId}`]: nextTelegramOutbox,
         [`eventTelegramProjectionGenerations/${eventId}`]: 2,
-        [`eventTelegramProjections/${eventId}`]: { version: "after" },
+        [`eventTelegramProjections/${eventId}`]: projectionState({
+          schemaVersion: 3,
+          upcomingText: "after",
+          reminderText: "",
+          startedText: "",
+          endedText: "",
+          endedAnnouncementArmed: false,
+          startedMatchKeys: [],
+          startedMatchLinesByKey: {},
+          lastProjectedSignature: "",
+          updatedAtMs: 300,
+        }),
       };
       const intent = {
-        schemaVersion: 1 as const,
+        schemaVersion: 3 as const,
         transitionId: "transition-mixed-family",
         eventId,
         expectedRevision: 1,
-        rtdbEffects: { "invites/mixed-family": { eventId } },
+        effects: {},
         canonicalUpdates: updates,
         createdAtMs: 200,
         updatedAtMs: 200,
@@ -4016,24 +4068,24 @@ describe("event D1 store", () => {
         const prizes = await readPrizeStorage();
         const results = await testEnv.EVENT_DB.batch<Record<string, unknown>>([
           testEnv.EVENT_DB.prepare(
-            "SELECT * FROM event_profile_game_projection_outboxes ORDER BY event_id",
+            "SELECT * FROM event_profile_game_projection_outboxes_canonical ORDER BY event_id",
           ),
           testEnv.EVENT_DB.prepare(
-            "SELECT * FROM event_telegram_projection_outboxes ORDER BY event_id",
+            "SELECT * FROM event_telegram_projection_outboxes_canonical ORDER BY event_id",
           ),
           testEnv.EVENT_DB.prepare(
-            "SELECT * FROM event_telegram_projection_state ORDER BY event_id",
+            "SELECT * FROM event_telegram_projection_state_canonical ORDER BY event_id",
           ),
           testEnv.EVENT_DB.prepare(
-            "SELECT * FROM event_transition_intents ORDER BY transition_id",
+            "SELECT * FROM event_transition_intents_canonical ORDER BY transition_id",
           ),
         ]);
         return {
           ...prizes,
-          profileOutboxes: results[0].results,
-          telegramOutboxes: results[1].results,
-          telegramState: results[2].results,
-          intents: results[3].results,
+          profileOutboxes: results[0]!.results,
+          telegramOutboxes: results[1]!.results,
+          telegramState: results[2]!.results,
+          intents: results[3]!.results,
         };
       };
       const before = await readStorage();
@@ -4066,12 +4118,17 @@ describe("event D1 store", () => {
             writeBatches++;
             if (outcome === "Telegram revision race") {
               await testEnv.EVENT_DB.prepare(
-                `UPDATE event_telegram_projection_state
+                `UPDATE event_telegram_projection_state_canonical
                  SET generation = 7, revision = revision + 1,
                      state_json = ?, updated_at_ms = 250
                  WHERE event_id = ?`,
               )
-                .bind(JSON.stringify({ version: "concurrent" }), eventId)
+                .bind(
+                  JSON.stringify(
+                    projectionState({ upcomingText: "concurrent" }),
+                  ),
+                  eventId,
+                )
                 .run();
             }
           }
@@ -4081,7 +4138,7 @@ describe("event D1 store", () => {
       if (outcome === "late SQL failure") {
         await testEnv.EVENT_DB.prepare(
           `CREATE TRIGGER mixed_family_telegram_failure
-           BEFORE UPDATE ON event_telegram_projection_state
+           BEFORE UPDATE ON event_telegram_projection_state_canonical
            BEGIN SELECT RAISE(ABORT, 'late-telegram-write-failed'); END`,
         ).run();
       }
@@ -4124,7 +4181,9 @@ describe("event D1 store", () => {
                     ...before.telegramState[0],
                     generation: 7,
                     revision: 2,
-                    state_json: JSON.stringify({ version: "concurrent" }),
+                    state_json: JSON.stringify(
+                      projectionState({ upcomingText: "concurrent" }),
+                    ),
                     updated_at_ms: 250,
                   },
                 ],
@@ -4134,7 +4193,7 @@ describe("event D1 store", () => {
         return;
       }
       expect(after.events[0]).toMatchObject({
-        status: "active",
+        updated_at_ms: 300,
         revision: 2,
         pending_transition_id: null,
       });
@@ -4150,17 +4209,9 @@ describe("event D1 store", () => {
         revision: 2,
         updated_at_ms: 300,
       });
-      expect(after.outboxes).toHaveLength(3);
+      expect(after.outboxes).toHaveLength(2);
       for (const [path, expected] of [
         [`eventProgressOutbox/${outboxId}`, nextProgress],
-        [
-          `eventProgressOutboxDead/${outboxId}`,
-          {
-            deadAtMs: 300,
-            originalRecord: malformedProgress,
-            reason: "invalid-event-progress-outbox",
-          },
-        ],
         ["eventProgressOutboxDead/mixed-family-dead", dead],
         [`profileGameProjectionOutbox/event/${eventId}`, nextProfileOutbox],
         [`telegramProjectionOutbox/event/${eventId}`, nextTelegramOutbox],
@@ -4174,7 +4225,7 @@ describe("event D1 store", () => {
       ).toEqual({
         generation: 2,
         revision: 2,
-        state: { version: "after" },
+        state: updates[`eventTelegramProjections/${eventId}`],
       });
       expect(after.intents).toEqual([]);
     },
@@ -4184,66 +4235,54 @@ describe("event D1 store", () => {
     await patchEventOwnedPaths(testEnv.EVENT_DB, {
       [`events/${eventId}`]: eventRecord(),
     });
-    const progress = {
-      schemaVersion: 1,
-      eventId,
-      sourceKey: `start:${eventId}:1000`,
-      reason: "scheduled-start",
-      runAtMs: 1_000,
-      firstQueuedAtMs: 100,
-      lastQueuedAtMs: 100,
-    };
+    const { outboxId: progressId, outbox: progress } =
+      await buildEventProgressPlan(
+        {
+          eventId,
+          sourceKey: `start:${eventId}:1000`,
+          reason: "scheduled-start",
+          runAtMs: 1000,
+        },
+        100,
+      );
     await patchEventOwnedPaths(testEnv.EVENT_DB, {
-      "eventProgressOutbox/progress-one": progress,
+      [`eventProgressOutbox/${progressId}`]: progress,
     });
     expect(await listDueEventProgressOutboxes(testEnv.EVENT_DB, 100)).toEqual([
-      { outboxId: "progress-one", record: progress },
+      { outboxId: progressId, record: progress },
     ]);
     await patchEventOwnedPaths(testEnv.EVENT_DB, {
-      "eventProgressOutbox/progress-one/lastQueuedAtMs": 150,
+      [`eventProgressOutbox/${progressId}/lastQueuedAtMs`]: 150,
     });
     expect(await listDueEventProgressOutboxes(testEnv.EVENT_DB, 100)).toEqual(
       [],
     );
     expect(await listDueEventProgressOutboxes(testEnv.EVENT_DB, 150)).toEqual([
       {
-        outboxId: "progress-one",
+        outboxId: progressId,
         record: { ...progress, lastQueuedAtMs: 150 },
       },
     ]);
-    const dead = {
-      deadAtMs: 175,
-      originalRecord: { ...progress, lastQueuedAtMs: 150 },
-      reason: "invalid-event-progress-outbox",
-    };
+    const dead = archivedProgress({ ...progress, lastQueuedAtMs: 150 }, 175);
     await patchEventOwnedPaths(testEnv.EVENT_DB, {
-      "eventProgressOutboxDead/progress-one": dead,
+      [`eventProgressOutboxDead/${progressId}`]: dead,
     });
     await expect(
-      readEventOwnedPath(testEnv.EVENT_DB, "eventProgressOutbox/progress-one"),
+      readEventOwnedPath(testEnv.EVENT_DB, `eventProgressOutbox/${progressId}`),
     ).resolves.toEqual({ ...progress, lastQueuedAtMs: 150 });
     await expect(
       readEventOwnedPath(
         testEnv.EVENT_DB,
-        "eventProgressOutboxDead/progress-one",
+        `eventProgressOutboxDead/${progressId}`,
       ),
     ).resolves.toEqual(dead);
     const unscopedDeadLetters = {
-      "progress-null": {
-        deadAtMs: 176,
-        originalRecord: null,
-        reason: "invalid-event-progress-outbox",
-      },
-      "progress-primitive": {
-        deadAtMs: 177,
-        originalRecord: "invalid",
-        reason: "invalid-event-progress-outbox",
-      },
-      "progress-deleted-event": {
-        deadAtMs: 178,
-        originalRecord: { eventId: "deleted-event" },
-        reason: "invalid-event-progress-outbox",
-      },
+      "progress-null": archivedProgress(null, 176),
+      "progress-primitive": archivedProgress("invalid", 177),
+      "progress-deleted-event": archivedProgress(
+        { eventId: "deleted-event" },
+        178,
+      ),
     };
     await patchEventOwnedPaths(
       testEnv.EVENT_DB,
@@ -4263,22 +4302,22 @@ describe("event D1 store", () => {
       ).resolves.toEqual(record);
     }
     const deadIdentities = await testEnv.EVENT_DB.prepare(
-      `SELECT outbox_id, event_id FROM event_progress_outboxes
+      `SELECT outbox_id, event_id FROM event_progress_outboxes_canonical
        WHERE status = 'dead' ORDER BY outbox_id`,
     ).all<{ event_id: string | null; outbox_id: string }>();
     expect(deadIdentities.results).toEqual([
+      { event_id: "NN3eRzoZo80", outbox_id: progressId },
       { event_id: null, outbox_id: "progress-deleted-event" },
       { event_id: null, outbox_id: "progress-null" },
-      { event_id: "NN3eRzoZo80", outbox_id: "progress-one" },
       { event_id: null, outbox_id: "progress-primitive" },
     ]);
     await patchEventOwnedPaths(testEnv.EVENT_DB, {
-      "eventProgressOutbox/progress-one": null,
+      [`eventProgressOutbox/${progressId}`]: null,
     });
     await expect(
       readEventOwnedPath(
         testEnv.EVENT_DB,
-        "eventProgressOutboxDead/progress-one",
+        `eventProgressOutboxDead/${progressId}`,
       ),
     ).resolves.toEqual(dead);
 
@@ -4334,9 +4373,9 @@ describe("event D1 store", () => {
       testEnv.EVENT_DB,
       {
         [`eventTelegramProjectionGenerations/${eventId}`]: 1,
-        [`eventTelegramProjections/${eventId}`]: {
-          scheduledText: "ready",
-        },
+        [`eventTelegramProjections/${eventId}`]: projectionState({
+          upcomingText: "ready",
+        }),
       },
       { expectedTelegramStateRevisions: { [eventId]: 0 }, now: () => 400 },
     );
@@ -4345,7 +4384,7 @@ describe("event D1 store", () => {
     ).toEqual({
       generation: 1,
       revision: 1,
-      state: { scheduledText: "ready" },
+      state: projectionState({ upcomingText: "ready" }),
     });
     await expect(
       patchEventOwnedPaths(
@@ -4395,24 +4434,22 @@ describe("event D1 store", () => {
   );
 
   it.each([
-    ["missing", null],
-    ["null", "null"],
-    ["boolean", "true"],
-    ["string", '"100"'],
-    ["fraction", "100.5"],
-    ["too large", "9007199254740992"],
-    ["too small", "-9007199254740992"],
-    ["array", "[]"],
-    ["object", "{}"],
+    ["schemaVersion", 1],
+    ["dataEpoch", 0],
+    ["firstQueuedAtMs", -1],
+    ["lastQueuedAtMs", null],
+    ["runAtMs", "1000"],
+    ["reason", false],
+    ["unknownFutureField", { retained: true }],
   ])(
-    "repairs and archives an announcement with a %s first scheduling time",
-    async (_name, timestamp) => {
+    "rejects a noncanonical progress %s before changing stored work",
+    async (field, value) => {
       const { outboxId, outbox } = await buildEventProgressPlan(
         {
           eventId,
-          sourceKey: "reminder:test",
+          sourceKey: "strict-progress:test",
           reason: "sunday-mons-reminder",
-          runAtMs: 1_000,
+          runAtMs: 1000,
         },
         200,
       );
@@ -4421,38 +4458,32 @@ describe("event D1 store", () => {
         [`events/${eventId}`]: eventRecord(),
         [path]: outbox,
       });
-      const storedJson = JSON.stringify(outbox).replace(
-        ',"firstQueuedAtMs":200',
-        timestamp === null ? "" : `,"firstQueuedAtMs":${timestamp}`,
-      );
-      await testEnv.EVENT_DB.prepare(
-        "UPDATE event_progress_outboxes SET record_json = ? WHERE outbox_id = ? AND status = 'pending'",
-      )
-        .bind(storedJson, outboxId)
-        .run();
-      await patchEventOwnedPaths(testEnv.EVENT_DB, { [path]: outbox });
+      await expect(
+        testEnv.EVENT_DB.prepare(
+          "UPDATE event_progress_outboxes_canonical SET record_json = ? WHERE status = 'pending' AND outbox_id = ?",
+        )
+          .bind(JSON.stringify({ ...outbox, [field]: value }), outboxId)
+          .run(),
+      ).rejects.toThrow();
       expect(await readEventOwnedPath(testEnv.EVENT_DB, path)).toEqual(outbox);
       expect(
         await readEventOwnedPath(
           testEnv.EVENT_DB,
           `eventProgressOutboxDead/${outboxId}`,
         ),
-      ).toMatchObject({
-        reason: "invalid-event-progress-outbox",
-        originalRecord: JSON.parse(storedJson),
-      });
+      ).toBeNull();
     },
   );
 
-  it.each(["1.0", "-1", "0", "100", "9007199254740991", "-9007199254740991"])(
-    "retains the earliest valid announcement time for stored %s",
+  it.each([0, 50, 100])(
+    "retains the earliest canonical announcement timestamp %s",
     async (timestamp) => {
       const { outboxId, outbox } = await buildEventProgressPlan(
         {
           eventId,
-          sourceKey: "prizes:test",
+          sourceKey: "canonical-timestamp:test",
           reason: "event-prize-announcement",
-          runAtMs: 1_000,
+          runAtMs: 1000,
         },
         200,
       );
@@ -4462,20 +4493,17 @@ describe("event D1 store", () => {
         [path]: outbox,
       });
       await testEnv.EVENT_DB.prepare(
-        "UPDATE event_progress_outboxes SET record_json = ? WHERE outbox_id = ? AND status = 'pending'",
+        "UPDATE event_progress_outboxes_canonical SET record_json = ? WHERE status = 'pending' AND outbox_id = ?",
       )
         .bind(
-          JSON.stringify(outbox).replace(
-            '"firstQueuedAtMs":200',
-            `"firstQueuedAtMs":${timestamp}`,
-          ),
+          JSON.stringify({ ...outbox, firstQueuedAtMs: timestamp }),
           outboxId,
         )
         .run();
       await patchEventOwnedPaths(testEnv.EVENT_DB, { [path]: outbox });
       expect(await readEventOwnedPath(testEnv.EVENT_DB, path)).toEqual({
         ...outbox,
-        firstQueuedAtMs: Math.min(Number(timestamp), outbox.firstQueuedAtMs),
+        firstQueuedAtMs: timestamp,
       });
       expect(
         await readEventOwnedPath(
@@ -4486,61 +4514,43 @@ describe("event D1 store", () => {
     },
   );
 
-  it.each([
-    ["schemaVersion", 2],
-    ["sourceKey", "wrong-source-digest"],
-    ["reason", { malformed: true }],
-    ["eventId", "wrong-event"],
-    ["runAtMs", "1000"],
-    ["lastQueuedAtMs", null],
-  ])(
-    "archives an invalid %s before replacing any progress marker",
-    async (field, invalid) => {
-      for (const reason of ["sunday-mons-reminder", "match-rating-updated"]) {
-        const { outboxId, outbox } = await buildEventProgressPlan(
-          { eventId, sourceKey: `${reason}:test`, reason, runAtMs: 1_000 },
-          200,
-        );
-        const path = `eventProgressOutbox/${outboxId}`;
-        await patchEventOwnedPaths(testEnv.EVENT_DB, {
-          [`events/${eventId}`]: eventRecord(),
-          [path]: outbox,
-        });
-        const malformed = {
-          ...outbox,
-          firstQueuedAtMs: 50,
-          [field]: invalid,
-          unknownFutureField: { evidence: [1, 2, 3] },
-        };
-        await testEnv.EVENT_DB.prepare(
-          "UPDATE event_progress_outboxes SET record_json = ? WHERE status = 'pending' AND outbox_id = ?",
-        )
-          .bind(JSON.stringify(malformed), outboxId)
-          .run();
-        await patchEventOwnedPaths(testEnv.EVENT_DB, { [path]: outbox });
-        expect(await readEventOwnedPath(testEnv.EVENT_DB, path)).toEqual(
-          outbox,
-        );
-        expect(
-          await readEventOwnedPath(
-            testEnv.EVENT_DB,
-            `eventProgressOutboxDead/${outboxId}`,
-          ),
-        ).toMatchObject({
-          reason: "invalid-event-progress-outbox",
-          originalRecord: malformed,
-        });
-      }
-    },
-  );
+  it("rejects a mismatched stored progress identity without automatic repair", async () => {
+    const { outboxId, outbox } = await buildEventProgressPlan(
+      { eventId, sourceKey: "identity:test", reason: "match-rating-updated" },
+      200,
+    );
+    const path = `eventProgressOutbox/${outboxId}`;
+    await patchEventOwnedPaths(testEnv.EVENT_DB, {
+      [`events/${eventId}`]: eventRecord(),
+      [path]: outbox,
+    });
+    const mismatched = { ...outbox, sourceKey: "different-source" };
+    await testEnv.EVENT_DB.prepare(
+      "UPDATE event_progress_outboxes_canonical SET record_json = ? WHERE status = 'pending' AND outbox_id = ?",
+    )
+      .bind(JSON.stringify(mismatched), outboxId)
+      .run();
+    await expect(
+      patchEventOwnedPaths(testEnv.EVENT_DB, { [path]: outbox }),
+    ).rejects.toThrow("invalid-event-progress-outbox");
+    expect(await readEventOwnedPath(testEnv.EVENT_DB, path)).toEqual(
+      mismatched,
+    );
+    expect(
+      await readEventOwnedPath(
+        testEnv.EVENT_DB,
+        `eventProgressOutboxDead/${outboxId}`,
+      ),
+    ).toBeNull();
+  });
 
-  it("compares valid stored JSON bytes without normalizing whitespace or numeric spelling", async () => {
+  it("compares canonical stored JSON bytes without normalizing whitespace", async () => {
     const { outboxId, outbox } = await buildEventProgressPlan(
       {
         eventId,
         sourceKey: "raw-json:test",
         reason: "sunday-mons-reminder",
-        runAtMs: 1_000,
+        runAtMs: 1000,
       },
       200,
     );
@@ -4549,14 +4559,10 @@ describe("event D1 store", () => {
       [`events/${eventId}`]: eventRecord(),
       [path]: outbox,
     });
-    const raw = JSON.stringify(outbox, null, 2).replace(
-      '"firstQueuedAtMs": 200',
-      '"firstQueuedAtMs": 200.0',
-    );
     await testEnv.EVENT_DB.prepare(
-      "UPDATE event_progress_outboxes SET record_json = ? WHERE status = 'pending' AND outbox_id = ?",
+      "UPDATE event_progress_outboxes_canonical SET record_json = ? WHERE status = 'pending' AND outbox_id = ?",
     )
-      .bind(raw, outboxId)
+      .bind(JSON.stringify(outbox, null, 2), outboxId)
       .run();
     const observed = observeD1FailureDatabase(testEnv.EVENT_DB);
     await patchEventOwnedPaths(observed.database, {
@@ -4568,115 +4574,50 @@ describe("event D1 store", () => {
       ...outbox,
       lastQueuedAtMs: 400,
     });
-    expect(
-      await readEventOwnedPath(
-        testEnv.EVENT_DB,
-        `eventProgressOutboxDead/${outboxId}`,
-      ),
-    ).toBeNull();
   });
 
-  it.each(["absent", "valid", "invalid"] as const)(
-    "retries a changed %s progress snapshot and archives only the actual replaced value",
+  it.each(["absent", "present"] as const)(
+    "retries a changed %s canonical progress snapshot",
     async (state) => {
       const { outboxId, outbox } = await buildEventProgressPlan(
         {
           eventId,
           sourceKey: "snapshot-race:test",
-          reason: "match-rating-updated",
+          reason: "sunday-mons-reminder",
         },
         200,
       );
       const path = `eventProgressOutbox/${outboxId}`;
       await patchEventOwnedPaths(testEnv.EVENT_DB, {
         [`events/${eventId}`]: eventRecord(),
+        ...(state === "present" ? { [path]: outbox } : {}),
       });
-      if (state !== "absent") {
-        await testEnv.EVENT_DB.prepare(
-          "INSERT INTO event_progress_outboxes (outbox_id, event_id, status, run_at_ms, last_queued_at_ms, record_json) VALUES (?, ?, 'pending', NULL, ?, ?)",
-        )
-          .bind(
-            outboxId,
-            eventId,
-            200,
-            JSON.stringify(
-              state === "valid" ? outbox : { ...outbox, schemaVersion: 2 },
-            ),
-          )
-          .run();
-      }
-      const raced = {
-        ...outbox,
-        reason: { broken: true },
-        evidence: "concurrent-record",
-      };
+      const raced = { ...outbox, firstQueuedAtMs: 50 };
       const observed = observeD1FailureDatabase(testEnv.EVENT_DB, {
         async beforeWriteBatch(attempt) {
           if (attempt !== 1) return;
           await testEnv.EVENT_DB.prepare(
-            "INSERT INTO event_progress_outboxes (outbox_id, event_id, status, run_at_ms, last_queued_at_ms, record_json) VALUES (?, ?, 'pending', NULL, ?, ?) ON CONFLICT (status, outbox_id) DO UPDATE SET record_json = excluded.record_json",
+            "INSERT INTO event_progress_outboxes_canonical (outbox_id,event_id,status,run_at_ms,last_queued_at_ms,record_json) VALUES (?,?,'pending',NULL,?,?) ON CONFLICT (status,outbox_id) DO UPDATE SET record_json = excluded.record_json",
           )
-            .bind(outboxId, eventId, 200, JSON.stringify(raced, null, 2))
+            .bind(outboxId, eventId, 200, JSON.stringify(raced))
             .run();
         },
       });
       await patchEventOwnedPaths(observed.database, { [path]: outbox });
       expect(observed.writeBatches).toHaveLength(2);
       expect(observed.readBatches).toHaveLength(2);
-      expect(await readEventOwnedPath(testEnv.EVENT_DB, path)).toEqual(outbox);
+      expect(await readEventOwnedPath(testEnv.EVENT_DB, path)).toEqual(raced);
       expect(
         await readEventOwnedPath(
           testEnv.EVENT_DB,
           `eventProgressOutboxDead/${outboxId}`,
         ),
-      ).toMatchObject({ originalRecord: raced });
+      ).toBeNull();
     },
   );
 
-  it("preserves a concurrent valid repair and its timestamp without auditing it as malformed", async () => {
-    const { outboxId, outbox } = await buildEventProgressPlan(
-      {
-        eventId,
-        sourceKey: "valid-repair:test",
-        reason: "sunday-mons-reminder",
-      },
-      200,
-    );
-    const path = `eventProgressOutbox/${outboxId}`;
-    await patchEventOwnedPaths(testEnv.EVENT_DB, {
-      [`events/${eventId}`]: eventRecord(),
-      [path]: outbox,
-    });
-    await testEnv.EVENT_DB.prepare(
-      "UPDATE event_progress_outboxes SET record_json = ? WHERE status = 'pending' AND outbox_id = ?",
-    )
-      .bind(JSON.stringify({ ...outbox, schemaVersion: 2 }), outboxId)
-      .run();
-    const repaired = { ...outbox, firstQueuedAtMs: 50 };
-    const observed = observeD1FailureDatabase(testEnv.EVENT_DB, {
-      async beforeWriteBatch(attempt) {
-        if (attempt !== 1) return;
-        await testEnv.EVENT_DB.prepare(
-          "UPDATE event_progress_outboxes SET record_json = ? WHERE status = 'pending' AND outbox_id = ?",
-        )
-          .bind(JSON.stringify(repaired), outboxId)
-          .run();
-      },
-    });
-    await patchEventOwnedPaths(observed.database, { [path]: outbox });
-    expect(observed.writeBatches).toHaveLength(2);
-    expect(observed.readBatches).toHaveLength(2);
-    expect(await readEventOwnedPath(testEnv.EVENT_DB, path)).toEqual(repaired);
-    expect(
-      await readEventOwnedPath(
-        testEnv.EVENT_DB,
-        `eventProgressOutboxDead/${outboxId}`,
-      ),
-    ).toBeNull();
-  });
-
   it.each(["mixed-plan", "explicit-expectation"] as const)(
-    "does not retry a changed progress snapshot in a %s",
+    "does not retry a changed canonical progress snapshot in a %s",
     async (scope) => {
       const { outboxId, outbox } = await buildEventProgressPlan(
         {
@@ -4691,11 +4632,11 @@ describe("event D1 store", () => {
         [`events/${eventId}`]: eventRecord(),
         [path]: outbox,
       });
-      const raced = { ...outbox, schemaVersion: 2 };
+      const raced = { ...outbox, firstQueuedAtMs: 50 };
       const observed = observeD1FailureDatabase(testEnv.EVENT_DB, {
         async beforeWriteBatch() {
           await testEnv.EVENT_DB.prepare(
-            "UPDATE event_progress_outboxes SET record_json = ? WHERE status = 'pending' AND outbox_id = ?",
+            "UPDATE event_progress_outboxes_canonical SET record_json = ? WHERE status = 'pending' AND outbox_id = ?",
           )
             .bind(JSON.stringify(raced), outboxId)
             .run();
@@ -4707,17 +4648,11 @@ describe("event D1 store", () => {
           {
             [path]: outbox,
             ...(scope === "mixed-plan"
-              ? { [`events/${eventId}/status`]: "active" }
+              ? { [`events/${eventId}/updatedAtMs`]: 300 }
               : {}),
           },
           scope === "explicit-expectation"
-            ? {
-                expectedRecords: {
-                  progress: {
-                    [outboxId]: retainEventProgressRecord("pending", outbox),
-                  },
-                },
-              }
+            ? { expectedRecords: { progress: { [outboxId]: outbox } } }
             : {},
         ),
       ).rejects.toBeInstanceOf(EventD1Conflict);
@@ -4736,7 +4671,7 @@ describe("event D1 store", () => {
     },
   );
 
-  it("bounds pure outbox snapshot conflicts without leaving a partial audit or replacement", async () => {
+  it("bounds canonical progress snapshot conflicts without a partial replacement", async () => {
     const { outboxId, outbox } = await buildEventProgressPlan(
       {
         eventId,
@@ -4753,10 +4688,10 @@ describe("event D1 store", () => {
     const observed = observeD1FailureDatabase(testEnv.EVENT_DB, {
       async beforeWriteBatch(attempt) {
         await testEnv.EVENT_DB.prepare(
-          "UPDATE event_progress_outboxes SET record_json = ? WHERE status = 'pending' AND outbox_id = ?",
+          "UPDATE event_progress_outboxes_canonical SET record_json = ? WHERE status = 'pending' AND outbox_id = ?",
         )
           .bind(
-            JSON.stringify({ ...outbox, schemaVersion: 2, attempt }),
+            JSON.stringify({ ...outbox, firstQueuedAtMs: 200 - attempt }),
             outboxId,
           )
           .run();
@@ -4769,8 +4704,7 @@ describe("event D1 store", () => {
     expect(observed.readBatches).toHaveLength(12);
     expect(await readEventOwnedPath(testEnv.EVENT_DB, path)).toEqual({
       ...outbox,
-      schemaVersion: 2,
-      attempt: 12,
+      firstQueuedAtMs: 188,
     });
     expect(
       await readEventOwnedPath(
@@ -4846,7 +4780,9 @@ describe("event D1 store", () => {
         requestId: "request-one",
         lastQueuedAtMs: 100,
       },
-      [`eventTelegramProjections/${eventId}`]: { version: 1 },
+      [`eventTelegramProjections/${eventId}`]: projectionState({
+        upcomingText: "first",
+      }),
     });
     const originalOutbox = await readEventOwnedPath(
       testEnv.EVENT_DB,
@@ -4863,7 +4799,9 @@ describe("event D1 store", () => {
         requestId: "request-two",
         lastQueuedAtMs: 200,
       },
-      [`eventTelegramProjections/${eventId}`]: { version: 2 },
+      [`eventTelegramProjections/${eventId}`]: projectionState({
+        upcomingText: "second",
+      }),
     });
     await expect(
       patchEventOwnedPaths(
@@ -4871,7 +4809,9 @@ describe("event D1 store", () => {
         {
           [`profileEventPrizes/${profileId}/${eventId}`]: null,
           [`profileGameProjectionOutbox/event/${eventId}`]: null,
-          [`eventTelegramProjections/${eventId}`]: { version: 1 },
+          [`eventTelegramProjections/${eventId}`]: projectionState({
+            upcomingText: "first",
+          }),
         },
         {
           expectedProfilePrizeRevisions: { [profileId]: 1 },
@@ -4903,7 +4843,7 @@ describe("event D1 store", () => {
       await readEventTelegramProjectionState(testEnv.EVENT_DB, eventId),
     ).toMatchObject({
       revision: 2,
-      state: { version: 2 },
+      state: projectionState({ upcomingText: "second" }),
     });
   });
 });

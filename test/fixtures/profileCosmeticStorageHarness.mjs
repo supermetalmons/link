@@ -2,6 +2,15 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import ts from "typescript";
 
+/**
+ * @typedef {typeof import("../../src/utils/profileCosmeticStorage.ts").createProfileCosmeticWrites} CreateProfileCosmeticWrites
+ * @typedef {Pick<typeof import("../../src/utils/storage.ts").storage,
+ *   "setCardBackgroundId" | "setCardStickers" | "setCardSubtitleId"
+ *   | "setProfileCounter" | "setProfileMons">} CosmeticStorage
+ * @typedef {(storage: CosmeticStorage, localStorage: Pick<Storage, "getItem">,
+ *   toStorageKey: (key: string) => string) => CreateProfileCosmeticWrites} BindProfileCosmeticStorage
+ */
+
 const path = new URL(
   "../../src/utils/profileCosmeticStorage.ts",
   import.meta.url,
@@ -23,8 +32,23 @@ const { outputText } = ts.transpileModule(
   { compilerOptions: { target: ts.ScriptTarget.ES2022 } },
 );
 
-export const bindProfileCosmeticStorage = new Function(
-  "storage",
-  "localStorage",
-  `${outputText}\nreturn createProfileCosmeticWrites;`,
+const bind = /** @type {BindProfileCosmeticStorage} */ (
+  new Function(
+    "storage",
+    "localStorage",
+    "applicationStorageKey",
+    `${outputText}\nreturn createProfileCosmeticWrites;`,
+  )
 );
+
+/**
+ * @param {CosmeticStorage} storage
+ * @param {Pick<Storage, "getItem">} localStorage
+ * @param {(key: string) => string} [toStorageKey]
+ * @returns {CreateProfileCosmeticWrites}
+ */
+export const bindProfileCosmeticStorage = (
+  storage,
+  localStorage,
+  toStorageKey = (key) => key,
+) => bind(storage, localStorage, toStorageKey);

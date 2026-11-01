@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { registerHooks } from "node:module";
 import test from "node:test";
+import { required } from "./fixtures/canonicalData.mjs";
 
 registerHooks({
   resolve(specifier, context, nextResolve) {
@@ -19,13 +20,15 @@ const previousLocalStorage = Object.getOwnPropertyDescriptor(
   globalThis,
   "localStorage",
 );
+/** @type {Map<string, string>} */
 const storedValues = new Map();
 Object.defineProperty(globalThis, "localStorage", {
   configurable: true,
   value: {
-    getItem: (key) => storedValues.get(key) ?? null,
-    setItem: (key, value) => storedValues.set(key, String(value)),
-    removeItem: (key) => storedValues.delete(key),
+    getItem: (/** @type {string} */ key) => storedValues.get(key) ?? null,
+    setItem: (/** @type {string} */ key, /** @type {string} */ value) =>
+      storedValues.set(key, String(value)),
+    removeItem: (/** @type {string} */ key) => storedValues.delete(key),
   },
 });
 
@@ -58,7 +61,7 @@ test.after(() => {
   if (previousLocalStorage) {
     Object.defineProperty(globalThis, "localStorage", previousLocalStorage);
   } else {
-    delete globalThis.localStorage;
+    Reflect.deleteProperty(globalThis, "localStorage");
   }
 });
 
@@ -79,12 +82,13 @@ test("reads current availability and distinguishes unknown from confirmed zero r
 });
 
 test("delivers mining and reservation changes synchronously with status and confirmation", (t) => {
+  /** @type {import("../src/services/availableMaterials.ts").AvailableMaterialsSnapshot[]} */
   const changes = [];
   t.after(subscribeAvailableMaterials((snapshot) => changes.push(snapshot)));
   assert.equal(changes.length, 1);
 
   rocksMiningService.setFromServer(mining(12), { persist: false });
-  assert.equal(changes.at(-1).availableMaterials.dust, 12);
+  assert.equal(required(changes.at(-1)).availableMaterials.dust, 12);
   setFrozenMaterials(materials(3), "ready");
   assert.deepEqual(changes.at(-1), {
     availableMaterials: materials(9),
@@ -99,7 +103,7 @@ test("delivers mining and reservation changes synchronously with status and conf
     hasConfirmedSnapshot: true,
   });
   setFrozenMaterialsStatus("unavailable");
-  assert.equal(changes.at(-1).hasConfirmedSnapshot, true);
+  assert.equal(required(changes.at(-1)).hasConfirmedSnapshot, true);
   setFrozenMaterials(null, "loading");
   assert.deepEqual(changes.at(-1), {
     availableMaterials: materials(12),
@@ -109,6 +113,7 @@ test("delivers mining and reservation changes synchronously with status and conf
 });
 
 test("fresh reads and subsequent reservation events include silent mining corrections", (t) => {
+  /** @type {import("../src/services/availableMaterials.ts").AvailableMaterialsSnapshot[]} */
   const changes = [];
   t.after(subscribeAvailableMaterials((snapshot) => changes.push(snapshot)));
   rocksMiningService.setFromServer(mining(18), {
@@ -118,10 +123,11 @@ test("fresh reads and subsequent reservation events include silent mining correc
   assert.equal(changes.length, 1);
   assert.equal(readAvailableMaterials().availableMaterials.dust, 18);
   setFrozenMaterials(materials(4), "ready");
-  assert.equal(changes.at(-1).availableMaterials.dust, 14);
+  assert.equal(required(changes.at(-1)).availableMaterials.dust, 14);
 });
 
 test("follows profile resets without retaining the previous balance or confirmation", (t) => {
+  /** @type {import("../src/services/availableMaterials.ts").AvailableMaterialsSnapshot[]} */
   const changes = [];
   t.after(subscribeAvailableMaterials((snapshot) => changes.push(snapshot)));
   setFrozenMaterials(materials(4), "ready");
@@ -146,6 +152,7 @@ test("follows profile resets without retaining the previous balance or confirmat
 });
 
 test("cleans up both subscriptions and can subscribe again with a fresh snapshot", () => {
+  /** @type {import("../src/services/availableMaterials.ts").AvailableMaterialsSnapshot[]} */
   const oldChanges = [];
   const unsubscribe = subscribeAvailableMaterials((snapshot) =>
     oldChanges.push(snapshot),
@@ -156,11 +163,31 @@ test("cleans up both subscriptions and can subscribe again with a fresh snapshot
   setFrozenMaterials(materials(3), "ready");
   assert.equal(oldChanges.length, 1);
 
+  /** @type {import("../src/services/availableMaterials.ts").AvailableMaterialsSnapshot[]} */
   const nextChanges = [];
   const dispose = subscribeAvailableMaterials((snapshot) =>
     nextChanges.push(snapshot),
   );
   assert.equal(nextChanges.length, 1);
-  assert.equal(nextChanges[0].availableMaterials.dust, 4);
+  assert.equal(required(nextChanges[0]).availableMaterials.dust, 4);
   dispose();
+});
+
+test("rejects malformed server mining snapshots without publishing or replacing balances", () => {
+  for (const value of [
+    { lastRockDate: null, materials: { dust: 7 } },
+    { lastRockDate: null, materials: { ...materials(), dust: "7" } },
+    { lastRockDate: 123, materials: materials(7) },
+  ])
+    assert.throws(
+      () =>
+        Reflect.apply(rocksMiningService.setFromServer, rocksMiningService, [
+          value,
+          { persist: false },
+        ]),
+      /invalid-mining-snapshot/,
+    );
+  assert.deepEqual(rocksMiningService.getSnapshot(), mining(10));
+  rocksMiningService.setFromServer(null, { persist: false });
+  assert.deepEqual(rocksMiningService.getSnapshot(), mining());
 });

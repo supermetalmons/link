@@ -1,11 +1,10 @@
 import { createCachedResource } from "../resources/cachedResource";
 import { useCachedResource } from "../resources/useCachedResource";
 
-type Emojis = (typeof import("../content/emojis"))["emojis"] &
-  Record<string, any>;
+type Emojis = (typeof import("../content/emojis"))["emojis"];
 
 const emojisResource = createCachedResource<Emojis>(
-  async () => (await import("../content/emojis")).emojis as Emojis,
+  async () => (await import("../content/emojis")).emojis,
   (error) => {
     console.error("Failed to load emojis:", error);
   },

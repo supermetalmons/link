@@ -1,4 +1,3 @@
-import { normalizeProfileEmojiId } from "@mons/shared/profiles";
 import type { PlayerProfile } from "./connectionModels";
 import { connection } from "./connection";
 import { setupLoggedInPlayerProfile } from "../game/board";
@@ -38,15 +37,15 @@ export function applyVerifiedProfile(
     }
   };
   const presentationWrites = createProfileCosmeticWrites(profile);
-  const emoji = normalizeProfileEmojiId(profile.emoji, 1);
+  const emoji = profile.emoji;
   storage.setLoginId(uid);
   storage.setProfileId(profile.id);
   storage.setEthAddress(profile.eth ?? "");
   storage.setSolAddress(profile.sol ?? "");
   applyOptional(() => {
     storage.setUsername(profile.username ?? "");
-    storage.setPlayerEmojiId(emoji.toString());
-    storage.setPlayerEmojiAura(profile.aura ?? "");
+    storage.setPlayerEmojiId(emoji);
+    storage.setPlayerEmojiAura(profile.aura);
     storage.setPlayerRating(profile.rating ?? null);
     storage.setPlayerNonce(profile.nonce ?? null);
     storage.setPlayerTotalManaPoints(profile.totalManaPoints ?? null);

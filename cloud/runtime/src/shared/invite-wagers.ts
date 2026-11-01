@@ -5,16 +5,16 @@ import { isMaterialName } from "./mining.js";
 export type PublicWagerProposal = {
   material: MiningMaterialName;
   count: number;
-  createdAt?: number;
+  createdAt: number;
 };
 
 export type PublicWagerAgreement = {
   material: MiningMaterialName;
   count: number;
-  total?: number;
+  total: number;
   proposerId: string;
   accepterId: string;
-  acceptedAt?: number;
+  acceptedAt: number;
 };
 
 export type PublicWagerResolution = {
@@ -22,15 +22,26 @@ export type PublicWagerResolution = {
   loserId: string;
   material: MiningMaterialName;
   count: number;
-  total?: number;
-  resolvedAt?: number;
+  total: number;
+  resolvedAt: number;
 };
 
+export type PublicWagerBlock = {
+  reason:
+    | "legacy-agreement-unsettled"
+    | "legacy-partial"
+    | "legacy-settlement-incomplete"
+    | "legacy-resolution-marker";
+  requiresManualReview: true;
+};
 export type PublicMatchWagerState = {
-  proposals?: Record<string, PublicWagerProposal>;
-  proposedBy?: Record<string, boolean>;
-  agreed?: PublicWagerAgreement;
-  resolved?: PublicWagerResolution;
+  schemaVersion: 1;
+  state: "proposed" | "agreed" | "settling" | "settled" | "blocked";
+  proposals: Record<string, PublicWagerProposal>;
+  proposedBy: Record<string, boolean>;
+  agreed: PublicWagerAgreement | null;
+  resolved: PublicWagerResolution | null;
+  blocked: PublicWagerBlock | null;
 };
 
 export type InviteWagersSnapshot = {
@@ -70,14 +81,13 @@ const isKey = (value: unknown): value is string =>
 const isUid = (value: unknown): value is string =>
   isKey(value) && value.length <= 128;
 const isCount = (value: unknown): value is number =>
-  Number.isSafeInteger(value) && (value as number) > 0;
+  Number.isSafeInteger(value) &&
+  Number.isSafeInteger((value as number) * 2) &&
+  (value as number) > 0;
 const isTimestamp = (value: unknown): value is number =>
-  typeof value === "number" && Number.isFinite(value) && (value as number) >= 0;
-const optional = (
-  value: Record<string, unknown>,
-  key: string,
-  validate: (value: unknown) => boolean,
-) => !Object.hasOwn(value, key) || validate(value[key]);
+  typeof value === "number" &&
+  Number.isSafeInteger(value) &&
+  (value as number) >= 0;
 const isParticipantMap = (
   value: unknown,
   validate: (value: unknown) => boolean,
@@ -89,28 +99,31 @@ const isParticipantMap = (
 function isPublicWagerProposal(value: unknown): value is PublicWagerProposal {
   return (
     isRecord(value) &&
-    hasKeys(value, ["material", "count"], ["createdAt"]) &&
+    hasKeys(value, ["material", "count", "createdAt"]) &&
     isMaterialName(value.material) &&
     isCount(value.count) &&
-    optional(value, "createdAt", isTimestamp)
+    isTimestamp(value.createdAt)
   );
 }
 
 function isPublicWagerAgreement(value: unknown): value is PublicWagerAgreement {
   return (
     isRecord(value) &&
-    hasKeys(
-      value,
-      ["material", "count", "proposerId", "accepterId"],
-      ["total", "acceptedAt"],
-    ) &&
+    hasKeys(value, [
+      "material",
+      "count",
+      "proposerId",
+      "accepterId",
+      "total",
+      "acceptedAt",
+    ]) &&
     isMaterialName(value.material) &&
     isCount(value.count) &&
     isUid(value.proposerId) &&
     isUid(value.accepterId) &&
     value.proposerId !== value.accepterId &&
-    optional(value, "total", isCount) &&
-    optional(value, "acceptedAt", isTimestamp)
+    value.total === value.count * 2 &&
+    isTimestamp(value.acceptedAt)
   );
 }
 
@@ -119,18 +132,21 @@ function isPublicWagerResolution(
 ): value is PublicWagerResolution {
   return (
     isRecord(value) &&
-    hasKeys(
-      value,
-      ["material", "count", "winnerId", "loserId"],
-      ["total", "resolvedAt"],
-    ) &&
+    hasKeys(value, [
+      "material",
+      "count",
+      "winnerId",
+      "loserId",
+      "total",
+      "resolvedAt",
+    ]) &&
     isMaterialName(value.material) &&
     isCount(value.count) &&
     isUid(value.winnerId) &&
     isUid(value.loserId) &&
     value.winnerId !== value.loserId &&
-    optional(value, "total", isCount) &&
-    optional(value, "resolvedAt", isTimestamp)
+    value.total === value.count * 2 &&
+    isTimestamp(value.resolvedAt)
   );
 }
 
@@ -139,15 +155,34 @@ function isPublicMatchWagerState(
 ): value is PublicMatchWagerState {
   return (
     isRecord(value) &&
-    hasKeys(value, [], ["proposals", "proposedBy", "agreed", "resolved"]) &&
-    optional(value, "proposals", (proposals) =>
-      isParticipantMap(proposals, isPublicWagerProposal),
+    hasKeys(value, [
+      "schemaVersion",
+      "state",
+      "proposals",
+      "proposedBy",
+      "agreed",
+      "resolved",
+      "blocked",
+    ]) &&
+    value.schemaVersion === 1 &&
+    ["proposed", "agreed", "settling", "settled", "blocked"].includes(
+      String(value.state),
     ) &&
-    optional(value, "proposedBy", (proposedBy) =>
-      isParticipantMap(proposedBy, (proposed) => typeof proposed === "boolean"),
-    ) &&
-    optional(value, "agreed", isPublicWagerAgreement) &&
-    optional(value, "resolved", isPublicWagerResolution)
+    isParticipantMap(value.proposals, isPublicWagerProposal) &&
+    isParticipantMap(value.proposedBy, (flag) => typeof flag === "boolean") &&
+    (value.agreed === null || isPublicWagerAgreement(value.agreed)) &&
+    (value.resolved === null || isPublicWagerResolution(value.resolved)) &&
+    (value.state === "blocked"
+      ? isRecord(value.blocked) &&
+        hasKeys(value.blocked, ["reason", "requiresManualReview"]) &&
+        value.blocked.requiresManualReview === true &&
+        [
+          "legacy-agreement-unsettled",
+          "legacy-partial",
+          "legacy-settlement-incomplete",
+          "legacy-resolution-marker",
+        ].includes(String(value.blocked.reason))
+      : value.blocked === null)
   );
 }
 

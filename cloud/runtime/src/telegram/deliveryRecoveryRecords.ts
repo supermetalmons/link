@@ -18,10 +18,7 @@ import {
   resolvePendingDeleteId,
   writeCleanup,
   writeDelivery,
-  DeliverySnapshot,
-  PendingDeleteSnapshot,
   deliveryDocument,
-  pendingDeleteDocument,
 } from "./deliveryState.js";
 import {
   normalizeAttempts,
@@ -32,7 +29,8 @@ import {
 
 import { readProperty } from "./values.js";
 import type { TelegramMessageDocument } from "./records.js";
-type RawRecord = Record<string, unknown>;
+import { requireTelegramTransaction } from "./recordCodec.js";
+import { documentFields } from "./deliveryState.js";
 
 type ApplySafeRetryProofRecordInput = {
   normalizedAttemptId: string;
@@ -53,13 +51,13 @@ export function applySafeRetryProofRecord(
     markApplied,
   } = input;
   const { retryAtMs, retryDeadlineAtMs, retrySequence, retryStartedAtMs } =
-    asObject(application);
-  const apply = (record: RawRecord) => {
+    documentFields(application);
+  const apply = (record: TelegramMessageDocument) => {
     const delivery = readDelivery(record.delivery);
-    const marker = asObject(delivery.sendInFlight);
+    const marker = delivery.sendInFlight;
     if (
-      normalizeString(marker.attemptId) !== normalizedAttemptId ||
-      normalizeString(marker.revision) !== normalizedRevision
+      normalizeString(marker?.attemptId) !== normalizedAttemptId ||
+      normalizeString(marker?.revision) !== normalizedRevision
     ) {
       return { commit: false, decision: "stale-safe-retry-proof" };
     }
@@ -109,8 +107,7 @@ export function applySafeRetryProofRecord(
       decision: "safe-retry-proof-applied",
     };
   };
-  const output: unknown = apply(asObject(current));
-  return output as TransactionDecision<TelegramMessageDocument>;
+  return requireTelegramTransaction(apply(current));
 }
 
 type ApplyDesiredRetryProofRecordInput = {
@@ -126,8 +123,9 @@ export function applyDesiredRetryProofRecord(
 ): TransactionDecision<TelegramMessageDocument> {
   const { normalizedRevision, now, proofRetryState, application, markApplied } =
     input;
-  const { apiGateReclaimOwner, retryProofLeaseOwner } = asObject(application);
-  const apply = (record: RawRecord) => {
+  const { apiGateReclaimOwner, retryProofLeaseOwner } =
+    documentFields(application);
+  const apply = (record: TelegramMessageDocument) => {
     const delivery = readDelivery(record.delivery);
     if (
       normalizeString(readProperty(record.desired, "revision")) !==
@@ -174,8 +172,7 @@ export function applyDesiredRetryProofRecord(
       decision: "retry-window-proof-applied",
     };
   };
-  const output: unknown = apply(asObject(current));
-  return output as TransactionDecision<TelegramMessageDocument>;
+  return requireTelegramTransaction(apply(current));
 }
 
 type ApplyManualRecoveryRecordInput = {
@@ -186,8 +183,8 @@ export function applyManualRecoveryRecord(
   input: ApplyManualRecoveryRecordInput,
 ): TransactionDecision<TelegramMessageDocument> {
   const { processedAtMs } = input;
-  const apply = (record: RawRecord) => {
-    const request = asObject(record.manualRecovery);
+  const apply = (record: TelegramMessageDocument) => {
+    const request = documentFields(record.manualRecovery);
     const requestId = normalizeString(request.requestId);
     const delivery = readDelivery(record.delivery);
     if (
@@ -196,10 +193,10 @@ export function applyManualRecoveryRecord(
     ) {
       return { commit: false, decision: "no-manual-recovery" };
     }
-    const action = normalizeString(request.action);
-    const marker = asObject(delivery.sendInFlight);
-    const markerAttemptId = normalizeString(marker.attemptId);
-    const markerApiGateOwner = normalizeString(marker.apiGateOwner);
+    const action = request.action;
+    const marker = delivery.sendInFlight;
+    const markerAttemptId = normalizeString(marker?.attemptId);
+    const markerApiGateOwner = normalizeString(marker?.apiGateOwner);
     const recoverable =
       delivery.status === "uncertain" && markerAttemptId !== "";
     const latestRevision = normalizeString(
@@ -214,7 +211,7 @@ export function applyManualRecoveryRecord(
       ...deliveryDocument(delivery),
       lastRecoveryRequestId: requestId,
     };
-    let nextRecord = record;
+    let nextRecord: unknown = record;
     if (action === "confirm-send-absent" && recoverable) {
       nextRecord = {
         ...record,
@@ -249,16 +246,18 @@ export function applyManualRecoveryRecord(
       Number(request.messageId) > 0
     ) {
       const recoveredApplied = {
-        destination: normalizeString(marker.destination),
-        chatId: normalizeString(marker.chatId),
+        destination: normalizeString(marker?.destination),
+        chatId: normalizeString(marker?.chatId),
         messageId: Number(request.messageId),
-        instanceKey: normalizeString(marker.instanceKey),
-        revision: normalizeString(marker.revision),
-        contentHash: normalizeString(marker.contentHash),
+        instanceKey: normalizeString(marker?.instanceKey),
+        revision: normalizeString(marker?.revision),
+        contentHash: normalizeString(marker?.contentHash),
         appliedAtMs: processedAtMs,
         recoveredAtMs: processedAtMs,
       };
-      let recoveredDelivery: RawRecord = writeDelivery({
+      let recoveredDelivery: Partial<
+        import("./records.js").TelegramDeliveryDocument
+      > = writeDelivery({
         ...omitRetryState(
           omitKeys(baseDelivery, [
             "leaseOwner",
@@ -281,7 +280,7 @@ export function applyManualRecoveryRecord(
           ? { apiGateReleaseOwner: markerApiGateOwner }
           : {}),
       });
-      const previousApplied = asObject(record.applied);
+      const previousApplied = documentFields(record.applied);
       const previousChatId =
         normalizeString(previousApplied.chatId) || recoveredApplied.chatId;
       if (
@@ -333,7 +332,7 @@ export function applyManualRecoveryRecord(
           status: "terminal",
           revision: latestRevision || normalizeString(delivery.revision),
           deadLetterAtMs: processedAtMs,
-          ...(markerAttemptId
+          ...(marker
             ? {
                 abandonedSend: sendEvidenceDocument({
                   ...marker,
@@ -372,8 +371,7 @@ export function applyManualRecoveryRecord(
     }
     return { value: nextRecord, decision: "manual-recovery-processed" };
   };
-  const output: unknown = apply(asObject(current));
-  return output as TransactionDecision<TelegramMessageDocument>;
+  return requireTelegramTransaction(apply(current));
 }
 
 type SettleManualGateReleaseRecordInput = {
@@ -384,7 +382,7 @@ export function settleManualGateReleaseRecord(
   input: SettleManualGateReleaseRecordInput,
 ): TransactionDecision<TelegramMessageDocument> {
   const { owner } = input;
-  const apply = (record: RawRecord) => {
+  const apply = (record: TelegramMessageDocument) => {
     const delivery = readDelivery(record.delivery);
     if (normalizeString(delivery.apiGateReleaseOwner) !== owner) {
       return { commit: false, decision: "manual-gate-release-settled" };
@@ -397,8 +395,7 @@ export function settleManualGateReleaseRecord(
       decision: "manual-gate-release-settled",
     };
   };
-  const output: unknown = apply(asObject(current));
-  return output as TransactionDecision<TelegramMessageDocument>;
+  return requireTelegramTransaction(apply(current));
 }
 
 type ApplyCleanupRetryProofRecordInput = {
@@ -419,8 +416,9 @@ export function applyCleanupRetryProofRecord(
     application,
     markApplied,
   } = input;
-  const { apiGateReclaimOwner, retryProofLeaseOwner } = asObject(application);
-  const apply = (record: RawRecord) => {
+  const { apiGateReclaimOwner, retryProofLeaseOwner } =
+    documentFields(application);
+  const apply = (record: TelegramMessageDocument) => {
     const delivery = readDelivery(record.delivery);
     const pendingDelete = readPendingDelete(delivery.pendingDelete);
     if (
@@ -471,26 +469,15 @@ export function applyCleanupRetryProofRecord(
       decision: "pending-delete-retry-window-proof-applied",
     };
   };
-  const output: unknown = apply(asObject(current));
-  return output as TransactionDecision<TelegramMessageDocument>;
+  return requireTelegramTransaction(apply(current));
 }
-
-const asObject = (value: unknown): Record<string, unknown> => {
-  const retained =
-    value instanceof DeliverySnapshot
-      ? deliveryDocument(value)
-      : value instanceof PendingDeleteSnapshot
-        ? pendingDeleteDocument(value)
-        : value;
-  return retained && typeof retained === "object" && !Array.isArray(retained)
-    ? (retained as Record<string, unknown>)
-    : {};
-};
 
 export function observeManualRecoveryResult(
   result: TransactionResult<TelegramMessageDocument>,
 ) {
-  const recoveryResult = asObject(messageRecoveryResultDocument(result.value));
+  const recoveryResult = documentFields(
+    messageRecoveryResultDocument(result.value),
+  );
   const processed =
     result.committed && normalizeString(recoveryResult.requestId) !== "";
   const action = normalizeString(recoveryResult.action);

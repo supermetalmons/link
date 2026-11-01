@@ -42,6 +42,7 @@ test("deduplicates concurrent resource loads and retains successful values", asy
 
 test("retries failed resource loads without caching failure", async () => {
   let loadCount = 0;
+  /** @type {unknown[]} */
   const failures = [];
   const resource = createCachedResource(
     async () => {
@@ -80,6 +81,7 @@ test("publishes mute changes only when the value changes", () => {
 });
 
 test("routes island dimming through the bound runtime port", () => {
+  /** @type {boolean[]} */
   const values = [];
   bindIslandButtonDimmer((dimmed) => values.push(dimmed));
 

@@ -186,7 +186,7 @@ export function NavigationGameRow({
           <>
             {typeof game.opponentEmoji === "number" ? (
               <GameEmojiImage
-                src={emojis.getEmojiUrl(game.opponentEmoji.toString())}
+                src={emojis.getEmojiUrl(game.opponentEmoji)}
                 alt=""
               />
             ) : (
@@ -260,7 +260,7 @@ export function NavigationEventRow({
                 {emojiIds.map((emojiId, index) => (
                   <EventAvatarImage
                     key={`slot_${index}`}
-                    src={emojis.getEmojiUrl(emojiId.toString())}
+                    src={emojis.getEmojiUrl(emojiId)}
                     alt=""
                   />
                 ))}

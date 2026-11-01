@@ -30,31 +30,22 @@ export type TelegramMediaGroupInput = TelegramTransportOptions & {
   silent?: boolean;
   hasSpoiler?: boolean;
 };
-declare const retainedTelegramRequest: unique symbol;
-export type RetainedTelegramSendInput = {
-  readonly [retainedTelegramRequest]: "send";
-};
-export type RetainedTelegramEditInput = {
-  readonly [retainedTelegramRequest]: "edit";
-};
-export type RetainedTelegramDeleteInput = {
-  readonly [retainedTelegramRequest]: "delete";
-};
-export type RetainedTelegramMediaGroupInput = {
-  readonly [retainedTelegramRequest]: "send-media-group";
-};
+export type RetainedTelegramSendInput = TelegramSendInput;
+export type RetainedTelegramEditInput = TelegramEditInput;
+export type RetainedTelegramDeleteInput = TelegramDeleteInput;
+export type RetainedTelegramMediaGroupInput = TelegramMediaGroupInput;
 export const retainTelegramSendInput = (
-  value: unknown,
-): RetainedTelegramSendInput => value as RetainedTelegramSendInput;
+  value: TelegramSendInput,
+): TelegramSendInput => value;
 export const retainTelegramEditInput = (
-  value: unknown,
-): RetainedTelegramEditInput => value as RetainedTelegramEditInput;
+  value: TelegramEditInput,
+): TelegramEditInput => value;
 export const retainTelegramDeleteInput = (
-  value: unknown,
-): RetainedTelegramDeleteInput => value as RetainedTelegramDeleteInput;
+  value: TelegramDeleteInput,
+): TelegramDeleteInput => value;
 export const retainTelegramMediaGroupInput = (
-  value: unknown,
-): RetainedTelegramMediaGroupInput => value as RetainedTelegramMediaGroupInput;
+  value: TelegramMediaGroupInput,
+): TelegramMediaGroupInput => value;
 
 type RequestFields = {
   chatId?: unknown;
@@ -503,8 +494,8 @@ const sendTelegramMessage: (
     method: "sendMessage",
     body,
     token,
-    fetchImpl,
-    timeoutMs,
+    ...(fetchImpl === undefined ? {} : { fetchImpl }),
+    ...(timeoutMs === undefined ? {} : { timeoutMs }),
   });
 };
 
@@ -550,8 +541,8 @@ const sendTelegramMediaGroup: (
       disable_notification: silent,
     },
     token,
-    fetchImpl,
-    timeoutMs,
+    ...(fetchImpl === undefined ? {} : { fetchImpl }),
+    ...(timeoutMs === undefined ? {} : { timeoutMs }),
   });
 };
 
@@ -581,8 +572,8 @@ const editTelegramMessage: (
     method: "editMessageText",
     body,
     token,
-    fetchImpl,
-    timeoutMs,
+    ...(fetchImpl === undefined ? {} : { fetchImpl }),
+    ...(timeoutMs === undefined ? {} : { timeoutMs }),
   });
 };
 
@@ -603,8 +594,8 @@ const deleteTelegramMessage: (
       message_id: messageId,
     },
     token,
-    fetchImpl,
-    timeoutMs,
+    ...(fetchImpl === undefined ? {} : { fetchImpl }),
+    ...(timeoutMs === undefined ? {} : { timeoutMs }),
   });
 };
 

@@ -1,11 +1,19 @@
+import { eventDocumentFixture } from "../test/eventCompatibilityFixture.ts";
+import { createExecutionContext } from "cloudflare:test";
+import {
+  eventApplicationEnvironment,
+  activateEventApplicationFixture,
+} from "./eventApplicationFixture.ts";
+import { queueEnvelope } from "../src/queueEnvelope.ts";
 import { projectionFixtureFields } from "../test/profileDataBoundaryFixture.ts";
 import { materializeProfileCompatibility as materializeCanonicalProfile } from "../test/profileDataBoundaryFixture.ts";
 import { commitEventCompatibilityFixture } from "../test/eventCompatibilityFixture.ts";
-import type { CompletePlayerProfile } from "@mons/shared/profiles";
+import { createDefaultProfileAppearance } from "@mons/shared/appearance";
+import { createStoredPlayerProfile } from "../src/profileCanonical/contracts.ts";
 import type { D1Migration } from "cloudflare:test";
 import { env } from "cloudflare:workers";
 import { beforeAll, describe, expect, it } from "vitest";
-import { decodeEventUpdates } from "../src/eventCompatibilityCodec.ts";
+import { decodeEventUpdates } from "../test/eventLegacyFixtureCodec.ts";
 import { createEventGameplayRepository } from "../src/eventRepository.ts";
 import { commitCanonicalPlan } from "../src/profileCanonicalD1.ts";
 import {
@@ -19,30 +27,32 @@ import { applyEventTestMigrations } from "./eventTestMigrations.ts";
 import { applyRetiredProfileMigrations } from "./profileTestMigrations.ts";
 import { applyStrictMatchStateTestMigrations } from "./strictMatchStateTestFixture.ts";
 
-const testEnv = env as Env & {
+const testEnv = eventApplicationEnvironment(env) as Env & {
   TEST_D1_MIGRATIONS: D1Migration[];
   TEST_EVENT_D1_MIGRATIONS: D1Migration[];
   TEST_PROFILE_D1_MIGRATIONS: D1Migration[];
 };
 
 async function insertProfileOwner(profileId: string, loginUid: string) {
-  const profile: CompletePlayerProfile = {
-    id: profileId,
-    completedProblemIds: [],
-    emoji: 2,
-    eth: null,
-    isTutorialCompleted: true,
-    mining: {
-      lastRockDate: "2026-09-13",
-      materials: { dust: 0, gum: 0, ice: 0, metal: 0, slime: 0 },
+  const profile = createStoredPlayerProfile(
+    profileId,
+    createDefaultProfileAppearance(2),
+    {
+      completedProblemIds: [],
+      eth: null,
+      isTutorialCompleted: true,
+      mining: {
+        lastRockDate: "2026-09-13",
+        materials: { dust: 0, gum: 0, ice: 0, metal: 0, slime: 0 },
+      },
+      nonce: 1,
+      rating: 1500,
+      sol: null,
+      totalManaPoints: 0,
+      username: profileId,
+      win: false,
     },
-    nonce: 1,
-    rating: 1500,
-    sol: null,
-    totalManaPoints: 0,
-    username: profileId,
-    win: false,
-  };
+  );
   await commitCanonicalPlan(testEnv.PROFILE_DB, {
     expectations: [
       { kind: "profile-absent", profileId },
@@ -75,11 +85,14 @@ describe("dedicated event preview queue D1 integration", () => {
       testEnv.EVENT_DB,
       testEnv.TEST_EVENT_D1_MIGRATIONS,
     );
+    await activateEventApplicationFixture(testEnv.PROFILE_GAMES_DB);
     await applyRetiredProfileMigrations(
       testEnv.PROFILE_DB,
       testEnv.TEST_PROFILE_D1_MIGRATIONS,
       "d".repeat(64),
     );
+    await activateEventApplicationFixture(testEnv.EVENT_DB);
+    await activateEventApplicationFixture(testEnv.PROFILE_DB);
     await testEnv.PROFILE_GAMES_DB.prepare(
       "UPDATE automatch_runtime_control SET backend = 'd1', state = 'active', epoch = epoch + 1 WHERE singleton = 1",
     ).run();
@@ -93,7 +106,7 @@ describe("dedicated event preview queue D1 integration", () => {
     await insertProfileOwner(creatorId, "queue-creator-login");
     await insertProfileOwner(guestId, "queue-guest-login");
     const archiveOutbox = {
-      schemaVersion: 1,
+      schemaVersion: 2,
       status: "pending",
       requestId: "deferred-archive-request",
       sourceUpdatedAtMs: nowMs,
@@ -115,7 +128,7 @@ describe("dedicated event preview queue D1 integration", () => {
     };
     const archiveJson = JSON.stringify(archiveOutbox);
     await testEnv.PROFILE_GAMES_DB.prepare(
-      "INSERT INTO game_session_projection_outbox (record_key, payload_json, revision, updated_at_ms) VALUES (?, ?, 1, ?)",
+      "INSERT INTO game_session_projection_outbox_canonical (record_key, payload_json, revision, updated_at_ms) VALUES (?, ?, 1, ?)",
     )
       .bind("deferred-archive-invite", archiveJson, nowMs)
       .run();
@@ -154,8 +167,8 @@ describe("dedicated event preview queue D1 integration", () => {
       await commitEventCompatibilityFixture(
         repository,
         decodeEventUpdates({
-          [`events/${eventId}`]: {
-            schemaVersion: 2,
+          [`events/${eventId}`]: eventDocumentFixture({
+            schemaVersion: 3,
             eventId,
             status: "scheduled",
             createdAtMs: nowMs,
@@ -166,7 +179,7 @@ describe("dedicated event preview queue D1 integration", () => {
             createdByUsername: creatorId,
             participants,
             rounds: {},
-          },
+          }),
           [`profileGameProjectionOutbox/event/${eventId}`]: {
             schemaVersion: 1,
             status: "pending",
@@ -189,7 +202,7 @@ describe("dedicated event preview queue D1 integration", () => {
           messages: [
             {
               id: requestId,
-              body: task,
+              body: queueEnvelope("EVENT_PROFILE_GAME_PROJECTION_QUEUE", task),
               timestamp: new Date(nowMs),
               attempts: 1,
               ack: () => acknowledgements++,
@@ -201,6 +214,7 @@ describe("dedicated event preview queue D1 integration", () => {
           retryAll: () => undefined,
         },
         environment,
+        createExecutionContext(),
       );
       expect(retries).toEqual([]);
       expect(acknowledgements).toBe(1);
@@ -221,7 +235,7 @@ describe("dedicated event preview queue D1 integration", () => {
     }
     expect(
       await testEnv.PROFILE_GAMES_DB.prepare(
-        "SELECT payload_json FROM game_session_projection_outbox WHERE record_key = ?",
+        "SELECT payload_json FROM game_session_projection_outbox_canonical WHERE record_key = ?",
       )
         .bind("deferred-archive-invite")
         .first("payload_json"),

@@ -1,11 +1,12 @@
+import { isAura, isEmojiId, type Aura, type EmojiId } from "./appearance.js";
 import { normalizeRecordKey } from "./ids.js";
 import { isProfileCustomizationUpdateRequest } from "./profiles.js";
 
 export type MatchPresentation = {
   matchId: string;
   actorUid: string;
-  emojiId: number;
-  aura: string;
+  emojiId: EmojiId;
+  aura: Aura;
   revision: number;
 };
 
@@ -17,8 +18,8 @@ export type MatchPresentationSnapshot = {
 export type UpdateMatchPresentationRequest = {
   operationId: string;
   expectedRevision: number;
-  emojiId: number;
-  aura: string;
+  emojiId: EmojiId;
+  aura: Aura;
 };
 
 export type ReadMatchPresentationResponse = {
@@ -57,9 +58,8 @@ const isMatchPresentation = (value: unknown): value is MatchPresentation =>
   isExactKey(value.matchId) &&
   isExactKey(value.actorUid) &&
   value.actorUid.length <= 128 &&
-  Number.isSafeInteger(value.emojiId) &&
-  typeof value.aura === "string" &&
-  value.aura.length <= 32 &&
+  isEmojiId(value.emojiId) &&
+  isAura(value.aura) &&
   isRevision(value.revision);
 
 const isMatchPresentationSnapshot = (

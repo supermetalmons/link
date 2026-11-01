@@ -24,6 +24,7 @@ exports.safeRetryProofIdentity = safeRetryProofIdentity;
 exports.desiredWindowProofState = desiredWindowProofState;
 exports.cleanupWindowProofState = cleanupWindowProofState;
 exports.messageSettlementOwnerInput = messageSettlementOwnerInput;
+const recordCodec_js_1 = require("./recordCodec.js");
 const deliveryPolicy_js_1 = require("./deliveryPolicy.js");
 const taskIdentity_js_1 = require("./taskIdentity.js");
 const taskKinds_js_1 = require("./taskKinds.js");
@@ -31,14 +32,8 @@ const values_js_1 = require("./values.js");
 const records_js_1 = require("./records.js");
 const normalizeString = (value) =>
   typeof value === "string" && value.trim() !== "" ? value.trim() : "";
-const proofFields = (value) => {
-  const retained = value;
-  return retained;
-};
-const applicationFields = (value) => {
-  const retained = value;
-  return retained;
-};
+const proofFields = (value) => value;
+const applicationFields = (value) => value;
 const buildTelegramRetrySchedule = ({
   messageKey,
   revision,
@@ -55,8 +50,7 @@ const buildTelegramRetrySchedule = ({
   apiGateReclaimOwner = "",
   apiGateSettleOwner = "",
 }) => {
-  const normalizedTaskKind =
-    normalizeString(taskKind) || taskKinds_js_1.TELEGRAM_DESIRED_TASK_KIND;
+  const normalizedTaskKind = taskKind;
   const retrySequence = (0, deliveryPolicy_js_1.normalizeRetrySequence)(
     retryState.retrySequence,
   );
@@ -77,7 +71,7 @@ const buildTelegramRetrySchedule = ({
     messageKey,
     revision,
     taskKind: normalizedTaskKind,
-    retrySequence,
+    ...(retrySequence === undefined ? {} : { retrySequence }),
     generation,
     retryStartedAtMs: (0, deliveryPolicy_js_1.normalizeTimestamp)(
       retryState.retryStartedAtMs,
@@ -100,27 +94,30 @@ const buildTelegramRetrySchedule = ({
     ...(apiGateReclaimOwner ? { apiGateReclaimOwner } : {}),
     ...(apiGateSettleOwner ? { apiGateSettleOwner } : {}),
   };
-  return payload;
+  return {
+    ...(0, taskIdentity_js_1.normalizeTaskPayload)(payload),
+    scheduleTimeMs: payload.scheduleTimeMs,
+  };
 };
 exports.buildTelegramRetrySchedule = buildTelegramRetrySchedule;
 function telegramRetryScheduleTime(input) {
-  const retained = input;
-  const value = retained;
   return (0, taskIdentity_js_1.normalizeOptionalTimestamp)(
-    value.scheduleTimeMs,
+    input.scheduleTimeMs,
   );
 }
 function retainedRateLimitProof(value) {
-  return value;
+  const proof = (0, recordCodec_js_1.readTelegramRetryProof)(value);
+  if (!proof) throw new TypeError("invalid-telegram-retry-proof");
+  return proof;
 }
 function messageRateLimitProof(value, pending = false) {
   const source = pending
     ? (0, values_js_1.readProperty)(value, "pendingDelete")
     : value;
   const proof = (0, values_js_1.readProperty)(source, "apiGateProofRequired");
-  return proof && typeof proof === "object" && !Array.isArray(proof)
-    ? proof
-    : {};
+  const parsed = (0, recordCodec_js_1.readTelegramRetryProof)(proof);
+  if (!parsed) throw new TypeError("telegram-retry-proof-missing");
+  return parsed;
 }
 function readRateLimitRetryState(value) {
   const proof = proofFields(value);
@@ -152,48 +149,40 @@ function lockedDesiredRetryInput(delivery, context) {
     taskKind: taskKinds_js_1.TELEGRAM_DESIRED_TASK_KIND,
     retryState: {
       retryStartedAtMs:
-        (0, values_js_1.readProperty)(
-          (0, records_js_1.messageDeliveryDocument)(delivery),
-          "retryStartedAtMs",
-        ) || context.retryStartedAtMs,
+        (0, records_js_1.messageDeliveryDocument)(delivery).retryStartedAtMs ||
+        context.retryStartedAtMs,
       retryDeadlineAtMs:
-        (0, values_js_1.readProperty)(
-          (0, records_js_1.messageDeliveryDocument)(delivery),
-          "retryDeadlineAtMs",
-        ) || context.retryDeadlineAtMs,
-      retryAtMs: context.retryAtMs,
+        (0, records_js_1.messageDeliveryDocument)(delivery).retryDeadlineAtMs ||
+        context.retryDeadlineAtMs,
+      retryAtMs: context.retryAtMs ?? 0,
       retrySequence:
-        (0, values_js_1.readProperty)(
-          (0, records_js_1.messageDeliveryDocument)(delivery),
-          "retrySequence",
-        ) ?? context.retrySequence,
+        (0, records_js_1.messageDeliveryDocument)(delivery).retrySequence ??
+        context.retrySequence,
     },
-    sourceGeneration: context.sourceGeneration,
+    ...(context.sourceGeneration === undefined
+      ? {}
+      : { sourceGeneration: context.sourceGeneration }),
     apiGateReclaimOwner: context.apiGateReclaimOwner,
   };
   return input;
 }
 function deferredDesiredRetryInput(delivery, context) {
+  const { retryStartedAtMs, retryDeadlineAtMs } = (0,
+  records_js_1.messageDeliveryDocument)(delivery);
   const input = {
     messageKey: context.messageKey,
     revision: context.revision,
     taskKind: taskKinds_js_1.TELEGRAM_DESIRED_TASK_KIND,
     retryState: {
-      retryStartedAtMs: (0, values_js_1.readProperty)(
-        (0, records_js_1.messageDeliveryDocument)(delivery),
-        "retryStartedAtMs",
-      ),
-      retryDeadlineAtMs: (0, values_js_1.readProperty)(
-        (0, records_js_1.messageDeliveryDocument)(delivery),
-        "retryDeadlineAtMs",
-      ),
-      retryAtMs: context.retryAtMs,
-      retrySequence: (0, values_js_1.readProperty)(
-        (0, records_js_1.messageDeliveryDocument)(delivery),
-        "retrySequence",
-      ),
+      ...(retryStartedAtMs === undefined ? {} : { retryStartedAtMs }),
+      ...(retryDeadlineAtMs === undefined ? {} : { retryDeadlineAtMs }),
+      retryAtMs: context.retryAtMs ?? 0,
+      retrySequence:
+        (0, records_js_1.messageDeliveryDocument)(delivery).retrySequence ?? 0,
     },
-    sourceGeneration: context.sourceGeneration,
+    ...(context.sourceGeneration === undefined
+      ? {}
+      : { sourceGeneration: context.sourceGeneration }),
   };
   return input;
 }
@@ -237,7 +226,9 @@ function desiredSafeProofInput(value, state) {
   const proof = proofFields(value);
   const input = {
     requestedRevision: proof.revision,
-    safeRejectedAttemptId: proof.safeRejectedAttemptId,
+    ...(proof.safeRejectedAttemptId === undefined
+      ? {}
+      : { safeRejectedAttemptId: proof.safeRejectedAttemptId }),
     ...state,
   };
   return input;
@@ -246,20 +237,25 @@ function desiredWindowProofInput(value, state) {
   const proof = proofFields(value);
   const input = {
     requestedRevision: proof.revision,
-    retryProofLeaseOwner: proof.retryProofLeaseOwner,
+    ...(proof.retryProofLeaseOwner === undefined
+      ? {}
+      : { retryProofLeaseOwner: proof.retryProofLeaseOwner }),
     ...state,
   };
   return input;
 }
 function cleanupWindowProofInput(value, state, target) {
   const proof = proofFields(value);
+  const pendingDeleteId =
+    target.requestedPendingDeleteId === undefined
+      ? proof.pendingDeleteId
+      : normalizeString(proof.pendingDeleteId) ||
+        target.requestedPendingDeleteId;
   const input = {
-    pendingDeleteId:
-      target.requestedPendingDeleteId === undefined
-        ? proof.pendingDeleteId
-        : normalizeString(proof.pendingDeleteId) ||
-          target.requestedPendingDeleteId,
-    retryProofLeaseOwner: proof.retryProofLeaseOwner,
+    ...(pendingDeleteId === undefined ? {} : { pendingDeleteId }),
+    ...(proof.retryProofLeaseOwner === undefined
+      ? {}
+      : { retryProofLeaseOwner: proof.retryProofLeaseOwner }),
     ...state,
   };
   return input;
@@ -273,12 +269,12 @@ const captureSafeRetryProof = ({
   retrySequence,
 }) => {
   const captured = {
-    requestedRevision,
-    safeRejectedAttemptId,
-    retryStartedAtMs,
-    retryDeadlineAtMs,
-    retryAtMs,
-    retrySequence,
+    ...(requestedRevision === undefined ? {} : { requestedRevision }),
+    ...(safeRejectedAttemptId === undefined ? {} : { safeRejectedAttemptId }),
+    ...(retryStartedAtMs === undefined ? {} : { retryStartedAtMs }),
+    ...(retryDeadlineAtMs === undefined ? {} : { retryDeadlineAtMs }),
+    ...(retryAtMs === undefined ? {} : { retryAtMs }),
+    ...(retrySequence === undefined ? {} : { retrySequence }),
   };
   return captured;
 };
@@ -294,14 +290,14 @@ const captureDesiredWindowProof = ({
   apiGateReclaimOwner,
 }) => {
   const captured = {
-    requestedRevision,
-    safeRejectedAttemptId,
-    retryStartedAtMs,
-    retryDeadlineAtMs,
-    retryAtMs,
-    retrySequence,
-    retryProofLeaseOwner,
-    apiGateReclaimOwner,
+    ...(requestedRevision === undefined ? {} : { requestedRevision }),
+    ...(safeRejectedAttemptId === undefined ? {} : { safeRejectedAttemptId }),
+    ...(retryStartedAtMs === undefined ? {} : { retryStartedAtMs }),
+    ...(retryDeadlineAtMs === undefined ? {} : { retryDeadlineAtMs }),
+    ...(retryAtMs === undefined ? {} : { retryAtMs }),
+    ...(retrySequence === undefined ? {} : { retrySequence }),
+    ...(retryProofLeaseOwner === undefined ? {} : { retryProofLeaseOwner }),
+    ...(apiGateReclaimOwner === undefined ? {} : { apiGateReclaimOwner }),
   };
   return captured;
 };
@@ -316,13 +312,13 @@ const captureCleanupWindowProof = ({
   apiGateReclaimOwner,
 }) => {
   const captured = {
-    pendingDeleteId,
-    retryStartedAtMs,
-    retryDeadlineAtMs,
-    retryAtMs,
-    retrySequence,
-    retryProofLeaseOwner,
-    apiGateReclaimOwner,
+    ...(pendingDeleteId === undefined ? {} : { pendingDeleteId }),
+    ...(retryStartedAtMs === undefined ? {} : { retryStartedAtMs }),
+    ...(retryDeadlineAtMs === undefined ? {} : { retryDeadlineAtMs }),
+    ...(retryAtMs === undefined ? {} : { retryAtMs }),
+    ...(retrySequence === undefined ? {} : { retrySequence }),
+    ...(retryProofLeaseOwner === undefined ? {} : { retryProofLeaseOwner }),
+    ...(apiGateReclaimOwner === undefined ? {} : { apiGateReclaimOwner }),
   };
   return captured;
 };
@@ -394,8 +390,5 @@ const readBarrierProofInput = ({
 };
 exports.readBarrierProofInput = readBarrierProofInput;
 function messageSettlementOwnerInput(message, field) {
-  return (0, values_js_1.readProperty)(
-    (0, values_js_1.readProperty)(message, "delivery"),
-    field,
-  );
+  return message?.delivery?.[field] ?? "";
 }

@@ -1,7 +1,9 @@
 import { parseAutomatchPath } from "../test/legacyAutomatchStoreFixture.ts";
 import { createLegacyAutomatchD1Store as createAutomatchD1Store } from "../test/legacyAutomatchStoreFixture.ts";
 import { matchTestPort } from "../test/gameSessionTestPorts.ts";
-import { env } from "cloudflare:workers";
+import { env as baseEnv } from "cloudflare:workers";
+import { activateCanonicalApplicationFixture } from "./applicationRoomFixture.ts";
+import { eventApplicationEnvironment } from "./eventApplicationFixture.ts";
 import type { D1Migration } from "cloudflare:test";
 import { applyStrictMatchStateTestMigrations } from "./strictMatchStateTestFixture.ts";
 import { createSeededRandom } from "@mons/shared/ids";
@@ -21,9 +23,9 @@ import {
   joinInvite,
   proposeRematch,
 } from "../src/gameSessionMutations.ts";
-import { applyRetiredProfileMigrations } from "./profileTestMigrations.ts";
 import { resetMatchPresentationTestState } from "./matchPresentationTestFixture.ts";
 
+const env = eventApplicationEnvironment(baseEnv);
 const testEnv = env as Env & {
   TEST_D1_MIGRATIONS: D1Migration[];
   TEST_PROFILE_D1_MIGRATIONS: D1Migration[];
@@ -103,7 +105,11 @@ function client(memoryState: MemoryStateRepository, uid: string) {
 }
 
 function operation() {
-  return { operationId: crypto.randomUUID(), emojiId: 1, aura: "" };
+  return {
+    operationId: crypto.randomUUID(),
+    emojiId: 1,
+    aura: "none" as const,
+  };
 }
 
 function request(inviteId: string) {
@@ -113,7 +119,7 @@ function request(inviteId: string) {
 async function captured() {
   const result = await db
     .prepare(
-      "SELECT login_uid, match_id, invite_id, resolution, provenance FROM login_match_discovery ORDER BY login_uid, match_id",
+      "SELECT login_uid, match_id, invite_id, resolution, provenance FROM login_match_discovery_canonical ORDER BY login_uid, match_id",
     )
     .all();
   return result.results;
@@ -142,7 +148,7 @@ async function assertPublished(inviteId: string, operationId: string) {
   expect(
     await db
       .prepare(
-        "SELECT count(*) AS count FROM game_session_transitions WHERE status = 'pending'",
+        "SELECT count(*) AS count FROM game_session_transitions_canonical WHERE status = 'pending'",
       )
       .first("count"),
   ).toBe(0);
@@ -150,12 +156,8 @@ async function assertPublished(inviteId: string, operationId: string) {
 
 describe("game discovery through the production gameplay repositories", () => {
   beforeAll(async () => {
+    await activateCanonicalApplicationFixture();
     await applyStrictMatchStateTestMigrations(db, testEnv.TEST_D1_MIGRATIONS);
-    await applyRetiredProfileMigrations(
-      env.PROFILE_DB,
-      testEnv.TEST_PROFILE_D1_MIGRATIONS,
-      "a".repeat(64),
-    );
   });
 
   beforeEach(async () => {
@@ -175,18 +177,18 @@ describe("game discovery through the production gameplay repositories", () => {
         "UPDATE login_match_discovery_control SET capture_enforced = 1, capture_version_id = '11111111-1111-4111-8111-111111111111', capture_started_at_ms = 1 WHERE singleton = 1",
       ),
       ...[
-        "login_match_discovery",
-        "invite_sources",
+        "login_match_discovery_canonical",
+        "invite_sources_canonical",
         "invite_source_write_admissions",
-        "game_session_transition_resources",
-        "game_session_transitions",
+        "game_session_transition_resources_canonical",
+        "game_session_transitions_canonical",
         "game_session_mutation_locks",
         "automatch_write_admissions",
-        "automatch_entries",
-        "automatch_telegram_sources",
-        "automatch_telegram_projection_outbox",
-        "game_session_projection_outbox",
-        "game_session_mutation_receipts",
+        "automatch_entries_canonical",
+        "automatch_telegram_sources_canonical",
+        "automatch_telegram_projection_outbox_canonical",
+        "game_session_projection_outbox_canonical",
+        "game_session_mutation_receipts_canonical",
       ].map((table) => db.prepare(`DELETE FROM ${table}`)),
     ]);
   });
@@ -292,7 +294,7 @@ describe("game discovery through the production gameplay repositories", () => {
     const host = client(memoryState, "host");
     const creation = request("capture-recovery");
     await db.exec(
-      "CREATE TRIGGER test_capture_failure BEFORE INSERT ON login_match_discovery BEGIN SELECT RAISE(ABORT, 'test-discovery-unavailable'); END;",
+      "CREATE TRIGGER test_capture_failure BEFORE INSERT ON login_match_discovery_canonical BEGIN SELECT RAISE(ABORT, 'test-discovery-unavailable'); END;",
     );
     try {
       await expect(
@@ -306,7 +308,7 @@ describe("game discovery through the production gameplay repositories", () => {
       expect(await captured()).toEqual([]);
       expect(
         await db
-          .prepare("SELECT status FROM game_session_transitions")
+          .prepare("SELECT status FROM game_session_transitions_canonical")
           .first("status"),
       ).toBe("pending");
       const store = createAutomatchD1Store(db);

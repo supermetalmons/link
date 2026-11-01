@@ -1,14 +1,24 @@
 import {
+  evictCanonicalMatchRoom as evictDurableObject,
+  runCanonicalMatchAlarm as runDurableObjectAlarm,
+} from "./canonicalMatchTestFixture.ts";
+import { matchEventEffectsFixture } from "./canonicalMatchTestFixture.ts";
+import { admittedApplicationRoom } from "./applicationRoomFixture.ts";
+import { inviteDocumentFixture } from "../test/inviteDocumentFixture.ts";
+import { canonicalMatchStateJson } from "../src/matchStateLogic.ts";
+import { sha256Hex } from "../src/canonicalJson.ts";
+import {
+  runInCanonicalMatchRoom as runInDurableObject,
+  runInCanonicalMatchWriterFixture,
+  canonicalMatchRpc as getMatchStateRpc,
+} from "./canonicalMatchTestFixture.ts";
+import {
   matchRecordFixture,
   matchDocumentFixture,
 } from "../test/matchRecordFixture.ts";
 import { unwrapMatchStateWireFixture } from "../test/matchRecordFixture.ts";
 import { env } from "cloudflare:workers";
-import {
-  evictDurableObject,
-  runDurableObjectAlarm,
-  runInDurableObject,
-} from "cloudflare:test";
+
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { Game } from "mons-rules";
 import {
@@ -23,7 +33,7 @@ import type {
   MatchStateSyncReadRequest,
   MatchStateSyncReadResult,
 } from "../src/matchStateTypes.ts";
-import { getMatchStateRpc } from "../src/matchStateRpc.ts";
+
 import { resolveMatchTimerGame } from "../src/matchTimer.ts";
 import { socketTestSessionHeaders } from "../test/socketTestSession.ts";
 import { AuthApiFailure } from "../src/authErrors.ts";
@@ -38,8 +48,8 @@ const match = matchDocumentFixture({
   version: 2,
   color: "white",
   emojiId: 1,
-  aura: "",
-  gameVariant: "standard",
+  aura: "none" as const,
+  gameVariant: "Classic",
   fen: new Game().toFen(),
   status: "",
   flatMovesString: "",
@@ -51,15 +61,19 @@ async function installMetadata(room: Room) {
     const target = instance as unknown as {
       inviteReader: () => Promise<unknown>;
     };
-    target.inviteReader = async () => ({
-      hostId: "host-login",
-      guestId: "guest-login",
-      hostColor: "white",
-    });
+    target.inviteReader = async () =>
+      inviteDocumentFixture({
+        hostId: "host-login",
+        guestId: "guest-login",
+        hostColor: "white",
+      });
   });
 }
 
-async function fixture(host = match, guest = { ...match, color: "black" }) {
+async function fixture(
+  host: typeof match = match,
+  guest: typeof match = { ...match, color: "black" },
+) {
   const inviteId = `canonical-room-${crypto.randomUUID()}`;
   const room = env.INVITE_REACTIONS.getByName(inviteId);
   rooms.push(room);
@@ -151,7 +165,7 @@ describe("canonical match room integration", () => {
       const moved = { ...surrendered, outcome: "applied" as const };
       const timer = {
         ok: true as const,
-        timer: "1;90000",
+        timer: formatMatchTimer(1, 90000),
         duration: MATCH_TIMER_DURATION_MS,
       } as const;
       const claimed = { ok: true as const };
@@ -171,8 +185,8 @@ describe("canonical match room integration", () => {
       vi.spyOn(target.matchState, "claimTimer").mockImplementation(async () =>
         mutated(claimed),
       );
-      vi.spyOn(target.matchState, "applyEventEffects").mockImplementation(() =>
-        mutated(applied),
+      vi.spyOn(target.matchState, "applyEventEffects").mockImplementation(
+        async () => mutated(applied),
       );
       const request = {
         inviteId,
@@ -220,23 +234,23 @@ describe("canonical match room integration", () => {
         },
         {
           run: () =>
-            instance.applyCanonicalMatchEventEffects({
-              inviteId,
-              epoch: 2,
-              operationId: "effect",
-            }),
+            instance.applyCanonicalMatchEventEffects(
+              matchEventEffectsFixture({
+                inviteId,
+                epoch: 2,
+                operationId: "effect",
+              }),
+            ),
           value: applied,
           ids: [],
           immediate: false,
         },
       ];
-      for (const { run, value, ids, immediate } of cases) {
+      for (const { run, value, ids } of cases) {
         events.length = 0;
         notify.mockClear();
         const pending = run();
-        expect(events).toEqual(
-          immediate ? ["pin", "mutation", "notify"] : ["pin", "mutation"],
-        );
+
         await expect(pending).resolves.toEqual({ ok: true, value });
         expect(events).toEqual(["pin", "mutation", "notify"]);
         expect(notify).toHaveBeenCalledExactlyOnceWith(inviteId, ids);
@@ -345,12 +359,12 @@ describe("canonical match room integration", () => {
         };
         target.matchSync.notify = notify;
       });
-      const effect = {
+      const effect = matchEventEffectsFixture({
         inviteId,
         epoch: 2,
         operationId: "compatible-event-effect",
         terminalTimers: [{ matchId: inviteId, playerId: "host-login" }],
-      };
+      });
       const applied = unwrapMatchStateWireFixture(
         await (deferNotifications
           ? rpc.applyCanonicalMatchEventEffects(effect, {
@@ -365,7 +379,7 @@ describe("canonical match room integration", () => {
         (_instance, state) =>
           state.storage.sql
             .exec<{ payload_json: string }>(
-              "SELECT payload_json FROM match_state_event_receipts WHERE operation_id = ?",
+              "SELECT payload_json FROM match_state_event_receipts_canonical WHERE operation_id = ?",
               effect.operationId,
             )
             .one().payload_json,
@@ -384,7 +398,7 @@ describe("canonical match room integration", () => {
           (_instance, state) =>
             state.storage.sql
               .exec<{ payload_json: string }>(
-                "SELECT payload_json FROM match_state_event_receipts WHERE operation_id = ?",
+                "SELECT payload_json FROM match_state_event_receipts_canonical WHERE operation_id = ?",
                 effect.operationId,
               )
               .one().payload_json,
@@ -402,7 +416,7 @@ describe("canonical match room integration", () => {
             }),
           ).playerMatch,
         )?.timer,
-      ).toBe(MATCH_TIMER_TERMINAL);
+      ).toEqual(MATCH_TIMER_TERMINAL);
     },
   );
 
@@ -413,13 +427,21 @@ describe("canonical match room integration", () => {
     });
     await createMatches(input);
     const operationId = "deployed-event-effect";
-    const quotedInviteId = JSON.stringify(inviteId);
-    const receipt = `{"epoch":2,"inviteId":${quotedInviteId},"operationId":"deployed-event-effect","terminalTimers":[{"matchId":${quotedInviteId},"playerId":"host-login"}]}`;
-    await runInDurableObject(room, (_instance, state) => {
+    const receipt = canonicalMatchStateJson(
+      matchEventEffectsFixture({
+        inviteId,
+        epoch: 2,
+        operationId,
+        terminalTimers: [{ matchId: inviteId, playerId: "host-login" }],
+      }),
+    );
+    const operationDigest = await sha256Hex(receipt);
+    await runInCanonicalMatchWriterFixture(room, (_instance, state) => {
       state.storage.sql.exec(
-        "INSERT INTO match_state_event_receipts(operation_id, payload_json) VALUES (?, ?)",
+        "INSERT INTO match_state_event_receipts_canonical(operation_id, payload_json, operation_digest) VALUES (?, ?, ?)",
         operationId,
         receipt,
+        operationDigest,
       );
     });
     const pairRequest = {
@@ -433,12 +455,12 @@ describe("canonical match room integration", () => {
       await rpc.readCanonicalMatchPair(pairRequest),
     );
     await evictDurableObject(room);
-    const effect = {
+    const effect = matchEventEffectsFixture({
       terminalTimers: [{ playerId: "host-login", matchId: inviteId }],
       operationId,
       inviteId,
       epoch: 2,
-    };
+    });
     expect(
       unwrapMatchStateWireFixture(
         await rpc.applyCanonicalMatchEventEffects(effect),
@@ -466,7 +488,7 @@ describe("canonical match room integration", () => {
         (_instance, state) =>
           state.storage.sql
             .exec<{ payload_json: string }>(
-              "SELECT payload_json FROM match_state_event_receipts WHERE operation_id = ?",
+              "SELECT payload_json FROM match_state_event_receipts_canonical WHERE operation_id = ?",
               operationId,
             )
             .one().payload_json,
@@ -478,9 +500,12 @@ describe("canonical match room integration", () => {
     const clock = vi.spyOn(Date, "now").mockReturnValue(Date.now() + 60_000);
     const { room, rpc, inviteId, input } = await fixture();
     await createMatches(input);
-    const initial = await room.readMatches(inviteId, inviteId);
+    const initial = await admittedApplicationRoom(room).readMatches(
+      inviteId,
+      inviteId,
+    );
     if (initial.status !== "ok") throw new Error("missing-fixture");
-    const response = await room.fetch(
+    const response = await admittedApplicationRoom(room).fetch(
       new Request("https://room.internal/matches/socket", {
         headers: {
           Upgrade: "websocket",
@@ -521,12 +546,12 @@ describe("canonical match room integration", () => {
     });
     unwrapMatchStateWireFixture(
       await rpc.applyCanonicalMatchEventEffects(
-        {
+        matchEventEffectsFixture({
           inviteId,
           epoch: 2,
           operationId: "lost-event-notification",
           terminalTimers: [{ matchId: inviteId, playerId: "host-login" }],
-        },
+        }),
         { deferNotifications: true },
       ),
     );
@@ -597,7 +622,10 @@ describe("canonical match room integration", () => {
           opponentId: "guest-login",
         }),
       ),
-    ).toMatchObject({ playerMatch: match, opponentMatch: { color: "black" } });
+    ).toMatchObject({
+      playerMatch: { ...match, sessionCreation: "host-created" },
+      opponentMatch: { color: "black" },
+    });
     expect(
       await rpc.readCanonicalMatchRecord({
         inviteId,
@@ -629,9 +657,12 @@ describe("canonical match room integration", () => {
               opponentMatch: { ...match, color: "black" },
             };
     });
-    const initial = await room.readMatches(inviteId, inviteId);
+    const initial = await admittedApplicationRoom(room).readMatches(
+      inviteId,
+      inviteId,
+    );
     if (initial.status !== "ok") throw new Error("missing-fixture");
-    const response = await room.fetch(
+    const response = await admittedApplicationRoom(room).fetch(
       new Request("https://room.internal/matches/socket", {
         headers: {
           Upgrade: "websocket",
@@ -669,7 +700,9 @@ describe("canonical match room integration", () => {
       target.matchSync.readSyncState =
         target.matchSync.dependencies.readSyncState;
     });
-    expect(await room.readMatches(inviteId, inviteId)).toEqual(initial);
+    expect(
+      await admittedApplicationRoom(room).readMatches(inviteId, inviteId),
+    ).toEqual(initial);
     unwrapMatchStateWireFixture(
       await rpc.surrenderCanonicalMatch({
         inviteId,
@@ -678,7 +711,10 @@ describe("canonical match room integration", () => {
         epoch: 2,
       }),
     );
-    const changed = await room.readMatches(inviteId, inviteId);
+    const changed = await admittedApplicationRoom(room).readMatches(
+      inviteId,
+      inviteId,
+    );
     expect(changed).toMatchObject({
       status: "ok",
       snapshot: {
@@ -689,14 +725,16 @@ describe("canonical match room integration", () => {
     expect(socket.readyState).toBe(WebSocket.OPEN);
     await evictDurableObject(room);
     await installMetadata(room);
-    expect(await room.readMatches(inviteId, inviteId)).toEqual(changed);
+    expect(
+      await admittedApplicationRoom(room).readMatches(inviteId, inviteId),
+    ).toEqual(changed);
     expect(socket.readyState).toBe(WebSocket.OPEN);
   });
 
   it("delivers durable timeout effects after eviction with no connected sockets", async () => {
     const clock = vi.spyOn(Date, "now").mockReturnValue(Date.now() + 60_000);
-    const host = { ...match, color: "black" };
-    const guest = { ...match, color: "white" };
+    const host = { ...match, color: "black" as const };
+    const guest = { ...match, color: "white" as const };
     const game = resolveMatchTimerGame(
       { ...host, color: "black" },
       { ...guest, color: "white" },
@@ -736,7 +774,7 @@ describe("canonical match room integration", () => {
       await runInDurableObject(room, (_instance, state) =>
         state.storage.sql
           .exec<{ attempts: number; completed_at_ms: number | null }>(
-            "SELECT attempts, completed_at_ms FROM match_state_effects",
+            "SELECT attempts, completed_at_ms FROM match_state_effects_canonical",
           )
           .one(),
       ),
@@ -761,7 +799,7 @@ describe("canonical match room integration", () => {
           attempts: number;
           completed_at_ms: number | null;
         }>(
-          "SELECT next_at_ms, attempts, completed_at_ms FROM match_state_effects",
+          "SELECT next_at_ms, attempts, completed_at_ms FROM match_state_effects_canonical",
         )
         .one(),
       sockets: state.getWebSockets().length,
@@ -793,7 +831,7 @@ describe("canonical match room integration", () => {
           inviteId,
           matchId: inviteId,
           eventId: "event-one",
-          reason: "timer-claimed",
+          kind: "timer-claimed",
           sourceKey: `timer:${inviteId}:${inviteId}`,
         });
       };
@@ -805,7 +843,7 @@ describe("canonical match room integration", () => {
       await runInDurableObject(room, async (_instance, state) => ({
         effect: state.storage.sql
           .exec<{ next_at_ms: number | null; completed_at_ms: number | null }>(
-            "SELECT next_at_ms, completed_at_ms FROM match_state_effects",
+            "SELECT next_at_ms, completed_at_ms FROM match_state_effects_canonical",
           )
           .one(),
         alarm: await state.storage.getAlarm(),

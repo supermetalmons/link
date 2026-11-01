@@ -1,3 +1,7 @@
+import {
+  parseApiErrorDetails,
+  type ApiErrorDetails,
+} from "@mons/shared/api-errors";
 import type {
   ApiPath,
   ApiPathRequest,
@@ -56,13 +60,13 @@ type AuthPostPath = Exclude<
 
 export class AuthApiError extends Error {
   readonly code: string;
-  readonly details?: unknown;
+  readonly details: ApiErrorDetails | undefined;
 
-  constructor(code: string, message: string, details?: unknown) {
+  constructor(code: string, message: string, details?: ApiErrorDetails) {
     super(message);
     this.name = "AuthApiError";
     this.code = code;
-    this.details = details;
+    this.details = parseApiErrorDetails(code, details);
   }
 }
 

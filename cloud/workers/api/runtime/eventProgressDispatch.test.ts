@@ -1,15 +1,15 @@
-import { commitEventCompatibilityFixture } from "../test/eventCompatibilityFixture.ts";
+import { requiredFixture } from "../test/requiredFixture.ts";
+import {
+  commitEventCompatibilityFixture,
+  eventDocumentFixture,
+} from "../test/eventCompatibilityFixture.ts";
 import type { D1Migration } from "cloudflare:test";
-import type { WorkflowStep } from "cloudflare:workers";
 import { env } from "cloudflare:workers";
 import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import { decodeEventUpdates } from "../src/eventCompatibilityCodec.ts";
-import { buildEventAnnouncementPlan } from "../src/eventPrizeAnnouncementSchedule.ts";
-import { runEventAnnouncementWorkflow } from "../src/eventPrizeAnnouncementWorkflow.ts";
+import { decodeEventUpdates } from "../test/eventLegacyFixtureCodec.ts";
 import {
   buildEventProgressPlan,
   ensureEventProgressWorkflow,
-  parseEventProgressOutbox,
   sweepEventProgress,
   type EventProgressPlan,
   type EventProgressSweepRepository,
@@ -27,7 +27,6 @@ import {
 import { readEventOwnedPath } from "./eventD1Fixture.ts";
 import { applyEventTestMigrations } from "./eventTestMigrations.ts";
 import { applyStrictMatchStateTestMigrations } from "./strictMatchStateTestFixture.ts";
-import { recoveryCandidates } from "../test/recoveryScanTestFixtures.ts";
 
 const testEnv = env as Env & {
   TEST_EVENT_D1_MIGRATIONS: D1Migration[];
@@ -41,7 +40,7 @@ async function freezeEventGate(): Promise<boolean> {
      SET storage_mode = 'frozen', freeze_generation = freeze_generation + 1
      WHERE singleton = 1 AND storage_mode = 'd1'
        AND NOT EXISTS (SELECT 1 FROM event_write_admissions)
-       AND NOT EXISTS (SELECT 1 FROM event_transition_intents)
+       AND NOT EXISTS (SELECT 1 FROM event_transition_intents_canonical)
        AND NOT EXISTS (SELECT 1 FROM event_leases)
      RETURNING singleton`,
   ).all();
@@ -126,8 +125,8 @@ async function seedOutbox(): Promise<{
   await commitEventCompatibilityFixture(
     client,
     decodeEventUpdates({
-      [`events/${eventId}`]: {
-        schemaVersion: 2,
+      [`events/${eventId}`]: eventDocumentFixture({
+        schemaVersion: 3,
         eventId,
         status: "active",
         createdAtMs: 100,
@@ -138,7 +137,7 @@ async function seedOutbox(): Promise<{
         createdByUsername: "ivan",
         participants: {},
         rounds: {},
-      },
+      }),
       [`eventProgressOutbox/${plan.outboxId}`]: plan.outbox,
     }),
   );
@@ -168,10 +167,12 @@ describe("event-progress Workflow dispatch admissions", () => {
   beforeEach(async () => {
     await testEnv.EVENT_DB.batch([
       testEnv.EVENT_DB.prepare("DELETE FROM event_write_admissions"),
-      testEnv.EVENT_DB.prepare("DELETE FROM event_transition_intents"),
-      testEnv.EVENT_DB.prepare("DELETE FROM event_progress_outboxes"),
+      testEnv.EVENT_DB.prepare(
+        "DELETE FROM event_transition_intents_canonical",
+      ),
+      testEnv.EVENT_DB.prepare("DELETE FROM event_progress_outboxes_canonical"),
       testEnv.EVENT_DB.prepare("DELETE FROM event_leases"),
-      testEnv.EVENT_DB.prepare("DELETE FROM event_records"),
+      testEnv.EVENT_DB.prepare("DELETE FROM event_records_canonical"),
       testEnv.EVENT_DB.prepare(
         "UPDATE event_runtime_control SET storage_mode = 'd1' WHERE singleton = 1",
       ),
@@ -387,16 +388,18 @@ describe("event-progress Workflow dispatch admissions", () => {
     );
   }
 
-  it("isolates BLOB outbox IDs so healthy dispatch and scheduled recovery continue", async () => {
+  it("rejects BLOB outbox IDs while healthy dispatch and scheduled recovery continue", async () => {
     const { plan, repository } = await seedOutbox();
     const recordJson = JSON.stringify(plan.outbox);
-    await testEnv.EVENT_DB.prepare(
-      `INSERT INTO event_progress_outboxes (
+    await expect(
+      testEnv.EVENT_DB.prepare(
+        `INSERT INTO event_progress_outboxes_canonical (
          outbox_id, event_id, status, run_at_ms, last_queued_at_ms, record_json
        ) VALUES (CAST(? AS BLOB), ?, 'pending', NULL, 50, ?)`,
-    )
-      .bind("bad", eventId, recordJson)
-      .run();
+      )
+        .bind("bad", eventId, recordJson)
+        .run(),
+    ).rejects.toThrow("cannot store BLOB value");
     const cursorRevision = await testEnv.EVENT_DB.prepare(
       "SELECT revision FROM event_scheduled_recovery_cursor WHERE singleton = 1",
     ).first<number>("revision");
@@ -423,237 +426,59 @@ describe("event-progress Workflow dispatch admissions", () => {
     expect(
       await testEnv.EVENT_DB.prepare(
         `SELECT hex(outbox_id) AS outbox_id_hex, status, last_queued_at_ms,
-           record_json FROM event_progress_outboxes
+           record_json FROM event_progress_outboxes_canonical
          WHERE typeof(outbox_id) = 'blob'`,
       ).all(),
     ).toMatchObject({
-      results: [
-        {
-          outbox_id_hex: "626164",
-          status: "pending",
-          last_queued_at_ms: 50,
-          record_json: recordJson,
-        },
-      ],
+      results: [],
     });
     expect(await admissionCount()).toBe(0);
     expect(
       (
         await testEnv.EVENT_DB.prepare(
-          "SELECT outbox_id FROM event_progress_outboxes WHERE status = 'dead'",
+          "SELECT outbox_id FROM event_progress_outboxes_canonical WHERE status = 'dead'",
         ).all()
       ).results,
     ).toEqual([]);
   });
 
-  it.each(
-    (["publication-first", "cleanup-first"] as const).flatMap((order) => [
-      {
-        lane: "announcement" as const,
-        field: "firstQueuedAtMs" as const,
-        order,
-      },
-      ...(["schemaVersion", "sourceKey", "reason"] as const).flatMap((field) =>
-        (["announcement", "rating"] as const).map((lane) => ({
-          lane,
-          field,
-          order,
-        })),
-      ),
-    ]),
-  )(
-    "retains malformed $field audit for $lane with $order recovery",
-    async ({ lane, field, order }) => {
-      const { repository } = await seedOutbox();
-      const nowMs = 1_000_000;
-      const event = {
-        eventId,
-        status: "scheduled" as const,
-        isSundayMons: true,
-        startAtMs: nowMs + 14_400_000 + 30_000,
-      };
-      const plan =
-        lane === "announcement"
-          ? await buildEventAnnouncementPlan(eventId, event, nowMs, "reminder")
-          : await buildEventProgressPlan(
-              {
-                eventId,
-                sourceKey: "rating:rating-invite:match-1",
-                reason: "match-rating-updated",
-              },
-              nowMs,
-            );
-      if (!plan) throw new Error("missing-recovery-plan");
-      await commitEventCompatibilityFixture(repository, [
-        { kind: "event-field", eventId, field: "status", value: event.status },
-        {
-          kind: "event-field",
-          eventId,
-          field: "startAtMs",
-          value: event.startAtMs,
-        },
-        { kind: "event-field", eventId, field: "isSundayMons", value: true },
-        {
-          kind: "progress-outbox",
-          outboxId: plan.outboxId,
-          value: plan.outbox,
-        },
-      ]);
-      const malformed: Record<string, unknown> = { ...plan.outbox };
-      if (field === "firstQueuedAtMs") delete malformed.firstQueuedAtMs;
-      else
-        malformed[field] =
+  it.each(["schemaVersion", "firstQueuedAtMs", "reason"] as const)(
+    "rejects invalid %s before any concurrent lane can observe noncanonical storage",
+    async (field) => {
+      const { plan } = await seedOutbox();
+      const malformed = {
+        ...plan.outbox,
+        [field]:
           field === "schemaVersion"
-            ? 2
-            : field === "sourceKey"
-              ? "mismatched-source"
-              : { invalid: true };
-      await testEnv.EVENT_DB.prepare(
-        "UPDATE event_progress_outboxes SET record_json = ? WHERE status = 'pending' AND outbox_id = ?",
-      )
-        .bind(JSON.stringify(malformed), plan.outboxId)
-        .run();
-      const published = Promise.withResolvers<void>();
-      const cleaned = Promise.withResolvers<void>();
+            ? 1
+            : field === "firstQueuedAtMs"
+              ? null
+              : { invalid: true },
+      };
+      await expect(
+        testEnv.EVENT_DB.prepare(
+          "UPDATE event_progress_outboxes_canonical SET record_json = ? WHERE outbox_id = ? AND status = 'pending'",
+        )
+          .bind(JSON.stringify(malformed), plan.outboxId)
+          .run(),
+      ).rejects.toThrow();
       const f = environment();
-      const ratingOutcomes: string[] = [];
-      const recoveryAdmission = await acquireEventWriteAdmission(
-        testEnv.EVENT_DB,
-      );
-      const outboxRecovery = createEventProgressRecoveryStore(
-        testEnv.EVENT_DB,
-        recoveryAdmission,
-      );
+      const admission = await acquireEventWriteAdmission(testEnv.EVENT_DB);
       try {
-        await sweepEventProgress(f.value, {
-          now: () => nowMs,
-          outboxRecovery: {
-            ...outboxRecovery,
-            async listDue(beforeMs, limit) {
-              const rows = await outboxRecovery.listDue(beforeMs, limit);
-              if (order === "publication-first") await published.promise;
-              return rows.filter((row) => row.outboxId === plan.outboxId);
-            },
-            async deadLetter(snapshot, deadAtMs) {
-              const removed = await outboxRecovery.deadLetter(
-                snapshot,
-                deadAtMs,
-              );
-              if (removed && snapshot.outboxId === plan.outboxId)
-                cleaned.resolve();
-              return removed;
-            },
-          },
-          ratingRepository:
-            lane === "rating"
-              ? {
-                  quarantineRatingRecoveryEntry: async () => null,
-                  scanDueRatingEventProgress: async () => {
-                    if (order === "cleanup-first") await cleaned.promise;
-                    return recoveryCandidates([
-                      {
-                        eventId,
-                        inviteId: "rating-invite",
-                        matchId: "match-1",
-                        operationId: "rating-invite__match-1",
-                        revision: 1,
-                        version: 1,
-                      },
-                    ]);
-                  },
-                  claimRatingEventProgress: async () => true,
-                  markRatingEventProgress: async (operationId, state) => {
-                    expect(operationId).toBe("rating-invite__match-1");
-                    ratingOutcomes.push(state);
-                  },
-                }
-              : null,
-          repository: {
-            ...repository,
-            async commitEventPlan(commands) {
-              await commitEventCompatibilityFixture(repository, commands);
-              for (const command of commands) {
-                if (
-                  command.kind !== "progress-outbox" ||
-                  command.outboxId !== plan.outboxId
-                )
-                  continue;
-                if (command.value !== null) published.resolve();
-              }
-            },
-          },
-          scheduledRecovery: {
-            readCursor: async () => ({ cursor: null, revision: 0 }),
-            listPage: async () => [],
-            listUrgent: async () => {
-              if (lane === "rating") return [];
-              if (order === "cleanup-first") await cleaned.promise;
-              return [
-                { cursor: { eventId, startAtMs: event.startAtMs }, event },
-              ];
-            },
-            checkpoint: async () => true,
-          },
+        const store = createEventProgressRecoveryStore(
+          testEnv.EVENT_DB,
+          admission,
+        );
+        const snapshot = await store.read(plan.outboxId);
+        if (!snapshot) throw new Error("missing-outbox");
+        await dispatchOutboxSnapshot(f.value, store, snapshot, () => 200);
+        expect(await store.read(plan.outboxId)).toMatchObject({
+          record: plan.outbox,
         });
       } finally {
-        await releaseEventWriteAdmission(testEnv.EVENT_DB, recoveryAdmission);
+        await releaseEventWriteAdmission(testEnv.EVENT_DB, admission);
       }
-      expect(await repository.readEventProgressOutbox(plan.outboxId)).toEqual(
-        plan.outbox,
-      );
-      expect(
-        await parseEventProgressOutbox(
-          plan.outboxId,
-          await repository.readEventProgressOutbox(plan.outboxId),
-        ),
-      ).toEqual(plan);
-      expect(
-        await readEventOwnedPath(
-          testEnv.EVENT_DB,
-          `eventProgressOutboxDead/${plan.outboxId}`,
-        ),
-      ).toMatchObject({
-        reason: "invalid-event-progress-outbox",
-        originalRecord: malformed,
-      });
       expect(await admissionCount()).toBe(0);
-      if (lane === "rating") {
-        expect(ratingOutcomes).toEqual(["done"]);
-        return;
-      }
-
-      const step = Object.create(null) as WorkflowStep;
-      step.sleepUntil = async () => {};
-      step.do = (async (
-        _name: string,
-        _options: unknown,
-        work: () => Promise<unknown>,
-      ) => work()) as WorkflowStep["do"];
-      let deliveries = 0;
-      const result = await runEventAnnouncementWorkflow(
-        {
-          payload: plan.params,
-          instanceId: plan.workflowId,
-          timestamp: new Date(nowMs),
-          workflowName: "mons-link-event-progress",
-        },
-        step,
-        {
-          now: () => plan.params.runAtMs!,
-          readOutbox: repository.readEventProgressOutbox,
-          acknowledge: (outboxId) =>
-            commitEventCompatibilityFixture(repository, [
-              { kind: "progress-outbox", outboxId, value: null },
-            ]),
-          deliver: async () => {
-            deliveries++;
-            return { status: "sent" };
-          },
-          refreshReminder: async () => ({ status: "skipped" }),
-        },
-      );
-      expect(result).toEqual({ status: "sent" });
-      expect(deliveries).toBe(1);
     },
   );
 
@@ -744,14 +569,16 @@ describe("event-progress Workflow dispatch admissions", () => {
     let nowMs = 1_000_000;
     await commitEventCompatibilityFixture(repository, [
       { kind: "progress-outbox", outboxId: plan.outboxId, value: null },
-      { kind: "event-field", eventId, field: "status", value: "scheduled" },
       {
-        kind: "event-field",
+        kind: "event",
         eventId,
-        field: "startAtMs",
-        value: nowMs + 5 * 3_600_000,
+        value: eventDocumentFixture({
+          eventId,
+          status: "scheduled",
+          startAtMs: nowMs + 5 * 3_600_000,
+          isSundayMons: true,
+        }),
       },
-      { kind: "event-field", eventId, field: "isSundayMons", value: true },
     ]);
     const f = environment();
     const sweep = () =>
@@ -765,7 +592,7 @@ describe("event-progress Workflow dispatch admissions", () => {
       f.operations.filter((operation) => operation === "status"),
     ).toHaveLength(2);
     const original = await testEnv.EVENT_DB.prepare(
-      "SELECT outbox_id, record_json FROM event_progress_outboxes WHERE status = 'pending' ORDER BY outbox_id",
+      "SELECT outbox_id, record_json FROM event_progress_outboxes_canonical WHERE status = 'pending' ORDER BY outbox_id",
     ).all();
     expect(original.results).toHaveLength(2);
     nowMs += 300_000;
@@ -781,7 +608,7 @@ describe("event-progress Workflow dispatch admissions", () => {
     expect(
       (
         await testEnv.EVENT_DB.prepare(
-          "SELECT outbox_id, record_json FROM event_progress_outboxes WHERE status = 'pending' ORDER BY outbox_id",
+          "SELECT outbox_id, record_json FROM event_progress_outboxes_canonical WHERE status = 'pending' ORDER BY outbox_id",
         ).all()
       ).results,
     ).toEqual(original.results);
@@ -793,8 +620,11 @@ describe("event-progress Workflow dispatch admissions", () => {
     await commitEventCompatibilityFixture(
       repository,
       decodeEventUpdates({
-        [`events/${eventId}/status`]: "scheduled",
-        [`events/${eventId}/startAtMs`]: 10_000,
+        [`events/${eventId}`]: eventDocumentFixture({
+          eventId,
+          status: "scheduled",
+          startAtMs: 10_000,
+        }),
       }),
     );
     const started = Promise.withResolvers<void>();
@@ -804,7 +634,7 @@ describe("event-progress Workflow dispatch admissions", () => {
     const create = f.value.EVENT_PROGRESS_WORKFLOW.createBatch;
     const get = f.value.EVENT_PROGRESS_WORKFLOW.get;
     f.value.EVENT_PROGRESS_WORKFLOW.createBatch = async (items) => {
-      if (items[0].id === plan.workflowId)
+      if (requiredFixture(items[0]).id === plan.workflowId)
         throw new Error("outbox-dispatch-failed");
       started.resolve();
       await finish.promise;

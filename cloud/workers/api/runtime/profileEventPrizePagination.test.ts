@@ -14,6 +14,7 @@ import { handleEventReadRoute } from "../src/eventReadRoute.ts";
 import { readProfileEventPrizePage } from "../src/eventD1/reads.ts";
 import type { ProfileOwnershipReader } from "../src/profileOwnership.ts";
 import { applyEventTestMigrations } from "./eventTestMigrations.ts";
+import { eventDocumentFixture } from "../test/eventCompatibilityFixture.ts";
 
 const testEnv = env as Env & { TEST_EVENT_D1_MIGRATIONS: D1Migration[] };
 const profileId = "profile-one";
@@ -48,7 +49,7 @@ function ownership(owner: string | null): ProfileOwnershipReader {
                     revision: 1,
                     profile: {
                       profileId: owner,
-                      aura: "",
+                      aura: "none",
                       emoji: 1,
                       eth: "",
                       rating: 1500,
@@ -93,11 +94,21 @@ async function seed(
     await testEnv.EVENT_DB.batch(
       ids.slice(offset, offset + 40).flatMap((eventId) => [
         testEnv.EVENT_DB.prepare(
-          `INSERT INTO event_records (event_id, status, start_at_ms, updated_at_ms, record_json)
-         VALUES (?, 'ended', 1, 1, '{}')`,
-        ).bind(eventId),
+          `INSERT INTO event_records_canonical (event_id, status, start_at_ms, updated_at_ms, record_json)
+         VALUES (?, 'ended', 1, 1, ?)`,
+        ).bind(
+          eventId,
+          JSON.stringify(
+            eventDocumentFixture({
+              eventId,
+              status: "ended",
+              startAtMs: 1,
+              updatedAtMs: 1,
+            }),
+          ),
+        ),
         testEnv.EVENT_DB.prepare(
-          `INSERT INTO profile_event_prizes (profile_id, event_id, assignment_json, updated_at_ms)
+          `INSERT INTO profile_event_prizes_canonical (profile_id, event_id, assignment_json, updated_at_ms)
          VALUES (?, ?, ?, 1)`,
         ).bind(
           owner,
@@ -115,7 +126,7 @@ async function seed(
     );
   }
   await testEnv.EVENT_DB.prepare(
-    "INSERT OR REPLACE INTO profile_event_prize_revisions (profile_id, revision, updated_at_ms) VALUES (?, 1, 1)",
+    "INSERT OR REPLACE INTO profile_event_prize_revisions_canonical (profile_id, revision, updated_at_ms) VALUES (?, 1, 1)",
   )
     .bind(owner)
     .run();
@@ -158,18 +169,20 @@ describe("profile prize pagination", () => {
 
   beforeEach(async () => {
     await testEnv.EVENT_DB.batch([
-      testEnv.EVENT_DB.prepare("DELETE FROM profile_event_prizes"),
-      testEnv.EVENT_DB.prepare("DELETE FROM profile_event_prize_revisions"),
-      testEnv.EVENT_DB.prepare("DELETE FROM event_records"),
+      testEnv.EVENT_DB.prepare("DELETE FROM profile_event_prizes_canonical"),
+      testEnv.EVENT_DB.prepare(
+        "DELETE FROM profile_event_prize_revisions_canonical",
+      ),
+      testEnv.EVENT_DB.prepare("DELETE FROM event_records_canonical"),
     ]);
   });
 
-  it("keeps legacy shape and reads bounded pages", async () => {
+  it("keeps the exact assignment shape and reads bounded pages", async () => {
     const ids = Array.from(
       { length: 102 },
       (_, index) => `event-${String(index).padStart(3, "0")}`,
     );
-    await seed(ids, { futureMetadata: { edition: 2 } });
+    await seed(ids);
     const legacy = await request("/events/prizes");
     const legacyBody = await legacy.json();
     expect(isProfileEventPrizesResponse(legacyBody)).toBe(true);
@@ -178,7 +191,13 @@ describe("profile prize pagination", () => {
     const first = await page(firstResponse);
     expect(Object.keys(first.prizes)).toEqual(ids.slice(0, 100));
     expect(isProfileEventPrizesResponse(first)).toBe(false);
-    expect(first.prizes[ids[0]].futureMetadata).toEqual({ edition: 2 });
+    expect(Object.keys(first.prizes[ids[0]!]!).sort()).toEqual([
+      "assignedAtMs",
+      "eventId",
+      "place",
+      "prizeId",
+      "profileId",
+    ]);
     expect(firstResponse.headers.get("ETag")).toBe(
       profileEventPrizesPageEtag(epoch, profileId, 1),
     );
@@ -227,10 +246,8 @@ describe("profile prize pagination", () => {
     expect(second.nextCursor).toBeNull();
   });
 
-  it("keeps byte-limited pages complete without skipping assignments", async () => {
-    await seed(["event-a", "event-b", "event-c"], {
-      futureMetadata: "é".repeat(160_000),
-    });
+  it("keeps bounded canonical pages complete without skipping assignments", async () => {
+    await seed(["event-a", "event-b", "event-c"]);
     const received: string[] = [];
     let url = path;
     do {
@@ -248,10 +265,10 @@ describe("profile prize pagination", () => {
     expect(received).toEqual(["event-a", "event-b", "event-c"]);
   });
 
-  it("serves a complete page that fits only after removing its provisional cursor", async () => {
+  it("omits a continuation cursor from a complete canonical page", async () => {
     const owner = "profile";
-    await seed(["event-0"], { extra: "é".repeat(327_520) }, owner);
-    await seed(["event-1"], { extra: "é" }, owner);
+    await seed(["event-0"], {}, owner);
+    await seed(["event-1"], {}, owner);
     const legacy = await request("/events/prizes", {}, owner);
     expect(legacy.status).toBe(200);
     const complete = {
@@ -267,14 +284,14 @@ describe("profile prize pagination", () => {
     expect(await page(response)).toEqual(complete);
   });
 
-  it("retains an error when one assignment exceeds the response budget", async () => {
+  it("rejects assignment extension payloads instead of returning untyped data", async () => {
     await seed(["event-a"], {
       futureMetadata: "x".repeat(MAX_EVENT_READ_RESPONSE_BYTES),
     });
     const response = await request();
     expect(response.status).toBe(503);
     expect(await response.json()).toMatchObject({
-      message: "event-response-too-large",
+      message: "event-read-unavailable",
     });
   });
 
@@ -346,7 +363,7 @@ describe("profile prize pagination", () => {
       });
     }
     await testEnv.EVENT_DB.prepare(
-      "DELETE FROM event_records WHERE event_id = 'event-0'",
+      "DELETE FROM event_records_canonical WHERE event_id = 'event-0'",
     ).run();
     const changed = await request(url);
     expect(changed.status).toBe(409);
@@ -384,7 +401,7 @@ describe("profile prize pagination", () => {
   it("skips assignment decoding for an unchanged stored revision and validates changed pages", async () => {
     await seed(["event-a"]);
     await testEnv.EVENT_DB.prepare(
-      "UPDATE profile_event_prizes SET assignment_json = '{}' WHERE profile_id = ?",
+      "UPDATE profile_event_prizes_canonical SET assignment_json = json_set(assignment_json, '$.invalidExtension', 1) WHERE profile_id = ?",
     )
       .bind(profileId)
       .run();
@@ -397,7 +414,7 @@ describe("profile prize pagination", () => {
     ).toBe(304);
     expect((await request()).status).toBe(503);
     await testEnv.EVENT_DB.prepare(
-      "DELETE FROM profile_event_prize_revisions WHERE profile_id = ?",
+      "DELETE FROM profile_event_prize_revisions_canonical WHERE profile_id = ?",
     )
       .bind(profileId)
       .run();
@@ -440,13 +457,15 @@ describe("profile prize pagination", () => {
     expect(results.entries).toHaveLength(101);
     expect(results.revision).toBe(1);
     const plan = await testEnv.EVENT_DB.prepare(
-      `EXPLAIN QUERY PLAN ${prepared[1].sql}`,
+      `EXPLAIN QUERY PLAN ${prepared[1]!.sql}`,
     )
-      .bind(...prepared[1].values)
+      .bind(...prepared[1]!.values)
       .all<{ detail: string }>();
     expect(
       plan.results.some((row) =>
-        row.detail.includes("SEARCH profile_event_prizes USING PRIMARY KEY"),
+        row.detail.includes(
+          "SEARCH profile_event_prizes_canonical USING PRIMARY KEY",
+        ),
       ),
     ).toBe(true);
     expect(plan.results.some((row) => row.detail.includes("TEMP B-TREE"))).toBe(

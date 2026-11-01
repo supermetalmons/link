@@ -47,6 +47,7 @@ import {
 import { AuthApiFailure } from "./authErrors.ts";
 import { EventNotUpcoming } from "./eventD1.ts";
 import type { RequestIdentity } from "./requestIdentity.ts";
+import { eventOwnershipSnapshot } from "./eventOwnershipSnapshot.ts";
 import {
   requireProfileOwnershipSnapshot,
   type ProfileOwnershipReader,
@@ -110,7 +111,7 @@ function requireTimestamp(value: unknown): number {
 function secureRandom(): number {
   const values = new Uint32Array(1);
   crypto.getRandomValues(values);
-  return values[0] / 0x1_0000_0000;
+  return values[0]! / 0x1_0000_0000;
 }
 
 function cloneEvent(value: EventRecord): EventRecord {
@@ -122,9 +123,11 @@ async function loadOwnershipSnapshot(
   repository: EventParticipationRepository,
   extras: { loginUids?: string[]; profileIds?: string[] } = {},
 ): Promise<EventOwnershipSnapshot> {
-  return requireProfileOwnershipSnapshot(
-    repository,
-    buildEventOwnershipQuery(event, extras),
+  return eventOwnershipSnapshot(
+    await requireProfileOwnershipSnapshot(
+      repository,
+      buildEventOwnershipQuery(event, extras),
+    ),
   );
 }
 
@@ -431,7 +434,9 @@ export async function joinEvent(
           event: cloneEvent(event),
           nowMs,
           ownershipSnapshot: null,
-          prizeSelections: eventPrizeSelections,
+          ...(eventPrizeSelections
+            ? { prizeSelections: eventPrizeSelections }
+            : {}),
         });
         await persistDueTransition(
           eventId,
@@ -469,7 +474,7 @@ export async function joinEvent(
           event: cloneEvent(event),
           nowMs,
           ownershipSnapshot,
-          prizeSelections,
+          ...(prizeSelections ? { prizeSelections } : {}),
         });
         await persistDueTransition(
           eventId,
@@ -506,7 +511,7 @@ export async function joinEvent(
         event: cloneEvent(draft.eventForSettlement),
         nowMs: settleNowMs,
         ownershipSnapshot,
-        prizeSelections: isDueAtSettle ? prizeSelections : undefined,
+        ...(isDueAtSettle && prizeSelections ? { prizeSelections } : {}),
       });
       const commit = finalizeJoin(eventId, draft, dueTransition);
       await assertOwned();
@@ -628,7 +633,7 @@ async function removeEventParticipation(
           event: cloneEvent(event),
           nowMs: dueNowMs,
           ownershipSnapshot,
-          prizeSelections,
+          ...(prizeSelections ? { prizeSelections } : {}),
         });
         await persistDueTransition(
           eventId,
@@ -687,7 +692,9 @@ async function removeEventParticipation(
               event: cloneEvent(latest.event),
               nowMs: dueNowMs,
               ownershipSnapshot: latestOwnership,
-              prizeSelections: latest.prizeSelections,
+              ...(latest.prizeSelections
+                ? { prizeSelections: latest.prizeSelections }
+                : {}),
             });
             await persistDueTransition(
               eventId,

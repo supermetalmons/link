@@ -37,13 +37,16 @@ function fixture() {
       "utf8",
     ),
   );
-  gameplay.exec(`CREATE TABLE game_session_transitions (transition_id TEXT PRIMARY KEY, status TEXT);
-    CREATE TABLE game_session_transition_resources (resource_key TEXT PRIMARY KEY);
+  gameplay.exec(
+    "ALTER TABLE match_state_routes RENAME TO match_state_routes_canonical",
+  );
+  gameplay.exec(`CREATE TABLE game_session_transitions_canonical (transition_id TEXT PRIMARY KEY, status TEXT);
+    CREATE TABLE game_session_transition_resources_canonical (resource_key TEXT PRIMARY KEY);
     CREATE TABLE invite_source_write_admissions (admission_id TEXT PRIMARY KEY);
     CREATE TABLE automatch_write_admissions (admission_id TEXT PRIMARY KEY);
     CREATE TABLE game_session_mutation_locks (lock_id TEXT PRIMARY KEY, expires_at_ms INTEGER);
     UPDATE match_state_control SET backend = 'durable', state = 'active', epoch = 2, import_id = '${IMPORT_ID}', candidate_version_id = '${IMPORT_ID}', source_digest = '${"a".repeat(64)}', verified_digest = '${"a".repeat(64)}', fence_digest = '${"b".repeat(64)}', source_record_count = 0, source_claim_count = 0, source_bundle_count = 0, verified_at_ms = 1, activated_at_ms = 2;`);
-  events.exec(`CREATE TABLE event_transition_intents (transition_id TEXT PRIMARY KEY, status TEXT);
+  events.exec(`CREATE TABLE event_transition_intents_canonical (transition_id TEXT PRIMARY KEY, status TEXT);
     CREATE TABLE event_write_admissions (admission_id TEXT PRIMARY KEY);
     CREATE TABLE event_leases (event_id TEXT PRIMARY KEY, expires_at_ms INTEGER);`);
   const logs: Record<string, unknown>[] = [];
@@ -121,18 +124,18 @@ test("status reads current authority, counts, and lock without local evidence or
   const f = fixture();
   t.after(f.close);
   f.gameplay.exec(
-    "INSERT INTO game_session_transitions VALUES ('pending','pending'),('complete','complete'); INSERT INTO game_session_mutation_locks VALUES ('live',1001),('expired',999);",
+    "INSERT INTO game_session_transitions_canonical VALUES ('pending','pending'),('complete','complete'); INSERT INTO game_session_mutation_locks VALUES ('live',1001),('expired',999);",
   );
   f.events.exec(
-    "INSERT INTO event_transition_intents VALUES ('pending','pending'); INSERT INTO event_leases VALUES ('expired',1000),('live',1001);",
+    "INSERT INTO event_transition_intents_canonical VALUES ('pending','pending'); INSERT INTO event_leases VALUES ('expired',1000),('live',1001);",
   );
   await manageMatchState({ operation: "status" }, f.deps);
-  assert.equal(f.logs[0].operatorLock, null);
+  assert.equal(f.logs[0]!.operatorLock, null);
   assert.equal(
-    (f.logs[0].control as Record<string, unknown>).import_id,
+    (f.logs[0]!.control as Record<string, unknown>).import_id,
     IMPORT_ID,
   );
-  assert.deepEqual(f.logs[0].counts, {
+  assert.deepEqual(f.logs[0]!.counts, {
     admissions: 0,
     session_intents: 1,
     session_resources: 0,
@@ -184,7 +187,7 @@ test("inspection preserves exact admission bytes using only the D1 import identi
       .all(),
     rows,
   );
-  assert.deepEqual(f.logs[0], {
+  assert.deepEqual(f.logs[0]!, {
     operation: "inspect-admissions",
     importId: IMPORT_ID,
     admissions: 1,
@@ -204,7 +207,7 @@ test("inspection rejects missing or changing authority before writing an artifac
       else
         f.deps.run = async (...args) => {
           const rows = await run(...args);
-          if (args[0].includes("SELECT * FROM match_state_write_admissions"))
+          if (args[0]!.includes("SELECT * FROM match_state_write_admissions"))
             f.gameplay.exec("UPDATE match_state_control SET epoch = epoch + 1");
           return rows;
         };

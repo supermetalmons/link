@@ -3,12 +3,12 @@ import {
   createAutomatchD1Store,
   AUTOMATCH_RECORD_TABLES,
   type AutomatchRoot,
-  resolveAutomatchServerValues,
   AutomatchD1Failure,
   type AutomatchRecordMutation,
   type AutomatchRecordSnapshot,
   type AutomatchD1StoreOptions,
 } from "../src/automatchD1.ts";
+import { resolveHistoricalSessionValueFixture as resolveAutomatchServerValues } from "./sessionValueOperationFixture.ts";
 import { isSafeRecordKey } from "../src/recordKeys.ts";
 import { validateTelegramTransactionDecision } from "../src/telegramTransaction.ts";
 import type {
@@ -37,7 +37,7 @@ export function parseAutomatchPath(path: string): AutomatchOwnedPath | null {
     return { root, key: null, nested: [] };
   }
   parts.forEach(requireKey);
-  return { root, key: parts[0], nested: parts.slice(1) };
+  return { root, key: parts[0]!, nested: parts.slice(1) };
 }
 
 function timestamp(value: number): number {
@@ -77,7 +77,8 @@ function setNested(
   const entries =
     value !== null && typeof value === "object" ? Object.entries(value) : [];
   const result = Object.fromEntries(entries);
-  const [key, ...rest] = parts;
+  const key = parts[0]!;
+  const rest = parts.slice(1);
   const child = setNested(
     Object.hasOwn(result, key) ? result[key] : null,
     rest,
@@ -187,7 +188,7 @@ function queryBound(value: string | number | boolean | null | undefined): {
   throw new TypeError("invalid-automatch-query-bound");
 }
 
-function querySql(
+export function querySql(
   column: string,
   query: StateQuery,
 ): { where: string; order: string; values: Array<string | number> } {
@@ -351,7 +352,7 @@ export function createLegacyAutomatchD1Store(
     for (let index = 1; index < paths.length; index++) {
       if (
         paths[index] === paths[index - 1] ||
-        paths[index].startsWith(`${paths[index - 1]}/`)
+        paths[index]!.startsWith(`${paths[index - 1]}/`)
       ) {
         throw new TypeError("overlapping-automatch-patch");
       }
@@ -365,7 +366,7 @@ export function createLegacyAutomatchD1Store(
     }
     return Promise.all(
       [...groups.values()].map(async (group) => {
-        const first = group[0].owned;
+        const first = group[0]!.owned;
         const current = await read(first.root, first.key!, signal);
         let value: unknown = current.value;
         for (const entry of group) {
@@ -412,7 +413,13 @@ export function createLegacyAutomatchD1Store(
         updater(structuredClone(value)),
       );
       if (!decision.commit)
-        return { committed: false, decision: decision.decision, value };
+        return {
+          committed: false,
+          ...(decision.decision === undefined
+            ? {}
+            : { decision: decision.decision }),
+          value,
+        };
       const next = resolveAutomatchServerValues(decision.value, value, nowMs);
       if (
         await commit(
@@ -425,7 +432,13 @@ export function createLegacyAutomatchD1Store(
           signal,
         )
       ) {
-        return { committed: true, decision: decision.decision, value: next };
+        return {
+          committed: true,
+          ...(decision.decision === undefined
+            ? {}
+            : { decision: decision.decision }),
+          value: next,
+        };
       }
     }
     throw new AutomatchD1Failure("automatch-transaction-contention");

@@ -209,8 +209,8 @@ export async function prepareEventAnnouncementSchedule(
           logger.error(
             JSON.stringify({
               event: "event_announcement_enqueue_failed",
-              eventId: plans[index].params.eventId,
-              reason: plans[index].params.reason,
+              eventId: plans[index]!.params.eventId,
+              reason: plans[index]!.params.reason,
             }),
           );
         }

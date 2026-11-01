@@ -1,3 +1,6 @@
+import { isWagerRecord } from "./wagerModel.ts";
+import { readInviteDocument } from "@mons/shared/invite-records";
+import { normalizeRecordKey } from "@mons/shared/ids";
 import {
   INVITE_WAGERS_MAX_MESSAGE_BYTES,
   isInviteWagersSnapshot,
@@ -33,61 +36,55 @@ function record(value: unknown): Record<string, unknown> | null {
     : null;
 }
 
-function pickFields(value: unknown, keys: string[]): unknown {
-  const source = record(value);
-  if (!source) return value;
-  return Object.fromEntries(
-    keys
-      .filter((key) => Object.hasOwn(source, key))
-      .map((key) => [key, source[key]]),
-  );
-}
-
 function normalizeMatchWager(value: unknown): PublicMatchWagerState | null {
-  const source = record(value);
-  if (!source) return null;
-  const wager: Record<string, unknown> = {};
-  if (Object.hasOwn(source, "proposals")) {
-    const proposals = record(source.proposals);
-    if (!proposals) return null;
-    wager.proposals = Object.fromEntries(
-      Object.keys(proposals)
-        .sort()
-        .map((uid) => [
+  if (!isWagerRecord(value)) return null;
+  const wager: PublicMatchWagerState = {
+    schemaVersion: 1,
+    state: value.state,
+    proposals: Object.fromEntries(
+      Object.entries(value.proposals)
+        .sort(([left], [right]) => left.localeCompare(right))
+        .map(([uid, proposal]) => [
           uid,
-          pickFields(proposals[uid], ["material", "count", "createdAt"]),
+          {
+            material: proposal.material,
+            count: proposal.count,
+            createdAt: proposal.createdAt,
+          },
         ]),
-    );
-  }
-  if (Object.hasOwn(source, "proposedBy")) {
-    const proposedBy = record(source.proposedBy);
-    if (!proposedBy) return null;
-    wager.proposedBy = Object.fromEntries(
-      Object.keys(proposedBy)
-        .sort()
-        .map((uid) => [uid, proposedBy[uid]]),
-    );
-  }
-  if (Object.hasOwn(source, "agreed")) {
-    wager.agreed = pickFields(source.agreed, [
-      "material",
-      "count",
-      "total",
-      "proposerId",
-      "accepterId",
-      "acceptedAt",
-    ]);
-  }
-  if (Object.hasOwn(source, "resolved")) {
-    wager.resolved = pickFields(source.resolved, [
-      "winnerId",
-      "loserId",
-      "material",
-      "count",
-      "total",
-      "resolvedAt",
-    ]);
-  }
+    ),
+    proposedBy: Object.fromEntries(
+      Object.entries(value.proposedBy).sort(([left], [right]) =>
+        left.localeCompare(right),
+      ),
+    ),
+    agreed:
+      value.agreed === null
+        ? null
+        : {
+            material: value.agreed.material,
+            count: value.agreed.count,
+            total: value.agreed.total,
+            proposerId: value.agreed.proposerId,
+            accepterId: value.agreed.accepterId,
+            acceptedAt: value.agreed.acceptedAt,
+          },
+    resolved:
+      value.resolved === null
+        ? null
+        : {
+            material: value.resolved.material,
+            count: value.resolved.count,
+            total: value.resolved.total,
+            winnerId: value.resolved.winnerId,
+            loserId: value.resolved.loserId,
+            resolvedAt: value.resolved.resolvedAt,
+          },
+    blocked:
+      value.blocked === null
+        ? null
+        : { reason: value.blocked.reason, requiresManualReview: true },
+  };
   return isPublicMatchWagerState(wager) ? wager : null;
 }
 
@@ -133,10 +130,11 @@ function canonicalSource(value: unknown): string | null {
         const source = entry as Record<string, unknown>;
         const keys = Object.keys(source).sort();
         for (let index = 0; index < keys.length; index++) {
+          const key = keys[index]!;
           if (index > 0) append(",");
-          appendString(keys[index]);
+          appendString(key);
           append(":");
-          visit(source[keys[index]], depth + 1);
+          visit(source[key], depth + 1);
         }
         append("}");
       }
@@ -156,20 +154,33 @@ function canonicalSource(value: unknown): string | null {
 export async function normalizeInviteWagers(
   inviteId: string,
   value: unknown,
-  metadata: InviteMetadataReadResult = normalizeInviteMetadata(inviteId, value),
+  knownMetadata?: InviteMetadataReadResult,
 ): Promise<InviteWagersSourceResult> {
   if (value === null || value === undefined) return { status: "missing" };
-  const invite = record(value);
-  if (!invite || metadata.status !== "ok") return { status: "invalid" };
+  const input = record(value);
+  if (!input || Object.keys(input).length !== 3) return { status: "invalid" };
+  const invite = readInviteDocument(input.invite);
+  const markers = record(input.resolutionMarkers);
+  if (
+    !invite ||
+    !markers ||
+    Object.entries(markers).some(
+      ([key, marker]) =>
+        normalizeRecordKey(key) !== key || typeof marker !== "boolean",
+    )
+  )
+    return { status: "invalid" };
+  const metadata = knownMetadata ?? normalizeInviteMetadata(inviteId, invite);
+  if (metadata.status !== "ok") return { status: "invalid" };
   if (
     metadata.snapshot.inviteId !== inviteId ||
     metadata.snapshot.hostId !== invite.hostId ||
-    metadata.snapshot.guestId !== (invite.guestId ?? null) ||
-    metadata.passwordProtected !== Object.hasOwn(invite, "password")
+    metadata.snapshot.guestId !== invite.guestId ||
+    metadata.passwordProtected !== (invite.password !== null)
   ) {
     return { status: "invalid" };
   }
-  const source = invite.wagers ?? {};
+  const source = input.wagers;
   const rawWagers = record(source);
   if (!rawWagers) return { status: "invalid" };
   const canonical = canonicalSource({

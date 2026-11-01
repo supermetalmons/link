@@ -1,3 +1,7 @@
+import {
+  parseApiErrorDetails,
+  type ApiErrorDetails,
+} from "@mons/shared/api-errors";
 import type {
   ApiPathRequest,
   ApiPathResponse,
@@ -30,13 +34,13 @@ const PROFILE_API_MAX_RESPONSE_BYTES = 4 * 1024 * 1024;
 
 export class ProfileApiError extends Error {
   readonly code: string;
-  readonly details?: unknown;
+  readonly details: ApiErrorDetails | undefined;
 
-  constructor(code: string, message: string, details?: unknown) {
+  constructor(code: string, message: string, details?: ApiErrorDetails) {
     super(message);
     this.name = "ProfileApiError";
     this.code = code;
-    this.details = details;
+    this.details = parseApiErrorDetails(code, details);
   }
 }
 
@@ -68,7 +72,9 @@ async function profileRequest<const Path extends ProfilePath>(
     createRequestInit: () => ({
       method: "POST",
       body: JSON.stringify(body),
-      keepalive: options.keepalive,
+      ...(options.keepalive === undefined
+        ? {}
+        : { keepalive: options.keepalive }),
     }),
     tokenProvider,
     validate,

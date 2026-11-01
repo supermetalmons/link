@@ -1,11 +1,9 @@
+import { applyPreCleanupTestMigrations } from "./canonicalTestMigrations.ts";
+import { seedProfileArchiveFixture } from "./profileArchiveFixture.ts";
 import { env } from "cloudflare:workers";
-import { applyD1Migrations, type D1Migration } from "cloudflare:test";
+import type { D1Migration } from "cloudflare:test";
 import { beforeAll, describe, expect, it } from "vitest";
 import { applyRetiredProfileMigrations } from "./profileTestMigrations.ts";
-import {
-  commitCanonicalPlan,
-  materializeCanonicalProfile,
-} from "../src/profileCanonicalD1.ts";
 
 const migrations = (env as Env & { TEST_PROFILE_D1_MIGRATIONS: D1Migration[] })
   .TEST_PROFILE_D1_MIGRATIONS;
@@ -40,33 +38,7 @@ describe("redundant auth method index migration", () => {
   });
 
   it("preserves active writes, auth methods, uniqueness and indexed profile lookup", async () => {
-    await commitCanonicalPlan(db, {
-      expectations: [{ kind: "profile-absent", profileId }],
-      mutations: [
-        {
-          kind: "insert-active-profile",
-          value: materializeCanonicalProfile({
-            profile: {
-              id: profileId,
-              nonce: 0,
-              rating: 1500,
-              totalManaPoints: 0,
-              win: false,
-              emoji: 0,
-              username: null,
-              eth: null,
-              sol: null,
-              mining: {
-                lastRockDate: "",
-                materials: { dust: 0, slime: 0, gum: 0, metal: 0, ice: 0 },
-              },
-            },
-            createdAtMs: 100,
-            updatedAtMs: 100,
-          }),
-        },
-      ],
-    });
+    await seedProfileArchiveFixture(db, profileId, {});
     await insertMethod("apple", "apple-user");
     const before = await db.prepare(methodsQuery).bind(profileId).all();
     expect(
@@ -77,7 +49,7 @@ describe("redundant auth method index migration", () => {
         .first("name"),
     ).toBe("idx_profile_auth_methods_profile");
 
-    await applyD1Migrations(db, [migrations[migrationIndex]]);
+    await applyPreCleanupTestMigrations(db, [migrations[migrationIndex]!]);
 
     expect(
       (await db.prepare(methodsQuery).bind(profileId).all()).results,
@@ -107,7 +79,7 @@ describe("redundant auth method index migration", () => {
       (
         await db
           .prepare("SELECT name FROM pragma_index_info(?) ORDER BY seqno")
-          .bind(uniqueIndexes.results[0].name)
+          .bind(uniqueIndexes.results[0]!.name)
           .all<{ name: string }>()
       ).results.map(({ name }) => name),
     ).toEqual(["profile_id", "method"]);

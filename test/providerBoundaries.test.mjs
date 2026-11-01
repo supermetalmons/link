@@ -1,8 +1,18 @@
+import { required } from "./fixtures/canonicalData.mjs";
+import { applicationStorageKey } from "../src/session/applicationDataStorage.ts";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 import ts from "typescript";
 
+/**
+ * @typedef {import("../src/connection/injectedEthereumProviders.ts").EIP1193Provider} EthereumProvider
+ * @typedef {import("../src/connection/injectedEthereumProviders.ts").EIP6963ProviderDetail} EthereumDetail
+ * @typedef {Parameters<NonNullable<Window["AppleID"]>["auth"]["init"]>[0]} AppleOptions
+ * @typedef {{ injectedEthereumProviders: typeof import("../src/connection/injectedEthereumProviders.ts") & { read(event: { detail: unknown }): EthereumDetail | null }, solanaConnection: typeof import("../src/connection/solanaConnection.ts") & { coerce(value: unknown): Uint8Array }, appleConnection: typeof import("../src/connection/appleConnection.ts") & { wait(states: string[]): Promise<unknown>, signals(value: unknown): { idToken: string, stateCandidates: string[] } } }} ModuleMap
+ * @typedef {{ window?: { ethereum?: unknown, solana?: unknown, location?: URL, AppleID?: { auth: { init(options: AppleOptions): void, signIn(): unknown } } }, require?: (name: string) => unknown, console?: Partial<Pick<Console, "error" | "log">>, document?: { addEventListener(name: string, listener: (event: { detail: unknown }) => void): void, removeEventListener(name: string, listener: (event: { detail: unknown }) => void): void }, setTimeout?: (callback: () => void, delay: number) => number, clearTimeout?: (id: number) => void }} HostBindings
+ */
+/** @template {keyof ModuleMap} Name @param {Name} name @param {HostBindings} dependencies @returns {ModuleMap[Name]} */
 function loadModule(name, dependencies, extra = "") {
   const source = readFileSync(
     new URL(`../src/connection/${name}.ts`, import.meta.url),
@@ -15,14 +25,24 @@ function loadModule(name, dependencies, extra = "") {
     },
   });
   const exports = {};
-  new Function("exports", ...Object.keys(dependencies), outputText)(
+  const bindings = {
+    ...dependencies,
+    require: (/** @type {string} */ name) => {
+      if (name === "../session/applicationDataStorage.ts")
+        return { applicationStorageKey };
+      if (dependencies.require) return dependencies.require(name);
+      throw new Error(`unexpected module: ${name}`);
+    },
+  };
+  new Function("exports", ...Object.keys(bindings), outputText)(
     exports,
-    ...Object.values(dependencies),
+    ...Object.values(bindings),
   );
-  return exports;
+  return /** @type {ModuleMap[Name]} */ (exports);
 }
 
 test("Ethereum discovery validates unknown capabilities and retains provider identity and receiver", async () => {
+  /** @type {{ ethereum?: unknown }} */
   const window = {};
   const api = loadModule(
     "injectedEthereumProviders",
@@ -43,17 +63,21 @@ test("Ethereum discovery validates unknown capabilities and retains provider ide
   }
   for (const provider of [{}, [], function provider() {}]) {
     const result = { arbitrary: "provider response" };
-    provider.request = function (args) {
-      assert.equal(this, provider);
-      assert.deepEqual(args, { method: "eth_accounts", params: [] });
-      return Promise.resolve(result);
-    };
+    Object.assign(provider, {
+      /** @param {Parameters<EthereumProvider["request"]>[0]} args */
+      request(args) {
+        assert.equal(this, provider);
+        assert.deepEqual(args, { method: "eth_accounts", params: [] });
+        return Promise.resolve(result);
+      },
+    });
     window.ethereum = provider;
     assert.equal(api.getLegacyInjectedProvider(), provider);
     assert.equal(
-      await api
-        .getLegacyInjectedProvider()
-        .request({ method: "eth_accounts", params: [] }),
+      await required(api.getLegacyInjectedProvider()).request({
+        method: "eth_accounts",
+        params: [],
+      }),
       result,
     );
     const info = Object.assign([], {
@@ -63,7 +87,7 @@ test("Ethereum discovery validates unknown capabilities and retains provider ide
       icon: "data:image/png;base64,",
     });
     const detail = Object.assign([], { provider, info });
-    const announced = api.read({ detail });
+    const announced = required(api.read({ detail }));
     assert.equal(announced.provider, provider);
     assert.deepEqual(announced.info, {
       name: "wallet.test",
@@ -80,7 +104,9 @@ test("Ethereum discovery validates unknown capabilities and retains provider ide
   );
 });
 
+/** @param {unknown} signature */
 function solana(signature) {
+  /** @type {(["connect", boolean] | ["sign", boolean, string] | ["intent", boolean, string])[]} */
   const calls = [];
   const wallet = {
     connected: false,
@@ -88,21 +114,26 @@ function solana(signature) {
     async connect() {
       calls.push(["connect", this === wallet]);
     },
+    /**
+     * @param {AllowSharedBufferSource | undefined} message
+     */
     async signMessage(message) {
       calls.push(["sign", this === wallet, new TextDecoder().decode(message)]);
       return signature;
     },
   };
   const connection = {
+    /** @param {string} method */
     async beginAuthIntent(method) {
       calls.push(["intent", this === connection, method]);
       return { nonce: "nonce", intentId: "intent" };
     },
   };
+  /** @type {{ solana: unknown }} */
   const window = { solana: wallet };
   const api = loadModule("solanaConnection", {
     window,
-    require: (name) => {
+    require: (/** @type {string} */ name) => {
       assert.equal(name, "./connection");
       return { connection };
     },
@@ -145,7 +176,13 @@ test("Solana envelope coercion retains the native constructor breadth and failur
     null,
     undefined,
   ]) {
-    const expected = btoa(String.fromCharCode(...new Uint8Array(signature)));
+    const expected = btoa(
+      String.fromCharCode(
+        .../** @type {Uint8Array} */ (
+          Reflect.construct(Uint8Array, [signature])
+        ),
+      ),
+    );
     assert.equal(
       (await solana({ signature }).api.connectToSolana()).signature,
       expected,
@@ -159,6 +196,7 @@ test("Solana envelope coercion retains the native constructor breadth and failur
   ]) {
     await assert.rejects(solana(value).api.connectToSolana(), TypeError);
   }
+  /** @type {(string)[]} */
   const reads = [];
   const bytes = [1, 2];
   Object.defineProperty(bytes, 0, {
@@ -188,11 +226,15 @@ test("Solana resolves the native constructor before observing the envelope signa
   try {
     bytes = api.coerce({
       get signature() {
-        globalThis.Uint8Array = class {
-          constructor() {
-            throw new Error("changed constructor");
-          }
-        };
+        Object.defineProperty(globalThis, "Uint8Array", {
+          configurable: true,
+          writable: true,
+          value: class {
+            constructor() {
+              throw new Error("changed constructor");
+            }
+          },
+        });
         return [1, 2];
       },
     });
@@ -206,13 +248,18 @@ const pump = async () => {
   for (let index = 0; index < 8; index++) await Promise.resolve();
 };
 
+/** @param {unknown} result */
 function apple(result) {
+  /** @type {Map<string, (event: { detail: unknown }) => void>} */
   const listeners = new Map();
+  /** @type {Map<number, { fn: () => void, at: number }>} */
   const timers = new Map();
+  /** @type {(["init", boolean, AppleOptions] | ["signIn", boolean])[]} */
   const calls = [];
   let nextTimer = 0;
   let now = 0;
   const auth = {
+    /** @param {AppleOptions} options */
     init(options) {
       calls.push(["init", this === auth, options]);
     },
@@ -255,7 +302,11 @@ function apple(result) {
     calls,
     timers,
     listeners,
-    emit: (name, detail) => listeners.get(name)?.({ detail }),
+    emit: (/** @type {string} */ name, /** @type {unknown} */ detail) =>
+      listeners.get(name)?.({ detail }),
+    /**
+     * @param {number} target
+     */
     async tick(target) {
       for (;;) {
         const next = [...timers]
@@ -324,6 +375,7 @@ test("Apple popup preserves event priority, grace timing, raw identity, and list
 });
 
 test("Apple public sign-in validates state/token and preserves SDK options and receiver", async () => {
+  /** @type {Parameters<typeof import("../src/connection/appleConnection.ts").signInWithApplePopup>[0]} */
   const request = {
     nonce: "nonce",
     state: "state",
@@ -366,7 +418,7 @@ test("Apple public sign-in validates state/token and preserves SDK options and r
 
 test("Apple failure details retain string/object fallback handling", async () => {
   const circular = {};
-  circular.self = circular;
+  Object.assign(circular, { self: circular });
   for (const [detail, message] of [
     ["denied", "denied"],
     [{ error: "cancelled" }, "cancelled"],

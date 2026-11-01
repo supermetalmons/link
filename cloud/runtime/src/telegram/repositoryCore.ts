@@ -35,11 +35,6 @@ export type TelegramStorage = {
 const normalizeString = (value: unknown): string =>
   typeof value === "string" && value.trim() !== "" ? value.trim() : "";
 
-const asObject = (value: unknown): Record<string, unknown> =>
-  value && typeof value === "object" && !Array.isArray(value)
-    ? (value as Record<string, unknown>)
-    : {};
-
 const createTelegramRepository: (
   input: TelegramStorage,
 ) => TelegramRepository = ({
@@ -74,7 +69,7 @@ const createTelegramRepository: (
         throw new TypeError("retryNotBeforeMs must be a positive number");
       }
       const result = await transactControl((current) => {
-        const control = asObject(current);
+        const control = controlDocument(current);
         const previous = Number(control.retryNotBeforeMs);
         return {
           value: updateTelegramControl(controlDocument(control), {
@@ -109,7 +104,7 @@ const createTelegramRepository: (
       const owner = normalizeString(input?.owner);
       const messageKey = validateTelegramMessageKey(input?.messageKey);
       const revision = normalizeString(input?.revision);
-      const operation = normalizeString(input?.operation);
+      const operation = input.operation;
       const acquiredAtMs = normalizeTimestamp(input?.acquiredAtMs);
       const reclaimOwner = normalizeString(input?.reclaimOwner);
       if (!owner || !revision || !operation || !acquiredAtMs) {
@@ -117,7 +112,7 @@ const createTelegramRepository: (
       }
       let decision = "blocked";
       const result = await transactControl((current) => {
-        const control = asObject(current);
+        const control = controlDocument(current);
         const retryNotBeforeMs = normalizeTimestamp(control.retryNotBeforeMs);
         if (retryNotBeforeMs > acquiredAtMs) {
           decision = "retry-after";
@@ -163,12 +158,12 @@ const createTelegramRepository: (
           decision,
         };
       });
-      const control = asObject(result.value);
+      const control = controlDocument(result.value);
       return {
         acquired: result.committed && decision === "acquired",
         reason: decision,
         retryNotBeforeMs: normalizeTimestamp(control.retryNotBeforeMs),
-        gate: apiGateDocument(control.apiGate),
+        gate: control.apiGate ?? null,
       };
     },
     async releaseApiGate(ownerInput) {
@@ -178,7 +173,7 @@ const createTelegramRepository: (
       }
       let released = false;
       const result = await transactControl((current) => {
-        const control = asObject(current);
+        const control = controlDocument(current);
         if (normalizeString(readProperty(control.apiGate, "owner")) !== owner) {
           return { commit: false, decision: "stale-api-gate-release" };
         }
@@ -201,7 +196,7 @@ const createTelegramRepository: (
       }
       let applied = false;
       const result = await transactControl((current) => {
-        const control = asObject(current);
+        const control = controlDocument(current);
         const gateOwner = normalizeString(
           readProperty(control.apiGate, "owner"),
         );
@@ -223,11 +218,11 @@ const createTelegramRepository: (
           decision: "barrier-proof-applied",
         };
       });
-      const control = asObject(result.value);
+      const control = controlDocument(result.value);
       return {
         applied: result.committed && applied,
         retryNotBeforeMs: normalizeTimestamp(control.retryNotBeforeMs),
-        gate: apiGateDocument(control.apiGate),
+        gate: control.apiGate ?? null,
       };
     },
   };

@@ -1,3 +1,9 @@
+import { requiredFixture } from "../test/requiredFixture.ts";
+import { eventDocumentFixture } from "../test/eventCompatibilityFixture.ts";
+import {
+  canonicalRatingFixture,
+  canonicalRatingInsert,
+} from "./canonicalRatingFixture.ts";
 import { expect } from "vitest";
 import {
   buildEventProgressPlan,
@@ -58,7 +64,7 @@ function eventStatement(
 ): D1PreparedStatement {
   return db
     .prepare(
-      `INSERT INTO event_records
+      `INSERT INTO event_records_canonical
        (event_id, status, start_at_ms, updated_at_ms, revision, record_json)
        VALUES (?, ?, ?, 100, 1, ?)`,
     )
@@ -66,20 +72,23 @@ function eventStatement(
       eventId,
       status,
       startAtMs,
-      JSON.stringify({
-        schemaVersion: 2,
-        eventId,
-        status,
-        createdAtMs: 100,
-        updatedAtMs: 100,
-        startAtMs,
-        createdByProfileId: `${prefix}profile`,
-        createdByLoginUid: `${prefix}login`,
-        createdByUsername: "cron-fixture",
-        isSundayMons,
-        participants: {},
-        rounds: {},
-      }),
+      JSON.stringify(
+        eventDocumentFixture({
+          schemaVersion: 3,
+          eventId,
+          status,
+          createdAtMs: 100,
+          updatedAtMs: 100,
+          startAtMs,
+          createdByProfileId: `${prefix}profile`,
+          createdByLoginUid: `${prefix}login`,
+          createdByUsername: "cron-fixture",
+          isSundayMons,
+          participants: {},
+          rounds: {},
+          ...(status === "active" ? { startedAtMs: 100 } : {}),
+        }),
+      ),
     );
 }
 
@@ -141,8 +150,8 @@ export async function seedCombinedCronEventProgress(
        SET start_at_ms = ?, event_id = ?, revision = ?, updated_at_ms = 100
        WHERE singleton = 1`,
     ).bind(
-      scheduled[urgentLimit].startAtMs,
-      scheduled[urgentLimit].eventId,
+      requiredFixture(scheduled[urgentLimit]).startAtMs,
+      requiredFixture(scheduled[urgentLimit]).eventId,
       initialCursorRevision,
     ),
   );
@@ -171,11 +180,11 @@ export async function seedCombinedCronEventProgress(
       },
       100 + index,
     );
-    persisted.push({ plan, initialStatus: statuses[index] });
+    persisted.push({ plan, initialStatus: requiredFixture(statuses[index]) });
     events.push(
       eventStatement(env.EVENT_DB, eventId, "active", 100),
       env.EVENT_DB.prepare(
-        `INSERT INTO event_progress_outboxes
+        `INSERT INTO event_progress_outboxes_canonical
          (status, outbox_id, event_id, run_at_ms, last_queued_at_ms,
           next_reconcile_at_ms, record_json)
          VALUES ('pending', ?, ?, ?, ?, 0, ?)`,
@@ -201,51 +210,19 @@ export async function seedCombinedCronEventProgress(
     );
     rating.push({ operationId, plan: ratingPlan });
     events.push(eventStatement(env.EVENT_DB, ratingEventId, "active", 100));
-    const payload = {
-      status: "done",
-      inviteId,
+    const value = canonicalRatingFixture(inviteId, {
       matchId,
-      playerId: `${prefix}player`,
-      opponentId: `${prefix}opponent`,
-      ownerUid: `${prefix}owner`,
-      ownerToken: `${prefix}token`,
-      startedAtMs: 100,
-      updatedAtMs: 100,
-      leaseExpiresAtMs: 100,
-      completedAtMs: 100,
       eventId: ratingEventId,
-      eventProgressState: "pending",
-      eventProgressUpdatedAtMs: 100,
-      eventProgressVersion: 1,
-      telegramProjectionState: "done",
-      telegramProjectionUpdatedAtMs: 100,
-      telegramProjectionVersion: 1,
-      profileGameProjectionState: "done",
-      profileGameProjectionUpdatedAtMs: 100,
-      profileGameProjectionVersion: 1,
-    };
+      profileState: "done",
+      telegramState: "done",
+    });
     ratings.push(
-      env.PROFILE_DB.prepare(
-        `INSERT INTO rating_updates
-         (operation_id, payload_json, status, invite_id, match_id,
-          player_id, opponent_id, owner_uid, owner_token, started_at_ms,
-          updated_at_ms, lease_expires_at_ms, completed_at_ms,
-          event_progress_state, event_progress_updated_at_ms, event_progress_version,
-          telegram_projection_state, telegram_projection_updated_at_ms, telegram_projection_version,
-          profile_game_projection_state, profile_game_projection_updated_at_ms, profile_game_projection_version,
-          revision)
-         VALUES (?, ?, 'done', ?, ?, ?, ?, ?, ?, 100, 100, 100, 100,
-                 'pending', 100, 1, 'done', 100, 1, 'done', 100, 1, 1)`,
-      ).bind(
-        operationId,
-        JSON.stringify(payload),
-        inviteId,
-        matchId,
-        payload.playerId,
-        payload.opponentId,
-        payload.ownerUid,
-        payload.ownerToken,
-      ),
+      canonicalRatingInsert(env.PROFILE_DB, {
+        ...value,
+        eventProgressUpdatedAtMs: 100,
+        telegramProjectionUpdatedAtMs: 100,
+        profileGameProjectionUpdatedAtMs: 100,
+      }),
     );
   }
   await Promise.all([
@@ -360,7 +337,7 @@ export async function assertCombinedCronEventProgress(
   recorder: ReturnType<typeof createCombinedCronWorkflowRecorder>,
 ): Promise<void> {
   const scheduledPlans = [
-    seed.scheduled[urgentLimit - 1],
+    requiredFixture(seed.scheduled[urgentLimit - 1]),
     ...seed.scheduled.slice(0, recoveredUrgentOrdinaryCount),
     ...seed.scheduled.slice(
       urgentLimit + 1,
@@ -440,7 +417,7 @@ export async function assertCombinedCronEventProgress(
   ).toEqual(processedPlans.map(({ workflowId }) => workflowId).sort());
   const rows = await env.EVENT_DB.prepare(
     `SELECT outbox_id, status, next_reconcile_at_ms, last_queued_at_ms, record_json
-     FROM event_progress_outboxes WHERE event_id LIKE ? ORDER BY outbox_id`,
+     FROM event_progress_outboxes_canonical WHERE event_id LIKE ? ORDER BY outbox_id`,
   )
     .bind(`${prefix}%`)
     .all<{
@@ -472,7 +449,7 @@ export async function assertCombinedCronEventProgress(
     last_queued_at_ms: plan.outbox.lastQueuedAtMs,
     record: plan.outbox,
   }));
-  const remainder = seed.persisted[progressLaneSize].plan;
+  const remainder = requiredFixture(seed.persisted[progressLaneSize]).plan;
   expectedRows.push({
     outbox_id: remainder.outboxId,
     status: "pending",
@@ -495,15 +472,18 @@ export async function assertCombinedCronEventProgress(
       "SELECT start_at_ms, event_id, revision, updated_at_ms FROM event_scheduled_recovery_cursor WHERE singleton = 1",
     ).first(),
   ).toEqual({
-    start_at_ms:
-      seed.scheduled[urgentLimit + recoveredBackgroundCount].startAtMs,
-    event_id: seed.scheduled[urgentLimit + recoveredBackgroundCount].eventId,
+    start_at_ms: requiredFixture(
+      seed.scheduled[urgentLimit + recoveredBackgroundCount],
+    ).startAtMs,
+    event_id: requiredFixture(
+      seed.scheduled[urgentLimit + recoveredBackgroundCount],
+    ).eventId,
     revision: initialCursorRevision + 1,
     updated_at_ms: nowMs,
   });
   const ratingRows = await env.PROFILE_DB.prepare(
     `SELECT operation_id, revision, event_progress_state, event_progress_updated_at_ms,
-       lease_expires_at_ms, payload_json FROM rating_updates
+       lease_expires_at_ms, payload_json FROM rating_updates_canonical
      WHERE operation_id LIKE ? ORDER BY operation_id`,
   )
     .bind(`${prefix}%`)
@@ -522,19 +502,17 @@ export async function assertCombinedCronEventProgress(
   ] of ratingRows.results.entries()) {
     const processed = index < progressLaneSize;
     expect(row).toEqual({
-      operation_id: seed.rating[index].operationId,
+      operation_id: requiredFixture(seed.rating[index]).operationId,
       revision: processed ? 3 : 1,
       event_progress_state: processed ? "done" : "pending",
       event_progress_updated_at_ms: processed ? nowMs : 100,
       lease_expires_at_ms: 100,
     });
-    expect(JSON.parse(payload_json)).toMatchObject({
-      eventId: seed.rating[index].plan.params.eventId,
-      eventProgressState: row.event_progress_state,
-      eventProgressUpdatedAtMs: row.event_progress_updated_at_ms,
-      telegramProjectionState: "done",
-      profileGameProjectionState: "done",
-    });
+    expect(JSON.parse(payload_json)).toEqual(
+      canonicalRatingFixture("fixture", {
+        eventId: requiredFixture(seed.rating[index]).plan.params.eventId,
+      }).payload,
+    );
   }
   for (const table of ["event_write_admissions", "event_leases"])
     expect(

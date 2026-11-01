@@ -1,3 +1,5 @@
+import { required } from "./fixtures/canonicalData.mjs";
+import { canonicalMatch } from "./fixtures/canonicalData.mjs";
 import assert from "node:assert/strict";
 import { registerHooks } from "node:module";
 import test from "node:test";
@@ -20,12 +22,14 @@ const { createRemoteMoveSyncController } =
   await import("../src/game/remoteMoveSyncController.ts");
 
 const whiteMoves = ["l10,5;l9,4", "l9,4;l8,5"];
-const match = (color, flatMovesString = "", status = "") => ({
-  color,
-  flatMovesString,
-  status,
-});
+/** @param {import("@mons/shared/game-sessions").GameSessionMatch["color"]} color @param {string} [flatMovesString] @param {import("@mons/shared/game-sessions").GameSessionMatch["status"]} [status] */
+const match = (color, flatMovesString = "", status = "active") =>
+  canonicalMatch({ color, flatMovesString, status });
 
+/**
+ * @typedef {{game: Game; matchId: string; session: number; isGameOver: boolean}} ReplayContext
+ * @param {(output: import("mons-rules").InputResolution, controller: ReturnType<typeof createRemoteMoveSyncController>, context: ReplayContext) => void} [onReplayOutput]
+ */
 function harness(onReplayOutput = () => {}) {
   const context = {
     game: new Game(),
@@ -33,7 +37,11 @@ function harness(onReplayOutput = () => {}) {
     session: 0,
     isGameOver: false,
   };
+  /**
+   * @type {string[]}
+   */
   const outputs = [];
+  /** @type {ReturnType<typeof createRemoteMoveSyncController>} */
   const controller = createRemoteMoveSyncController({
     getGame: () => context.game,
     getActiveMatchId: () => context.matchId,
@@ -56,8 +64,8 @@ function unverifiedSnapshot() {
     assert.equal(server.playFen(move).kind, "complete");
   }
   const snapshot = Game.fromFen(server.toFen());
-  assert.equal(snapshot.historyVerified, false);
-  return snapshot;
+  assert.equal(required(snapshot).historyVerified, false);
+  return required(snapshot);
 }
 
 test("zero seeded counts initialize each side independently", () => {
@@ -88,7 +96,7 @@ test("clearing histories retains counters, initialization and pending verificati
   assert.equal(controller.getProcessedCount("black"), 0);
   assert.equal(controller.hasInitializedBothSides(), true);
   assert.equal(controller.verifyHistory(snapshot, "match", "", "black"), true);
-  assert.equal(snapshot.historyVerified, true);
+  assert.equal(required(snapshot).historyVerified, true);
   assert.equal(
     controller.remember(match("white", whiteMoves.join("-")), "old"),
     true,
@@ -108,7 +116,7 @@ test("resetting progress retains buffered moves but clears verification and init
   assert.equal(controller.getProcessedCount("white"), 0);
   assert.equal(controller.getProcessedCount("black"), 0);
   assert.equal(controller.verifyHistory(snapshot, "match", "", "black"), false);
-  assert.equal(snapshot.historyVerified, false);
+  assert.equal(required(snapshot).historyVerified, false);
   assert.equal(controller.drain("match", true), true);
   assert.deepEqual(outputs, whiteMoves);
   assert.equal(controller.hasInitializedBothSides(), false);
@@ -135,12 +143,12 @@ test("verification succeeds only after both histories describe the supplied snap
     false,
   );
   assert.equal(controller.verifyHistory(snapshot, "match", "", "black"), false);
-  assert.equal(snapshot.historyVerified, false);
+  assert.equal(required(snapshot).historyVerified, false);
   assert.equal(
     controller.verifyHistory(snapshot, "match", whiteMoves.join("-"), "white"),
     true,
   );
-  assert.equal(snapshot.historyVerified, true);
+  assert.equal(required(snapshot).historyVerified, true);
   assert.equal(controller.verifyHistory(snapshot, "match", "", "black"), false);
   assert.equal(controller.hasInitializedBothSides(), false);
 });
@@ -180,10 +188,10 @@ test("binding a verified game clears pending sides and skips verification for th
   controller.bindVerifiedGame("match");
   assert.equal(
     controller.verifyHistory(
-      {
-        historyVerified: true,
-        verifyHistory: () => assert.fail("already verified"),
-      },
+      Object.defineProperties(new Game(), {
+        historyVerified: { value: true },
+        verifyHistory: { value: () => assert.fail("already verified") },
+      }),
       "match",
       "ignored",
       "black",
@@ -197,17 +205,22 @@ test("binding a verified game clears pending sides and skips verification for th
   );
 });
 
-test("missing histories are empty and embedded empty tokens remain available to verification", () => {
-  for (const empty of ["", null, undefined]) {
+test("explicit empty histories and embedded empty tokens remain available to verification", () => {
+  for (const empty of [""]) {
     const { controller } = harness();
+    /** @type {Array<Parameters<Game["verifyHistory"]>[0]>} */
     const calls = [];
-    const game = {
-      historyVerified: false,
-      verifyHistory: (histories) => {
-        calls.push(histories);
-        return false;
+    const game = Object.defineProperties(new Game(), {
+      historyVerified: { value: false },
+      verifyHistory: {
+        value: (
+          /** @type {Parameters<Game["verifyHistory"]>[0]} */ histories,
+        ) => {
+          calls.push(histories);
+          return false;
+        },
       },
-    };
+    });
     assert.equal(
       controller.verifyHistory(game, "match", "first--third-", "white"),
       false,
@@ -224,31 +237,42 @@ test("remember rejects malformed snapshots before changing a buffered match", ()
   const { controller } = harness();
   controller.remember(match("white", "", "surrendered"), "match");
   for (const invalid of [
-    match("white", {}),
-    match("white", 0),
-    match("other"),
+    { ...match("white"), flatMovesString: {} },
+    { ...match("white"), flatMovesString: 0 },
+    { ...match("white"), flatMovesString: null },
+    { ...match("white"), flatMovesString: undefined },
+    { ...match("white"), color: "other" },
   ]) {
-    assert.equal(controller.remember(invalid, "other"), false);
-    assert.equal(controller.getSurrenderedMatchWhenDrained().color, "white");
+    assert.equal(
+      Reflect.apply(controller.remember, controller, [invalid, "other"]),
+      false,
+    );
+    assert.equal(
+      required(controller.getSurrenderedMatchWhenDrained()).color,
+      "white",
+    );
   }
-  for (const empty of ["", null, undefined]) {
+  for (const empty of [""]) {
     assert.equal(controller.remember(match("black", empty), "match"), true);
     assert.equal(controller.hasPendingMoves(), false);
   }
 });
 
 test("surrender remains sticky on accepted updates and follows first observed color order", () => {
-  for (const first of ["white", "black"]) {
+  for (const first of /** @type {const} */ (["white", "black"])) {
     const { controller } = harness();
     const second = first === "white" ? "black" : "white";
     const original = match(first, "", "surrendered");
     controller.remember(original, "match");
-    original.status = "";
+    Reflect.set(original, "status", "");
     controller.remember(match(second, "", "surrendered"), "match");
     controller.remember(match(first), "match");
-    assert.equal(controller.getSurrenderedMatchWhenDrained().color, first);
     assert.equal(
-      controller.getSurrenderedMatchWhenDrained().status,
+      required(controller.getSurrenderedMatchWhenDrained()).color,
+      first,
+    );
+    assert.equal(
+      required(controller.getSurrenderedMatchWhenDrained()).status,
       "surrendered",
     );
   }
@@ -304,7 +328,7 @@ test("a historical drain advances the model without output effects", () => {
   const { controller, context, outputs } = harness();
   controller.remember(match("white", whiteMoves.join("-")), "match");
   assert.equal(controller.drain("match", false), true);
-  assert.equal(context.game.toFen(), unverifiedSnapshot().toFen());
+  assert.equal(context.game.toFen(), required(unverifiedSnapshot()).toFen());
   assert.deepEqual(outputs, []);
   assert.equal(controller.getProcessedCount("white"), 2);
 });

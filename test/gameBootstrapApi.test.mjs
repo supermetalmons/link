@@ -1,3 +1,4 @@
+import { required } from "./fixtures/canonicalData.mjs";
 import assert from "node:assert/strict";
 import { registerHooks } from "node:module";
 import test from "node:test";
@@ -23,16 +24,17 @@ const {
 } = await import("../src/services/gameBootstrapApi.ts");
 
 const originalFetch = globalThis.fetch;
-const match = (color, changes = {}) => ({
+const match = (/** @type {string} */ color, changes = {}) => ({
+  schemaVersion: 1,
   version: 2,
   color,
   emojiId: 1,
-  aura: "",
+  aura: "none",
   gameVariant: "Classic",
   fen: "initial",
-  status: "",
+  status: "active",
   flatMovesString: "",
-  timer: "",
+  timer: { state: "idle" },
   ...changes,
 });
 const value = (snapshot = {}) => ({
@@ -44,8 +46,8 @@ const value = (snapshot = {}) => ({
     hostId: "host",
     guestId: "guest",
     hostColor: "white",
-    hostRematches: "",
-    guestRematches: "",
+    hostRematches: { state: "open", indices: [] },
+    guestRematches: { state: "open", indices: [] },
     automatchStateHint: null,
     eventId: null,
     eventOwned: false,
@@ -63,15 +65,14 @@ const value = (snapshot = {}) => ({
     ...snapshot,
   },
 });
+/** @param {unknown} [body] @param {number} [status] @param {HeadersInit} [headers] */
 const response = (body = value(), status = 200, headers) =>
-  new Response(JSON.stringify(body), { status, headers });
-const deferred = () => {
-  let resolve;
-  const promise = new Promise((done) => {
-    resolve = done;
+  new Response(JSON.stringify(body), {
+    status,
+    ...(headers === undefined ? {} : { headers }),
   });
-  return { promise, resolve };
-};
+/** @template [T=string] @returns {PromiseWithResolvers<T>} */
+const deferred = () => Promise.withResolvers();
 const flush = () => new Promise((resolve) => setImmediate(resolve));
 test.afterEach(() => {
   globalThis.fetch = originalFetch;
@@ -85,9 +86,10 @@ test("rejects invalid invite identifiers before fetching", async () => {
 });
 
 test("reads a bounded bootstrap and selects approved matches explicitly", async () => {
+  /** @type {{ url: Parameters<typeof fetch>[0], options: RequestInit }[]} */
   const calls = [];
   globalThis.fetch = async (url, options) => {
-    calls.push({ url, options });
+    calls.push({ url, options: required(options) });
     return response();
   };
   assert.deepEqual(
@@ -97,18 +99,25 @@ test("reads a bounded bootstrap and selects approved matches explicitly", async 
   await readGameBootstrapViaApi("invite", async () => "token", {
     selection: "approved",
   });
-  assert.equal(calls[0].url, "https://api.mons.link/invites/invite/bootstrap");
-  assert.equal(calls[0].options.method, "GET");
-  assert.equal(calls[0].options.headers.Authorization, "Bearer token");
-  assert.equal(calls[0].options.cache, "no-store");
-  assert.equal(calls[0].options.redirect, "error");
   assert.equal(
-    calls[1].url,
+    required(calls[0]).url,
+    "https://api.mons.link/invites/invite/bootstrap",
+  );
+  assert.equal(required(calls[0]).options.method, "GET");
+  assert.equal(
+    new Headers(required(calls[0]).options.headers).get("Authorization"),
+    "Bearer token",
+  );
+  assert.equal(required(calls[0]).options.cache, "no-store");
+  assert.equal(required(calls[0]).options.redirect, "error");
+  assert.equal(
+    required(calls[1]).url,
     "https://api.mons.link/invites/invite/bootstrap?selection=approved",
   );
 });
 
 test("refreshes auth exactly once for 401 and preserves the shared deadline", async () => {
+  /** @type {(boolean | undefined)[]} */
   const refreshes = [];
   let calls = 0;
   globalThis.fetch = async () =>
@@ -207,7 +216,7 @@ test("aborts pending token lookup without a late request", async () => {
   });
   controller.abort();
   await assert.rejects(pending, { code: "aborted" });
-  token.resolve("old-token");
+  required(token.resolve)("old-token");
   await flush();
   assert.equal(fetches, 0);
 });
@@ -223,23 +232,24 @@ test("one deadline bounds token refresh and rejects late tokens even before dela
   await flush();
   t.mock.timers.tick(GAME_BOOTSTRAP_REQUEST_TIMEOUT_MS);
   await rejected;
-  token.resolve("late-token");
+  required(token.resolve)("late-token");
   await flush();
   let now = Date.now();
   t.mock.method(Date, "now", () => now);
   const late = deferred();
   const delayed = readGameBootstrapViaApi("invite", () => late.promise);
   now += GAME_BOOTSTRAP_REQUEST_TIMEOUT_MS;
-  late.resolve("expired-token");
+  required(late.resolve)("expired-token");
   await assert.rejects(delayed, { code: "timeout" });
 });
 
 test("aborts stalled response streams as well as the request", async () => {
   const controller = new AbortController();
   let canceled = false;
-  let signal;
+  /** @type {{ signal?: AbortSignal | null | undefined }} */
+  const captured = {};
   globalThis.fetch = async (_url, options) => {
-    signal = options.signal;
+    captured.signal = required(options).signal;
     return new Response(
       new ReadableStream({
         cancel() {
@@ -254,11 +264,12 @@ test("aborts stalled response streams as well as the request", async () => {
   await flush();
   controller.abort();
   await assert.rejects(pending, { code: "aborted" });
-  assert.equal(signal.aborted, true);
+  assert.equal(required(captured.signal).aborted, true);
   assert.equal(canceled, true);
 });
 
 test("rejects auth-user replacement and cancels late response bodies", async () => {
+  /** @type {PromiseWithResolvers<Response>} */
   const request = deferred();
   let current = true;
   let canceled = false;
@@ -271,7 +282,7 @@ test("rejects auth-user replacement and cancels late response bodies", async () 
   const pending = readGameBootstrapViaApi("invite", tokenProvider);
   await flush();
   current = false;
-  request.resolve(
+  required(request.resolve)(
     new Response(
       new ReadableStream({
         cancel() {

@@ -1,6 +1,18 @@
 import type { MiningSnapshot } from "./mining.js";
 import { isMiningSnapshot } from "./mining.js";
-import { PROFILE_FALLBACK_EMOJI_COUNT } from "./profiles.js";
+import {
+  isAura,
+  isCardBackgroundId,
+  isCardSubtitleId,
+  isEmojiAppearance,
+  isEmojiId,
+  isProfileCounter,
+  isSelectedMons,
+  isStickerMap,
+  type Aura,
+  type EmojiId,
+  type ProfileAppearance,
+} from "./appearance.js";
 
 export type AuthMethodKey = "eth" | "sol" | "apple" | "x";
 
@@ -37,7 +49,7 @@ export interface LinkedAuthMethodsResponse {
   appleLinked: boolean;
 }
 
-export interface AuthProfileResponse {
+export interface AuthProfileResponse extends ProfileAppearance {
   ok: true;
   uid: string;
   profileId: string;
@@ -46,16 +58,10 @@ export interface AuthProfileResponse {
   sol?: string | null;
   linkedMethods: LinkedAuthMethods;
   appleLinked: boolean;
-  emoji: number;
-  aura?: string | null;
+  emoji: EmojiId;
   rating?: number | null;
   nonce?: number | null;
   totalManaPoints?: number | null;
-  cardBackgroundId?: number | null;
-  cardStickers?: string | null;
-  cardSubtitleId?: number | null;
-  profileCounter?: string | null;
-  profileMons?: string | null;
   completedProblems?: string[] | null;
   tutorialCompleted?: boolean | null;
   mining?: MiningSnapshot;
@@ -68,30 +74,30 @@ export interface SolanaAuthVerificationRequest {
   intentId: string;
   address: string;
   signature: string;
-  emoji: number;
-  aura: string | null;
+  emoji: EmojiId;
+  aura: Aura;
 }
 
 export interface EthereumAuthVerificationRequest {
   intentId: string;
   message: string;
   signature: string;
-  emoji: number;
-  aura: string | null;
+  emoji: EmojiId;
+  aura: Aura;
 }
 
 export interface AppleAuthVerificationRequest {
   intentId: string;
   idToken: string;
   consentSource: "signin" | "settings";
-  emoji: number;
-  aura: string | null;
+  emoji: EmojiId;
+  aura: Aura;
 }
 
 export interface XAuthCompletionRequest {
   flowId: string;
-  emoji: number;
-  aura: string | null;
+  emoji: EmojiId;
+  aura: Aura;
 }
 
 export interface AuthMethodUnlinkRequest {
@@ -100,8 +106,8 @@ export interface AuthMethodUnlinkRequest {
 }
 
 export interface AuthPresentation {
-  emoji: number;
-  aura: string | null;
+  emoji: EmojiId;
+  aura: Aura;
 }
 
 const AUTH_METHODS = Object.freeze(["eth", "sol", "apple", "x"] as const);
@@ -131,8 +137,6 @@ const AUTH_METHOD_REUSE_COOLDOWN_MS: 86400000 = (24 *
   60 *
   60 *
   1000) as 86400000;
-const AUTH_SWAG_EMOJI_MIN = 1000;
-const AUTH_SWAG_EMOJI_MAX = 1466;
 const AUTH_COOLDOWN_REASONS: Readonly<{
   method: "method-reuse-cooldown";
   profileMethod: "profile-method-cooldown";
@@ -163,10 +167,15 @@ const AUTH_PROFILE_RESPONSE_REQUIRED_KEYS = Object.freeze([
   "linkedMethods",
   "appleLinked",
   "opId",
+  "aura",
+  "cardBackgroundId",
+  "cardStickers",
+  "cardSubtitleId",
+  "profileCounter",
+  "profileMons",
 ]);
 const AUTH_PROFILE_RESPONSE_KEYS = Object.freeze([
   ...AUTH_PROFILE_RESPONSE_REQUIRED_KEYS,
-  "address",
   "eth",
   "sol",
   "aura",
@@ -223,32 +232,18 @@ const isOptionalNullableFiniteNumber = (
   value === null ||
   (typeof value === "number" && Number.isFinite(value));
 
-const isAuthEmoji = (value: unknown): value is number =>
-  Number.isSafeInteger(value) &&
-  (((value as number) >= 1 &&
-    (value as number) <= PROFILE_FALLBACK_EMOJI_COUNT) ||
-    ((value as number) >= AUTH_SWAG_EMOJI_MIN &&
-      (value as number) <= AUTH_SWAG_EMOJI_MAX));
-
-const normalizeAuthPresentation = (
-  emoji: unknown,
-  aura: unknown,
+const createAuthPresentation = (
+  emoji: EmojiId,
+  aura: Aura,
 ): AuthPresentation => {
-  const numericEmoji =
-    typeof emoji === "number" ||
-    (typeof emoji === "string" && emoji.trim() !== "")
-      ? Number(emoji)
-      : NaN;
-  return {
-    emoji: isAuthEmoji(numericEmoji) ? numericEmoji : 1,
-    aura: typeof aura === "string" && aura.length <= 32 ? aura : null,
-  };
+  const presentation = { emoji, aura };
+  if (!isEmojiAppearance(presentation))
+    throw new Error("invalid-auth-presentation");
+  return presentation;
 };
 
-const isEmojiAndAura = (value: Record<string, unknown>) => {
-  const normalized = normalizeAuthPresentation(value.emoji, value.aura);
-  return normalized.emoji === value.emoji && normalized.aura === value.aura;
-};
+const isEmojiAndAura = (value: Record<string, unknown>): boolean =>
+  isEmojiAppearance({ emoji: value.emoji, aura: value.aura });
 
 const isAuthToken = (value: unknown): value is string =>
   typeof value === "string" &&
@@ -366,23 +361,21 @@ const isAuthProfileResponse = (value: unknown): value is AuthProfileResponse =>
   cleanString(value.uid) !== "" &&
   cleanString(value.profileId) !== "" &&
   isNullableString(value.username) &&
-  typeof value.emoji === "number" &&
-  Number.isFinite(value.emoji) &&
+  isEmojiId(value.emoji) &&
   isLinkedAuthMethods(value.linkedMethods) &&
   value.appleLinked === value.linkedMethods.apple &&
   cleanString(value.opId) !== "" &&
-  isOptionalNullableString(value.address) &&
   isOptionalNullableString(value.eth) &&
   isOptionalNullableString(value.sol) &&
-  isOptionalNullableString(value.aura) &&
+  isAura(value.aura) &&
   isOptionalNullableFiniteNumber(value.rating) &&
   isOptionalNullableFiniteNumber(value.nonce) &&
   isOptionalNullableFiniteNumber(value.totalManaPoints) &&
-  isOptionalNullableFiniteNumber(value.cardBackgroundId) &&
-  isOptionalNullableFiniteNumber(value.cardSubtitleId) &&
-  isOptionalNullableString(value.profileCounter) &&
-  isOptionalNullableString(value.cardStickers) &&
-  isOptionalNullableString(value.profileMons) &&
+  isCardBackgroundId(value.cardBackgroundId) &&
+  isCardSubtitleId(value.cardSubtitleId) &&
+  isProfileCounter(value.profileCounter) &&
+  isStickerMap(value.cardStickers) &&
+  (value.profileMons === null || isSelectedMons(value.profileMons)) &&
   (value.completedProblems === undefined ||
     value.completedProblems === null ||
     (Array.isArray(value.completedProblems) &&
@@ -473,7 +466,7 @@ export {
   AUTH_METHOD_REUSE_COOLDOWN_MS,
   AUTH_COOLDOWN_REASONS,
   getLinkedAuthMethodsFromProfile,
-  normalizeAuthPresentation,
+  createAuthPresentation,
   normalizeAuthMethod,
   normalizeAuthCooldownReason,
   getAuthCooldownScope,

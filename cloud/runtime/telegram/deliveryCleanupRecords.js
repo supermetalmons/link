@@ -10,6 +10,7 @@ const deliveryState_js_1 = require("./deliveryState.js");
 const deliveryPolicy_js_1 = require("./deliveryPolicy.js");
 const taskKinds_js_1 = require("./taskKinds.js");
 const values_js_1 = require("./values.js");
+const recordCodec_js_1 = require("./recordCodec.js");
 function orphanPendingDeleteRecord(current, input) {
   const { apiGateSettleOwner, nowMs, ownerToken, pendingDeleteId, result } =
     input;
@@ -27,12 +28,12 @@ function orphanPendingDeleteRecord(current, input) {
     ) {
       return { commit: false, decision: "pending-delete-lost" };
     }
-    const orphanedDeletes = asObject(delivery.orphanedDeletes);
+    const orphanedDeletes = delivery.orphanedDeletes;
     const nextDelivery = (0, deliveryState_js_1.promotePendingDeleteQueue)({
       ...(0, deliveryState_js_1.omitKeys)(delivery, ["pendingDelete"]),
       orphanedDeletes: {
         ...orphanedDeletes,
-        [pendingDeleteId]: {
+        [pendingDeleteId]: (0, recordCodec_js_1.requireTelegramOrphanedDelete)({
           ...(0, deliveryPolicy_js_1.omitRetryState)(
             (0, deliveryState_js_1.omitKeys)(pendingDelete, [
               "leaseOwner",
@@ -42,7 +43,7 @@ function orphanPendingDeleteRecord(current, input) {
           ),
           terminalAtMs: nowMs,
           lastError: (0, deliveryPolicy_js_1.buildErrorState)(result, nowMs),
-        },
+        }),
       },
     });
     return {
@@ -58,8 +59,7 @@ function orphanPendingDeleteRecord(current, input) {
       decision: "pending-delete-orphaned",
     };
   };
-  const output = apply(asObject(current));
-  return output;
+  return (0, recordCodec_js_1.requireTelegramTransaction)(apply(current));
 }
 function recordCleanupRetryProof(current, input) {
   const {
@@ -109,8 +109,7 @@ function recordCleanupRetryProof(current, input) {
       decision: "pending-rate-limit-proof-required",
     };
   };
-  const output = apply(asObject(current));
-  return output;
+  return (0, recordCodec_js_1.requireTelegramTransaction)(apply(current));
 }
 function recordCleanupRetryState(current, input) {
   const {
@@ -169,8 +168,7 @@ function recordCleanupRetryState(current, input) {
       decision: "pending-delete-retryable",
     };
   };
-  const output = apply(asObject(current));
-  return output;
+  return (0, recordCodec_js_1.requireTelegramTransaction)(apply(current));
 }
 function acquirePendingDeleteRecord(current, input) {
   const {
@@ -242,8 +240,9 @@ function acquirePendingDeleteRecord(current, input) {
       const nextDelivery = (0, deliveryState_js_1.promotePendingDeleteQueue)({
         ...(0, deliveryState_js_1.omitKeys)(delivery, ["pendingDelete"]),
         orphanedDeletes: {
-          ...asObject(delivery.orphanedDeletes),
-          [pendingDeleteId]: {
+          ...delivery.orphanedDeletes,
+          [pendingDeleteId]: (0,
+          recordCodec_js_1.requireTelegramOrphanedDelete)({
             ...(0, deliveryState_js_1.pendingDeleteDocument)(pendingDelete),
             pendingDeleteId,
             terminalAtMs: nowMs,
@@ -251,7 +250,7 @@ function acquirePendingDeleteRecord(current, input) {
               code: "invalid-pending-delete",
               atMs: nowMs,
             },
-          },
+          }),
         },
       });
       return {
@@ -304,10 +303,14 @@ function acquirePendingDeleteRecord(current, input) {
       const nextDelivery = (0, deliveryState_js_1.promotePendingDeleteQueue)({
         ...(0, deliveryState_js_1.omitKeys)(delivery, ["pendingDelete"]),
         orphanedDeletes: {
-          ...asObject(delivery.orphanedDeletes),
-          [pendingDeleteId]: {
+          ...delivery.orphanedDeletes,
+          [pendingDeleteId]: (0,
+          recordCodec_js_1.requireTelegramOrphanedDelete)({
             ...(0, deliveryPolicy_js_1.omitRetryState)(
-              (0, deliveryState_js_1.pendingDeleteDocument)(pendingDelete),
+              (0, deliveryState_js_1.omitKeys)(
+                (0, deliveryState_js_1.pendingDeleteDocument)(pendingDelete),
+                ["status", "leaseOwner", "leaseExpiresAtMs"],
+              ),
             ),
             pendingDeleteId,
             terminalAtMs: nowMs,
@@ -315,7 +318,7 @@ function acquirePendingDeleteRecord(current, input) {
               code: "safe-retry-window-exhausted",
               atMs: nowMs,
             },
-          },
+          }),
         },
       });
       return {
@@ -385,8 +388,7 @@ function acquirePendingDeleteRecord(current, input) {
       decision,
     };
   };
-  const output = apply(asObject(current));
-  return output;
+  return (0, recordCodec_js_1.requireTelegramTransaction)(apply(current));
 }
 function clearPendingDeleteRecord(current, input) {
   const { apiGateOwner, ownerToken, pendingDeleteId } = input;
@@ -416,17 +418,5 @@ function clearPendingDeleteRecord(current, input) {
       decision: "pending-delete-cleared",
     };
   };
-  const output = apply(asObject(current));
-  return output;
+  return (0, recordCodec_js_1.requireTelegramTransaction)(apply(current));
 }
-const asObject = (value) => {
-  const retained =
-    value instanceof deliveryState_js_1.DeliverySnapshot
-      ? (0, deliveryState_js_1.deliveryDocument)(value)
-      : value instanceof deliveryState_js_1.PendingDeleteSnapshot
-        ? (0, deliveryState_js_1.pendingDeleteDocument)(value)
-        : value;
-  return retained && typeof retained === "object" && !Array.isArray(retained)
-    ? retained
-    : {};
-};

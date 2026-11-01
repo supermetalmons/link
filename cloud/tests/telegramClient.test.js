@@ -9,6 +9,7 @@ const {
   sendTelegramMessage,
 } = require("../runtime/telegram/client");
 
+/** @param {number} status @param {unknown} data */
 const jsonResponse = (status, data) => ({
   status,
   ok: status >= 200 && status < 300,
@@ -18,7 +19,8 @@ const jsonResponse = (status, data) => ({
 });
 
 test("sends the exact Telegram payload and returns the message ID", async () => {
-  let request;
+  /** @type {{request?: {url: string, options: RequestInit}}} */
+  const captured = {};
   const result = await sendTelegramMessage({
     chatId: "chat-1",
     text: "<b>hello</b>",
@@ -26,7 +28,7 @@ test("sends the exact Telegram payload and returns the message ID", async () => 
     silent: true,
     token: "secret-token",
     fetchImpl: async (url, options) => {
-      request = { url, options };
+      captured.request = { url, options };
       return jsonResponse(200, {
         ok: true,
         result: { message_id: 42 },
@@ -40,8 +42,11 @@ test("sends the exact Telegram payload and returns the message ID", async () => 
     messageId: 42,
     httpStatus: 200,
   });
+  const request = captured.request;
+  assert.ok(request);
+  assert.ok(typeof request.options.body === "string");
   assert.equal(request.url.endsWith("/botsecret-token/sendMessage"), true);
-  assert.deepEqual(JSON.parse(request.options.body), {
+  assert.deepEqual(/** @type {unknown} */ (JSON.parse(request.options.body)), {
     chat_id: "chat-1",
     text: "<b>hello</b>",
     disable_web_page_preview: true,
@@ -52,22 +57,31 @@ test("sends the exact Telegram payload and returns the message ID", async () => 
 });
 
 test("omits parse mode for plain text sends", async () => {
-  let body;
+  /** @type {{body?: Record<string, unknown>}} */
+  const captured = {};
   await sendTelegramMessage({
     chatId: "chat-1",
     text: "hello",
     token: "token",
     fetchImpl: async (_url, options) => {
-      body = JSON.parse(options.body);
+      assert.ok(typeof options.body === "string");
+      const parsed = /** @type {unknown} */ (JSON.parse(options.body));
+      assert.ok(
+        parsed !== null && typeof parsed === "object" && !Array.isArray(parsed),
+      );
+      captured.body = /** @type {Record<string, unknown>} */ (parsed);
       return jsonResponse(200, { ok: true, result: { message_id: 1 } });
     },
   });
+  const body = captured.body;
+  assert.ok(body);
   assert.equal(Object.hasOwn(body, "parse_mode"), false);
   assert.equal(body.disable_notification, false);
 });
 
 test("sends an exact Telegram media group with one plain-text caption", async () => {
-  let request;
+  /** @type {{request?: {url: string, options: RequestInit}}} */
+  const captured = {};
   const result = await sendTelegramMediaGroup({
     chatId: "community-chat",
     imageUrls: [
@@ -78,7 +92,7 @@ test("sends an exact Telegram media group with one plain-text caption", async ()
     text: "Prizes are live\n\nhttps://mons.link/event/event-1",
     token: "secret-token",
     fetchImpl: async (url, options) => {
-      request = { url, options };
+      captured.request = { url, options };
       return jsonResponse(200, {
         ok: true,
         result: [{ message_id: 41 }, { message_id: 42 }, { message_id: 43 }],
@@ -92,8 +106,11 @@ test("sends an exact Telegram media group with one plain-text caption", async ()
     messageIds: [41, 42, 43],
     httpStatus: 200,
   });
+  const request = captured.request;
+  assert.ok(request);
+  assert.ok(typeof request.options.body === "string");
   assert.equal(request.url.endsWith("/botsecret-token/sendMediaGroup"), true);
-  assert.deepEqual(JSON.parse(request.options.body), {
+  assert.deepEqual(/** @type {unknown} */ (JSON.parse(request.options.body)), {
     chat_id: "community-chat",
     media: [
       {
@@ -109,7 +126,8 @@ test("sends an exact Telegram media group with one plain-text caption", async ()
 });
 
 test("adds a spoiler animation to every requested media-group photo", async () => {
-  let body;
+  /** @type {{body?: Record<string, unknown>}} */
+  const captured = {};
   const result = await sendTelegramMediaGroup({
     chatId: "community-chat",
     imageUrls: ["https://example.com/one.webp", "https://example.com/two.webp"],
@@ -118,7 +136,12 @@ test("adds a spoiler animation to every requested media-group photo", async () =
     parseMode: "HTML",
     token: "secret-token",
     fetchImpl: async (_url, options) => {
-      body = JSON.parse(options.body);
+      assert.ok(typeof options.body === "string");
+      const parsed = /** @type {unknown} */ (JSON.parse(options.body));
+      assert.ok(
+        parsed !== null && typeof parsed === "object" && !Array.isArray(parsed),
+      );
+      captured.body = /** @type {Record<string, unknown>} */ (parsed);
       return jsonResponse(200, {
         ok: true,
         result: [{ message_id: 41 }, { message_id: 42 }],
@@ -127,6 +150,8 @@ test("adds a spoiler animation to every requested media-group photo", async () =
   });
 
   assert.equal(result.ok, true);
+  const body = captured.body;
+  assert.ok(body);
   assert.deepEqual(body.media, [
     {
       type: "photo",
@@ -182,6 +207,7 @@ test("validates Telegram media group size and acknowledgements", async () => {
       }),
   });
   assert.equal(result.ok, false);
+  assert.ok(result.ok === false);
   assert.equal(result.classification, "uncertain");
   assert.equal(result.code, "missing-message-id");
 });
@@ -200,6 +226,7 @@ test("classifies explicit rate limits as safe retries", async () => {
       }),
   });
   assert.equal(result.ok, false);
+  assert.ok(result.ok === false);
   assert.equal(result.classification, "retryable");
   assert.equal(result.code, "rate-limited");
   assert.equal(result.retryAfterSeconds, 7);
@@ -216,6 +243,7 @@ test("classifies explicit rate limits as safe retries", async () => {
       },
     }),
   });
+  assert.ok(malformed.ok === false);
   assert.equal(malformed.classification, "retryable");
   assert.equal(malformed.code, "rate-limited");
 });
@@ -239,6 +267,7 @@ test("retries only known-safe send transport rejections", async () => {
         throw error;
       },
     });
+    assert.ok(result.ok === false);
     assert.equal(result.classification, "retryable", code);
     assert.equal(result.code, "network-error", code);
   }
@@ -248,11 +277,13 @@ test("retries only known-safe send transport rejections", async () => {
     text: "hello",
     token: "token",
     fetchImpl: async () => {
-      const error = new Error("connection reset");
-      error.code = "ECONNRESET";
+      const error = Object.assign(new Error("connection reset"), {
+        code: "ECONNRESET",
+      });
       throw error;
     },
   });
+  assert.ok(ambiguous.ok === false);
   assert.equal(ambiguous.classification, "uncertain");
 });
 
@@ -266,6 +297,7 @@ test("classifies ambiguous send failures as uncertain", async (t) => {
         throw new Error("request sensitive-token failed");
       },
     });
+    assert.ok(result.ok === false);
     assert.equal(result.classification, "uncertain");
     assert.equal(result.code, "network-error");
     assert.equal(result.description.includes("sensitive-token"), false);
@@ -279,6 +311,7 @@ test("classifies ambiguous send failures as uncertain", async (t) => {
       timeoutMs: 5,
       fetchImpl: (_url, options) =>
         new Promise((_resolve, reject) => {
+          assert.ok(options.signal);
           options.signal.addEventListener("abort", () => {
             const error = new Error("aborted");
             error.name = "AbortError";
@@ -286,6 +319,7 @@ test("classifies ambiguous send failures as uncertain", async (t) => {
           });
         }),
     });
+    assert.ok(result.ok === false);
     assert.equal(result.classification, "uncertain");
     assert.equal(result.code, "timeout");
 
@@ -300,6 +334,7 @@ test("classifies ambiguous send failures as uncertain", async (t) => {
         throw error;
       },
     });
+    assert.ok(codedAbort.ok === false);
     assert.equal(codedAbort.classification, "uncertain");
   });
 
@@ -311,6 +346,7 @@ test("classifies ambiguous send failures as uncertain", async (t) => {
       fetchImpl: async () =>
         jsonResponse(408, { ok: false, description: "timeout" }),
     });
+    assert.ok(result.ok === false);
     assert.equal(result.classification, "uncertain");
     assert.equal(result.code, "http-408");
   });
@@ -323,6 +359,7 @@ test("classifies ambiguous send failures as uncertain", async (t) => {
       fetchImpl: async () =>
         jsonResponse(503, { ok: false, description: "unavailable" }),
     });
+    assert.ok(result.ok === false);
     assert.equal(result.classification, "uncertain");
   });
 
@@ -339,6 +376,7 @@ test("classifies ambiguous send failures as uncertain", async (t) => {
         },
       }),
     });
+    assert.ok(result.ok === false);
     assert.equal(result.classification, "uncertain");
     assert.equal(result.code, "malformed-response");
 
@@ -348,6 +386,7 @@ test("classifies ambiguous send failures as uncertain", async (t) => {
       token: "token",
       fetchImpl: async () => jsonResponse(200, {}),
     });
+    assert.ok(invalidShape.ok === false);
     assert.equal(invalidShape.classification, "uncertain");
     assert.equal(invalidShape.code, "malformed-response");
   });
@@ -359,6 +398,7 @@ test("classifies ambiguous send failures as uncertain", async (t) => {
       token: "token",
       fetchImpl: async () => jsonResponse(200, { ok: true, result: {} }),
     });
+    assert.ok(result.ok === false);
     assert.equal(result.classification, "uncertain");
     assert.equal(result.code, "missing-message-id");
   });
@@ -386,6 +426,7 @@ test("classifies transient edit and delete failures as retryable", async () => {
       }),
   ]) {
     const result = await request();
+    assert.ok(result.ok === false);
     assert.equal(result.classification, "retryable");
   }
 });
@@ -402,6 +443,7 @@ test("classifies Telegram body 408 and 500 errors as transient", async () => {
         description: "internal failure",
       }),
   });
+  assert.ok(send.ok === false);
   assert.equal(send.classification, "uncertain");
   assert.equal(send.code, "telegram-500");
 
@@ -433,6 +475,7 @@ test("classifies Telegram body 408 and 500 errors as transient", async () => {
       }),
   ]) {
     const result = await request();
+    assert.ok(result.ok === false);
     assert.equal(result.classification, "retryable");
   }
 });
@@ -461,7 +504,9 @@ test("does not normalize semantic phrases from HTTP 5xx responses", async () => 
         description: "message to delete not found",
       }),
   });
+  assert.ok(edit.ok === false);
   assert.equal(edit.classification, "retryable");
+  assert.ok(deletion.ok === false);
   assert.equal(deletion.classification, "retryable");
 });
 
@@ -494,6 +539,7 @@ test("normalizes idempotent edit and delete outcomes", async () => {
         description: "Bad Request: message to edit not found",
       }),
   });
+  assert.ok(missingEdit.ok === false);
   assert.equal(missingEdit.classification, "missing");
 
   const missingDelete = await deleteTelegramMessage({
@@ -525,6 +571,7 @@ test("classifies rejected requests as terminal without exposing the token", asyn
         description: "token sensitive-token rejected",
       }),
   });
+  assert.ok(result.ok === false);
   assert.equal(result.classification, "terminal");
   assert.equal(result.code, "telegram-401");
   assert.equal(result.description.includes("sensitive-token"), false);
@@ -540,6 +587,7 @@ test("redacts a token before truncating diagnostics", async () => {
       throw new Error(`${"x".repeat(500 - token.length + 1)}${token}`);
     },
   });
+  assert.ok(result.ok === false);
   assert.equal(result.description.includes(token), false);
   assert.equal(result.description.includes(token.slice(0, -1)), false);
   assert.equal(result.description.includes("[redacted]"), true);

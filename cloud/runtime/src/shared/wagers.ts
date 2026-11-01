@@ -3,12 +3,7 @@ import type {
   MiningMaterials,
   MiningSnapshot,
 } from "./mining.js";
-import {
-  MATERIAL_KEYS,
-  isMaterialName,
-  isMiningSnapshot,
-  normalizeCount,
-} from "./mining.js";
+import { MATERIAL_KEYS, isMaterialName, isMiningSnapshot } from "./mining.js";
 import { isSafeRecordKey } from "./ids.js";
 
 export interface WagerFrozenReadRequest {
@@ -90,6 +85,7 @@ const WAGER_STORAGE_VERSION = "1";
 const WAGER_FROZEN_READ_PATH = "/wagers/frozen/read";
 
 const WAGER_PROPOSAL_REMOVAL_FAILURE_REASONS = Object.freeze([
+  "manual-review-required",
   "invite-not-found",
   "missing-opponent",
   "profile-not-found",
@@ -97,6 +93,7 @@ const WAGER_PROPOSAL_REMOVAL_FAILURE_REASONS = Object.freeze([
 ] as const);
 
 const WAGER_PROPOSAL_SEND_FAILURE_REASONS = Object.freeze([
+  "manual-review-required",
   "invite-not-found",
   "missing-opponent",
   "profile-not-found",
@@ -105,6 +102,7 @@ const WAGER_PROPOSAL_SEND_FAILURE_REASONS = Object.freeze([
 ] as const);
 
 const WAGER_PROPOSAL_ACCEPT_FAILURE_REASONS = Object.freeze([
+  "manual-review-required",
   "invite-not-found",
   "missing-opponent",
   "profile-not-found",
@@ -114,6 +112,7 @@ const WAGER_PROPOSAL_ACCEPT_FAILURE_REASONS = Object.freeze([
 ] as const);
 
 const WAGER_OUTCOME_RESOLVE_FAILURE_REASONS = Object.freeze([
+  "manual-review-required",
   "invite-not-found",
   "missing-opponent",
   "profile-not-found",
@@ -186,9 +185,9 @@ const isWagerProposalSendRequest = (
   value.matchId.trim() !== "" &&
   isMaterialName(value.material) &&
   typeof value.count === "number" &&
-  Number.isFinite(value.count) &&
-  Number.isSafeInteger(normalizeCount(value.count)) &&
-  normalizeCount(value.count) > 0;
+  Number.isSafeInteger(value.count) &&
+  Number.isSafeInteger(value.count * 2) &&
+  value.count > 0;
 
 const isWagerOutcomeResolveRequest = (
   value: unknown,
@@ -211,15 +210,16 @@ const isWagerAgreement = (value: unknown): value is WagerAgreement =>
     "acceptedAt",
   ]) &&
   isMaterialName(value.material) &&
-  Number.isInteger(value.count) &&
+  Number.isSafeInteger(value.count) &&
   (value.count as number) > 0 &&
-  Number.isInteger(value.total) &&
+  Number.isSafeInteger(value.total) &&
   value.total === (value.count as number) * 2 &&
   typeof value.proposerId === "string" &&
   value.proposerId.trim() !== "" &&
   typeof value.accepterId === "string" &&
   value.accepterId.trim() !== "" &&
-  Number.isFinite(value.acceptedAt) &&
+  value.proposerId !== value.accepterId &&
+  Number.isSafeInteger(value.acceptedAt) &&
   (value.acceptedAt as number) >= 0;
 
 const isWagerProposalRemovalResponse = (
@@ -247,7 +247,7 @@ const isWagerProposalSendResponse = (
     return false;
   }
   if (value.ok === true) {
-    if (!Number.isInteger(value.count) || (value.count as number) <= 0) {
+    if (!Number.isSafeInteger(value.count) || (value.count as number) <= 0) {
       return false;
     }
     if (hasExactKeys(value, ["ok", "count"])) {
@@ -277,7 +277,7 @@ const isWagerProposalAcceptResponse = (
   if (value.ok === true) {
     return (
       hasExactKeys(value, ["ok", "count"]) &&
-      Number.isInteger(value.count) &&
+      Number.isSafeInteger(value.count) &&
       (value.count as number) > 0
     );
   }

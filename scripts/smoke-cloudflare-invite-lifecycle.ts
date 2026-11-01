@@ -1,4 +1,9 @@
 import {
+  applicationDataHeaders,
+  APPLICATION_DATA_SOCKET_PROTOCOL,
+} from "@mons/shared/data-contract";
+import type { RematchSeries } from "@mons/shared/rematches";
+import {
   createToolSession,
   refreshToolSession,
   revokeToolSession,
@@ -90,7 +95,7 @@ type Dependencies = {
   connect: (
     url: string,
     options: import("ws").ClientOptions,
-    protocol: string,
+    protocol: string[],
   ) => SmokeSocket;
   createInviteId: () => string;
   createOperationId: () => string;
@@ -166,7 +171,7 @@ function parseArgs(argv: string[]): Options {
   }
   return validateOptions({
     baseUrl: values.get("--base-url") || "",
-    output: values.get("--output"),
+    ...(values.has("--output") ? { output: values.get("--output")! } : {}),
   });
 }
 
@@ -237,6 +242,7 @@ async function requestJson(
     try {
       response = await dependencies.fetch(url, {
         ...init,
+        headers: applicationDataHeaders(init.headers),
         redirect: "error",
         cache: "no-store",
         signal: controller.signal,
@@ -409,7 +415,7 @@ function openMatchChannel(
         maxPayload: MATCH_SYNC_MAX_MESSAGE_BYTES,
         perMessageDeflate: false,
       },
-      MATCH_SYNC_SOCKET_PROTOCOL,
+      [MATCH_SYNC_SOCKET_PROTOCOL, APPLICATION_DATA_SOCKET_PROTOCOL],
     );
   } catch {
     throw new SmokeFailure("Lifecycle match socket could not connect.");
@@ -495,7 +501,7 @@ function openMatchChannel(
       const status =
         value === null
           ? "missing"
-          : value.status === ""
+          : value.status === "active"
             ? "empty"
             : value.status === "surrendered"
               ? "surrendered"
@@ -734,7 +740,7 @@ function openMetadataChannel(
         maxPayload: INVITE_METADATA_MAX_MESSAGE_BYTES,
         perMessageDeflate: false,
       },
-      INVITE_METADATA_SOCKET_PROTOCOL,
+      [INVITE_METADATA_SOCKET_PROTOCOL, APPLICATION_DATA_SOCKET_PROTOCOL],
     );
   } catch {
     throw new SmokeFailure("Lifecycle metadata socket could not connect.");
@@ -878,8 +884,8 @@ async function readMetadata(
   expected: {
     hostId: string;
     guestId: string | null;
-    hostRematches: string;
-    guestRematches: string;
+    hostRematches: RematchSeries;
+    guestRematches: RematchSeries;
   },
   minimumRevision: number,
   dependencies: Dependencies,
@@ -897,8 +903,14 @@ async function readMetadata(
     payload.snapshot.revision < minimumRevision ||
     payload.snapshot.hostId !== expected.hostId ||
     payload.snapshot.guestId !== expected.guestId ||
-    payload.snapshot.hostRematches !== expected.hostRematches ||
-    payload.snapshot.guestRematches !== expected.guestRematches ||
+    !isDeepStrictEqual(
+      payload.snapshot.hostRematches,
+      expected.hostRematches,
+    ) ||
+    !isDeepStrictEqual(
+      payload.snapshot.guestRematches,
+      expected.guestRematches,
+    ) ||
     payload.snapshot.automatchStateHint !== null ||
     payload.snapshot.eventId !== null ||
     payload.snapshot.eventOwned ||
@@ -1085,8 +1097,8 @@ function cumulativeMoveRequests(
     });
   }
   if (
-    requests[1].fen !== requests[3].fen ||
-    requests[1].flatMovesString === requests[3].flatMovesString
+    requests[1]!.fen !== requests[3]!.fen ||
+    requests[1]!.flatMovesString === requests[3]!.flatMovesString
   )
     throw new SmokeFailure(
       "Lifecycle takeback sequence did not retain distinct history at the same FEN.",
@@ -1137,7 +1149,7 @@ async function verifyLiveMatch(
     mover.uid,
     current.value,
   );
-  const latest = burst[burst.length - 1];
+  const latest = burst[burst.length - 1]!;
   const cumulativeMatch = {
     ...current.value,
     fen: latest.fen,
@@ -1145,7 +1157,7 @@ async function verifyLiveMatch(
   };
   for (const [request, expectedOutcome] of [
     [latest, null],
-    [burst[0], "superseded"],
+    [burst[0]!, "superseded"],
     [latest, "already-applied"],
   ] as const) {
     const result = await apiRequest(
@@ -1333,7 +1345,7 @@ async function verifyCanonicalTimer(
   );
   if (
     !isStartMatchTimerResponse(repeated) ||
-    repeated.timer !== started.timer ||
+    !isDeepStrictEqual(repeated.timer, started.timer) ||
     repeated.duration !== started.duration
   )
     throw new SmokeFailure(
@@ -1415,7 +1427,7 @@ async function runSmoke(
     ...(presentation
       ? {
           emojiId: name === "join" || name === "guestRematch" ? 2 : 1,
-          aura: "",
+          aura: "none",
         }
       : {}),
   });
@@ -1423,12 +1435,13 @@ async function runSmoke(
     sessions.push(
       await createToolSession(validated.baseUrl, dependencies.fetch),
     );
-    report.hostUid = sessions[0].uid;
+    report.hostUid = sessions[0]!.uid;
     sessions.push(
       await createToolSession(validated.baseUrl, dependencies.fetch),
     );
-    report.guestUid = sessions[1].uid;
-    const [host, guest] = sessions;
+    report.guestUid = sessions[1]!.uid;
+    const host = sessions[0]!;
+    const guest = sessions[1]!;
     if (host.uid === guest.uid)
       throw new SmokeFailure("Lifecycle smoke sessions were not distinct.");
     createAttempted = true;
@@ -1445,11 +1458,16 @@ async function runSmoke(
       dependencies,
     );
     report.checks.push("create-receipt-replay");
-    let expected = {
+    let expected: {
+      hostId: string;
+      guestId: string | null;
+      hostRematches: RematchSeries;
+      guestRematches: RematchSeries;
+    } = {
       hostId: host.uid,
       guestId: null as string | null,
-      hostRematches: "",
-      guestRematches: "",
+      hostRematches: { state: "open" as const, indices: [] },
+      guestRematches: { state: "open" as const, indices: [] },
     };
     let snapshot = await readMetadata(
       validated,
@@ -1571,12 +1589,15 @@ async function runSmoke(
         value.inviteId === inviteId &&
         value.actorUid === host.uid &&
         value.matchId === `${inviteId}1` &&
-        value.rematches === "1" &&
+        isDeepStrictEqual(value.rematches, { state: "open", indices: [1] }) &&
         value.match.emojiId === 1 &&
-        value.match.aura === "",
+        value.match.aura === "none",
       dependencies,
     );
-    expected = { ...expected, hostRematches: "1" };
+    expected = {
+      ...expected,
+      hostRematches: { state: "open" as const, indices: [1] },
+    };
     snapshot = await readMetadata(
       validated,
       inviteId,
@@ -1610,9 +1631,9 @@ async function runSmoke(
         value.inviteId === inviteId &&
         value.actorUid === guest.uid &&
         value.matchId === `${inviteId}1` &&
-        value.rematches === "1" &&
+        isDeepStrictEqual(value.rematches, { state: "open", indices: [1] }) &&
         value.match.emojiId === 2 &&
-        value.match.aura === "",
+        value.match.aura === "none",
       dependencies,
     );
     if (
@@ -1621,7 +1642,10 @@ async function runSmoke(
       hostRematch.match.color === guestRematch.match.color
     )
       throw new SmokeFailure("Lifecycle rematch seeds or colors disagreed.");
-    expected = { ...expected, guestRematches: "1" };
+    expected = {
+      ...expected,
+      guestRematches: { state: "open" as const, indices: [1] },
+    };
     snapshot = await readMetadata(
       validated,
       inviteId,
@@ -1676,11 +1700,14 @@ async function runSmoke(
       (value) =>
         value.inviteId === inviteId &&
         value.actorUid === host.uid &&
-        value.rematches === "1x",
+        isDeepStrictEqual(value.rematches, { state: "ended", indices: [1] }),
       dependencies,
     );
     terminal = true;
-    expected = { ...expected, hostRematches: "1x" };
+    expected = {
+      ...expected,
+      hostRematches: { state: "ended" as const, indices: [1] },
+    };
     snapshot = await readMetadata(
       validated,
       inviteId,
@@ -1730,7 +1757,8 @@ async function runSmoke(
     channel?.close();
     for (const socket of matchChannels) socket.close();
     if (!terminal && createAttempted && sessions.length === 2) {
-      const [host, guest] = sessions;
+      const host = sessions[0]!;
+      const guest = sessions[1]!;
       try {
         if (!paired) {
           await apiRequest(
@@ -1759,7 +1787,7 @@ async function runSmoke(
           !isEndRematchResponse(ended) ||
           ended.inviteId !== inviteId ||
           ended.actorUid !== host.uid ||
-          !ended.rematches.endsWith("x")
+          ended.rematches.state !== "ended"
         ) {
           failure = new SmokeFailure(
             "Lifecycle smoke failed and could not confirm terminal series cleanup.",

@@ -1,34 +1,38 @@
 // Generated from src/shared/match-protocol.ts. Run npm run generate:runtime.
+import type { IdleMatchTimer, MatchTimer } from "./timers.js";
+import type { Aura, EmojiId } from "./appearance.js";
 export type MatchSeedRecord<TGameVariant extends string = string> = {
   gameVariant: TGameVariant;
   fen: string;
 };
 export type FreshMatchRecord<
-  TEmojiId = unknown,
-  TAura = unknown,
+  TEmojiId = EmojiId,
+  TAura = Aura,
   TGameVariant extends string = string,
-  TColor extends string = string,
+  TColor extends string = "white" | "black",
 > = {
+  schemaVersion: 1;
   version: typeof CONTROLLER_VERSION;
   color: TColor;
   emojiId: TEmojiId;
   aura: TAura;
   gameVariant: TGameVariant;
   fen: string;
-  status: "";
+  status: "active";
   flatMovesString: "";
-  timer: "";
+  timer: IdleMatchTimer;
 };
 export type MatchCreationRecord = {
+  schemaVersion: 1;
   version: number;
   color: "white" | "black";
-  emojiId: number | string;
-  aura: string | null;
+  emojiId: EmojiId;
+  aura: Aura;
   gameVariant: string;
   fen: string;
-  status: string;
+  status: "active" | "surrendered";
   flatMovesString: string;
-  timer: string;
+  timer: MatchTimer;
 };
 export type MatchHistoryRecord = {
   color?: unknown;

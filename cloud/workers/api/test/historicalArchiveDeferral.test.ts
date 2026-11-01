@@ -1,11 +1,10 @@
+import { publicMatchFixture } from "./matchRecordFixture.ts";
 import assert from "node:assert/strict";
 import test from "node:test";
 import { Game, GameVariant } from "mons-rules";
+import type { MatchTimer } from "@mons/shared/timers";
 import { classifyTransitionHistoricalMatchPair } from "../src/historicalMatches.ts";
-import {
-  parseAutomatchProfileGameProjectionOutbox,
-  salvageHistoricalMatchDescriptors,
-} from "../src/profileGameProjectionOutbox.ts";
+import { parseAutomatchProfileGameProjectionOutbox } from "../src/profileGameProjectionOutbox.ts";
 import { processAutomatchProfileGameProjection } from "../src/profileGameProjection.ts";
 import type { ProfileGameProjectionRuntime } from "../src/profileGameProjectionRepository.ts";
 import { attachProjectionTestPorts } from "./projectionTestPorts.ts";
@@ -25,20 +24,54 @@ function descriptor() {
     hostPlayerId: "host",
     guestPlayerId: "guest",
     source: "transition",
+    retryNotBeforeMs: null,
   };
 }
 
 function match(color: "white" | "black", terminal = false) {
-  return {
+  return publicMatchFixture({
     version: 2,
     color,
     emojiId: 1,
-    aura: "",
+    aura: "none" as const,
     gameVariant: GameVariant.ForwardBridgeManaRows,
     fen: new Game({ variant: GameVariant.ForwardBridgeManaRows }).toFen(),
     status: terminal ? "surrendered" : "",
     flatMovesString: "",
     timer: "",
+  });
+}
+
+function serializedTimerPair(actor: "host" | "guest", timer: MatchTimer) {
+  const game = new Game();
+  const initialFen = game.toFen();
+  const moves = ["l10,5;l9,4", "l9,4;l8,5"];
+  for (const move of moves) {
+    assert.equal(game.playFen(move).kind, "complete");
+  }
+  const claimant = {
+    ...match("black"),
+    gameVariant: game.variant,
+    fen: initialFen,
+    timer,
+  };
+  const opponent = {
+    ...match("white"),
+    gameVariant: game.variant,
+    fen: game.toFen(),
+    flatMovesString: moves.join("-"),
+  };
+  const hostMatch: unknown = JSON.parse(
+    JSON.stringify(actor === "host" ? claimant : opponent),
+  );
+  const guestMatch: unknown = JSON.parse(
+    JSON.stringify(actor === "guest" ? claimant : opponent),
+  );
+  return {
+    ...descriptor(),
+    matchId: inviteId,
+    hostMatch,
+    guestMatch,
   };
 }
 
@@ -52,7 +85,8 @@ function fixture(matchIds = [inviteId]) {
     [
       outboxPath,
       {
-        schemaVersion: 1,
+        schemaVersion: 2,
+        archiveRetry: null,
         status: "pending",
         requestId: task.requestId,
         reason: "manual-hostRematches-ended",
@@ -85,13 +119,15 @@ function fixture(matchIds = [inviteId]) {
       if (result.commit === false)
         return {
           committed: false,
-          decision: result.decision,
+          ...(result.decision === undefined
+            ? {}
+            : { decision: result.decision }),
           value: values.get(path),
         };
       values.set(path, result.value);
       return {
         committed: true,
-        decision: result.decision,
+        ...(result.decision === undefined ? {} : { decision: result.decision }),
         value: result.value,
       };
     },
@@ -166,6 +202,46 @@ test("transition classification distinguishes initial, missing and terminal sour
   assert.equal(ready.status, "ready");
 });
 
+for (const actor of ["host", "guest"] as const) {
+  test(`serialized finished ${actor} timer makes valid history ready`, () => {
+    const input = serializedTimerPair(actor, { state: "finished" });
+    const result = classifyTransitionHistoricalMatchPair(input);
+    assert.equal(result.status, "ready");
+    if (result.status !== "ready") assert.fail("expected ready history");
+    assert.deepEqual(result.pair.hostMatch, input.hostMatch);
+    assert.deepEqual(result.pair.guestMatch, input.guestMatch);
+  });
+
+  test(`serialized idle and running ${actor} timers leave history unready`, () => {
+    const timers: MatchTimer[] = [
+      { state: "idle" },
+      { state: "running", turnNumber: 0, deadlineAtMs: 1 },
+    ];
+    for (const timer of timers) {
+      assert.deepEqual(
+        classifyTransitionHistoricalMatchPair(
+          serializedTimerPair(actor, timer),
+        ),
+        { status: "unready" },
+      );
+    }
+  });
+
+  test(`transition projection archives a serialized finished ${actor} timer without deferral`, async () => {
+    const f = fixture();
+    const input = serializedTimerPair(actor, { state: "finished" });
+    f.values.set(`players/host/matches/${inviteId}`, input.hostMatch);
+    f.values.set(`players/guest/matches/${inviteId}`, input.guestMatch);
+    assert.equal(await f.process(), "projected");
+    assert.deepEqual(f.archived, [inviteId]);
+    assert.equal(f.outbox(), null);
+    const completedCounts = f.counts();
+    assert.equal(await f.process(), "stale");
+    assert.deepEqual(f.counts(), completedCounts);
+    assert.deepEqual(f.archived, [inviteId]);
+  });
+}
+
 test("unready history retains its descriptor and duplicate deliveries do no work until recovery", async () => {
   const f = fixture();
   assert.equal(await f.process(), "deferred");
@@ -183,7 +259,7 @@ test("unready history retains its descriptor and duplicate deliveries do no work
   assert.deepEqual(f.counts(), firstCounts);
   f.clock(301_000);
   assert.equal(await f.process(), "deferred");
-  assert.equal(f.outbox()?.historicalMatches?.[0].retryNotBeforeMs, 601_000);
+  assert.equal(f.outbox()?.historicalMatches?.[0]?.retryNotBeforeMs, 601_000);
   f.values.set(`players/host/matches/${inviteId}`, match("black", true));
   f.clock(601_000);
   assert.equal(await f.process(), "projected");
@@ -196,7 +272,7 @@ test("five deferred histories cannot prevent a later valid history from archivin
   const f = fixture(ids);
   f.values.set(`players/host/matches/${ids[5]}`, match("black", true));
   assert.equal(await f.process(), "continued");
-  assert.equal(f.outbox()?.archiveRetry, undefined);
+  assert.equal(f.outbox()?.archiveRetry, null);
   assert.equal(await f.process(), "deferred");
   assert.deepEqual(f.archived, [ids[5]]);
   assert.equal(f.outbox()?.historicalMatches?.length, 5);
@@ -209,6 +285,7 @@ test("a newer projection bypasses an earlier request gate without losing descrip
   f.values.set(outboxPath, {
     ...old,
     requestId: "request-2",
+    archiveRetry: null,
     sourceUpdatedAtMs: 2_000,
   });
   const firstCounts = f.counts();
@@ -216,7 +293,7 @@ test("a newer projection bypasses an earlier request gate without losing descrip
   assert.equal(f.counts().projections, firstCounts.projections + 1);
   assert.equal(f.counts().sourceReads, firstCounts.sourceReads);
   assert.equal(f.outbox()?.archiveRetry?.requestId, "request-2");
-  assert.equal(f.outbox()?.historicalMatches?.[0].retryNotBeforeMs, 301_000);
+  assert.equal(f.outbox()?.historicalMatches?.[0]?.retryNotBeforeMs, 301_000);
 });
 
 test("a superseding request cannot receive an old descriptor deferral or settlement", async () => {
@@ -234,8 +311,8 @@ test("a superseding request cannot receive an old descriptor deferral or settlem
   };
   assert.equal(await f.process(), "superseded");
   assert.equal(f.outbox()?.requestId, "request-2");
-  assert.equal(f.outbox()?.archiveRetry, undefined);
-  assert.equal(f.outbox()?.historicalMatches?.[0].retryNotBeforeMs, undefined);
+  assert.equal(f.outbox()?.archiveRetry, null);
+  assert.equal(f.outbox()?.historicalMatches?.[0]?.retryNotBeforeMs, undefined);
 });
 
 test("archive infrastructure failures propagate without gating or dropping history", async () => {
@@ -246,8 +323,8 @@ test("archive infrastructure failures propagate without gating or dropping histo
     throw failure;
   };
   await assert.rejects(f.process(), (error) => error === failure);
-  assert.equal(f.outbox()?.archiveRetry, undefined);
-  assert.equal(f.outbox()?.historicalMatches?.[0].retryNotBeforeMs, undefined);
+  assert.equal(f.outbox()?.archiveRetry, null);
+  assert.equal(f.outbox()?.historicalMatches?.[0]?.retryNotBeforeMs, undefined);
   assert.equal(f.outbox()?.historicalMatches?.length, 1);
 });
 
@@ -265,9 +342,9 @@ test("missing source defers but a failed source read remains retryable", async (
     throw failure;
   };
   await assert.rejects(unavailable.process(), (error) => error === failure);
-  assert.equal(unavailable.outbox()?.archiveRetry, undefined);
+  assert.equal(unavailable.outbox()?.archiveRetry, null);
   assert.equal(
-    unavailable.outbox()?.historicalMatches?.[0].retryNotBeforeMs,
+    unavailable.outbox()?.historicalMatches?.[0]?.retryNotBeforeMs,
     undefined,
   );
 });
@@ -301,25 +378,18 @@ test("a projection read failure cannot suppress delivery or change archive recov
   assert.equal(f.counts().sourceReads, 0);
 });
 
-test("malformed retry metadata never discards a valid historical descriptor", () => {
+test("malformed retry metadata is rejected without salvaging executable history", () => {
   const f = fixture();
   const current = f.values.get(outboxPath) as Record<string, unknown>;
-  for (const retryNotBeforeMs of [-1, "later", Infinity, null]) {
-    const raw = {
-      ...current,
-      archiveRetry: { requestId: "request-1", notBeforeMs: "later" },
-      historicalMatches: { [inviteId]: { ...descriptor(), retryNotBeforeMs } },
-    };
+  for (const retryNotBeforeMs of [-1, "later", Infinity]) {
     assert.equal(
-      parseAutomatchProfileGameProjectionOutbox(raw)?.historicalMatches?.length,
-      1,
+      parseAutomatchProfileGameProjectionOutbox({
+        ...current,
+        historicalMatches: {
+          [inviteId]: { ...descriptor(), retryNotBeforeMs },
+        },
+      }),
+      null,
     );
-    assert.equal(
-      parseAutomatchProfileGameProjectionOutbox(raw)?.archiveRetry,
-      undefined,
-    );
-    assert.deepEqual(salvageHistoricalMatchDescriptors(raw), [
-      { ...descriptor(), matchId: inviteId },
-    ]);
   }
 });

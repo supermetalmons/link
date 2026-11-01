@@ -1,3 +1,4 @@
+import { requireValue } from "./browserAssertions";
 import React, { act, useLayoutEffect, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { flushSync } from "react-dom";
@@ -21,7 +22,7 @@ import { storage } from "../../src/utils/storage";
 import { environment } from "./eventPrizeSelectionEnvironment";
 import "../../src/index.css";
 
-const catalog = getEventPrizeConfig(LEGACY_CORE_PRIZES_EVENT_ID)!;
+const catalog = requireValue(getEventPrizeConfig(LEGACY_CORE_PRIZES_EVENT_ID));
 const prizeConfig = {
   ...catalog,
   prizes: catalog.prizes.map((prize) => ({
@@ -29,14 +30,20 @@ const prizeConfig = {
     imageUrl: `/__prize/${prize.id}.svg`,
   })),
 };
-const otherConfig = { ...prizeConfig, eventId: COMPRESSED_PRIZES_EVENT_ID };
-const participant = (index: number): EventParticipant => ({
+const otherConfig = {
+  ...prizeConfig,
+  eventId: requireValue(getEventPrizeConfig(COMPRESSED_PRIZES_EVENT_ID))
+    .eventId,
+};
+const participant = (
+  index: number,
+): EventParticipant & { state: "active"; loginUid: string } => ({
   profileId: `p${index}`,
   loginUid: `login${index}`,
   username: `player${index}`,
   displayName: `Player ${index}`,
   emojiId: index,
-  aura: "",
+  aura: "none",
   joinedAtMs: index,
   state: "active",
   eliminatedRoundIndex: null,
@@ -58,10 +65,11 @@ const finishedEvent = (): EventRecord => {
     eliminatedByProfileId: host.profileId,
   };
   return {
-    schemaVersion: 2,
+    schemaVersion: 3,
     eventId: catalog.eventId,
     isSundayMons: false,
     status: "ended",
+    bracketFormat: "fixed",
     createdAtMs: now - 240_000,
     updatedAtMs: now,
     startAtMs: now - 180_000,
@@ -75,6 +83,13 @@ const finishedEvent = (): EventRecord => {
     currentRoundIndex: 0,
     bracketSize: 2,
     roundCount: 1,
+    telegramAnnouncements: { invite: false, matches: false, results: false },
+    telegramDeliveryVersion: 2,
+    supportsThirdPlaceMatch: false,
+    thirdPlaceMatch: null,
+    prizeSelectionsLockedAtMs: null,
+    prizeAssignments: {},
+    roundByes: {},
     participants: { [host.profileId]: host, [guest.profileId]: guest },
     rounds: {
       "0": {
@@ -85,7 +100,7 @@ const finishedEvent = (): EventRecord => {
         matches: {
           "0_0": {
             matchKey: "0_0",
-            inviteId: null,
+            inviteId: "final-match",
             status: "host",
             resolvedAtMs: now - 60_000,
             winnerDisqualified: false,
@@ -113,7 +128,7 @@ const finishedEvent = (): EventRecord => {
 const motions: {
   bodyChild: boolean;
   target: string | null;
-  frames: unknown;
+  frames: Keyframe[] | PropertyIndexedKeyframes | null;
 }[] = [];
 const animations: Animation[] = [];
 const nativeAnimate = Element.prototype.animate;
@@ -140,7 +155,7 @@ type ViewState = {
 };
 let selection: ReturnType<typeof useEventPrizeSelection>;
 let updateView: React.Dispatch<React.SetStateAction<ViewState>>;
-const root = createRoot(document.getElementById("root")!);
+const root = createRoot(requireValue(document.getElementById("root")));
 
 function Harness() {
   const [view, setView] = useState<ViewState>({
@@ -205,7 +220,9 @@ flushSync(() =>
 const emit = (selections: EventPrizeSelections, subscriptionIndex?: number) => {
   flushSync(() => {
     if (subscriptionIndex !== undefined) {
-      environment.subscriptions[subscriptionIndex].update(selections);
+      requireValue(environment.subscriptions[subscriptionIndex]).update(
+        selections,
+      );
     } else {
       environment.subscriptions
         .filter((s) => s.active)
@@ -214,112 +231,135 @@ const emit = (selections: EventPrizeSelections, subscriptionIndex?: number) => {
   });
 };
 
-Object.assign(window, {
-  harness: {
-    snapshot: () => ({
-      selections: selection.selections,
-      isUpdating: selection.isUpdating,
-      isPending: selection.isPending(),
-      loadedImageIds: [...selection.loadedImageIds],
-      subscriptions: environment.subscriptions.map(({ eventId, active }) => ({
-        eventId,
-        active,
-      })),
-      mutations: environment.mutations.map(({ eventId, prizeId }) => ({
-        eventId,
-        prizeId,
-      })),
-      participantClicks: environment.participantClicks,
-      motions,
-      exitClones: [...document.body.children].filter(
-        (el) =>
-          el instanceof HTMLElement &&
-          el.style.position === "fixed" &&
-          el.getAttribute("aria-hidden") === "true",
-      ).length,
+export const eventPrizeSelectionHarness = {
+  snapshot: () => ({
+    selections: selection.selections,
+    isUpdating: selection.isUpdating,
+    isPending: selection.isPending(),
+    loadedImageIds: [...selection.loadedImageIds],
+    subscriptions: environment.subscriptions.map(({ eventId, active }) => ({
+      eventId,
+      active,
+    })),
+    mutations: environment.mutations.map(({ eventId, prizeId }) => ({
+      eventId,
+      prizeId,
+    })),
+    participantClicks: environment.participantClicks,
+    motions,
+    exitClones: [...document.body.children].filter(
+      (el) =>
+        el instanceof HTMLElement &&
+        el.style.position === "fixed" &&
+        el.getAttribute("aria-hidden") === "true",
+    ).length,
+  }),
+  setView: (patch: Partial<ViewState>) =>
+    flushSync(() => updateView((view) => ({ ...view, ...patch }))),
+  emit,
+  toggleImmediately: (prizeId: EventPrizeId) => {
+    let pending = false;
+    flushSync(() => {
+      selection.toggle(prizeId);
+      pending = selection.isPending();
+    });
+    return pending;
+  },
+  async settle(index: number, value: EventPrizeId | null, error?: string) {
+    Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
+    try {
+      await act(async () => {
+        const mutation = requireValue(environment.mutations[index]);
+        if (error) mutation.reject(new Error(error));
+        else mutation.resolve(value);
+      });
+    } finally {
+      Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: false });
+    }
+  },
+  clearMotions: () => {
+    motions.length = 0;
+  },
+  finishAnimations: () =>
+    animations.splice(0).forEach((animation) => {
+      if (animation.playState !== "idle") animation.finish();
     }),
-    setView: (patch: Partial<ViewState>) =>
-      flushSync(() => updateView((view) => ({ ...view, ...patch }))),
-    emit,
-    toggleImmediately: (prizeId: EventPrizeId) => {
-      let pending = false;
-      flushSync(() => {
-        selection.toggle(prizeId);
-        pending = selection.isPending();
-      });
-      return pending;
-    },
-    async settle(index: number, value: EventPrizeId | null, error?: string) {
-      Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
-      try {
-        await act(async () => {
-          const mutation = environment.mutations[index];
-          if (error) mutation.reject(new Error(error));
-          else mutation.resolve(value);
-        });
-      } finally {
-        Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: false });
-      }
-    },
-    clearMotions: () => {
-      motions.length = 0;
-    },
-    finishAnimations: () =>
-      animations.splice(0).forEach((animation) => {
-        if (animation.playState !== "idle") animation.finish();
-      }),
-    mountModal: () => {
-      const ended = finishedEvent();
-      const people = Object.values(ended.participants);
-      people.forEach((p, index) => {
-        p.displayName = `Finalist ${index + 1}`;
-      });
-      environment.event = {
-        ...ended,
-        status: "scheduled",
-        startAtMs: Date.now() + 30 * 60_000,
-        endedAtMs: null,
-        rounds: {},
-        prizeAssignments: {},
-      };
-      environment.initialSelections = {};
-      storage.setProfileId(people[0].profileId);
-      storage.setLoginId(people[0].loginUid);
-      openEventModal(catalog.eventId);
-      flushSync(() =>
-        root.render(
-          <React.StrictMode>
-            <EventModal />
-          </React.StrictMode>,
-        ),
-      );
-    },
-    finishEvent: () => {
-      const ended = finishedEvent();
-      const people = Object.values(ended.participants);
-      people.forEach((p, index) => {
-        p.displayName = `Finalist ${index + 1}`;
-      });
-      const winner = people.find((p) => p.profileId === ended.winnerProfileId)!;
-      const loser = people.find((p) => p !== winner)!;
-      ended.prizeAssignments = Object.fromEntries(
-        [winner, loser].map((p, index) => [
-          String(index + 1),
+  mountModal: () => {
+    const ended = finishedEvent();
+    const people = Object.values(ended.participants);
+    people.forEach((p, index) => {
+      p.displayName = `Finalist ${index + 1}`;
+    });
+    environment.event = {
+      ...ended,
+      status: "scheduled",
+      bracketFormat: "fixed",
+      startAtMs: Date.now() + 30 * 60_000,
+      startedAtMs: null,
+      endedAtMs: null,
+      currentRoundIndex: null,
+      bracketSize: 0,
+      roundCount: 0,
+      winnerProfileId: null,
+      winnerDisplayName: null,
+      participants: Object.fromEntries(
+        people.map((person) => [
+          person.profileId,
           {
-            eventId: catalog.eventId,
-            profileId: p.profileId,
-            place: index + 1,
-            prizeId: catalog.prizes[index].id,
-            assignedAtMs: Date.now(),
+            ...person,
+            state: "active" as const,
+            eliminatedRoundIndex: null,
+            eliminatedByProfileId: null,
           },
         ]),
-      ) as typeof ended.prizeAssignments;
-      environment.event = ended;
-      flushSync(() =>
-        environment.eventListeners.forEach((listener) => listener(ended)),
-      );
-    },
-    closeModal: () => flushSync(() => closeEventModal()),
-    dispose: () => flushSync(() => root.unmount()),
+      ),
+      rounds: {},
+      prizeAssignments: {},
+    };
+    environment.initialSelections = {};
+    storage.setProfileId(requireValue(people[0]).profileId);
+    storage.setLoginId(requireValue(requireValue(people[0]).loginUid));
+    openEventModal(catalog.eventId);
+    flushSync(() =>
+      root.render(
+        <React.StrictMode>
+          <EventModal />
+        </React.StrictMode>,
+      ),
+    );
   },
-});
+  finishEvent: () => {
+    const ended = finishedEvent();
+    const people = Object.values(ended.participants);
+    people.forEach((p, index) => {
+      p.displayName = `Finalist ${index + 1}`;
+    });
+    const winner = requireValue(
+      people.find((p) => p.profileId === ended.winnerProfileId),
+    );
+    const loser = requireValue(people.find((p) => p !== winner));
+    ended.prizeAssignments = {
+      "1": {
+        eventId: catalog.eventId,
+        profileId: winner.profileId,
+        place: 1,
+        prizeId: requireValue(catalog.prizes[0]).id,
+        assignedAtMs: Date.now(),
+      },
+      "2": {
+        eventId: catalog.eventId,
+        profileId: loser.profileId,
+        place: 2,
+        prizeId: requireValue(catalog.prizes[1]).id,
+        assignedAtMs: Date.now(),
+      },
+    };
+    environment.event = ended;
+    flushSync(() =>
+      environment.eventListeners.forEach((listener) => listener(ended)),
+    );
+  },
+  closeModal: () => flushSync(() => closeEventModal()),
+  dispose: () => flushSync(() => root.unmount()),
+};
+Object.assign(window, { eventPrizeSelectionHarness });

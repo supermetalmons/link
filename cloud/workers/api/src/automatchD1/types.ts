@@ -1,5 +1,5 @@
 import type {
-  RetainedAutomatchValue,
+  AutomatchRecordMap,
   AutomatchEntryWrite,
   AutomatchTelegramSourceWrite,
   MutationReceiptWrite,
@@ -9,37 +9,36 @@ import type {
   TelegramProjectionRequest,
   ProfileProjectionRequest,
 } from "../../../../runtime/gameSessionChanges.js";
-import { RETIRED_STATE_BACKEND } from "../stateCompatibility.ts";
 import type { RecoveryScanPage } from "../recoveryScanPage.ts";
 
 export const AUTOMATCH_RECORD_TABLES = {
   automatch: {
-    table: "automatch_entries",
+    table: "automatch_entries_canonical",
     valueColumn: "payload_json",
     revisionColumn: "revision",
   },
   telegramAutomatches: {
-    table: "automatch_telegram_sources",
+    table: "automatch_telegram_sources_canonical",
     valueColumn: "payload_json",
     revisionColumn: "revision",
   },
   "telegramProjectionOutbox/automatch": {
-    table: "automatch_telegram_projection_outbox",
+    table: "automatch_telegram_projection_outbox_canonical",
     valueColumn: "payload_json",
     revisionColumn: "revision",
   },
   "profileGameProjectionOutbox/automatch": {
-    table: "game_session_projection_outbox",
+    table: "game_session_projection_outbox_canonical",
     valueColumn: "payload_json",
     revisionColumn: "revision",
   },
   gameplayMutationReceipts: {
-    table: "game_session_mutation_receipts",
+    table: "game_session_mutation_receipts_canonical",
     valueColumn: "payload_json",
     revisionColumn: "revision",
   },
   gameplayMutationReceiptExpirations: {
-    table: "game_session_mutation_receipts",
+    table: "game_session_mutation_receipts_canonical",
     valueColumn: "expiration_json",
     revisionColumn: "expiration_revision",
   },
@@ -47,7 +46,7 @@ export const AUTOMATCH_RECORD_TABLES = {
 
 export type AutomatchRoot = keyof typeof AUTOMATCH_RECORD_TABLES;
 export type AutomatchRecordValue<Root extends AutomatchRoot> =
-  RetainedAutomatchValue<Root> | null;
+  AutomatchRecordMap[Root] | null;
 
 export type AutomatchFreshWrites = {
   automatch: AutomatchEntryWrite;
@@ -92,17 +91,12 @@ export type AutomatchRecordMutation<
 > = {
   [Key in Root]: {
     current: AutomatchRecordSnapshot<Key>;
-    value: AutomatchRecordValue<Key> | AutomatchFreshWrites[Key];
+    value: AutomatchRecordValue<Key>;
   };
 }[Root];
 
-declare const retainedAutomatchMutations: unique symbol;
-export type RetainedAutomatchMutationBatch = {
-  readonly [retainedAutomatchMutations]: true;
-};
-
 export type AutomatchRuntimeControl = {
-  backend: typeof RETIRED_STATE_BACKEND | "d1";
+  backend: "d1";
   state: "active" | "frozen";
   epoch: number;
   freezeGeneration: number;
@@ -112,12 +106,11 @@ export type AutomatchRuntimeControl = {
   sourceDigest: string | null;
   importDigest: string | null;
   activatedAtMs: number | null;
-  metadata: unknown;
 };
 
 export type AutomatchWriteAdmission = {
   admissionId: string;
-  backend: typeof RETIRED_STATE_BACKEND | "d1";
+  backend: "d1";
   epoch: number;
   freezeGeneration: number;
   kind: string;
@@ -135,12 +128,11 @@ export type ControlRow = {
   source_digest: string | null;
   import_digest: string | null;
   activated_at_ms: number | null;
-  metadata_json: string | null;
 };
 
 export type AdmissionRow = {
   admission_id: string;
-  backend: typeof RETIRED_STATE_BACKEND | "d1";
+  backend: "d1";
   epoch: number;
   freeze_generation: number;
   kind: string;
@@ -163,8 +155,3 @@ export class AutomatchD1Failure extends Error {
     super(message, options);
   }
 }
-
-export type AutomatchD1StoreOptions = {
-  now?: () => number;
-  writeGuards?: () => readonly D1PreparedStatement[];
-};

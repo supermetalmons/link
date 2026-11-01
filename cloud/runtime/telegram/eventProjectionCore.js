@@ -78,6 +78,7 @@ exports.renderUpcomingMessage =
 const eventProjectionRecords_js_1 = require("./eventProjectionRecords.js");
 const documents_js_1 = require("../events/documents.js");
 const values_js_1 = require("./values.js");
+const records_js_1 = require("./records.js");
 const crypto = __importStar(require("node:crypto"));
 const eventParticipants_js_1 = require("./eventParticipants.js");
 const sundayMonsReminder_js_1 = require("./sundayMonsReminder.js");
@@ -85,11 +86,8 @@ const desiredStateCore_js_1 = require("./desiredStateCore.js");
 const bracket_js_1 = require("../events/bracket.js");
 const eventProjectionRecords_js_2 = require("./eventProjectionRecords.js");
 const events_1 = require("@mons/shared/events");
-const objectProperties = (value) =>
-  value && typeof value === "object" ? value : {};
 const telegramAnnouncements = (value) => {
-  const retained = value;
-  return (0, events_1.resolveEventTelegramAnnouncements)(retained);
+  return value.telegramAnnouncements;
 };
 const EVENT_TELEGRAM_PROJECTION_LOCK_ROOT = "eventTelegramProjectionLocks";
 exports.EVENT_TELEGRAM_PROJECTION_LOCK_ROOT =
@@ -189,69 +187,33 @@ const toMatchIndex = (matchKey) => {
   return index === null || index < 0 ? Number.MAX_SAFE_INTEGER : index;
 };
 const collectActiveMatchEntries = (rawEventData) => {
-  const eventData = objectProperties(rawEventData);
-  const rounds =
-    eventData && eventData.rounds && typeof eventData.rounds === "object"
-      ? objectProperties(eventData.rounds)
-      : {};
+  const eventData = (0, documents_js_1.readEventDocument)(rawEventData);
+  if (!eventData) return [];
   const entries = [];
-  for (const roundKey of Object.keys(rounds)) {
-    const rawRound = rounds[roundKey];
-    const round = objectProperties(rawRound);
-    if (!rawRound || typeof rawRound !== "object") {
-      continue;
-    }
-    const roundIndex =
-      normalizeNumberOrNull(round.roundIndex) ??
-      normalizeNumberOrNull(roundKey) ??
-      Number.MAX_SAFE_INTEGER;
-    const matches =
-      round.matches && typeof round.matches === "object"
-        ? objectProperties(round.matches)
-        : {};
-    const sortedMatchKeys = Object.keys(matches).sort(
-      (left, right) => toMatchIndex(left) - toMatchIndex(right),
-    );
-    for (const matchKey of sortedMatchKeys) {
-      const rawMatch = matches[matchKey];
-      const match = objectProperties(rawMatch);
-      if (!rawMatch || typeof rawMatch !== "object") {
-        continue;
-      }
-      if (!normalizeString(match.inviteId)) {
-        continue;
-      }
+  for (const round of Object.values(eventData.rounds)) {
+    for (const [matchKey, match] of Object.entries(round.matches)) {
+      if (match.inviteId === null) continue;
       entries.push({
-        key: `round:${roundIndex}:${matchKey}`,
+        key: `round:${round.roundIndex}:${matchKey}`,
         match,
-        sortRank: roundIndex,
+        sortRank: round.roundIndex,
         sortIndex: toMatchIndex(matchKey),
       });
     }
   }
-  const thirdPlaceMatch =
-    eventData &&
-    eventData.thirdPlaceMatch &&
-    typeof eventData.thirdPlaceMatch === "object"
-      ? objectProperties(eventData.thirdPlaceMatch)
-      : null;
-  if (thirdPlaceMatch && normalizeString(thirdPlaceMatch.inviteId)) {
+  if (eventData.thirdPlaceMatch?.inviteId)
     entries.push({
       key: events_1.THIRD_PLACE_MATCH_KEY,
-      match: thirdPlaceMatch,
+      match: eventData.thirdPlaceMatch,
       sortRank: Number.MAX_SAFE_INTEGER - 1,
       sortIndex: 0,
     });
-  }
-  return entries.sort((left, right) => {
-    if (left.sortRank !== right.sortRank) {
-      return left.sortRank - right.sortRank;
-    }
-    if (left.sortIndex !== right.sortIndex) {
-      return left.sortIndex - right.sortIndex;
-    }
-    return left.key.localeCompare(right.key);
-  });
+  return entries.sort(
+    (left, right) =>
+      left.sortRank - right.sortRank ||
+      left.sortIndex - right.sortIndex ||
+      left.key.localeCompare(right.key),
+  );
 };
 const loadEndedMatchResults = async (eventData, { readRatingUpdates } = {}) => {
   if (typeof readRatingUpdates !== "function") {
@@ -284,13 +246,18 @@ const loadEndedMatchResults = async (eventData, { readRatingUpdates } = {}) => {
   for (let index = 0; index < scoreRequests.length; index += 1) {
     const { entry, inviteId, hostLoginUid, guestLoginUid } =
       scoreRequests[index];
-    const result = objectProperties(snapshots[index]);
+    const result = snapshots[index];
     if (
+      !result ||
       result.status !== "done" ||
       normalizeString(result.inviteId) !== inviteId ||
       normalizeString(result.matchId) !== inviteId ||
-      !Number.isFinite(result.playerManaPoints) ||
-      !Number.isFinite(result.opponentManaPoints)
+      typeof result.playerManaPoints !== "number" ||
+      !Number.isSafeInteger(result.playerManaPoints) ||
+      result.playerManaPoints < 0 ||
+      typeof result.opponentManaPoints !== "number" ||
+      !Number.isSafeInteger(result.opponentManaPoints) ||
+      result.opponentManaPoints < 0
     ) {
       resultsByKey[entry.key] = { status: "unavailable" };
       continue;
@@ -324,13 +291,7 @@ const buildStartedThreadMatchKey = (eventData) =>
   collectActiveMatchEntries(eventData)
     .map((entry) => entry.key)
     .join(";");
-const isV2TelegramEvent = (eventData) =>
-  Boolean(
-    eventData &&
-    typeof eventData === "object" &&
-    (0, values_js_1.readProperty)(eventData, "telegramDeliveryVersion") ===
-      EVENT_TELEGRAM_DELIVERY_VERSION,
-  );
+const isV2TelegramEvent = (eventData) => (0, events_1.isEventRecord)(eventData);
 exports.isV2TelegramEvent = isV2TelegramEvent;
 const isTerminalStatus = (status) =>
   status === EVENT_STATUS_ENDED || status === EVENT_STATUS_DISMISSED;
@@ -439,34 +400,13 @@ const renderEndedMessage = (
   return lines.join("\n");
 };
 exports.renderEndedMessage = renderEndedMessage;
-const parseProjectionState = (raw) => {
-  const value = objectProperties(raw);
-  const startedMatchKeys = Array.isArray(value.startedMatchKeys)
-    ? value.startedMatchKeys.filter(
-        (key) => typeof key === "string" && key.trim() !== "",
-      )
-    : [];
-  const startedMatchLinesByKey =
-    value.startedMatchLinesByKey &&
-    typeof value.startedMatchLinesByKey === "object"
-      ? objectProperties(value.startedMatchLinesByKey)
-      : {};
-  return {
-    upcomingText: normalizeText(value.upcomingText),
-    reminderText: normalizeText(value.reminderText),
-    startedText: normalizeText(value.startedText),
-    endedText: normalizeText(value.endedText),
-    endedAnnouncementArmed: value.endedAnnouncementArmed === true,
-    startedMatchKeys,
-    startedMatchLinesByKey: (0,
-    eventProjectionRecords_js_2.retainStartedMatchLines)(
-      startedMatchLinesByKey,
-    ),
-    lastProjectedSignature: normalizeString(value.lastProjectedSignature),
-  };
-};
+const parseProjectionState = (raw) =>
+  raw === undefined || raw === null
+    ? (0,
+      eventProjectionRecords_js_2.createEmptyEventTelegramProjectionDocument)()
+    : (0, eventProjectionRecords_js_2.readEventTelegramProjectionDocument)(raw);
 exports.parseProjectionState = parseProjectionState;
-const buildStartedState = (eventId, eventData, rawState = {}) => {
+const buildStartedState = (eventId, eventData, rawState) => {
   const state = parseProjectionState(rawState);
   const participantsByProfileId = getParticipantsByProfileId(eventData);
   const activeMatchEntries = collectActiveMatchEntries(eventData);
@@ -527,31 +467,39 @@ const buildEndedState = (
   resultsByKey = (0,
   eventProjectionRecords_js_1.retainEventTelegramEndedResults)({}),
 ) => {
-  const eventData = objectProperties(rawEventData);
+  const eventData = (0, documents_js_1.readEventDocument)(rawEventData);
+  if (!eventData) throw new TypeError("invalid-event-telegram-event");
   const participantsByProfileId = getParticipantsByProfileId(eventData);
-  const matchLines = collectActiveMatchEntries(eventData).map((entry) => {
+  const entries = collectActiveMatchEntries(eventData);
+  const matchLines = entries.flatMap((entry, index) => {
+    const appendBye = (line) => {
+      const bye = eventData.roundByes[String(entry.sortRank)];
+      if (!bye || entries[index + 1]?.sortRank === entry.sortRank)
+        return [line];
+      return [
+        line,
+        `${(0, eventParticipants_js_1.resolveParticipantToken)(participantsByProfileId.get(bye.profileId))} (bye)`,
+      ];
+    };
     const hostProfileId = normalizeString(entry.match.hostProfileId);
     const guestProfileId = normalizeString(entry.match.guestProfileId);
     const hostParticipant = participantsByProfileId.get(hostProfileId) || null;
     const guestParticipant =
       participantsByProfileId.get(guestProfileId) || null;
     const matchup = `${(0, eventParticipants_js_1.resolveParticipantToken)(hostParticipant, entry.match.hostDisplayName)} vs. ${(0, eventParticipants_js_1.resolveParticipantToken)(guestParticipant, entry.match.guestDisplayName)}`;
-    const retainedResults = resultsByKey;
-    const result = objectProperties(retainedResults[entry.key]);
+    const result = resultsByKey[entry.key];
     if (
       entry.match.winnerDisqualified === true ||
       result?.status === "disqualified"
     ) {
-      return `${matchup} (DQ)`;
+      return appendBye(`${matchup} (DQ)`);
     }
-    if (
-      result?.status === "scored" &&
-      Number.isFinite(result.hostScore) &&
-      Number.isFinite(result.guestScore)
-    ) {
-      return `${matchup} (${result.hostScore} - ${result.guestScore})`;
+    if (result?.status === "scored") {
+      return appendBye(
+        `${matchup} (${result.hostScore} - ${result.guestScore})`,
+      );
     }
-    return matchup;
+    return appendBye(matchup);
   });
   const participantsById = Object.fromEntries(
     (0, eventParticipants_js_1.getParticipantRecords)(eventData).map(
@@ -599,32 +547,36 @@ const parseUpcomingHeading = (text) => {
     : "";
 };
 const parseEventMessage = (eventId, channel, raw) => {
-  const value = objectProperties(raw);
-  const matchesTarget = (record) =>
-    !!record &&
-    (0, values_js_1.readProperty)(record, "instanceKey") ===
-      `event:${eventId}:${channel}:v2` &&
-    (0, values_js_1.readProperty)(record, "destination") === "community";
-  const applied = objectProperties(value.applied);
-  const desired = objectProperties(value.desired);
-  const hasAppliedMessage = Boolean(
-    matchesTarget(value.applied) &&
-    typeof applied.messageId === "number" &&
-    Number.isSafeInteger(applied.messageId) &&
-    applied.messageId > 0,
-  );
+  const value =
+    raw === undefined || raw === null
+      ? null
+      : (0, records_js_1.readTelegramMessageDocument)(raw);
+  if (raw !== undefined && raw !== null && value === null)
+    throw new TypeError("invalid-event-telegram-message");
+  const target = `event:${eventId}:${channel}:v2`;
+  const applied = value?.applied;
+  const candidate = value?.desired;
+  const desired =
+    candidate?.operation === "send" || candidate?.operation === "edit"
+      ? candidate
+      : null;
+  const hasAppliedMessage =
+    applied !== undefined &&
+    applied.instanceKey === target &&
+    applied.destination === "community";
   const desiredText =
-    matchesTarget(value.desired) &&
+    desired !== null &&
+    desired.instanceKey === target &&
+    desired.destination === "community" &&
     (desired.operation === "send" || desired.operation === "edit")
-      ? normalizeText(desired.text)
+      ? desired.text
       : "";
   const confirmedDesiredText =
     hasAppliedMessage &&
     desiredText &&
-    ((normalizeString(applied.contentHash) &&
-      applied.contentHash === desired.contentHash) ||
-      (normalizeString(applied.revision) &&
-        applied.revision === desired.revision))
+    desired &&
+    ((applied.contentHash && applied.contentHash === desired.contentHash) ||
+      applied.revision === desired.revision)
       ? desiredText
       : "";
   return {
@@ -635,7 +587,7 @@ const parseEventMessage = (eventId, channel, raw) => {
       ? {
           destination: applied.destination,
           instanceKey: applied.instanceKey,
-          chatId: normalizeString(applied.chatId),
+          chatId: applied.chatId,
           messageId: applied.messageId,
         }
       : null,
@@ -843,7 +795,7 @@ const buildEventTelegramProjection = ({
     operations,
     state: (0,
     eventProjectionRecords_js_2.createEventTelegramProjectionDocument)({
-      schemaVersion: EVENT_TELEGRAM_DELIVERY_VERSION,
+      schemaVersion: 3,
       upcomingText: nextUpcomingText,
       reminderText: nextReminderText,
       startedText: nextStartedText,
@@ -853,6 +805,7 @@ const buildEventTelegramProjection = ({
       startedMatchLinesByKey: startedState.startedMatchLinesByKey,
       lastProjectedSignature: signature,
       updatedAtMs: Math.floor(nowMs),
+      eventTelegramProjectionGuard: null,
     }),
   };
 };

@@ -1,4 +1,3 @@
-import { RETIRED_STATE_BACKEND } from "../stateCompatibility.ts";
 import { readD1FirstRow } from "../d1Reads.ts";
 import { timestamp } from "./codec.ts";
 import {
@@ -17,7 +16,9 @@ export function prepareAutomatchRuntimeControlRead(
   db: Pick<D1Database, "prepare">,
 ): D1PreparedStatement {
   return db.prepare(
-    "SELECT * FROM automatch_runtime_control WHERE singleton = 1",
+    `SELECT backend, state, epoch, freeze_generation, staged_at_ms,
+      candidate_version_id, imported_at_ms, source_digest, import_digest, activated_at_ms
+     FROM automatch_runtime_control WHERE singleton = 1`,
   );
 }
 
@@ -27,12 +28,20 @@ export function parseAutomatchRuntimeControlRow(
   const row = value as ControlRow | null | undefined;
   if (
     !row ||
-    (row.backend !== RETIRED_STATE_BACKEND && row.backend !== "d1") ||
+    row.backend !== "d1" ||
     (row.state !== "active" && row.state !== "frozen") ||
     !Number.isSafeInteger(row.epoch) ||
     row.epoch < 1 ||
     !Number.isSafeInteger(row.freeze_generation) ||
-    row.freeze_generation < 0
+    row.freeze_generation < 0 ||
+    ![row.candidate_version_id].every(
+      (value) => value === null || (typeof value === "string" && value !== ""),
+    ) ||
+    ![row.source_digest, row.import_digest].every(
+      (value) =>
+        value === null ||
+        (typeof value === "string" && /^[a-f0-9]{64}$/.test(value)),
+    )
   ) {
     throw new AutomatchD1Failure("automatch-control-unavailable");
   }
@@ -48,8 +57,6 @@ export function parseAutomatchRuntimeControlRow(
       sourceDigest: row.source_digest,
       importDigest: row.import_digest,
       activatedAtMs: nullableTimestamp(row.activated_at_ms),
-      metadata:
-        row.metadata_json === null ? null : JSON.parse(row.metadata_json),
     };
   } catch (error) {
     throw new AutomatchD1Failure("automatch-control-corrupt", { cause: error });

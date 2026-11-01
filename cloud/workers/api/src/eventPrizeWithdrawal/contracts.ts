@@ -11,7 +11,8 @@ import type { WithdrawalResponseFields } from "../../../../runtime/eventPrizes/r
 import { AuthApiFailure, type AuthErrorCode } from "../authErrors.ts";
 
 export type EventPrizeWithdrawalWorkflowParams = {
-  schemaVersion: 1;
+  schemaVersion: 2;
+  dataEpoch: 1;
   kind: "withdrawal";
   eventId: EventPrizeEventId;
   operationId: string;
@@ -22,7 +23,8 @@ export type EventPrizeWithdrawalWorkflowParams = {
 };
 
 export type EventPrizeWithdrawalPreflightParams = {
-  schemaVersion: 1;
+  schemaVersion: 2;
+  dataEpoch: 1;
   kind: "preflight";
 };
 
@@ -160,11 +162,13 @@ export async function parseEventPrizeWithdrawalWorkflowParams(
   };
   if (
     !record ||
-    Object.keys(record).length !== 8 ||
-    record.schemaVersion !== 1 ||
+    Object.keys(record).length !== 9 ||
+    record.schemaVersion !== 2 ||
+    record.dataEpoch !== 1 ||
     record.kind !== "withdrawal" ||
     !isEventPrizeWithdrawalRequest(request) ||
-    cleanString(record.operationId) !== instanceId ||
+    !/^epw_[a-f0-9]{64}$/.test(String(record.operationId)) ||
+    withdrawalWorkflowInstanceId(String(record.operationId)) !== instanceId ||
     !cleanString(record.profileId) ||
     !cleanString(record.requesterUid)
   ) {
@@ -174,9 +178,10 @@ export async function parseEventPrizeWithdrawalWorkflowParams(
     String(record.eventId),
     String(record.prizeId),
   );
-  if (operationId !== instanceId) return null;
+  if (withdrawalWorkflowInstanceId(operationId) !== instanceId) return null;
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
+    dataEpoch: 1,
     kind: "withdrawal",
     eventId: request.eventId,
     operationId,
@@ -185,4 +190,10 @@ export async function parseEventPrizeWithdrawalWorkflowParams(
     recipientAddress: request.solanaAddress,
     requesterUid: cleanString(record.requesterUid),
   };
+}
+
+export function withdrawalWorkflowInstanceId(operationId: string): string {
+  if (!/^epw_[a-f0-9]{64}$/.test(operationId))
+    throw new TypeError("invalid-withdrawal-operation-id");
+  return `data1_${operationId}`;
 }

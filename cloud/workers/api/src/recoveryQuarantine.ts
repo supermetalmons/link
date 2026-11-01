@@ -1,14 +1,14 @@
 const QUARANTINE_TARGETS = {
   auth: {
-    table: "profile_auth_recovery_quarantine",
+    table: "profile_auth_recovery_quarantine_canonical",
     identityColumns: ["profile_id"],
   },
   "profile-link": {
-    table: "profile_link_catchup_quarantine",
+    table: "profile_link_catchup_quarantine_canonical",
     identityColumns: ["login_uid"],
   },
   rating: {
-    table: "rating_projection_recovery_quarantine",
+    table: "rating_projection_recovery_quarantine_canonical",
     identityColumns: ["operation_id", "projection_kind"],
   },
 } as const;

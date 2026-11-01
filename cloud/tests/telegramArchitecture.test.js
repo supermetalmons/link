@@ -63,6 +63,7 @@ const ignoredDirectories = new Set([
   "node_modules",
 ]);
 
+/** @param {string} directory @returns {string[]} */
 const listDomainSourceFiles = (directory) =>
   fs.readdirSync(directory, { withFileTypes: true }).flatMap((entry) => {
     const entryPath = path.join(directory, entry.name);
@@ -74,6 +75,7 @@ const listDomainSourceFiles = (directory) =>
     return entry.isFile() && /\.(?:js|ts)$/.test(entry.name) ? [entryPath] : [];
   });
 
+/** @param {string} filePath */
 const isRuntimeOutput = (filePath) => {
   const relativePath = path.relative(runtimeRoot, filePath);
   if (
@@ -92,6 +94,7 @@ const isRuntimeOutput = (filePath) => {
   );
 };
 
+/** @param {string} directory @returns {string[]} */
 const listRepositorySourceFiles = (directory) =>
   fs.readdirSync(directory, { withFileTypes: true }).flatMap((entry) => {
     const entryPath = path.join(directory, entry.name);
@@ -244,10 +247,11 @@ test("Worker tests exercise the production event projector", () => {
 });
 
 test("admin Telegram scripts use signed commands and durable aliases", () => {
+  /** @type {[string, string, string][]} */
   const scripts = [
-    ["shootingStarAlert.js", "admin:shooting-star:", "silent: true"],
-    ["topGpWithEmojis.js", "admin:top-gp:", 'parseMode: "HTML"'],
-    ["topMpWithEmojis.js", "admin:top-mp:", 'parseMode: "HTML"'],
+    ["shootingStarAlert.ts", "admin:shooting-star:", "silent: true"],
+    ["topGpWithEmojis.ts", "admin:top-gp:", 'parseMode: "HTML"'],
+    ["topMpWithEmojis.ts", "admin:top-mp:", 'parseMode: "HTML"'],
   ];
   for (const [fileName, keyPrefix, option] of scripts) {
     const source = fs.readFileSync(path.join(adminRoot, fileName), "utf8");
@@ -261,25 +265,26 @@ test("admin Telegram scripts use signed commands and durable aliases", () => {
     assert.equal(source.includes("../runtime/.env"), false);
   }
   const shootingSource = fs.readFileSync(
-    path.join(adminRoot, "shootingStarAlert.js"),
+    path.join(adminRoot, "shootingStarAlert.ts"),
     "utf8",
   );
   assert.equal(shootingSource.includes("ADC_FAILURE_MESSAGE"), false);
-  for (const fileName of ["topGpWithEmojis.js", "topMpWithEmojis.js"]) {
+  for (const fileName of ["topGpWithEmojis.ts", "topMpWithEmojis.ts"]) {
     const source = fs.readFileSync(path.join(adminRoot, fileName), "utf8");
     assert.match(source, /createProfileD1Reader/);
     assert.equal(source.includes("ADC_FAILURE_MESSAGE"), false);
   }
-  const d1Source = fs.readFileSync(path.join(adminRoot, "_d1.js"), "utf8");
+  const d1Source = fs.readFileSync(path.join(adminRoot, "_d1.ts"), "utf8");
   assert.match(d1Source, /CLOUDFLARE_API_TOKEN/);
   assert.match(d1Source, /D1 Read/);
-  assert.match(d1Source, /\["active", "frozen"\]/);
+  assert.match(d1Source, /state !== "active" && state !== "frozen"/);
   assert.equal(d1Source.includes('"verifying"'), false);
   assert.equal(d1Source.includes("activated_at_ms"), false);
 });
 
 test("admin tools no longer require Firebase Admin credentials", () => {
   assert.equal(fs.existsSync(path.join(adminRoot, "_admin.js")), false);
+  /** @type {{dependencies?: Record<string, string>}} */
   const manifest = require("../admin/package.json");
   assert.equal(manifest.dependencies?.["firebase-admin"], undefined);
 });

@@ -1,4 +1,4 @@
-import { materializeProfileCompatibility as materializeCanonicalProfile } from "../test/profileDataBoundaryFixture.ts";
+import { materializeProfileFixture as materializeCanonicalProfile } from "../test/profileDataBoundaryFixture.ts";
 import { env } from "cloudflare:workers";
 import type { D1Migration } from "cloudflare:test";
 import type { CompletePlayerProfile } from "@mons/shared/profiles";
@@ -89,10 +89,10 @@ async function createProfile(
 }
 
 function mutableSnapshot(snapshot: CanonicalProfileMutationSnapshot) {
-  const { legacyFields: _legacyFields, ...profile } = snapshot.profile;
+  const profile = snapshot.profile;
   return {
     owner: snapshot.owner,
-    profile: { ...profile, storageShape: "mutable" as const },
+    profile,
   };
 }
 
@@ -197,7 +197,7 @@ function observeDatabase(
 
 async function readProfileRow(profileId: string) {
   const row = await db
-    .prepare("SELECT * FROM profile_records WHERE profile_id = ?")
+    .prepare("SELECT * FROM profile_records_canonical WHERE profile_id = ?")
     .bind(profileId)
     .first<Record<string, unknown>>();
   expect(row).not.toBeNull();
@@ -211,23 +211,23 @@ async function expectProfileUpdate(
 ) {
   const updates = observed.batchQueries.flatMap((queries, batchIndex) =>
     queries.flatMap((query, statementIndex) =>
-      /^\s*UPDATE profile_records\s+SET\b/.test(query)
+      /^\s*UPDATE profile_records_canonical\s+SET\b/.test(query)
         ? [
             {
               query,
-              bindings: observed.batchBindings[batchIndex][statementIndex],
+              bindings: observed.batchBindings[batchIndex]![statementIndex]!,
             },
           ]
         : [],
     ),
   );
   expect(updates).toHaveLength(1);
-  const [{ query, bindings }] = updates;
+  const { query, bindings } = updates[0]!;
   const columns = query
-    .split("SET")[1]
-    .split("WHERE")[0]
+    .split("SET")[1]!
+    .split("WHERE")[0]!
     .split(",")
-    .map((assignment) => assignment.split("=")[0].trim());
+    .map((assignment) => assignment.split("=")[0]!.trim());
   expect([...columns].sort()).toEqual(Object.keys(changes).sort());
   expect(bindings).toEqual([
     ...columns
@@ -278,7 +278,6 @@ async function mergeOwner(
           targetProfileId: target.profile.profileId,
           mergedAtMs: 3_000,
           opId: "mutation-test-merge",
-          sourceLegacyFields: source.profile.legacyFields,
         },
       },
     ],
@@ -303,12 +302,8 @@ describe("canonical profile mutation reads", () => {
       const opponent = await createProfile(
         {},
         {
-          legacyFields: {
-            imported: { missingRating: true },
-            custom: [1, null],
-          },
           emojiPresent: false,
-          gameplayEmoji: "legacy-emoji",
+          gameplayEmoji: 0,
           winPresent: false,
           sortPresence: { rating: false, nonce: false, mp: true, gum: false },
           sortValues: { mp: null, gum: null },
@@ -331,8 +326,8 @@ describe("canonical profile mutation reads", () => {
       expect(observed.batchBindings).toEqual([
         [[player.owner.loginUid], [opponent.owner.loginUid]],
       ]);
-      expect(observed.batchQueries[0].join("\n")).not.toMatch(
-        /profile_february_opponents|profile_auth_methods|profile_auth_recovery_jobs|FROM profile_login_owners\s+WHERE profile_id/,
+      expect(observed.batchQueries[0]!.join("\n")).not.toMatch(
+        /profile_february_opponents_canonical|profile_auth_methods_canonical|profile_auth_recovery_jobs_canonical|FROM profile_login_owners_canonical\s+WHERE profile_id/,
       );
     });
 
@@ -439,7 +434,7 @@ describe("canonical profile mutation reads", () => {
       ["invalid player owner", 0, { canonical_owner_revision: 0 }],
       ["invalid opponent profile", 1, { revision: 0 }],
       ["invalid player payload", 0, { payload_json: "{}" }],
-      ["invalid opponent legacy fields", 1, { legacy_fields_validation: 0 }],
+      ["invalid opponent gameplay emoji", 1, { gameplay_emoji: "0" }],
       [
         "retiring player",
         0,
@@ -499,9 +494,8 @@ describe("canonical profile mutation reads", () => {
     const initial = await createProfile(
       { eth: "0xwallet", sol: "sol-wallet" },
       {
-        legacyFields: { imported: { missingRating: true }, custom: [1, null] },
         emojiPresent: false,
-        gameplayEmoji: "legacy-emoji",
+        gameplayEmoji: 0,
         winPresent: false,
         sortPresence: {
           rating: false,
@@ -535,7 +529,7 @@ describe("canonical profile mutation reads", () => {
     expect(observed.firstQueries).toHaveLength(1);
     expect(observed.batchQueries).toHaveLength(0);
     expect(observed.firstQueries[0]).not.toMatch(
-      /profile_auth_methods|profile_auth_recovery_jobs|profile_february_opponents/,
+      /profile_auth_methods_canonical|profile_auth_recovery_jobs_canonical|profile_february_opponents_canonical/,
     );
   });
 
@@ -561,10 +555,10 @@ describe("canonical profile mutation reads", () => {
     ["owner timestamp", { canonical_owner_created_at_ms: -1 }],
     ["profile revision", { revision: 0 }],
     ["profile payload", { payload_json: "{}" }],
-    ["legacy fields", { legacy_fields_json: "[]" }],
+    ["gameplay emoji", { gameplay_emoji: 0 }],
     ["username key", { username_key: "unexpected-name" }],
     ["sort presence", { rating_sort_present: 0 }],
-    ["gameplay emoji", { gameplay_emoji_json: "{}" }],
+    ["gameplay emoji", { gameplay_emoji: "{}" }],
     [
       "retiring profile",
       { state: "retiring", merged_into_profile_id: "target" },
@@ -591,9 +585,8 @@ describe("canonical profile mutation reads", () => {
     const initial = await createProfile(
       {},
       {
-        legacyFields: { imported: { emoji: "" } },
         emojiPresent: false,
-        gameplayEmoji: "legacy-gameplay-emoji",
+        gameplayEmoji: 0,
         winPresent: false,
         sortPresence: { rating: false, nonce: false, mp: true },
         sortValues: { mp: null },
@@ -636,9 +629,8 @@ describe("canonical profile mutation reads", () => {
     const initial = await createProfile(
       { aura: "rainbow" },
       {
-        legacyFields: { imported: { emoji: "" } },
         emojiPresent: false,
-        gameplayEmoji: "0",
+        gameplayEmoji: 0,
         winPresent: false,
         sortPresence: { rating: false, nonce: false, mp: true },
         sortValues: { mp: null },
@@ -652,7 +644,7 @@ describe("canonical profile mutation reads", () => {
         now: () => 4_000,
       }).updateCustomization(
         initial.owner.loginUid,
-        { field: "emojiAndAura", value: { emoji: 0, aura: "" } },
+        { field: "emojiAndAura", value: { emoji: 0, aura: "none" } },
         async () => undefined,
       ),
     ).resolves.toBe("updated");
@@ -660,7 +652,7 @@ describe("canonical profile mutation reads", () => {
       readCanonicalProfile(db, initial.profile.profileId),
     ).resolves.toEqual({
       ...initial.profile,
-      profile: { ...initial.profile.profile, emoji: 0, aura: "" },
+      profile: { ...initial.profile.profile, emoji: 0, aura: "none" },
       emojiPresent: true,
       gameplayEmoji: 0,
       revision: 2,
@@ -673,9 +665,8 @@ describe("canonical profile mutation reads", () => {
       payload_json: JSON.stringify({
         ...initial.profile.profile,
         emoji: 0,
-        aura: "",
+        aura: "none",
       }),
-      gameplay_emoji_json: "0",
       emoji_present: 1,
       updated_at_ms: 4_000,
       revision: 2,
@@ -686,9 +677,8 @@ describe("canonical profile mutation reads", () => {
     const initial = await createProfile(
       {},
       {
-        legacyFields: { imported: { mining: null } },
         emojiPresent: false,
-        gameplayEmoji: "legacy-gameplay-emoji",
+        gameplayEmoji: 0,
         winPresent: false,
         sortPresence: {
           rating: false,
@@ -886,10 +876,10 @@ describe("canonical profile mutation reads", () => {
       expect(observed.batchQueries.map((queries) => queries.length)).toEqual([
         6, 6,
       ]);
-      expect(observed.batchQueries[0][2]).toContain(
+      expect(observed.batchQueries[0]![2]!).toContain(
         "login_uid = ? AND profile_id = ? AND revision = ?",
       );
-      expect(observed.batchBindings[0][2]).toEqual([
+      expect(observed.batchBindings[0]![2]!).toEqual([
         source.owner.loginUid,
         source.owner.profileId,
         source.owner.revision,
@@ -1052,7 +1042,9 @@ describe("canonical profile mutation reads", () => {
     });
     const retired = await readCanonicalProfile(db, source.profile.profileId);
     expect(retired?.state).toBe("retiring");
-    expect(retired?.profile.cardBackgroundId).toBeUndefined();
+    expect(retired?.profile.cardBackgroundId).toBe(
+      source.profile.profile.cardBackgroundId,
+    );
   });
 
   it("keeps rename and unchanged-name reads within their query budgets", async () => {
@@ -1259,7 +1251,7 @@ describe("canonical profile mutation reads", () => {
     for (const [loginUid, outcome] of [
       [`missing-clear-${crypto.randomUUID()}`, "profile-not-found"],
       [initial.owner.loginUid, "updated"],
-    ]) {
+    ] as const) {
       const observed = observeDatabase();
       await expect(
         createUsernameRepository(testEnv, {
@@ -1383,11 +1375,11 @@ describe("canonical profile mutation reads", () => {
       ).resolves.toBe(outcome);
       expect(observed.firstQueries).toHaveLength(0);
       expect(observed.allQueries).toHaveLength(0);
-      expect(observed.batchQueries[0][1]).toContain(
-        "FROM profile_auth_methods",
+      expect(observed.batchQueries[0]![1]!).toContain(
+        "FROM profile_auth_methods_canonical",
       );
-      expect(observed.batchQueries[0].join("\n")).not.toMatch(
-        /profile_auth_recovery_jobs|profile_february_opponents/,
+      expect(observed.batchQueries[0]!.join("\n")).not.toMatch(
+        /profile_auth_recovery_jobs_canonical|profile_february_opponents_canonical/,
       );
       expect(observed.batchQueries.map((queries) => queries.length)).toEqual(
         outcome === "updated" ? [2, 6] : [2],

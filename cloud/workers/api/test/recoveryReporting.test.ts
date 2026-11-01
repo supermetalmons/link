@@ -33,7 +33,7 @@ test("recovery failure logs allowlisted identity and bounded cause details", () 
     record: { secret: "private" },
   };
   reportRecoveryFailure({ error: (value) => logs.push(value) }, entry, error);
-  assert.deepEqual(JSON.parse(logs[0]), {
+  assert.deepEqual(JSON.parse(logs[0]!), {
     ...context,
     operationId: "invite__match",
     profileId: "profile-1",
@@ -52,8 +52,8 @@ test("recovery failure logs allowlisted identity and bounded cause details", () 
       },
     },
   });
-  assert.equal(logs[0].includes("private"), false);
-  assert.equal(logs[0].includes("stack"), false);
+  assert.equal(logs[0]!.includes("private"), false);
+  assert.equal(logs[0]!.includes("stack"), false);
 });
 
 test("recovery failure logs omit malformed IDs and raw non-Error payloads", () => {

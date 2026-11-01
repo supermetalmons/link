@@ -151,7 +151,9 @@ async function executeAuthMutation(
   const service =
     dependencies.identityService ||
     createAuthIdentityService(env, {
-      authState: dependencies.stateRepository,
+      ...(dependencies.stateRepository === undefined
+        ? {}
+        : { authState: dependencies.stateRepository }),
       signal: operationSignal,
     });
   if (pathname === "/auth/methods/sol/verify") {
@@ -288,7 +290,11 @@ async function executeAuthMutation(
         | Promise<ApiResponse<`POST ${typeof pathname}`>>;
     }
     try {
-      validateSiweLocation(message);
+      validateSiweLocation({
+        ...(message.scheme === undefined ? {} : { scheme: message.scheme }),
+        ...(message.domain === undefined ? {} : { domain: message.domain }),
+        ...(message.uri === undefined ? {} : { uri: message.uri }),
+      });
     } catch (error) {
       await consumeRejectedIntent(
         service,
@@ -392,6 +398,12 @@ async function executeAuthMutation(
         "x-redirect-flow-not-found",
       );
     }
+    if (flow.dataEpoch !== 1)
+      throw new AuthApiFailure(
+        409,
+        "failed-precondition",
+        "application-data-reset",
+      );
     return flow;
   };
   const completedFlowResult = async (
@@ -455,7 +467,7 @@ async function executeAuthMutation(
       if (status === "completed") {
         return completedFlowResult(current);
       }
-      if (status === "failed") {
+      if (status === "failed" || status === "cancelled") {
         if (
           fields.status === "completed" &&
           cleanString(current.errorCode) === "x-redirect-flow-expired"
@@ -498,7 +510,7 @@ async function executeAuthMutation(
         | ApiResponse<`POST ${typeof pathname}`>
         | Promise<ApiResponse<`POST ${typeof pathname}`>>;
     }
-    if (status === "failed") {
+    if (status === "failed" || status === "cancelled") {
       throw new AuthApiFailure(
         409,
         "failed-precondition",
@@ -520,6 +532,7 @@ async function executeAuthMutation(
       await writeTerminalFlow(flow, {
         status: "failed",
         errorCode: "x-redirect-flow-expired",
+        processingStartedAtMs: null,
         updatedAtMs: expiredAtMs,
       });
     } catch (error) {

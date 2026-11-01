@@ -3,6 +3,8 @@ import {
   REACTION_HEARTBEAT_RESPONSE,
 } from "@mons/shared/reactions";
 import { socketSessionRefreshDelay } from "./socketSession";
+import { applicationSocketProtocols } from "../services/applicationTransport.ts";
+import { applicationDataGate } from "../session/applicationDataLifecycle.ts";
 
 export type SnapshotDelivery = {
   source: "http" | "socket";
@@ -73,6 +75,7 @@ export class SnapshotChannel<
   >;
   private readonly controller = new AbortController();
   private readonly removeWakeListener: () => void;
+  private readonly removeApplicationListener: () => void;
   private socket: SnapshotSocket | null = null;
   private reconnectTimer: Timer | null = null;
   private heartbeatTimer: Timer | null = null;
@@ -96,6 +99,13 @@ export class SnapshotChannel<
     this.removeWakeListener = dependencies.addWakeListener(() =>
       this.refresh(),
     );
+    this.removeApplicationListener = applicationDataGate.subscribe(() =>
+      this.stop(),
+    );
+    if (applicationDataGate.blocked) {
+      this.stop();
+      return;
+    }
     this.scheduleReconnect(0);
     if (
       dependencies.initialSnapshotAccepted &&
@@ -120,6 +130,7 @@ export class SnapshotChannel<
     this.clearTimer("reconnectTimer");
     this.disconnect();
     this.removeWakeListener();
+    this.removeApplicationListener();
   }
 
   refresh(): void {
@@ -164,7 +175,11 @@ export class SnapshotChannel<
   }
 
   private isActive(): boolean {
-    return !this.signal.aborted && this.dependencies.isActive();
+    return (
+      !this.signal.aborted &&
+      !applicationDataGate.blocked &&
+      this.dependencies.isActive()
+    );
   }
 
   private now(): number {
@@ -221,7 +236,7 @@ export class SnapshotChannel<
       const retryDelay =
         HTTP_ERROR_DELAYS_MS[
           Math.min(this.httpFailures++, HTTP_ERROR_DELAYS_MS.length - 1)
-        ];
+        ]!;
       const retryAfter = this.dependencies.retryAfterMs(error);
       this.nextHttpAt = this.now() + Math.max(retryDelay, retryAfter);
       this.dependencies.onError(this.dependencies.readError(error));
@@ -277,7 +292,7 @@ export class SnapshotChannel<
     const baseDelay =
       SNAPSHOT_RECONNECT_DELAYS_MS[
         Math.min(this.socketFailures++, SNAPSHOT_RECONNECT_DELAYS_MS.length - 1)
-      ];
+      ]!;
     this.scheduleReconnect(
       Math.round(baseDelay * (0.8 + this.dependencies.random() * 0.2)),
     );
@@ -317,7 +332,7 @@ export class SnapshotChannel<
       try {
         const socket = this.dependencies.createSocket(
           this.dependencies.socketUrl,
-          protocols,
+          applicationSocketProtocols(protocols),
         );
         if (!isPreparing()) {
           socket.close();

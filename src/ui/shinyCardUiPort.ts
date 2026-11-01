@@ -1,3 +1,4 @@
+import type { Aura } from "@mons/shared/appearance";
 import type { PlayerProfile } from "../connection/connectionModels";
 import { flushDeferredProfilePresentation } from "../connection/deferredProfilePresentation";
 
@@ -16,7 +17,7 @@ export type ShinyCardUiApi = {
   updateDisplayName: (displayName: string) => void;
   getActiveInventoryItemSelection: () => ActiveInventoryItemSelection;
   setOwnershipVerifiedSpecialItem: (id: number) => void;
-  setOwnershipVerifiedIdCardEmoji: (id: number, aura: string) => void;
+  setOwnershipVerifiedIdCardEmoji: (id: number, aura: Aura) => void;
 };
 
 let api: ShinyCardUiApi | null = null;
@@ -73,7 +74,7 @@ export const setOwnershipVerifiedSpecialItem = (id: number): void => {
 
 export const setOwnershipVerifiedIdCardEmoji = (
   id: number,
-  aura: string,
+  aura: Aura,
 ): void => {
   getApi().setOwnershipVerifiedIdCardEmoji(id, aura);
 };

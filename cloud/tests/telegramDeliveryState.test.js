@@ -1,5 +1,4 @@
 "use strict";
-
 const assert = require("node:assert/strict");
 const test = require("node:test");
 const {
@@ -12,79 +11,65 @@ const {
   writeCleanup,
   writeDelivery,
 } = require("../runtime/telegram/deliveryState");
-
+const { readTelegramDelivery } = require("../runtime/telegram/recordCodec");
 const retry = {
-  retryStartedAtMs: 1_000,
-  retryDeadlineAtMs: 601_000,
-  retryAtMs: 2_000,
+  retryStartedAtMs: 1000,
+  retryDeadlineAtMs: 601000,
+  retryAtMs: 2000,
   retrySequence: 1,
 };
-
-test("delivery views retain historical encodings and untouched fields", () => {
+/** @type {import("../runtime/telegram/records").TelegramCleanupDocument} */
+const cleanup = {
+  status: "processing",
+  pendingDeleteId: "cleanup",
+  chatId: "chat",
+  messageId: 42,
+  instanceKey: "old",
+  leaseOwner: "cleanup-owner",
+  leaseExpiresAtMs: 60000,
+};
+test("delivery views preserve validated lifecycle fields without coercion", () => {
+  /** @type {import("../runtime/telegram/records").TelegramDeliveryDocument} */
   const source = {
-    status: "historical-status",
-    revision: " revision-1 ",
-    attempts: "2",
-    leaseOwner: " owner-1 ",
-    leaseExpiresAtMs: "1500.5",
-    retryStartedAtMs: "0",
-    retryDeadlineAtMs: null,
-    retrySequence: "3",
-    sendInFlight: true,
-    future: { version: 7, nested: [null, { keep: true }] },
-    pendingDelete: {
-      status: "historical-cleanup",
-      chatId: "chat-1",
-      messageId: "42",
-      retryStartedAtMs: "0",
-      retrySequence: null,
-      future: { keep: true },
-    },
-  };
-  const original = structuredClone(source);
-  const delivery = readDelivery(source);
-  assert.equal(delivery.kind, "legacy");
-  assert.equal(delivery.revision, " revision-1 ");
-  assert.equal(delivery.matchesRevision("revision-1"), true);
-  assert.equal(delivery.attempts, 0);
-  assert.equal(delivery.leaseOwner, "owner-1");
-  assert.equal(delivery.leaseExpiresAtMs, 1500.5);
-  assert.equal(delivery.retryTimestampOr("retryStartedAtMs", 9_000), 0);
-  assert.equal(delivery.retryTimestampOr("retryDeadlineAtMs", 9_000), 9_000);
-  assert.equal(delivery.retrySequenceOr(9), 0);
-  assert.equal(Boolean(delivery.sendInFlight), true);
-  assert.equal(delivery.pendingDelete.kind, "legacy");
-  assert.equal(delivery.pendingDelete.retrySequenceOr(9), 9);
-  assert.equal(readPendingDelete(null).kind, "missing");
-  assert.equal(
-    resolvePendingDeleteId(delivery.pendingDelete),
-    resolvePendingDeleteId(source.pendingDelete),
-  );
-  assert.deepEqual(deliveryDocument(delivery), original);
-  assert.deepEqual(source, original);
-});
-
-test("typed transitions preserve unknown fields and explicit omissions", () => {
-  const original = {
     status: "processing",
-    revision: "revision-1",
-    attempts: 1,
-    leaseOwner: "owner-1",
-    leaseExpiresAtMs: 60_000,
-    apiGateOwner: "gate-1",
-    future: { keep: true },
-    explicitNull: null,
-    pendingDelete: {
-      status: "processing",
-      leaseOwner: "cleanup-owner",
-      leaseExpiresAtMs: 60_000,
-      chatId: "chat-1",
-      messageId: 42,
-      future: { keep: true },
-    },
+    revision: "revision",
+    attempts: 2,
+    leaseOwner: "owner",
+    leaseExpiresAtMs: 1500,
+    ...retry,
+    pendingDelete: cleanup,
   };
-  const snapshot = readDelivery(original);
-  const cleanup = writeCleanup({
+  assert.ok(readTelegramDelivery(source));
+  const snapshot = readDelivery(source);
+  assert.equal(snapshot.kind, "processing");
+  assert.equal(snapshot.attempts, 2);
+  assert.equal(snapshot.leaseOwner, "owner");
+  assert.equal(snapshot.retrySequenceOr(9), 1);
+  assert.equal(snapshot.pendingDelete.kind, "processing");
+  assert.equal(resolvePendingDeleteId(snapshot.pendingDelete), "cleanup");
+  assert.equal(readPendingDelete(null).kind, "missing");
+  assert.deepEqual(deliveryDocument(snapshot), source);
+  for (const patch of [
+    { status: "historical" },
+    { attempts: "2" },
+    { leaseExpiresAtMs: "1500" },
+    { future: {} },
+  ])
+    assert.equal(readTelegramDelivery({ ...source, ...patch }), null);
+});
+test("typed transitions preserve named metadata and remove expired leases", () => {
+  /** @type {import("../runtime/telegram/records").TelegramDeliveryDocument} */
+  const source = {
+    status: "processing",
+    revision: "revision",
+    attempts: 1,
+    leaseOwner: "owner",
+    leaseExpiresAtMs: 60000,
+    apiGateOwner: "gate",
+    pendingDelete: cleanup,
+  };
+  const snapshot = readDelivery(source);
+  const pendingDelete = writeCleanup({
     ...omitKeys(snapshot.pendingDelete, ["leaseOwner", "leaseExpiresAtMs"]),
     status: "retryable",
     ...retry,
@@ -92,42 +77,59 @@ test("typed transitions preserve unknown fields and explicit omissions", () => {
   const next = writeDelivery({
     ...omitKeys(snapshot, ["leaseOwner", "leaseExpiresAtMs"]),
     status: "retryable",
-    revision: "revision-1",
+    revision: "revision",
     ...retry,
-    pendingDelete: cleanup,
+    pendingDelete,
   });
-  assert.deepEqual(next.future, original.future);
-  assert.deepEqual(next.pendingDelete.future, original.pendingDelete.future);
-  assert.equal(next.explicitNull, null);
-  assert.equal(next.apiGateOwner, "gate-1");
-  assert.equal(Object.hasOwn(next, "leaseOwner"), false);
-  assert.equal(Object.hasOwn(next.pendingDelete, "leaseOwner"), false);
-  assert.equal(Object.hasOwn(next, "source"), false);
-  assert.equal(Object.hasOwn(next.pendingDelete, "source"), false);
-  assert.equal(original.leaseOwner, "owner-1");
-  assert.deepEqual(JSON.parse(JSON.stringify(next)), next);
+  assert.equal(next.apiGateOwner, "gate");
+  assert.equal(next.leaseOwner, undefined);
+  assert.ok(next.pendingDelete);
+  assert.equal(next.pendingDelete.leaseOwner, undefined);
+  assert.equal(next.pendingDelete.messageId, 42);
+  assert.equal(source.leaseOwner, "owner");
+  assert.throws(
+    () => Reflect.apply(writeDelivery, undefined, [{ ...next, future: {} }]),
+    /invalid-telegram-delivery-transition/,
+  );
 });
-
-test("uncertain transitions preserve malformed evidence and absent fields", () => {
-  for (const evidence of [
-    true,
-    "interrupted",
-    ["legacy"],
-    { future: true },
-    null,
-  ]) {
-    const next = writeDelivery({
+test("uncertain transitions require complete typed evidence when present", () => {
+  /** @type {import("../runtime/telegram/records").TelegramSendEvidence} */
+  const evidence = {
+    attemptId: "attempt",
+    revision: "revision",
+    destination: "community",
+    chatId: "chat",
+    instanceKey: "instance",
+    contentHash: "content",
+    startedAtMs: 1,
+    apiGateOwner: "send:attempt",
+  };
+  assert.deepEqual(
+    writeDelivery({
       status: "uncertain",
-      revision: "revision-1",
+      revision: "revision",
       sendInFlight: preserveSendEvidence(evidence),
-    });
-    assert.deepEqual(next.sendInFlight, evidence);
-    assert.deepEqual(JSON.parse(JSON.stringify(next)), next);
-  }
-  const absent = writeDelivery({
-    status: "uncertain",
-    revision: "revision-1",
-    sendInFlight: preserveSendEvidence(undefined, false),
-  });
-  assert.equal(Object.hasOwn(absent, "sendInFlight"), false);
+    }).sendInFlight,
+    evidence,
+  );
+  assert.equal(
+    writeDelivery({
+      status: "uncertain",
+      revision: "revision",
+      sendInFlight: preserveSendEvidence(undefined, false),
+    }).sendInFlight,
+    undefined,
+  );
+  for (const malformed of [true, {}, { attemptId: "incomplete" }])
+    assert.throws(
+      () =>
+        writeDelivery({
+          status: "uncertain",
+          revision: "revision",
+          sendInFlight: Reflect.apply(preserveSendEvidence, undefined, [
+            malformed,
+          ]),
+        }),
+      /invalid-telegram-delivery-transition/,
+    );
 });

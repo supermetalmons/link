@@ -49,10 +49,10 @@ function fixture() {
 test("receipt status reports pinned Workflows and lock ownership without taking the lock or changing controls", async () => {
   const f = fixture();
   await inspectEventReceipts(f.deps);
-  assert.equal(f.logs[0].state, "active");
-  assert.equal(f.logs[0].workflows, 1);
-  assert.equal(f.logs[0].versionId, VERSION);
-  assert.deepEqual(f.logs[0].operatorLock, {
+  assert.equal(f.logs[0]!.state, "active");
+  assert.equal(f.logs[0]!.workflows, 1);
+  assert.equal(f.logs[0]!.versionId, VERSION);
+  assert.deepEqual(f.logs[0]!.operatorLock, {
     owner_token: "orphan",
     operation: "retired-import",
     created_at_ms: 100,
@@ -151,7 +151,7 @@ test("receipt provider performs only bounded read-only deployment and Workflow q
     },
   });
   assert.equal(await provider.deployment(), VERSION);
-  assert.equal((await provider.workflowPage(1)).rows[0].id, "pinned");
+  assert.equal((await provider.workflowPage(1)).rows[0]!.id, "pinned");
   assert.equal(urls.length, 2);
   assert.deepEqual(Object.keys(provider).sort(), [
     "deployment",

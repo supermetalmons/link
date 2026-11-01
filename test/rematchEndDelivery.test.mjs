@@ -1,3 +1,4 @@
+import { required } from "./fixtures/canonicalData.mjs";
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
@@ -18,29 +19,37 @@ const nextRecord = {
   operationId: "00000000-0000-4000-8000-000000000002",
 };
 
+/** @typedef {ConstructorParameters<typeof RematchEndDelivery>[1]} Dependencies */
+/** @returns {PromiseWithResolvers<void>} */
 function deferred() {
-  let resolve;
-  let reject;
-  const promise = new Promise((yes, no) => {
-    resolve = yes;
-    reject = no;
-  });
-  return { promise, resolve, reject };
+  return Promise.withResolvers();
 }
 
 const settle = async () => {
   for (let i = 0; i < 10; i += 1) await Promise.resolve();
 };
 
+/** @param {{ entries?: Map<string, string>, online?: boolean, scope?: ConstructorParameters<typeof RematchEndDelivery>[0], storage?: Dependencies["storage"], submit?: Dependencies["submit"] }} [options] */
 function harness(options = {}) {
   const entries = options.entries ?? new Map();
+  /**
+   * @type {import("../src/connection/rematchEndDelivery.ts").PendingRematchEnd[]}
+   */
   const calls = [];
+  /**
+   * @type {import("../src/connection/rematchEndDelivery.ts").PendingRematchEnd[]}
+   */
   const confirmed = [];
+  /**
+   * @type {Error[]}
+   */
   const errors = [];
+  /** @type {Map<number, { callback: () => void, delayMs: number }>} */
   const timers = new Map();
   let nextTimer = 0;
   let authorized = true;
   let online = options.online ?? true;
+  /** @type {NonNullable<Dependencies["storage"]>} */
   const storage = {
     getItem: (key) => entries.get(key) ?? null,
     setItem: (key, value) => entries.set(key, value),
@@ -54,7 +63,7 @@ function harness(options = {}) {
       calls.push(value);
       if (options.storage === undefined) {
         assert.equal(
-          JSON.parse(entries.get(key)).record.operationId,
+          JSON.parse(required(entries.get(key))).record.operationId,
           value.operationId,
         );
       }
@@ -67,7 +76,7 @@ function harness(options = {}) {
       timers.set(id, { callback, delayMs });
       return id;
     },
-    clearTimer: (id) => timers.delete(id),
+    clearTimer: (id) => typeof id === "number" && timers.delete(id),
   });
   return {
     delivery,
@@ -76,10 +85,10 @@ function harness(options = {}) {
     confirmed,
     errors,
     timers,
-    setAuthorized: (value) => (authorized = value),
-    setOnline: (value) => (online = value),
+    setAuthorized: (/** @type {boolean} */ value) => (authorized = value),
+    setOnline: (/** @type {boolean} */ value) => (online = value),
     fireTimer() {
-      const [id, timer] = timers.entries().next().value;
+      const [id, timer] = required(timers.entries().next().value);
       timers.delete(id);
       timer.callback();
       return timer.delayMs;
@@ -91,10 +100,10 @@ test("end persists before submission and clears only after confirmation", async 
   const pending = deferred();
   const h = harness({ submit: () => pending.promise });
   assert.equal(h.delivery.accept(record), true);
-  assert.deepEqual(JSON.parse(h.entries.get(key)).record, record);
+  assert.deepEqual(JSON.parse(required(h.entries.get(key))).record, record);
   assert.deepEqual(h.delivery.pending, record);
   assert.deepEqual(h.confirmed, []);
-  pending.resolve();
+  required(pending.resolve)();
   await settle();
   assert.equal(h.delivery.pending, null);
   assert.equal(h.entries.has(key), false);
@@ -123,7 +132,7 @@ test("repeated clicks and wake events keep one in-flight operation", async () =>
   h.delivery.refresh();
   assert.deepEqual(h.calls, [record]);
   assert.deepEqual(h.delivery.pending, record);
-  pending.resolve();
+  required(pending.resolve)();
   await settle();
   assert.deepEqual(h.confirmed, [record]);
 });
@@ -160,13 +169,13 @@ test("rate limiting preserves the intent and waits one minute before retry", asy
   });
   h.delivery.accept(record);
   await settle();
-  assert.equal(h.timers.values().next().value.delayMs, 60_000);
+  assert.equal(required(h.timers.values().next().value).delayMs, 60_000);
   assert.equal(h.entries.has(key), true);
   h.delivery.refresh();
   h.delivery.refresh();
   h.delivery.accept(nextRecord);
   assert.equal(h.calls.length, 1);
-  assert.equal(h.timers.values().next().value.delayMs, 60_000);
+  assert.equal(required(h.timers.values().next().value).delayMs, 60_000);
   h.delivery.pause();
 });
 
@@ -202,7 +211,11 @@ test("authentication and permanent failures pause without deleting the intent", 
 });
 
 test("metadata retry-after controls backoff without overflowing timers", async () => {
-  for (const [code, retryAfterMs, expectedMs] of [
+  for (const [
+    code,
+    retryAfterMs,
+    expectedMs,
+  ] of /** @type {[string, number | undefined, number][]} */ ([
     ["http-429", undefined, 60_000],
     ["http-429", 120_000, 120_000],
     ["http-429", 0, 60_000],
@@ -211,7 +224,7 @@ test("metadata retry-after controls backoff without overflowing timers", async (
     ["http-429", NaN, 60_000],
     ["http-429", Number.MAX_SAFE_INTEGER, 2_147_483_647],
     ["http-503", 90_000, 90_000],
-  ]) {
+  ])) {
     const h = harness({
       submit: () =>
         Promise.reject(
@@ -223,7 +236,7 @@ test("metadata retry-after controls backoff without overflowing timers", async (
     });
     h.delivery.accept(record);
     await settle();
-    assert.equal(h.timers.values().next().value.delayMs, expectedMs);
+    assert.equal(required(h.timers.values().next().value).delayMs, expectedMs);
     assert.equal(h.entries.has(key), true);
     h.delivery.refresh();
     assert.equal(h.calls.length, 1);
@@ -237,7 +250,7 @@ test("account changes pause delivery and an old response cannot confirm another 
   h.delivery.accept(record);
   h.setAuthorized(false);
   h.delivery.pause();
-  pending.resolve();
+  required(pending.resolve)();
   await settle();
   assert.deepEqual(h.delivery.pending, record);
   assert.equal(h.confirmed.length, 0);
@@ -289,15 +302,15 @@ test("late completion cannot clear a newer intent", async () => {
   h.delivery.confirm();
   h.delivery.accept(nextRecord);
   assert.equal(h.calls.length, 1);
-  first.resolve();
+  required(first.resolve)();
   await settle();
   assert.deepEqual(h.delivery.pending, nextRecord);
   assert.equal(
-    JSON.parse(h.entries.get(key)).record.operationId,
+    JSON.parse(required(h.entries.get(key))).record.operationId,
     nextRecord.operationId,
   );
   assert.equal(h.calls.length, 2);
-  second.resolve();
+  required(second.resolve)();
   await settle();
   assert.deepEqual(h.confirmed, [record, nextRecord]);
 });
@@ -331,7 +344,7 @@ test("unavailable persistence keeps the end in memory through retries", async ()
     h.fireTimer();
     assert.deepEqual(h.calls, [record, record]);
     assert.deepEqual(h.delivery.pending, record);
-    pending.resolve();
+    required(pending.resolve)();
     await settle();
     assert.equal(h.delivery.pending, null);
     assert.deepEqual(h.confirmed, [record]);
@@ -370,7 +383,7 @@ test("new intent rejects invalid scope and cannot be accepted by another account
   assert.equal(h.entries.size, 0);
 });
 
-test("confirmation removes only the matching stored operation even when its envelope is otherwise incomplete", () => {
+test("confirmation leaves incomplete stored envelopes untouched", () => {
   for (const operationId of [record.operationId, nextRecord.operationId]) {
     const h = harness({ online: false });
     assert.equal(h.delivery.accept(record), true);
@@ -380,9 +393,6 @@ test("confirmation removes only the matching stored operation even when its enve
     assert.equal(h.delivery.pending, null);
     assert.deepEqual(h.confirmed, [record]);
     assert.deepEqual(h.errors, []);
-    assert.equal(
-      h.entries.get(key),
-      operationId === record.operationId ? undefined : stored,
-    );
+    assert.equal(h.entries.get(key), stored);
   }
 });

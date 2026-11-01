@@ -1,50 +1,25 @@
 import {
-  MATCH_TIMER_TERMINAL,
-  parseStrictMatchTimer,
+  isTimerClaim,
   type ClaimedTimerWrite,
+  type TimerClaim,
+  type PendingTimerClaim,
 } from "@mons/shared/timers";
-import { isCanonicalLoginUid } from "./recordKeys.ts";
 export type { ClaimedTimerWrite } from "@mons/shared/timers";
 
-declare const timerClaimDocument: unique symbol;
+export type TimerClaimDocument = TimerClaim;
+export type RetainedTimerClaim = TimerClaim | null;
+export type TimerClaimWireValue = RetainedTimerClaim;
 
-export type TimerClaimDocument = { readonly [timerClaimDocument]: true };
-export type RetainedTimerClaim =
-  undefined | null | boolean | number | string | TimerClaimDocument;
-export type TimerClaimWireValue =
-  undefined | null | boolean | number | string | object;
-
-type ClaimFields = {
-  status?: unknown;
-  inviteId?: unknown;
-  playerId?: unknown;
-  opponentId?: unknown;
-  timer?: unknown;
-  turnNumber?: unknown;
-  claimedAtMs?: unknown;
-  expiresAtMs?: unknown;
-};
-
-const fields = (value: RetainedTimerClaim): ClaimFields => value as ClaimFields;
-
-export function readRetainedTimerClaim(value: object): TimerClaimDocument;
-export function readRetainedTimerClaim(value: unknown): RetainedTimerClaim;
 export function readRetainedTimerClaim(value: unknown): RetainedTimerClaim {
-  if (
-    value === undefined ||
-    value === null ||
-    typeof value === "boolean" ||
-    typeof value === "number" ||
-    typeof value === "string"
-  )
-    return value;
-  if (typeof value === "object") return value as TimerClaimDocument;
-  throw new TypeError("match-state-invalid-json");
+  if (value === null) return null;
+  if (!isTimerClaim(value)) throw new TypeError("match-state-invalid-claim");
+  return value;
 }
 
-export function readStoredTimerClaim(json: string): RetainedTimerClaim {
+export function readStoredTimerClaim(json: string): TimerClaimDocument {
   const value: unknown = JSON.parse(json);
-  return readRetainedTimerClaim(value);
+  if (!isTimerClaim(value)) throw new TypeError("match-state-invalid-claim");
+  return value;
 }
 
 export function timerClaimWireValue(
@@ -56,54 +31,24 @@ export function timerClaimWireValue(
 export function timerClaimStatus(
   value: RetainedTimerClaim,
 ): "pending" | "claimed" | null {
-  const status = fields(value)?.status;
-  return status === "pending" || status === "claimed" ? status : null;
+  return value?.status ?? null;
 }
 
 export function pendingTimerClaim(
   value: RetainedTimerClaim,
-): { expiresAtMs: number } | null {
-  const claim = fields(value);
-  return claim?.status === "pending" && typeof claim.expiresAtMs === "number"
-    ? { expiresAtMs: claim.expiresAtMs }
-    : null;
+): PendingTimerClaim | null {
+  return value?.status === "pending" ? value : null;
 }
 
-export type CommittedTimerClaim = Omit<ClaimedTimerWrite, "expiresAtMs">;
+export type CommittedTimerClaim = ClaimedTimerWrite;
 
 export function readCommittedTimerClaim(
   value: RetainedTimerClaim,
   inviteId: string,
-): (CommittedTimerClaim & { document: TimerClaimDocument }) | null {
-  const claim = fields(value);
-  const timer = parseStrictMatchTimer(claim.timer);
-  if (
-    claim.status !== "claimed" ||
-    claim.inviteId !== inviteId ||
-    !isCanonicalLoginUid(claim.playerId) ||
-    !isCanonicalLoginUid(claim.opponentId) ||
-    claim.playerId === claim.opponentId ||
-    !Number.isSafeInteger(claim.turnNumber) ||
-    (claim.turnNumber as number) < 0 ||
-    !(
-      claim.timer === MATCH_TIMER_TERMINAL ||
-      timer?.turnNumber === claim.turnNumber
-    ) ||
-    !Number.isSafeInteger(claim.claimedAtMs) ||
-    (claim.claimedAtMs as number) < 0 ||
-    claim.expiresAtMs != null
-  )
-    return null;
-  return {
-    document: value as TimerClaimDocument,
-    status: "claimed",
-    inviteId: claim.inviteId,
-    playerId: claim.playerId,
-    opponentId: claim.opponentId,
-    timer: claim.timer as string,
-    turnNumber: claim.turnNumber as number,
-    claimedAtMs: claim.claimedAtMs as number,
-  };
+): (CommittedTimerClaim & { document: ClaimedTimerWrite }) | null {
+  return value?.status === "claimed" && value.inviteId === inviteId
+    ? { ...value, document: value }
+    : null;
 }
 
 export function timerClaimIdentityMatches(
@@ -112,16 +57,17 @@ export function timerClaimIdentityMatches(
   opponentId: string,
   inviteId: string,
 ): boolean {
-  const claim = fields(value);
   return (
-    claim.playerId === playerId &&
-    claim.opponentId === opponentId &&
-    claim.inviteId === inviteId
+    value !== null &&
+    value.playerId === playerId &&
+    value.opponentId === opponentId &&
+    value.inviteId === inviteId
   );
 }
 
 export function createClaimedTimerDocument(
   value: ClaimedTimerWrite,
-): TimerClaimDocument {
-  return value as object as TimerClaimDocument;
+): ClaimedTimerWrite {
+  if (!isTimerClaim(value)) throw new TypeError("match-state-invalid-claim");
+  return structuredClone(value);
 }

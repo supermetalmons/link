@@ -42,6 +42,7 @@ test("surrender contracts identify a match and actor without accepting mutable f
         false,
       );
     }
+    /** @type {Record<string, unknown>} */
     const missing = { ...request };
     delete missing[field];
     assert.equal(isSurrenderMatchRequest(missing), false);

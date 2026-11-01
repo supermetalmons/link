@@ -1,3 +1,5 @@
+import { required } from "./fixtures/canonicalData.mjs";
+import { applicationStorageKey } from "../src/session/applicationDataStorage.ts";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
@@ -6,10 +8,11 @@ const previousLocalStorage = Object.getOwnPropertyDescriptor(
   globalThis,
   "localStorage",
 );
+/** @type {Map<string, string>} */
 const values = new Map();
 Object.defineProperty(globalThis, "localStorage", {
   configurable: true,
-  value: {
+  value: /** @satisfies {Storage} */ ({
     clear: () => values.clear(),
     getItem: (key) => values.get(key) ?? null,
     key: (index) => Array.from(values.keys())[index] ?? null,
@@ -18,7 +21,7 @@ Object.defineProperty(globalThis, "localStorage", {
     },
     removeItem: (key) => values.delete(key),
     setItem: (key, value) => values.set(key, String(value)),
-  },
+  }),
 });
 
 const { storage } = await import("../src/utils/storage.ts");
@@ -29,8 +32,11 @@ const connectionSource = readFileSync(
   "utf8",
 );
 
-const OPERATION_KEY = "pendingAutomatchOperation:login-uid";
+const OPERATION_KEY = applicationStorageKey(
+  "pendingAutomatchOperation:login-uid",
+);
 const OPERATION_ID = "00000000-0000-4000-8000-000000000001";
+/** @type {import("../src/utils/storage.ts").PendingAutomatchOperation} */
 const VALID_OPERATION = {
   createdAtMs: 1_750_000_000_000,
   operationId: OPERATION_ID,
@@ -39,6 +45,7 @@ const VALID_OPERATION = {
   uid: "login-uid",
 };
 
+/** @param {string} start @param {string} end */
 const methodSource = (start, end) => {
   const startIndex = connectionSource.indexOf(start);
   const endIndex = connectionSource.indexOf(end, startIndex + start.length);
@@ -53,22 +60,32 @@ test.after(() => {
   if (previousLocalStorage) {
     Object.defineProperty(globalThis, "localStorage", previousLocalStorage);
   } else {
-    delete globalThis.localStorage;
+    Reflect.deleteProperty(globalThis, "localStorage");
   }
 });
 
 test("round-trips and defensively reads a pending automatch operation", () => {
   storage.setPendingAutomatchOperation(VALID_OPERATION.uid, VALID_OPERATION);
 
-  assert.equal(JSON.parse(values.get(OPERATION_KEY)).resolvedInviteId, null);
-  const stored = storage.getPendingAutomatchOperation(VALID_OPERATION.uid);
+  /** @type {unknown} */
+  const serialized = JSON.parse(required(values.get(OPERATION_KEY)));
+  assert.ok(
+    serialized !== null &&
+      typeof serialized === "object" &&
+      "resolvedInviteId" in serialized,
+  );
+  assert.equal(serialized.resolvedInviteId, null);
+  const stored = required(
+    storage.getPendingAutomatchOperation(VALID_OPERATION.uid),
+  );
   assert.deepEqual(stored, VALID_OPERATION);
   assert.notStrictEqual(stored, VALID_OPERATION);
   assert.notStrictEqual(stored.request, VALID_OPERATION.request);
 
-  stored.request.aura = "changed";
+  stored.request.aura = "none";
   assert.equal(
-    storage.getPendingAutomatchOperation(VALID_OPERATION.uid).request.aura,
+    required(storage.getPendingAutomatchOperation(VALID_OPERATION.uid)).request
+      .aura,
     "rainbow",
   );
 
@@ -89,15 +106,15 @@ test("rejects malformed pending automatch operations", () => {
     { ...VALID_OPERATION, resolvedInviteId: "invalid/invite" },
     { ...VALID_OPERATION, createdAtMs: 0 },
     { ...VALID_OPERATION, createdAtMs: 1.5 },
-    { ...VALID_OPERATION, request: { emojiId: 0, aura: "" } },
+    { ...VALID_OPERATION, request: { emojiId: -1, aura: "none" } },
     {
       ...VALID_OPERATION,
-      request: { emojiId: Number.MAX_SAFE_INTEGER + 1, aura: "" },
+      request: { emojiId: Number.MAX_SAFE_INTEGER + 1, aura: "none" },
     },
     { ...VALID_OPERATION, request: { emojiId: 7, aura: 3 } },
     {
       ...VALID_OPERATION,
-      request: { emojiId: 7, aura: "", unexpected: true },
+      request: { emojiId: 7, aura: "none", unexpected: true },
     },
   ];
 
@@ -134,20 +151,25 @@ test("serializes automatch start and cancel through the same user lock", () => {
     "public async removeWaitingNavigationGame(",
   );
 
-  for (const [source, apiCall] of [
+  for (const [source, apiCall] of /** @type {const} */ ([
     [startSource, "startAutomatchViaApi("],
     [cancelSource, "cancelAutomatchViaApi("],
-  ]) {
-    const lockIndex = source.indexOf("withAutomatchOperationLock(user.uid");
-    const apiIndex = source.indexOf(apiCall);
+  ])) {
+    const lockIndex = required(source).indexOf(
+      "withAutomatchOperationLock(user.uid",
+    );
+    const apiIndex = required(source).indexOf(apiCall);
     assert.notEqual(lockIndex, -1);
     assert.ok(apiIndex > lockIndex);
   }
 });
 
 test("executes same-user operations serially through the Web-Lock wrapper", async () => {
+  /** @type {Map<string, Promise<void>>} */
   const tails = new Map();
+  /** @type {string[]} */
   const requestedNames = [];
+  /** @type {import("../src/connection/automatchOperationLock.ts").AutomatchOperationLockManager} */
   const lockManager = {
     request: (name, callback) => {
       requestedNames.push(name);
@@ -165,6 +187,7 @@ test("executes same-user operations serially through the Web-Lock wrapper", asyn
   };
   let active = 0;
   let maxActive = 0;
+  /** @type {Array<number>} */
   const completionOrder = [];
 
   const results = await Promise.all(
@@ -273,12 +296,13 @@ test("keeps queued retries on one operation until resolved-invite cleanup", () =
   );
 
   storage.setPendingAutomatchOperation(VALID_OPERATION.uid, VALID_OPERATION);
+  /** @type {string[]} */
   const seenOperationIds = [];
   for (let index = 0; index < 8; index += 1) {
     const pending = storage.getPendingAutomatchOperation(VALID_OPERATION.uid);
-    seenOperationIds.push(pending.operationId);
+    seenOperationIds.push(required(pending).operationId);
     storage.setPendingAutomatchOperation(VALID_OPERATION.uid, {
-      ...pending,
+      ...required(pending),
       resolvedInviteId: "auto_resolved",
     });
   }

@@ -28,7 +28,7 @@ import {
 type AppSessionTarget = RouteState;
 type PendingTransitionRequest = {
   target: RouteState;
-  options?: SessionTransitionOptions;
+  options: SessionTransitionOptions | undefined;
   waiters: Array<() => void>;
 };
 
@@ -278,9 +278,11 @@ export const transitionToHome = async (options?: TransitionToHomeOptions) => {
     shouldForceMatchScopeReset
   ) {
     await transition(homeTarget, {
-      resetProfileScope: options?.resetProfileScope,
+      ...(options?.resetProfileScope === undefined
+        ? {}
+        : { resetProfileScope: options.resetProfileScope }),
       force: shouldForceMatchScopeReset,
-      replace: options?.replace,
+      ...(options?.replace === undefined ? {} : { replace: options.replace }),
     });
   } else if (options?.resetProfileScope) {
     const lifecycleManager = await import("../lifecycle/lifecycleManager");

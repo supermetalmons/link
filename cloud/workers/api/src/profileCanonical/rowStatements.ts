@@ -5,13 +5,13 @@ export function canonicalRowMutationStatement<
 >(
   db: D1Database,
   table:
-    | "profile_records"
-    | "rating_updates"
-    | "profile_auth_methods"
-    | "profile_auth_operations"
+    | "profile_records_canonical"
+    | "rating_updates_canonical"
+    | "profile_auth_methods_canonical"
+    | "profile_auth_operations_canonical"
     | "profile_auth_method_revocations"
     | "profile_auth_method_cooldowns"
-    | "profile_auth_recovery_jobs",
+    | "profile_auth_recovery_jobs_canonical",
   keyColumn:
     | (keyof Row & string)
     | readonly [keyof Row & string, ...(keyof Row & string)[]],

@@ -1,3 +1,8 @@
+import type {
+  AutomatchTelegramSourceRecord,
+  AutomatchTelegramOutboxRecord,
+  AutomatchProfileOutboxRecord,
+} from "../../../runtime/automatchRecords.js";
 import type { InviteDocument } from "@mons/shared/invite-records";
 import type { GameSessionChange } from "../../../runtime/gameSessionChanges.js";
 import type {
@@ -18,18 +23,22 @@ export type RawAutomatchProjectionPort = {
   ): Promise<AutomatchRecordValue<"telegramAutomatches">>;
   transactAutomatchTelegramSource(
     inviteId: string,
-    update: (current: unknown) => TransactionDecision<unknown>,
+    update: (
+      current: AutomatchTelegramSourceRecord | null,
+    ) => TransactionDecision<AutomatchTelegramSourceRecord>,
     signal?: AbortSignal,
-  ): Promise<TransactionResult<unknown>>;
+  ): Promise<TransactionResult<AutomatchTelegramSourceRecord>>;
   readAutomatchTelegramOutbox(
     inviteId: string,
     signal?: AbortSignal,
   ): Promise<AutomatchRecordValue<"telegramProjectionOutbox/automatch">>;
   transactAutomatchTelegramOutbox(
     inviteId: string,
-    update: (current: unknown) => TransactionDecision<unknown>,
+    update: (
+      current: AutomatchTelegramOutboxRecord | null,
+    ) => TransactionDecision<AutomatchTelegramOutboxRecord>,
     signal?: AbortSignal,
-  ): Promise<TransactionResult<unknown>>;
+  ): Promise<TransactionResult<AutomatchTelegramOutboxRecord>>;
   claimAutomatchTelegramOutbox(
     inviteId: string,
     requestId: string,
@@ -63,9 +72,11 @@ export type RawAutomatchProjectionPort = {
   ): Promise<AutomatchRecordValue<"profileGameProjectionOutbox/automatch">>;
   transactAutomatchProfileOutbox(
     inviteId: string,
-    update: (current: unknown) => TransactionDecision<unknown>,
+    update: (
+      current: AutomatchProfileOutboxRecord | null,
+    ) => TransactionDecision<AutomatchProfileOutboxRecord>,
     signal?: AbortSignal,
-  ): Promise<TransactionResult<unknown>>;
+  ): Promise<TransactionResult<AutomatchProfileOutboxRecord>>;
   claimAutomatchProfileOutbox(
     inviteId: string,
     requestId: string,

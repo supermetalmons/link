@@ -1,3 +1,5 @@
+import { Game } from "mons-rules";
+import { canonicalMatch, required } from "./fixtures/canonicalData.mjs";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { registerHooks } from "node:module";
@@ -63,33 +65,54 @@ const declarations = [
   return declaration.getText(source).replace(/^export /, "");
 });
 
-const home = { mode: "home", path: "", autojoin: false };
+/** @type {import("../src/navigation/routeState.ts").RouteState} */
+const home = {
+  mode: "home",
+  path: "",
+  autojoin: false,
+  inviteId: null,
+  snapshotId: null,
+  eventId: null,
+};
+/** @returns {import("../src/navigation/routeState.ts").RouteState} */
 const invite = (inviteId = "next", autojoin = false) => ({
+  ...home,
   mode: "invite",
   path: inviteId,
   inviteId,
   autojoin,
 });
 
+/** @param {{pendingAutomatch?: boolean; route?: import("../src/navigation/routeState.ts").RouteState; waiting?: boolean; snapshotValid?: boolean}} [options] */
 function harness({
   pendingAutomatch = false,
   route = home,
   waiting = false,
   snapshotValid = true,
 } = {}) {
+  /** @type {Array<[string, ...unknown[]]>} */
   const events = [];
+  /** @type {Record<string, unknown>} */
   const ui = {};
+  /** @type {Set<(value: {agreed: string} | null) => void>} */
   const subscriptions = new Set();
   const pendingTimeouts = new Set([1, 2]);
+  /** @type {ResetApi | undefined} */
   let api;
+  /** @type {string | null} */
   let wagerMatch = "old";
+  /** @type {{agreed: string} | null} */
   let wagerSnapshot = { agreed: "old" };
+  /** @type {Array<Partial<import("../src/game/gameControlsModel.ts").GameControlsContext>>} */
   const contexts = [];
   const initial = {
     activeRouteState: route,
     initialWagersMatchId: "old",
     cancelRematchScoresPreload: () =>
-      events.push(["preload-cancel", api.state().initialWagersMatchId]),
+      events.push([
+        "preload-cancel",
+        required(api).state().initialWagersMatchId,
+      ]),
     isOnlineGame: true,
     isGameWithBot: true,
     isWaitingForRematchResponse: true,
@@ -105,8 +128,8 @@ function harness({
     isInviteBotIntoLocalGameUnavailable: true,
     didMakeFirstLocalPlayerMoveOnLocalBoard: true,
     isWatchOnly: true,
-    watchOnlyListeners: new Set(),
-    boardViewMode: "historicalView",
+    watchOnlyListeners: new Set(/** @type {Array<() => void>} */ ([])),
+    boardViewMode: /** @type {const} */ ("historicalView"),
     boardRenderSessionId: 4,
     moveHistoryFlipOverrideEnabled: true,
     moveHistoryFlipOverrideSessionId: 4,
@@ -134,26 +157,40 @@ function harness({
     playerSideColor: "black",
     currentGameVariant: "old",
     isMoveHistoryPopupOpen: true,
-    game: {
-      contentPositions: () => [],
-      winner: undefined,
-      scores: { white: 0, black: 0 },
-    },
+    game: Object.assign(new Game(), { contentPositions: () => [] }),
   };
+  /**
+   * @typedef {Omit<typeof initial, "initialWagersMatchId" | "cancelRematchScoresPreload" | "selectedProblem" | "boardViewMode" | "pendingOnlineReconnectInviteId" | "resignedColor" | "winnerByTimerColor" | "wagerOutcomeAnimTimer" | "unsubscribeFromWagerState" | "currentWagerState" | "wagerMatchId"> & {
+   * initialWagersMatchId: string | null; cancelRematchScoresPreload: (() => void) | null;
+   * selectedProblem: string | null; boardViewMode: import("../src/game/boardViewPolicy.ts").BoardViewMode;
+   * pendingOnlineReconnectInviteId: string | null; resignedColor: "white" | "black" | undefined;
+   * winnerByTimerColor: "white" | "black" | undefined; wagerOutcomeAnimTimer: number | null;
+   * unsubscribeFromWagerState: (() => void) | null; currentWagerState: {agreed: string} | null;
+   * wagerMatchId: string | null; selection: import("../src/game/rematchViewing.ts").ViewedRematch | null;
+   * }} ResetState
+   * @typedef {{go: typeof import("../src/game/gameController.ts").go;
+   * disposeGameSession: typeof import("../src/game/gameController.ts").disposeGameSession;
+   * state(): ResetState; setState(value: Partial<ResetState>): void}} ResetApi
+   */
   const controlsStore = createGameControlsStore({
     duration: 60,
     progress: 15,
     requestDate: 1000,
   });
   controlsStore.updateContext({
-    ...Object.fromEntries(
-      Object.keys(controlsStore.getSnapshot().context)
-        .filter((key) => Object.hasOwn(initial, key))
-        .map((key) => [key, initial[key]]),
-    ),
+    isOnlineGame: initial.isOnlineGame,
+    isWatchOnly: initial.isWatchOnly,
+    isGameWithBot: initial.isGameWithBot,
+    puzzleMode: initial.puzzleMode,
+    isGameOver: initial.isGameOver,
+    boardViewMode: initial.boardViewMode,
     sessionId: 1,
   });
+  /**
+   * @type {import("../src/game/gameControlsModel.ts").GameControlsSnapshot[]}
+   */
   const observedSnapshots = [];
+  /** @type {Array<{ name: string; snapshot: import("../src/game/gameControlsModel.ts").GameControlsSnapshot; notifications: number; }>} */
   const observerSnapshots = [];
   controlsStore.subscribe(() =>
     observedSnapshots.push(controlsStore.getSnapshot()),
@@ -167,17 +204,30 @@ function harness({
   });
   remoteMoveSync.setProcessedCounts(5, 4);
   remoteMoveSync.remember(
-    { color: "white", flatMovesString: Array(6).fill("old").join("-") },
+    canonicalMatch({
+      color: "white",
+      flatMovesString: Array(6).fill("old").join("-"),
+    }),
     "old",
   );
   remoteMoveSync.verifyHistory(
-    { historyVerified: false },
+    Object.defineProperty(new Game(), "historyVerified", { value: false }),
     "old",
     "old-white",
     "white",
   );
   const rematchViewing = createRematchViewingHarness({
-    selection: { matchId: "old", pair: {}, game: {} },
+    selection: {
+      matchId: "old",
+      pair: {
+        matchId: "old",
+        hostPlayerId: "host",
+        guestPlayerId: null,
+        hostMatch: canonicalMatch(),
+        guestMatch: null,
+      },
+      game: new Game(),
+    },
   });
   const timerHarness = createMatchTimerHarness({ activeMatchId: null }, () => {
     const state = api?.state() ?? initial;
@@ -189,10 +239,18 @@ function harness({
       isGameOver: state.isGameOver,
     };
   });
-  timerHarness.controller.setStash("old", "white", "old-white");
-  timerHarness.controller.setStash("old", "black", "old-black");
+  timerHarness.controller.setStash("old", "white", {
+    state: "running",
+    turnNumber: 4,
+    deadlineAtMs: 1000,
+  });
+  timerHarness.controller.setStash("old", "black", {
+    state: "running",
+    turnNumber: 4,
+    deadlineAtMs: 1000,
+  });
   timerHarness.controller.startCooldown("old");
-  const capture = (name) => {
+  const capture = (/** @type {string} */ name) => {
     observerSnapshots.push({
       name,
       snapshot: controlsStore.getSnapshot(),
@@ -201,42 +259,57 @@ function harness({
     events.push([
       name,
       {
-        watchOnly: api.state().isWatchOnly,
-        flashback: api.state().flashbackMode,
-        inputs: [...api.state().currentInputs],
+        watchOnly: required(api).state().isWatchOnly,
+        flashback: required(api).state().flashbackMode,
+        inputs: [...required(api).state().currentInputs],
         timer: timerHarness.controller.getMatchId(),
-        wager: api.state().currentWagerState,
-        selectedProblem: api.state().selectedProblem,
-        waiting: api.state().isWaitingForInviteToGetAccepted,
+        wager: required(api).state().currentWagerState,
+        selectedProblem: required(api).state().selectedProblem,
+        waiting: required(api).state().isWaitingForInviteToGetAccepted,
       },
     ]);
   };
   initial.watchOnlyListeners.add(() => capture("watcher"));
   const noop = () => {};
-  const setterNames = [
-    "setIslandButtonDimmed",
-    "setHomeVisible",
-    "setBrushAndNavigationButtonDimmed",
-    "setNavigationListButtonVisible",
-    "setAutomatchWaitingState",
-    "setInviteLinkActionVisible",
-    "setAutomatchVisible",
-    "setBotGameOptionVisible",
-    "setPlaySamePuzzleAgainButtonVisible",
-    "setAutomatchEnabled",
-    "setUndoVisible",
-    "setAutomoveActionVisible",
-    "setAutomoveActionEnabled",
-    "setUndoEnabled",
-    "setWatchOnlyVisible",
-    "showVoiceReactionButton",
-    "showMoveHistoryButton",
-    "setEndMatchVisible",
-    "setEndMatchConfirmed",
-    "showWaitingStateText",
-    "showPrimaryAction",
-    "setDisplayedBoardSquareTypes",
-  ];
+  /** @param {string} name @returns {(...args: unknown[]) => void} */
+  const recordControl =
+    (name) =>
+    (...args) => {
+      ui[name] = args[0];
+      events.push(["control", name, ...args]);
+    };
+  /** @type {Omit<Parameters<typeof createSessionControlsPresenter>[0], "hideTimerButtons" | "disableAndHideUndoResignAndTimerControls"> & {setDisplayedBoardSquareTypes: (value: unknown) => void}} */
+  const controlCommands = {
+    setIslandButtonDimmed: recordControl("setIslandButtonDimmed"),
+    setHomeVisible: recordControl("setHomeVisible"),
+    setBrushAndNavigationButtonDimmed: recordControl(
+      "setBrushAndNavigationButtonDimmed",
+    ),
+    setNavigationListButtonVisible: recordControl(
+      "setNavigationListButtonVisible",
+    ),
+    setAutomatchWaitingState: recordControl("setAutomatchWaitingState"),
+    setInviteLinkActionVisible: recordControl("setInviteLinkActionVisible"),
+    setAutomatchVisible: recordControl("setAutomatchVisible"),
+    setBotGameOptionVisible: recordControl("setBotGameOptionVisible"),
+    setPlaySamePuzzleAgainButtonVisible: recordControl(
+      "setPlaySamePuzzleAgainButtonVisible",
+    ),
+    setAutomatchEnabled: recordControl("setAutomatchEnabled"),
+    setUndoVisible: recordControl("setUndoVisible"),
+    setAutomoveActionVisible: recordControl("setAutomoveActionVisible"),
+    setAutomoveActionEnabled: recordControl("setAutomoveActionEnabled"),
+    setUndoEnabled: recordControl("setUndoEnabled"),
+    setWatchOnlyVisible: recordControl("setWatchOnlyVisible"),
+    showVoiceReactionButton: recordControl("showVoiceReactionButton"),
+    showMoveHistoryButton: recordControl("showMoveHistoryButton"),
+    setEndMatchVisible: recordControl("setEndMatchVisible"),
+    setEndMatchConfirmed: recordControl("setEndMatchConfirmed"),
+    showWaitingStateText: recordControl("showWaitingStateText"),
+    showPrimaryAction: recordControl("showPrimaryAction"),
+    setDisplayedBoardSquareTypes: recordControl("setDisplayedBoardSquareTypes"),
+    showResignButton: recordControl("showResignButton"),
+  };
   const boardMethods = [
     "setBoardMetadataDisplaySwapped",
     "resetPlayersMetadataForSession",
@@ -260,7 +333,9 @@ function harness({
     getCurrentSessionId: () => 1,
     isGameConnectionBound: () => false,
     batchGameControlsUpdates: controlsStore.batchUpdates,
-    updateGameControlsContext: (context) => {
+    updateGameControlsContext: (
+      /** @type {Partial<import("../src/game/gameControlsModel.ts").GameControlsContext>} */ context,
+    ) => {
       controlsStore.updateContext(context);
       contexts.push(context);
       events.push(["context", context]);
@@ -276,15 +351,18 @@ function harness({
       events.push(["timeouts-clear"]);
       pendingTimeouts.clear();
     },
-    clearManagedGameTimeout: (id) => pendingTimeouts.delete(id),
-    setCurrentWagerMatch: (matchId) => {
+    clearManagedGameTimeout: (/** @type {number} */ id) =>
+      pendingTimeouts.delete(id),
+    setCurrentWagerMatch: (/** @type {string | null} */ matchId) => {
       events.push(["wager-match", matchId]);
       if (wagerMatch === matchId) return;
       wagerMatch = matchId;
       wagerSnapshot = null;
       subscriptions.forEach((listener) => listener(wagerSnapshot));
     },
-    subscribeToWagerState: (listener) => {
+    subscribeToWagerState: (
+      /** @type {(value: { agreed: string; } | null) => void} */ listener,
+    ) => {
       events.push(["subscribe"]);
       subscriptions.add(listener);
       listener(wagerSnapshot);
@@ -294,24 +372,27 @@ function harness({
       };
     },
     applyWagerState: () => capture("wager-notify"),
-    summarizeWagerState: (state) => state,
+    summarizeWagerState: (/** @type {{agreed: string} | null} */ state) =>
+      state,
     logWagerDebug: noop,
     shouldDeferWagerStateForUninstalledMatch: () => false,
     syncWagerOutcome: noop,
     connection: {
-      setWagerViewMatchId: (id) => {
+      setWagerViewMatchId: (/** @type {string | null} */ id) => {
         events.push(["wager-view", id]);
         subscriptions.forEach((listener) => listener(wagerSnapshot));
       },
-      setupConnection: (reconnect, target) =>
-        events.push(["setup-connection", reconnect, target]),
-      hasPendingInviteCreationFor: (id) => id === "next",
+      setupConnection: (
+        /** @type {boolean} */ reconnect,
+        /** @type {import("../src/navigation/routeState.ts").RouteState} */ target,
+      ) => events.push(["setup-connection", reconnect, target]),
+      hasPendingInviteCreationFor: (/** @type {string} */ id) => id === "next",
     },
     Board: {
       ...Object.fromEntries(
         boardMethods.map((name) => [
           name,
-          (...args) => {
+          /** @param {...unknown} args */ (...args) => {
             ui[name] = args[0];
             events.push(["board", name, ...args]);
           },
@@ -319,7 +400,7 @@ function harness({
       ),
       setupBoard: () => events.push(["setup-board", ui.preserveAnimation]),
       hasMonsBoardDisplayAnimationRunning: () => waiting,
-      setPreserveDisplayAnimation: (value) => {
+      setPreserveDisplayAnimation: (/** @type {boolean} */ value) => {
         ui.preserveAnimation = value;
         events.push(["preserve-animation", value]);
       },
@@ -332,19 +413,11 @@ function harness({
         events.push(["waiting-animation"]);
       },
     },
-    ...Object.fromEntries(
-      setterNames.map((name) => [
-        name,
-        (...args) => {
-          ui[name] = args[0];
-          events.push(["control", name, ...args]);
-        },
-      ]),
-    ),
+    ...controlCommands,
     triggerMoveHistoryPopupReload: () => events.push(["reload-history"]),
     buildInitialRouteGameSeed: () => ({}),
     applyGameSeedToCurrentGame: () => events.push(["apply-seed"]),
-    loadCurrentGameFromFen: (fen) => {
+    loadCurrentGameFromFen: (/** @type {string} */ fen) => {
       events.push(["load-snapshot", fen]);
       return snapshotValid;
     },
@@ -354,32 +427,41 @@ function harness({
     updateDisplayedBoardSquareTypes: () =>
       events.push(["display-square-types"]),
     syncInviteBotIntoLocalGameButton: noop,
-    markMainGameContentReady: (interactive) =>
+    markMainGameContentReady: (/** @type {boolean} */ interactive) =>
       events.push(["content-ready", interactive]),
-    hideTimerButtons: () => events.push(["control", "hideTimerButtons"]),
-    disableAndHideUndoResignAndTimerControls: () =>
-      events.push(["control", "disableAndHideUndoResignAndTimerControls"]),
+    hideTimerButtons: () => {
+      events.push(["control", "hideTimerButtons"]);
+    },
+    disableAndHideUndoResignAndTimerControls: () => {
+      events.push(["control", "disableAndHideUndoResignAndTimerControls"]);
+    },
     createLegacyBoardSquareTypeGrid: () => "legacy-grid",
   };
-  for (const [name, key] of Object.entries({
-    setHomeVisible: "homeVisible",
-    setNavigationListButtonVisible: "navigationVisible",
-    setBotGameOptionVisible: "botGameVisible",
-    setPlaySamePuzzleAgainButtonVisible: "replayPuzzleVisible",
-    setWatchOnlyVisible: "watchOnlyVisible",
-    showVoiceReactionButton: "voiceReactionVisible",
-    showMoveHistoryButton: "moveHistoryVisible",
-    setEndMatchVisible: "endMatchVisible",
-    setEndMatchConfirmed: "endMatchConfirmed",
-    showWaitingStateText: "waitingText",
-  })) {
+  const presentationFields = /** @type {const} */ ([
+    ["setHomeVisible", "homeVisible"],
+    ["setNavigationListButtonVisible", "navigationVisible"],
+    ["setBotGameOptionVisible", "botGameVisible"],
+    ["setPlaySamePuzzleAgainButtonVisible", "replayPuzzleVisible"],
+    ["setWatchOnlyVisible", "watchOnlyVisible"],
+    ["showVoiceReactionButton", "voiceReactionVisible"],
+    ["showMoveHistoryButton", "moveHistoryVisible"],
+    ["setEndMatchVisible", "endMatchVisible"],
+    ["setEndMatchConfirmed", "endMatchConfirmed"],
+  ]);
+  for (const [name, key] of presentationFields) {
     const command = dependencies[name];
-    dependencies[name] = (value) => {
+    dependencies[name] = (/** @type {boolean} */ value) => {
       controlsStore.updatePresentation({ [key]: value });
       command(value);
     };
   }
-  for (const [name, action] of Object.entries({
+  const waitingText = dependencies.showWaitingStateText;
+  dependencies.showWaitingStateText = (value) => {
+    controlsStore.updatePresentation({ waitingText: value });
+    waitingText(value);
+  };
+  /** @type {Record<"setUndoVisible" | "setUndoEnabled" | "setAutomoveActionVisible" | "setAutomoveActionEnabled", (value: boolean) => Parameters<typeof controlsStore.dispatchGameControls>[0]>} */
+  const booleanActions = {
     setUndoVisible: (visible) => ({ type: "setUndoVisible", visible }),
     setUndoEnabled: (enabled) => ({ type: "setUndoEnabled", enabled }),
     setAutomoveActionVisible: (visible) => ({
@@ -390,34 +472,50 @@ function harness({
       type: "setAutomoveEnabled",
       enabled,
     }),
-    showPrimaryAction: (action) => ({ type: "setPrimaryAction", action }),
-    hideTimerButtons: () => ({ type: "hideTimers" }),
-    disableAndHideUndoResignAndTimerControls: () => ({
-      type: "hideGameControls",
-    }),
-  })) {
+  };
+  for (const name of /** @type {const} */ ([
+    "setUndoVisible",
+    "setUndoEnabled",
+    "setAutomoveActionVisible",
+    "setAutomoveActionEnabled",
+  ])) {
     const command = dependencies[name];
-    dependencies[name] = (...args) => {
-      controlsStore.dispatchGameControls(action(...args));
-      command(...args);
-    };
-  }
-  for (const [name, presentation] of Object.entries({
-    setBrushAndNavigationButtonDimmed: (dimmed) => ({
-      navigationDimmed: dimmed,
-      appearanceDimmed: dimmed,
-    }),
-    setInviteLinkActionVisible: (visible) => ({
-      inviteLinkVisible: visible,
-      ...(!visible ? { inviteReadyToCopy: false } : {}),
-    }),
-  })) {
-    const command = dependencies[name];
-    dependencies[name] = (value) => {
-      controlsStore.updatePresentation(presentation(value));
+    dependencies[name] = (/** @type {boolean} */ value) => {
+      controlsStore.dispatchGameControls(booleanActions[name](value));
       command(value);
     };
   }
+  const primary = dependencies.showPrimaryAction;
+  dependencies.showPrimaryAction = (action) => {
+    controlsStore.dispatchGameControls({ type: "setPrimaryAction", action });
+    primary(action);
+  };
+  const hideTimers = dependencies.hideTimerButtons;
+  dependencies.hideTimerButtons = () => {
+    controlsStore.dispatchGameControls({ type: "hideTimers" });
+    hideTimers();
+  };
+  const hideControls = dependencies.disableAndHideUndoResignAndTimerControls;
+  dependencies.disableAndHideUndoResignAndTimerControls = () => {
+    controlsStore.dispatchGameControls({ type: "hideGameControls" });
+    hideControls();
+  };
+  const dimNavigation = dependencies.setBrushAndNavigationButtonDimmed;
+  dependencies.setBrushAndNavigationButtonDimmed = (dimmed) => {
+    controlsStore.updatePresentation({
+      navigationDimmed: dimmed,
+      appearanceDimmed: dimmed,
+    });
+    dimNavigation(dimmed);
+  };
+  const inviteLink = dependencies.setInviteLinkActionVisible;
+  dependencies.setInviteLinkActionVisible = (visible) => {
+    controlsStore.updatePresentation({
+      inviteLinkVisible: visible,
+      ...(!visible ? { inviteReadyToCopy: false } : {}),
+    });
+    inviteLink(visible);
+  };
   Object.assign(dependencies, createSessionControlsPresenter(dependencies));
   const keys = Object.keys(initial);
   const { outputText } = ts.transpileModule(
@@ -432,9 +530,10 @@ function harness({
   `,
     { compilerOptions: { target: ts.ScriptTarget.ES2022 } },
   );
-  api = new Function(...Object.keys(dependencies), outputText)(
-    ...Object.values(dependencies),
+  const load = /** @type {(...values: unknown[]) => ResetApi} */ (
+    new Function(...Object.keys(dependencies), outputText)
   );
+  api = load(...Object.values(dependencies));
   return {
     ...api,
     remoteMoveSync,
@@ -447,7 +546,7 @@ function harness({
     subscriptions,
     pendingTimeouts,
     timerHarness,
-    publishWager: (state) => {
+    publishWager: (/** @type {{ agreed: string; }} */ state) => {
       wagerMatch = "old";
       wagerSnapshot = state;
       subscriptions.forEach((listener) => listener(state));
@@ -455,7 +554,7 @@ function harness({
   };
 }
 
-for (const action of ["go", "disposeGameSession"]) {
+for (const action of /** @type {const} */ (["go", "disposeGameSession"])) {
   test(`${action} clears the dirty session baseline and cancels old work`, async () => {
     const h = harness();
     await h[action](home);
@@ -477,7 +576,7 @@ for (const action of ["go", "disposeGameSession"]) {
       ["timeouts-clear"],
     ]);
     assert.equal(h.pendingTimeouts.size, 0);
-    for (const flag of [
+    for (const flag of /** @type {const} */ ([
       "isOnlineGame",
       "isGameWithBot",
       "isWaitingForRematchResponse",
@@ -489,7 +588,7 @@ for (const action of ["go", "disposeGameSession"]) {
       "didConnect",
       "isWatchOnly",
       "flashbackMode",
-    ]) {
+    ])) {
       assert.equal(state[flag], false, flag);
     }
     assert.equal(state.boardViewMode, "activeLive");
@@ -530,10 +629,12 @@ test("wager subscriptions survive repeated startup and are replaced once after d
   assert.equal(h.remoteMoveSync.hasInitializedBothSides(), false);
   assert.equal(h.state().processedVoiceReactions.size, 0);
   h.remoteMoveSync.verifyHistory(
-    {
-      historyVerified: false,
-      verifyHistory: () => assert.fail("disposed history was retained"),
-    },
+    Object.defineProperties(new Game(), {
+      historyVerified: { value: false },
+      verifyHistory: {
+        value: () => assert.fail("disposed history was retained"),
+      },
+    }),
     "old",
     "new-black",
     "black",
@@ -549,15 +650,18 @@ test("startup retains move progress until the disposal lifecycle resets it", asy
   assert.equal(h.remoteMoveSync.getProcessedCount("white"), 5);
   assert.equal(h.remoteMoveSync.getProcessedCount("black"), 4);
   assert.equal(h.remoteMoveSync.hasInitializedBothSides(), true);
+  /** @type {Array<Parameters<Game["verifyHistory"]>[0]>} */
   const histories = [];
   h.remoteMoveSync.verifyHistory(
-    {
-      historyVerified: false,
-      verifyHistory: (value) => {
-        histories.push(value);
-        return false;
+    Object.defineProperties(new Game(), {
+      historyVerified: { value: false },
+      verifyHistory: {
+        value: (/** @type {Parameters<Game["verifyHistory"]>[0]} */ value) => {
+          histories.push(value);
+          return false;
+        },
       },
-    },
+    }),
     "old",
     "new-black",
     "black",
@@ -572,18 +676,22 @@ test("startup retains move progress until the disposal lifecycle resets it", asy
   assert.equal(h.remoteMoveSync.hasInitializedBothSides(), false);
 });
 
-for (const [action, pendingAutomatch] of [
+for (const [action, pendingAutomatch] of /** @type {const} */ ([
   ["go", false],
   ["go", true],
   ["disposeGameSession", false],
   ["disposeGameSession", true],
-]) {
+])) {
   test(`${action} preserves synchronous wager and watch-only notification ordering with pending automatch ${pendingAutomatch}`, async () => {
     const h = harness();
     await h.go(home);
     const wager = { agreed: "old" };
     h.publishWager(wager);
-    h.timerHarness.controller.setStash("old", "white", "old-white");
+    h.timerHarness.controller.setStash("old", "white", {
+      state: "running",
+      turnNumber: 4,
+      deadlineAtMs: 1000,
+    });
     h.setState({
       pendingAutomatchTransition: pendingAutomatch,
       isWatchOnly: true,
@@ -753,6 +861,7 @@ test("manual invite animation is preserved only for a matching pending creation 
   }
 });
 
+/** @param {Array<[string, ...unknown[]]>} events */
 const controlCalls = (events) =>
   events.filter(([name]) => name === "control").map(([, ...call]) => call);
 
@@ -772,17 +881,18 @@ const automatchControls = [
   ...inviteControls,
   ["setAutomatchWaitingState", true],
 ];
+/** @type {Array<{name: string; route: import("../src/navigation/routeState.ts").RouteState; controls: unknown[][]; local: boolean}>} */
 const routeCases = [
   { name: "home", route: home, controls: lobbyControls, local: true },
   {
     name: "event",
-    route: { mode: "event", path: "event/party", eventId: "party" },
+    route: { ...home, mode: "event", path: "event/party", eventId: "party" },
     controls: lobbyControls,
     local: true,
   },
   {
     name: "watch",
-    route: { mode: "watch", path: "watch" },
+    route: { ...home, mode: "watch", path: "watch" },
     controls: [
       ["setHomeVisible", true],
       ["setIslandButtonDimmed", true],
@@ -796,7 +906,12 @@ const routeCases = [
   },
   {
     name: "snapshot",
-    route: { mode: "snapshot", path: "snapshot/saved", snapshotId: "saved" },
+    route: {
+      ...home,
+      mode: "snapshot",
+      path: "snapshot/saved",
+      snapshotId: "saved",
+    },
     controls: [
       ["setHomeVisible", true],
       ["setIslandButtonDimmed", true],
@@ -874,7 +989,8 @@ for (const scenario of routeCases) {
       assert.equal(h.ui.showPrimaryAction, "rematch");
       const setup = h.events.findIndex(([name]) => name === "setup-connection");
       const firstControl = h.events.findIndex(
-        ([name], index) => index > setup && name === "control",
+        ([name], /** @type {number} */ index) =>
+          index > setup && name === "control",
       );
       const lastControl = h.events.findLastIndex(
         ([name]) => name === "control",
@@ -917,7 +1033,13 @@ for (const scenario of routeCases) {
 }
 
 test("invalid snapshot startup throws before route controls and board completion", async () => {
-  const route = { mode: "snapshot", path: "snapshot/bad", snapshotId: "bad" };
+  /** @type {import("../src/navigation/routeState.ts").RouteState} */
+  const route = {
+    ...home,
+    mode: "snapshot",
+    path: "snapshot/bad",
+    snapshotId: "bad",
+  };
   const h = harness({ route, snapshotValid: false });
   await assert.rejects(h.go(route), /invalid-snapshot-route/);
   assert.deepEqual(h.observedSnapshots, [h.controlsStore.getSnapshot()]);
@@ -969,7 +1091,15 @@ test("automatch invite startup retains both waiting commands and their animation
     .slice(connection + 1)
     .filter(([name]) => name === "context");
   assert.equal(contexts.length, 2);
-  assert.ok(contexts.every(([, context]) => context.isOnlineGame));
+  assert.ok(
+    contexts.every(
+      ([, context]) =>
+        context !== null &&
+        typeof context === "object" &&
+        "isOnlineGame" in context &&
+        context.isOnlineGame,
+    ),
+  );
   assert.equal(h.state().pendingAutomatchTransition, false);
   h.events.length = 0;
   await h.go(invite());

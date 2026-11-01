@@ -1,6 +1,6 @@
 import * as projectionTransactions from "../src/eventD1/transactions.ts";
 import * as d1 from "../src/eventD1.ts";
-import { decodeEventUpdates } from "../src/eventCompatibilityCodec.ts";
+import { decodeEventUpdates } from "../test/eventLegacyFixtureCodec.ts";
 import { isEventMutation } from "../../../runtime/eventCommands.js";
 import type { TransactionDecision } from "../../../runtime/transactions.js";
 export async function patchEventOwnedPaths(
@@ -18,6 +18,7 @@ export async function readEventOwnedPath(
   path: string,
 ): Promise<unknown> {
   const [root, id, ...parts] = path.split("/");
+  if (!id) throw new Error("invalid-event-fixture-path");
   const nested = (value: unknown, keys: string[]) =>
     keys.reduce(
       (current, key) =>
@@ -37,9 +38,9 @@ export async function readEventOwnedPath(
   if (root === "eventProgressOutboxDead")
     return d1.readEventProgressDeadOutbox(db, id);
   if (root === "profileGameProjectionOutbox" && id === "event")
-    return d1.readEventProfileGameProjectionOutbox(db, parts[0]);
+    return d1.readEventProfileGameProjectionOutbox(db, parts[0]!);
   if (root === "telegramProjectionOutbox" && id === "event")
-    return d1.readEventTelegramProjectionOutbox(db, parts[0]);
+    return d1.readEventTelegramProjectionOutbox(db, parts[0]!);
   if (root === "eventTelegramProjectionGenerations")
     return (await d1.readEventTelegramProjectionState(db, id))?.generation || 0;
   if (root === "eventTelegramProjections")
@@ -55,6 +56,7 @@ export async function transactEventOwnedPath(
   options: Parameters<typeof d1.transactEventRecord>[3],
 ) {
   const [root, id, ...parts] = path.split("/");
+  if (!id) throw new Error("invalid-event-fixture-path");
   if (root === "events" && parts.length === 0)
     return d1.transactEventRecord(
       db,
@@ -66,7 +68,7 @@ export async function transactEventOwnedPath(
     return d1.transactEventField(
       db,
       id,
-      parts[0] as Parameters<typeof d1.transactEventField>[2],
+      parts[0]! as Parameters<typeof d1.transactEventField>[2],
       updater as Parameters<typeof d1.transactEventField>[3],
       options,
     );
@@ -81,7 +83,7 @@ export async function transactEventOwnedPath(
     return d1.transactEventPrizeSelection(
       db,
       id,
-      parts[0],
+      parts[0]!,
       updater as Parameters<typeof d1.transactEventPrizeSelection>[3],
       options,
     );
@@ -89,7 +91,7 @@ export async function transactEventOwnedPath(
     return d1.transactProfileEventPrize(
       db,
       id,
-      parts[0],
+      parts[0]!,
       updater as Parameters<typeof d1.transactProfileEventPrize>[3],
       options,
     );
@@ -110,7 +112,7 @@ export async function transactEventOwnedPath(
   if (root === "profileGameProjectionOutbox" && id === "event")
     return projectionTransactions.transactEventProfileGameProjectionOutbox(
       db,
-      parts[0],
+      parts[0]!,
       updater as Parameters<
         typeof projectionTransactions.transactEventProfileGameProjectionOutbox
       >[2],
@@ -119,7 +121,7 @@ export async function transactEventOwnedPath(
   if (root === "telegramProjectionOutbox" && id === "event")
     return projectionTransactions.transactEventTelegramProjectionOutbox(
       db,
-      parts[0],
+      parts[0]!,
       updater as Parameters<
         typeof projectionTransactions.transactEventTelegramProjectionOutbox
       >[2],

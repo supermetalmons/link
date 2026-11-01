@@ -7,14 +7,19 @@ import jsxA11y from "eslint-plugin-jsx-a11y";
 import react from "eslint-plugin-react";
 import reactHooks from "eslint-plugin-react-hooks";
 
-export default [
+const recommendedReactRules = react.configs.flat.recommended;
+if (!recommendedReactRules)
+  throw new Error("react-eslint-recommended-config-missing");
+
+/** @type {import("@typescript-eslint/utils").TSESLint.FlatConfig.Config[]} */
+const configuration = [
   {
     files: [
       "src/**/*.{ts,tsx}",
       "cloud/workers/api/**/*.ts",
       "cloud/runtime/src/**/*.ts",
       "scripts/**/*.ts",
-      "cloud/admin/**/*.js",
+      "cloud/admin/**/*.ts",
     ],
     languageOptions: {
       ecmaVersion: "latest",
@@ -40,7 +45,7 @@ export default [
     },
     rules: {
       ...js.configs.recommended.rules,
-      ...react.configs.flat.recommended.rules,
+      ...recommendedReactRules.rules,
       "no-array-constructor": "off",
       "no-dupe-class-members": "off",
       "no-redeclare": "off",
@@ -152,3 +157,5 @@ export default [
     },
   },
 ];
+
+export default configuration;

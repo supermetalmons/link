@@ -1,3 +1,4 @@
+import type { EventProgressDocument } from "../../../../runtime/eventProgressRecords.js";
 import type { EventProjectionOutboxDocument } from "../../../../runtime/eventProjectionOutboxRecords.js";
 import type { EventPersistenceMutation as EventMutation } from "../eventPersistenceCommands.ts";
 import {
@@ -68,7 +69,10 @@ export async function readEventMutationSnapshots(
 
   const eventIds = new Set<string>();
   const selectionIds = new Set<string>();
-  const progressUpdates = new Map<string, unknown>();
+  const progressUpdates = new Map<
+    string,
+    EventProgressDocument<"pending"> | null
+  >();
   const profileGameIds = new Set<string>();
   const initializedProfileGameIds = new Set<string>();
   const telegramIds = new Set<string>();
@@ -173,7 +177,7 @@ export async function readEventMutationSnapshots(
     reads.push({
       statement: prepareProjectionOutboxRead(
         db,
-        "event_profile_game_projection_outboxes",
+        "event_profile_game_projection_outboxes_canonical",
         eventId,
       ),
       accept(rows) {
@@ -200,6 +204,7 @@ export async function readEventMutationSnapshots(
               rows[0] as
                 | { generation: number; revision: number; state_json: string }
                 | undefined,
+              eventId,
             ),
           );
         },

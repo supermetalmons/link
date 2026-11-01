@@ -13,6 +13,7 @@ exports.isSendInviteReactionResponse =
   exports.REACTION_PROTOCOL_VERSION =
   exports.STICKER_ID_WHITELIST =
   exports.FIXED_STICKER_IDS =
+  exports.isReaction =
     void 0;
 exports.isInviteRoomMessage = isInviteRoomMessage;
 const ids_js_1 = require("./ids.js");
@@ -82,6 +83,10 @@ function hasReactionFields(value) {
     : Object.hasOwn(VOICE_VARIATIONS, value.kind) &&
         value.variation <= VOICE_VARIATIONS[value.kind];
 }
+const isReaction = (value) =>
+  hasReactionFields(value) &&
+  hasExactKeys(value, ["uuid", "kind", "variation"]);
+exports.isReaction = isReaction;
 const isInviteReaction = (value) =>
   hasReactionFields(value) &&
   hasExactKeys(value, ["uuid", "kind", "variation", "matchId"]) &&

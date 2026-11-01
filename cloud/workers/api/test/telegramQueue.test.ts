@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { TelegramRepository } from "../../../runtime/telegram/deliveryEngine.js";
-import { MAX_RECORD_KEY_BYTES } from "../src/recordKeys.ts";
 import {
   handleTelegramQueue,
   handleTelegramQueueMessage,
@@ -11,6 +10,8 @@ import {
 import { TELEGRAM_TEST_ENV } from "./testEnv.ts";
 
 const task = {
+  schemaVersion: 1,
+  dataEpoch: 1,
   messageKey: "automatch:invite-1",
   revision: "revision-1",
   taskKind: "desired",
@@ -185,8 +186,8 @@ test("retries storage check failures without treating TypeError as a poison mess
   }
 });
 
-test("keeps frozen delivery retries ahead of payload validation without pacing", async () => {
-  const queued = queueMessage({ nope: true });
+test("keeps valid frozen delivery tasks pending without processing or pacing", async () => {
+  const queued = queueMessage(task);
   await handleTelegramQueueMessage(queued.message, TELEGRAM_TEST_ENV, {
     readStorageMode: async () => "frozen",
     createEngine: () => {
@@ -220,7 +221,7 @@ test("continues a delivery batch after a storage binding failure", async () => {
   };
   await handleTelegramQueue(
     {
-      queue: "mons-link-telegram-delivery",
+      queue: "mons-link-telegram-delivery-data1",
       messages: [failed.message, forwarded.message],
       metadata: { metrics: { backlogCount: 0, backlogBytes: 0 } },
       ackAll() {
@@ -236,7 +237,7 @@ test("continues a delivery batch after a storage binding failure", async () => {
   assert.deepEqual(failed.retries, [{ delaySeconds: 4 }]);
   assert.equal(forwarded.acknowledgements(), 1);
   assert.deepEqual(forwarded.retries, []);
-  assert.deepEqual(sent, [wagerTask]);
+  assert.deepEqual(sent, []);
 });
 
 test("treats unscheduled logical retries as infrastructure failures", async () => {
@@ -296,93 +297,21 @@ const forwardingDependencies = {
   },
 };
 
-test("forwards legacy wager tasks unchanged before acknowledging without Telegram work", async () => {
-  for (const body of [wagerTask, recoverableWagerTask]) {
-    const queued = queueMessage(body);
-    const forwarded: Array<{ body: unknown; options?: QueueSendOptions }> = [];
-    await handleTelegramQueueMessage(
-      queued.message,
-      forwardingEnvironment(async (task, options) => {
-        assert.equal(queued.acknowledgements(), 0);
-        forwarded.push({ body: task, options });
-        return {
-          metadata: { metrics: { backlogCount: 0, backlogBytes: 0 } },
-        };
-      }),
-      forwardingDependencies,
-    );
-    assert.deepEqual(forwarded, [{ body, options: undefined }]);
-    assert.equal(queued.acknowledgements(), 1);
-    assert.deepEqual(queued.retries, []);
-  }
-});
-
-test("retries the original wager message when forwarding fails", async () => {
-  const queued = queueMessage(recoverableWagerTask, 4);
-  await handleTelegramQueueMessage(
-    queued.message,
-    forwardingEnvironment(async () => {
-      throw new Error("wager-queue-unavailable");
-    }),
-    forwardingDependencies,
-  );
-  assert.equal(queued.acknowledgements(), 0);
-  assert.deepEqual(queued.retries, [{ delaySeconds: 8 }]);
-});
-
-test("preserves the settlement identity if forwarding succeeds but acknowledgement is lost", async () => {
-  const first = queueMessage(recoverableWagerTask);
-  const replay = queueMessage(structuredClone(recoverableWagerTask), 2);
-  const forwarded: unknown[] = [];
-  const environment = forwardingEnvironment(async (body) => {
-    forwarded.push(structuredClone(body));
-    return {
-      metadata: { metrics: { backlogCount: 0, backlogBytes: 0 } },
-    };
-  });
-  first.message.ack = () => {
-    throw new Error("acknowledgement-lost");
-  };
-  await handleTelegramQueueMessage(
-    first.message,
-    environment,
-    forwardingDependencies,
-  );
-  await handleTelegramQueueMessage(
-    replay.message,
-    environment,
-    forwardingDependencies,
-  );
-  assert.deepEqual(first.retries, [{ delaySeconds: 1 }]);
-  assert.equal(replay.acknowledgements(), 1);
-  assert.deepEqual(replay.retries, []);
-  assert.deepEqual(forwarded, [recoverableWagerTask, recoverableWagerTask]);
-});
-
-test("acknowledges malformed legacy wagers without forwarding them", async () => {
-  const errors: unknown[] = [];
+test("rejects retired wager tasks without reading storage or dispatching another family", async () => {
   for (const body of [
+    wagerTask,
+    recoverableWagerTask,
     { ...wagerTask, extra: true },
-    { ...wagerTask, inviteId: "invite/child" },
-    { ...wagerTask, matchId: "m".repeat(MAX_RECORD_KEY_BYTES + 1) },
-    {
-      ...recoverableWagerTask,
-      resolution: { ...recoverableWagerTask.resolution, winnerUid: "" },
-    },
   ]) {
     const queued = queueMessage(body);
     await handleTelegramQueueMessage(
       queued.message,
       forwardingEnvironment(async () => {
-        assert.fail("malformed task forwarded");
+        assert.fail("unexpected-retired-wager-forward");
       }),
-      {
-        ...forwardingDependencies,
-        logger: { info() {}, error: (entry) => errors.push(entry) },
-      },
+      forwardingDependencies,
     );
     assert.equal(queued.acknowledgements(), 1);
     assert.deepEqual(queued.retries, []);
   }
-  assert.equal(errors.length, 4);
 });

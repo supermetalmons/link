@@ -1,3 +1,4 @@
+import { required } from "./fixtures/canonicalData.mjs";
 import assert from "node:assert/strict";
 import test from "node:test";
 import { setImmediate } from "node:timers/promises";
@@ -14,6 +15,13 @@ import {
   moveDeliveryStorageKey,
 } from "../src/connection/moveDelivery.ts";
 
+/**
+ * @typedef {ConstructorParameters<typeof MoveDelivery>[2]} Dependencies
+ * @typedef {Parameters<Dependencies["submit"]>[0]} SubmitRequest
+ * @typedef {Awaited<ReturnType<Dependencies["submit"]>>} SubmitResponse
+ * @typedef {Awaited<ReturnType<Dependencies["read"]>>} ReadResponse
+ */
+/** @template Data, Value @typedef {Data & { signal: AbortSignal, timeoutMs: number, active: boolean, resolve(value: Value): void, reject(error: unknown): void }} PendingRequest */
 const scope = {
   loginUid: "original-login",
   playerId: "actor",
@@ -29,16 +37,23 @@ const settle = async () => {
 function fakeClock() {
   let now = 0;
   let nextId = 0;
+  /** @type {Map<number, { callback: () => void, at: number }>} */
   const timers = new Map();
   return {
     now: () => now,
+    /** @param {() => void} callback @param {number} delayMs */
     setTimer(callback, delayMs) {
       assert.ok(delayMs >= 0);
       const id = ++nextId;
       timers.set(id, { callback, at: now + delayMs });
       return id;
     },
-    clearTimer: (id) => timers.delete(id),
+    clearTimer: (
+      /** @type {Parameters<NonNullable<Dependencies["clearTimer"]>>[0]} */ id,
+    ) => typeof id === "number" && timers.delete(id),
+    /**
+     * @param {number} milliseconds
+     */
     async advance(milliseconds) {
       const end = now + milliseconds;
       let steps = 0;
@@ -60,6 +75,7 @@ function fakeClock() {
   };
 }
 
+/** @param {{ start?: typeof initial, online?: boolean, storageFailure?: boolean, records?: Map<string, string>, ignoreAbort?: boolean, retryWindowMs?: number, attemptTimeoutMs?: number, verificationWindowMs?: number }} [options] */
 function harness({
   start = initial,
   online = true,
@@ -71,14 +87,28 @@ function harness({
   verificationWindowMs = 3500,
 } = {}) {
   const clock = fakeClock();
+  /** @type {PendingRequest<{ request: SubmitRequest, authorizedUid: string }, SubmitResponse>[]} */
   const requests = [];
+  /** @type {PendingRequest<{}, ReadResponse>[]} */
   const reads = [];
+  /** @type {({ error: Error; kind: "storage" | "paused" | "conflict"; })[]} */
   const errors = [];
+  /**
+   * @type {boolean[]}
+   */
   const advances = [];
   let loginUid = scope.loginUid;
   let maximumActive = 0;
+  /**
+   * @template Data, Value
+   * @param {PendingRequest<Data, Value>[]} list
+   * @param {Data} data
+   * @param {Parameters<Dependencies["read"]>[0]} options
+   * @returns {Promise<Value>}
+   */
   const pending = (list, data, options) =>
     new Promise((resolve, reject) => {
+      /** @type {PendingRequest<Data, Value>} */
       const entry = {
         ...data,
         ...options,
@@ -108,6 +138,7 @@ function harness({
         requests.filter((request) => request.active).length,
       );
     });
+  /** @type {NonNullable<Dependencies["storage"]>} */
   const storage = {
     getItem: (key) => records.get(key) ?? null,
     setItem: (key, value) => {
@@ -151,16 +182,21 @@ function harness({
     advances,
     records,
     key: moveDeliveryStorageKey(scope),
-    setOnline: (value) => {
+    setOnline: (/** @type {boolean} */ value) => {
       online = value;
     },
-    setLogin: (value) => {
+    setLogin: (/** @type {string} */ value) => {
       loginUid = value;
     },
     maximumActive: () => maximumActive,
-    stored: () => JSON.parse(records.get(moveDeliveryStorageKey(scope))),
+    stored: () =>
+      JSON.parse(required(records.get(moveDeliveryStorageKey(scope)))),
+    /**
+     * @param {number} index
+     */
+    /** @param {number} index @param {Exclude<SubmitResponse["outcome"], "superseded">} [outcome] */
     acknowledge(index, outcome = "applied") {
-      const entry = requests[index];
+      const entry = required(requests[index]);
       entry.resolve({
         ok: true,
         inviteId: scope.inviteId,
@@ -172,29 +208,33 @@ function harness({
   };
 }
 
+/** @param {Promise<unknown>} promise */
 function observe(promise) {
+  /** @type {{ state: "pending" | "fulfilled" | "rejected", error?: Error & { code?: string } }} */
   const outcome = { state: "pending" };
-  outcome.done = promise.then(
-    () => {
-      outcome.state = "fulfilled";
-    },
-    (error) => {
-      outcome.state = "rejected";
-      outcome.error = error;
-    },
-  );
-  return outcome;
+  return Object.assign(outcome, {
+    done: promise.then(
+      () => {
+        outcome.state = "fulfilled";
+      },
+      (error) => {
+        assert.ok(error instanceof Error);
+        outcome.state = "rejected";
+        outcome.error = error;
+      },
+    ),
+  });
 }
 
 test("two in-flight attempts coalesce later inputs and stale acknowledgements cannot reverse progress", async (t) => {
   const h = harness();
   t.after(() => h.outbox.pause());
-  for (const [move, fen] of [
+  for (const [move, fen] of /** @type {const} */ ([
     ["a", "a-fen"],
     ["b", "b-fen"],
     ["z", "a-fen"],
     ["c", "c-fen"],
-  ]) {
+  ])) {
     h.outbox.enqueue(move, fen);
   }
   const completed = observe(h.outbox.flush());
@@ -206,9 +246,9 @@ test("two in-flight attempts coalesce later inputs and stale acknowledgements ca
   h.acknowledge(1);
   await settle();
   assert.equal(h.requests.length, 3);
-  assert.equal(h.requests[2].request.previousFlatMovesString, "a-b");
-  assert.equal(h.requests[2].request.flatMovesString, "a-b-z-c");
-  assert.deepEqual(h.requests[2].request.previousStates, [
+  assert.equal(required(h.requests[2]).request.previousFlatMovesString, "a-b");
+  assert.equal(required(h.requests[2]).request.flatMovesString, "a-b-z-c");
+  assert.deepEqual(required(h.requests[2]).request.previousStates, [
     { moveCount: 2, fen: "b-fen" },
     { moveCount: 3, fen: "a-fen" },
   ]);
@@ -240,16 +280,29 @@ test("offline journals split at 64 checkpoints and drain the remaining suffix", 
   h.setOnline(true);
   h.outbox.resume();
   assert.equal(
-    h.requests[0].request.previousStates.length,
+    required(required(h.requests[0]).request.previousStates).length,
     MAX_MATCH_MOVE_PREVIOUS_STATES,
   );
-  assert.equal(countMoveHistory(h.requests[0].request.flatMovesString), 64);
+  assert.equal(
+    countMoveHistory(required(h.requests[0]).request.flatMovesString),
+    64,
+  );
   h.acknowledge(0);
   await settle();
   assert.equal(h.requests.length, 2);
-  assert.equal(h.requests[1].request.previousStates.length, 6);
-  assert.equal(h.requests[1].request.previousStates[0].moveCount, 64);
-  assert.equal(countMoveHistory(h.requests[1].request.flatMovesString), 70);
+  assert.equal(
+    required(required(h.requests[1]).request.previousStates).length,
+    6,
+  );
+  assert.equal(
+    required(required(required(h.requests[1]).request.previousStates)[0])
+      .moveCount,
+    64,
+  );
+  assert.equal(
+    countMoveHistory(required(h.requests[1]).request.flatMovesString),
+    70,
+  );
   assert.equal(completed.state, "pending");
   h.acknowledge(1);
   await completed.done;
@@ -272,8 +325,8 @@ test("large escaped FEN checkpoints split below the complete 1 MiB envelope", as
   const completed = observe(h.outbox.flush());
   for (let index = 0; h.outbox.hasPendingMoves; index++) {
     assert.ok(index < 20);
-    const { request } = h.requests[index];
-    assert.ok(request.previousStates.length < 20);
+    const { request } = required(h.requests[index]);
+    assert.ok(required(request.previousStates).length < 20);
     assert.ok(
       Buffer.byteLength(JSON.stringify(request)) <=
         MAX_MATCH_MOVE_REQUEST_BYTES,
@@ -296,7 +349,7 @@ test("storage failures report once while the in-memory journal remains deliverab
   h.outbox.enqueue("b", "b-fen");
   assert.deepEqual(h.outbox.latest, { fen: "b-fen", flatMovesString: "a-b" });
   assert.equal(h.errors.length, 1);
-  assert.equal(h.errors[0].kind, "storage");
+  assert.equal(required(h.errors[0]).kind, "storage");
   const completed = observe(h.outbox.flush());
   h.acknowledge(1);
   await completed.done;
@@ -316,8 +369,11 @@ test("authentication pause retains pending actions and dispatch resumes only for
   h.outbox.pause();
   await settle();
   assert.equal(completed.state, "rejected");
-  assert.equal(completed.error.message, "move-authentication-changed");
-  assert.equal(h.requests[0].signal.aborted, true);
+  assert.equal(
+    required(completed.error).message,
+    "move-authentication-changed",
+  );
+  assert.equal(required(h.requests[0]).signal.aborted, true);
   assert.equal(h.stored().pending.length, 1);
   h.outbox.resume();
   await h.clock.advance(60_000);
@@ -326,8 +382,11 @@ test("authentication pause retains pending actions and dispatch resumes only for
   h.outbox.resume();
   const resumed = observe(h.outbox.flush());
   assert.equal(h.requests.length, 2);
-  assert.deepEqual(h.requests[1].request, h.requests[0].request);
-  assert.equal(h.requests[1].authorizedUid, scope.loginUid);
+  assert.deepEqual(
+    required(h.requests[1]).request,
+    required(h.requests[0]).request,
+  );
+  assert.equal(required(h.requests[1]).authorizedUid, scope.loginUid);
   h.acknowledge(1, "already-applied");
   await resumed.done;
   assert.equal(resumed.state, "fulfilled");
@@ -363,7 +422,10 @@ test("partial same-match recovery retains the optimistic suffix and disregards a
   );
   restored.setOnline(true);
   restored.outbox.resume();
-  assert.equal(restored.requests[0].request.previousFlatMovesString, "a");
+  assert.equal(
+    required(restored.requests[0]).request.previousFlatMovesString,
+    "a",
+  );
   restored.acknowledge(0);
   await settle();
   assert.equal(restored.outbox.hasPendingMoves, false);
@@ -412,7 +474,7 @@ test("a divergent branch archives pending state on reset and ignores late pre-re
   const previousRecord = h.stored();
   h.outbox.resetAfterConflict(remote);
   assert.deepEqual(
-    JSON.parse(h.records.get(`${h.key}:conflict`)),
+    JSON.parse(required(h.records.get(`${h.key}:conflict`))),
     previousRecord,
   );
   assert.equal(h.records.has(h.key), false);
@@ -476,7 +538,7 @@ test("hydration suspension keeps barriers and pending actions while blocking new
   h.outbox.reconcile(initial);
   h.outbox.resume();
   assert.equal(h.requests.length, 1);
-  assert.equal(h.requests[0].request.flatMovesString, "a-b");
+  assert.equal(required(h.requests[0]).request.flatMovesString, "a-b");
   h.acknowledge(0);
   await completed.done;
   assert.equal(completed.state, "fulfilled");
@@ -492,12 +554,12 @@ test("transient exhaustion retains journal and barriers and recovers after coold
   h.outbox.enqueue("a", "a-fen");
   const completed = observe(h.outbox.flush());
   await h.clock.advance(20);
-  h.requests[0].reject(
+  required(h.requests[0]).reject(
     Object.assign(new Error("upstream-unavailable"), { code: "unavailable" }),
   );
   await settle();
   assert.equal(h.reads.length, 1);
-  h.reads[0].resolve(initial);
+  required(h.reads[0]).resolve(initial);
   await settle();
   await h.clock.advance(10);
   assert.equal(h.outbox.hasPendingMoves, true);
@@ -510,7 +572,10 @@ test("transient exhaustion retains journal and barriers and recovers after coold
     read.resolve(initial);
   await settle();
   assert.equal(h.requests.length, 2);
-  assert.deepEqual(h.requests[1].request, h.requests[0].request);
+  assert.deepEqual(
+    required(h.requests[1]).request,
+    required(h.requests[0]).request,
+  );
   h.acknowledge(1, "already-applied");
   await completed.done;
   assert.equal(completed.state, "fulfilled");
@@ -523,7 +588,7 @@ test("permanent submission errors reject barriers and never auto-resume", async 
   t.after(() => h.outbox.pause());
   h.outbox.enqueue("a", "a-fen");
   const completed = observe(h.outbox.flush());
-  h.requests[0].reject(
+  required(h.requests[0]).reject(
     Object.assign(new Error("participant-required"), {
       code: "permission-denied",
     }),
@@ -586,11 +651,11 @@ test("partial verification progress resumes the unacknowledged suffix without en
   }
   await settle();
   assert.equal(h.reads.length, 1);
-  h.reads[0].resolve({ fen: "a-fen", flatMovesString: "a" });
+  required(h.reads[0]).resolve({ fen: "a-fen", flatMovesString: "a" });
   await settle();
   assert.equal(h.requests.length, 3);
-  assert.equal(h.requests[2].request.previousFlatMovesString, "a");
-  assert.equal(h.requests[2].request.flatMovesString, "a-b");
+  assert.equal(required(h.requests[2]).request.previousFlatMovesString, "a");
+  assert.equal(required(h.requests[2]).request.flatMovesString, "a-b");
   assert.deepEqual(h.errors, []);
   assert.equal(completed.state, "pending");
   h.acknowledge(2);
@@ -605,7 +670,7 @@ test("a confirmed finished match archives undelivered actions and survives reloa
   h.outbox.enqueue("b", "b-fen");
   const confirmationVersion = h.outbox.confirmationVersion;
   const completed = observe(h.outbox.flush());
-  h.requests[0].reject(
+  required(h.requests[0]).reject(
     Object.assign(new Error("match-move-finished"), {
       code: "failed-precondition",
     }),
@@ -613,21 +678,34 @@ test("a confirmed finished match archives undelivered actions and survives reloa
   await completed.done;
   await settle();
   assert.equal(completed.state, "rejected");
-  assert.equal(completed.error.message, "match-move-finished");
+  assert.equal(required(completed.error).message, "match-move-finished");
   assert.equal(h.outbox.confirmationVersion, confirmationVersion);
   assert.equal(h.outbox.hasPendingMoves, false);
   assert.throws(() => h.outbox.enqueue("c", "c-fen"), /match-move-finished/);
   const later = observe(h.outbox.flush());
   await later.done;
   assert.equal(later.state, "rejected");
-  assert.equal(later.error.message, "match-move-finished");
+  assert.equal(required(later.error).message, "match-move-finished");
   assert.ok(h.records.size > 0);
   assert.ok(
     [...h.records.values()].some((value) => {
-      const record = JSON.parse(value);
+      const record = /** @type {unknown} */ (JSON.parse(value));
       return (
+        record !== null &&
+        typeof record === "object" &&
+        "pending" in record &&
         Array.isArray(record.pending) &&
-        record.pending.map((move) => move.moveFen).join("-") === "a-b"
+        record.pending
+          .map((/** @type {unknown} */ move) => {
+            assert.ok(
+              move !== null &&
+                typeof move === "object" &&
+                "moveFen" in move &&
+                typeof move.moveFen === "string",
+            );
+            return move.moveFen;
+          })
+          .join("-") === "a-b"
       );
     }),
   );
@@ -643,19 +721,17 @@ test("a confirmed finished match archives undelivered actions and survives reloa
   const restoredBarrier = observe(restored.outbox.flush());
   await restoredBarrier.done;
   assert.equal(restoredBarrier.state, "rejected");
-  assert.equal(restoredBarrier.error.message, "match-move-finished");
+  assert.equal(required(restoredBarrier.error).message, "match-move-finished");
   assert.equal(restored.requests.length, 0);
 });
 
-test("restoration retains journal extensions until an explicit write and leaves malformed bytes untouched", () => {
+test("restoration accepts canonical journals and rejects extensions without rewriting malformed bytes", () => {
   const key = moveDeliveryStorageKey(scope);
   const stored = {
     version: 1,
     scope,
-    confirmed: { ...initial, retained: { keep: true } },
-    pending: [{ moveFen: "a", fen: "next-fen", retained: [null, false] }],
-    gameVariant: " legacy ",
-    finished: false,
+    confirmed: { ...initial },
+    pending: [{ moveFen: "a", fen: "next-fen" }],
   };
   const raw = JSON.stringify(stored);
   const h = harness({ online: false, records: new Map([[key, raw]]) });
@@ -663,22 +739,27 @@ test("restoration retains journal extensions until an explicit write and leaves 
   assert.deepEqual(h.errors, []);
   assert.deepEqual(h.outbox.latest, { flatMovesString: "a", fen: "next-fen" });
   h.outbox.enqueue("b", "last-fen");
-  const rewritten = h.stored();
-  assert.deepEqual(rewritten.confirmed.retained, { keep: true });
-  assert.deepEqual(rewritten.pending[0].retained, [null, false]);
-  assert.equal(rewritten.gameVariant, " legacy ");
-  assert.equal(Object.hasOwn(rewritten, "finished"), false);
+  assert.deepEqual(h.stored().confirmed, initial);
+  assert.deepEqual(h.stored().pending, [
+    { moveFen: "a", fen: "next-fen" },
+    { moveFen: "b", fen: "last-fen" },
+  ]);
   for (const invalid of [
     null,
     { ...stored, scope: { ...scope, loginUid: "other" } },
     { ...stored, pending: [{ moveFen: "a-b", fen: "next-fen" }] },
+    { ...stored, confirmed: { ...initial, retained: true } },
+    { ...stored, pending: [{ moveFen: "a", fen: "next-fen", retained: true }] },
+    { ...stored, finished: false },
+    { ...stored, gameVariant: 1 },
+    { ...stored, extra: true },
   ]) {
     const bytes = JSON.stringify(invalid);
     const failed = harness({ online: false, records: new Map([[key, bytes]]) });
     assert.equal(failed.outbox.hasPendingMoves, false);
     assert.deepEqual(failed.outbox.latest, initial);
     assert.equal(failed.errors.length, 1);
-    assert.equal(failed.errors[0].kind, "storage");
+    assert.equal(required(failed.errors[0]).kind, "storage");
     assert.equal(failed.records.get(key), bytes);
   }
 });

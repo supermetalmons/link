@@ -1,3 +1,4 @@
+import { APPLICATION_DATA_SOCKET_PROTOCOL } from "@mons/shared/data-contract";
 import type { ApiSocketUrl, ApiResponse } from "@mons/shared/api-contracts";
 import { normalizeRecordKey } from "@mons/shared/ids";
 import { parseInviteMatchIndex } from "@mons/shared/rematches";
@@ -23,8 +24,8 @@ export const MATCH_SYNC_REQUEST_TIMEOUT_MS = 10_000;
 
 export class MatchSyncApiError extends Error {
   readonly code: string;
-  readonly status?: number;
-  readonly retryAfterMs?: number;
+  readonly status: number | undefined;
+  readonly retryAfterMs: number | undefined;
 
   constructor(code: string, status?: number, retryAfterMs?: number) {
     super(code);
@@ -64,6 +65,7 @@ export function createMatchSyncSocketProtocols(token: string): string[] {
   return [
     MATCH_SYNC_SOCKET_PROTOCOL,
     `${REACTION_AUTH_PROTOCOL_PREFIX}${token}`,
+    APPLICATION_DATA_SOCKET_PROTOCOL,
   ];
 }
 
@@ -76,8 +78,8 @@ export async function readMatchSyncViaApi(
   const path = matchSyncPath(inviteId, matchId);
   return readSnapshotJson({
     url: `${MATCH_SYNC_API_ROOT}${path}/snapshot`,
-    tokenProvider,
-    signal: options.signal,
+    ...(tokenProvider ? { tokenProvider } : {}),
+    ...(options.signal ? { signal: options.signal } : {}),
     timeoutMs: MATCH_SYNC_REQUEST_TIMEOUT_MS,
     maxResponseBytes: MATCH_SYNC_MAX_MESSAGE_BYTES,
     validate: (payload): payload is ReadMatchSyncResponse =>

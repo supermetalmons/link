@@ -16,7 +16,7 @@ declare const removed: Awaited<ReturnType<typeof connection.removeWaitingNavigat
 if (!removed.ok) {
   removed.reason satisfies "invalid-invite-id";
   removed.skipped satisfies true;
-  // @ts-expect-error The local skipped result has no server invite ID.
+  // expect-diagnostic TS2339: The local skipped result has no server invite ID.
   removed.inviteId;
 } else {
   removed.inviteId satisfies string;
@@ -24,34 +24,34 @@ if (!removed.ok) {
 `,
   "src/connection/injectedEthereumProviders.ts": `
 declare const providerResult: Awaited<ReturnType<EIP1193Provider["request"]>>;
-// @ts-expect-error Unvalidated provider responses cannot be consumed as accounts.
+// expect-diagnostic TS18046: Unvalidated provider responses cannot be consumed as accounts.
 providerResult.accounts;
-// @ts-expect-error The legacy global must pass the capability guard.
+// expect-diagnostic TS18046: The legacy global must pass the capability guard.
 window.ethereum.request({ method: "eth_accounts" });
 const checkedProvider = getLegacyInjectedProvider();
 checkedProvider?.request({ method: "eth_accounts", params: [] });
 checkedProvider?.request({ method: "wallet_switchEthereumChain", params: { chainId: "0x1" } });
-// @ts-expect-error The request method is required.
+// expect-diagnostic TS2345: The request method is required.
 checkedProvider?.request({ params: [] });
 `,
   "src/connection/solanaConnection.ts": `
 declare const signatureResult: Awaited<ReturnType<InjectedSolanaProvider["signMessage"]>>;
-// @ts-expect-error Foreign signature responses remain unknown before coercion.
+// expect-diagnostic TS18046: Foreign signature responses remain unknown before coercion.
 signatureResult.signature;
 coerceLegacySolanaSignature(signatureResult) satisfies Uint8Array;
 `,
   "src/connection/appleConnection.ts": `
 declare const appleSdk: AppleAuthSdk;
 const rawAppleResult = appleSdk.signIn();
-// @ts-expect-error SDK responses must pass popup signal extraction.
+// expect-diagnostic TS18046: SDK responses must pass popup signal extraction.
 rawAppleResult.authorization;
 extractApplePopupSignals(rawAppleResult).idToken satisfies string;
 declare const rawPopupResult: Awaited<ReturnType<typeof waitForApplePopupResult>>;
-// @ts-expect-error Popup event and promise values remain unknown until decoding.
+// expect-diagnostic TS18046: Popup event and promise values remain unknown until decoding.
 rawPopupResult.id_token;
 declare const initOptions: AppleAuthOptions;
 appleSdk.init(initOptions);
-// @ts-expect-error This client requests an ID token, not a code response.
+// expect-diagnostic TS2322: This client requests an ID token, not a code response.
 appleSdk.init({ ...initOptions, responseType: "code" });
 `,
   "src/utils/ensResolver.ts": `
@@ -60,13 +60,13 @@ const ensProfile = decodeEnsProfile(providerProfile);
 if (ensProfile) {
   ensProfile.name satisfies string;
   ensProfile.avatar satisfies string | null | undefined;
-  // @ts-expect-error Missing or null avatars cannot be consumed as present strings.
+  // expect-diagnostic TS1360: Missing or null avatars cannot be consumed as present strings.
   ensProfile.avatar satisfies string;
 }
 `,
   "src/services/sessionApi.ts": `
 declare const tokenClaims: unknown;
-// @ts-expect-error Parsed claims are not trusted timestamps.
+// expect-diagnostic TS18046: Parsed claims are not trusted timestamps.
 tokenClaims.iat;
 if (hasNumericTokenTimestamps(tokenClaims)) {
   tokenClaims.iat satisfies number;
@@ -79,14 +79,35 @@ test("public connection and provider boundaries reject trusted use of undecoded 
   const configuration = ts.getParsedCommandLineOfConfigFile(
     resolve(root, "tsconfig.json"),
     {},
-    { ...ts.sys, onUnRecoverableConfigFileDiagnostic: assert.fail },
+    {
+      ...ts.sys,
+      onUnRecoverableConfigFileDiagnostic(diagnostic) {
+        assert.fail(
+          ts.flattenDiagnosticMessageText(diagnostic.messageText, "\n"),
+        );
+      },
+    },
   );
   assert.ok(configuration);
   assert.deepEqual(configuration.errors, []);
+  /** @type {Map<string, Map<number, { code: number; label: string; reported: boolean }>>} */
+  const expectedByFile = new Map();
   const replacements = new Map(
     Object.entries(checks).map(([file, appended]) => {
       const path = resolve(root, file);
-      return [path, `${readFileSync(path, "utf8")}\n${appended}`];
+      const source = `${readFileSync(path, "utf8")}\n${appended}`;
+      /** @type {Map<number, { code: number; label: string; reported: boolean }>} */
+      const expected = new Map();
+      source.split("\n").forEach((line, index) => {
+        const match = /^\s*\/\/ expect-diagnostic TS(\d+): (.+)$/.exec(line);
+        if (!match) return;
+        const [, code, label] = match;
+        assert.ok(code && label);
+        expected.set(index + 1, { code: Number(code), label, reported: false });
+      });
+      assert.ok(expected.size > 0, `Missing rejection cases for ${file}`);
+      expectedByFile.set(path, expected);
+      return [path, source];
     }),
   );
   const host = ts.createCompilerHost(configuration.options);
@@ -97,11 +118,38 @@ test("public connection and provider boundaries reject trusted use of undecoded 
     configuration.options,
     host,
   );
+  /** @type {import("typescript").Diagnostic[]} */
+  const unrelated = [];
+  for (const diagnostic of ts.getPreEmitDiagnostics(program)) {
+    const expected =
+      diagnostic.file && diagnostic.start !== undefined
+        ? expectedByFile
+            .get(resolve(diagnostic.file.fileName))
+            ?.get(
+              diagnostic.file.getLineAndCharacterOfPosition(diagnostic.start)
+                .line,
+            )
+        : undefined;
+    if (!expected) {
+      unrelated.push(diagnostic);
+      continue;
+    }
+    assert.equal(
+      diagnostic.category,
+      ts.DiagnosticCategory.Error,
+      expected.label,
+    );
+    assert.equal(diagnostic.code, expected.code, expected.label);
+    expected.reported = true;
+  }
   assert.deepEqual(
-    ts.getPreEmitDiagnostics(program).map((diagnostic) => ({
+    unrelated.map((diagnostic) => ({
       file: diagnostic.file?.fileName,
       message: ts.flattenDiagnosticMessageText(diagnostic.messageText, "\n"),
     })),
     [],
   );
+  for (const expected of expectedByFile.values())
+    for (const { label, reported } of expected.values())
+      assert.ok(reported, `Compiler accepted: ${label}`);
 });

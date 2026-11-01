@@ -1,9 +1,16 @@
-import { retainedInviteSourceFixture } from "./inviteDocumentFixture.ts";
+import {
+  canonicalAutomatchFixture,
+  retainedAutomatchRecordsFixture,
+} from "./automatchRecordFixture.ts";
+import {
+  retainedInviteSourceFixture,
+  inviteDocumentFixture,
+} from "./inviteDocumentFixture.ts";
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
-  decodeAutomatchEntries,
-  decodeAutomatchEntry,
+  decodeAutomatchEntries as parseAutomatchEntries,
+  decodeAutomatchEntry as parseAutomatchEntry,
 } from "../../../runtime/automatchRecords.js";
 import { AuthApiFailure } from "../src/authErrors.ts";
 import { createAutomatchProfileOutboxSnapshot } from "../src/automatchProjectionRecords.ts";
@@ -39,6 +46,15 @@ import {
   type LegacyGameplayTestMethods,
 } from "./gameSessionTestPorts.ts";
 import { createMemoryGameplayCoordinationStores } from "./gameplayCoordinationTestUtils.ts";
+
+function decodeAutomatchEntry(value: unknown) {
+  return parseAutomatchEntry(canonicalAutomatchFixture("automatch", value));
+}
+function decodeAutomatchEntries(value: unknown) {
+  return parseAutomatchEntries(
+    retainedAutomatchRecordsFixture("automatch", value),
+  );
+}
 
 const identity: RequestIdentity = {
   uid: "guest-uid",
@@ -89,7 +105,7 @@ function cancelQueuedAutomatch(
   dependencies: Partial<AutomatchDependencies> = {},
   signal?: AbortSignal,
 ) {
-  const data = decodeAutomatchEntry(queued.data).record;
+  const data = decodeAutomatchEntry(queued.data);
   assert.ok(data);
   return cancelQueuedAutomatchImpl(
     { inviteId: queued.inviteId, data },
@@ -120,8 +136,12 @@ async function automatchOwnerLockId(owner: string): Promise<string> {
     byte.toString(16).padStart(2, "0"),
   ).join("")}`;
 }
-function request(emojiId = 1, aura = "", operationId = AUTOMATCH_OPERATION_ID) {
-  return { operationId, emojiId, aura };
+function request(
+  emojiId = 1,
+  aura: import("@mons/shared/appearance").Aura | "" = "none",
+  operationId = AUTOMATCH_OPERATION_ID,
+) {
+  return { operationId, emojiId, aura: aura === "" ? ("none" as const) : aura };
 }
 
 function receiptFromUpdates(
@@ -143,8 +163,9 @@ function storedAutomatchReceipt(
   operationId = AUTOMATCH_OPERATION_ID,
 ): Record<string, unknown> {
   return {
-    schemaVersion: 1,
-    aura: "",
+    schemaVersion: 2,
+    effects: { state: "enabled" },
+    aura: "none" as const,
     completedAtMs: 1,
     emojiId: 1,
     inviteId,
@@ -169,8 +190,9 @@ function assertPendingReceiptUpdates(
   requesterUid = identity.uid,
 ): void {
   assert.deepEqual(updates[`gameplayMutationReceipts/${operationId}`], {
-    schemaVersion: 1,
-    aura: "",
+    schemaVersion: 2,
+    effects: { state: "enabled" },
+    aura: "none" as const,
     completedAtMs: STATE_SERVER_TIMESTAMP,
     emojiId: 1,
     inviteId,
@@ -188,7 +210,7 @@ function assertPendingReceiptUpdates(
   });
   assert.deepEqual(
     updates[`gameplayMutationReceiptExpirations/${operationId}`],
-    { completedAtMs: STATE_SERVER_TIMESTAMP },
+    { schemaVersion: 1, completedAtMs: STATE_SERVER_TIMESTAMP },
   );
   assert.equal(
     updates[`invites/${inviteId}/automatchOperationIds/${requesterUid}`],
@@ -321,28 +343,38 @@ function repository(
       if (decision.commit === false) {
         return {
           committed: false,
-          decision: decision.decision,
+          ...(decision.decision === undefined
+            ? {}
+            : { decision: decision.decision }),
           value: transactionValues.get(path) ?? null,
         };
       }
       transactionValues.set(path, decision.value);
       return {
         committed: true,
-        decision: decision.decision,
+        ...(decision.decision === undefined
+          ? {}
+          : { decision: decision.decision }),
         value: decision.value,
       };
     },
     ...remainingOverrides,
   };
   const result = attachGameplayTestPorts(source);
-  result.readAutomatchProfileOutbox = async (inviteId, signal) =>
-    createAutomatchProfileOutboxSnapshot({
-      requestId: await getStatePath?.(
-        `profileGameProjectionOutbox/automatch/${inviteId}/requestId`,
-        undefined,
-        signal,
-      ),
-    });
+  result.readAutomatchProfileOutbox = async (inviteId, signal) => {
+    const requestId = await getStatePath?.(
+      `profileGameProjectionOutbox/automatch/${inviteId}/requestId`,
+      undefined,
+      signal,
+    );
+    return createAutomatchProfileOutboxSnapshot(
+      requestId == null
+        ? null
+        : canonicalAutomatchFixture("profileGameProjectionOutbox/automatch", {
+            requestId,
+          }),
+    );
+  };
   return result;
 }
 
@@ -372,7 +404,7 @@ test("reselects and rereads ownership after a named journal selection conflict",
   assert.equal(attempts, 2);
   assert.equal(ownershipReads, 2);
   assert.equal(delays.length, 1);
-  assert.ok(delays[0] >= 1 && delays[0] <= 5);
+  assert.ok(delays[0]! >= 1 && delays[0]! <= 5);
 });
 
 test("bounds repeated journal selection conflicts without retrying an ambiguous committed write", async () => {
@@ -425,14 +457,14 @@ test("normalizes the first bounded queue result", () => {
     ),
     {
       inviteId: "auto_one",
-      data: decodeAutomatchEntry({ uid: "host" }).record,
+      data: decodeAutomatchEntry({ uid: "host" }),
     },
   );
   assert.equal(getFirstQueuedAutomatch(null), null);
   assert.equal(getFirstQueuedAutomatch({}), null);
   assert.deepEqual(emptyAutomatchProfile(), {
-    aura: "",
-    emoji: "",
+    aura: "none" as const,
+    emoji: 0,
     eth: "",
     profileId: "",
     rating: 0,
@@ -489,7 +521,7 @@ test("creates a pending automatch with profile metadata and exact roots", async 
       },
       random: () => {
         assert.ok(randomCalls < randomValues.length);
-        return randomValues[randomCalls++];
+        return randomValues[randomCalls++]!;
       },
     },
   );
@@ -529,19 +561,19 @@ test("creates a pending automatch with profile metadata and exact roots", async 
   const receipt = updates[
     `gameplayMutationReceipts/${AUTOMATCH_OPERATION_ID}`
   ] as Record<string, unknown>;
-  assert.equal(receipt.schemaVersion, 1);
+  assert.equal(receipt.schemaVersion, 2);
   assert.equal(receipt.kind, "automatch-start");
   assert.equal(receipt.operationId, AUTOMATCH_OPERATION_ID);
   assert.equal(receipt.requesterUid, identity.uid);
   assert.equal(receipt.emojiId, 1);
-  assert.equal(receipt.aura, "");
+  assert.equal(receipt.aura, "none");
   assert.equal(receipt.inviteId, "auto_abcdefghijk");
   assert.equal(receipt.profileProjectionRequestId, "request-1");
   assert.equal(receipt.telegramProjection, true);
   assert.deepEqual(receipt.response, result);
   assert.deepEqual(
     updates[`gameplayMutationReceiptExpirations/${AUTOMATCH_OPERATION_ID}`],
-    { completedAtMs: STATE_SERVER_TIMESTAMP },
+    { schemaVersion: 1, completedAtMs: STATE_SERVER_TIMESTAMP },
   );
   const queue = updates["automatch/auto_abcdefghijk"] as Record<
     string,
@@ -559,18 +591,20 @@ test("creates a pending automatch with profile metadata and exact roots", async 
   assert.deepEqual(
     updates["profileGameProjectionOutbox/automatch/auto_abcdefghijk"],
     {
-      schemaVersion: 1,
+      schemaVersion: 2,
       status: "pending",
       requestId: "request-1",
       reason: "automatch-queue",
       sourceUpdatedAtMs: STATE_SERVER_TIMESTAMP,
       lastQueuedAtMs: STATE_SERVER_TIMESTAMP,
+      historicalMatches: {},
+      archiveRetry: null,
     },
   );
   assert.deepEqual(
     updates["telegramProjectionOutbox/automatch/auto_abcdefghijk"],
     {
-      schemaVersion: 1,
+      schemaVersion: 2,
       status: "pending",
       requestId: "request-1",
       updatedAtMs: STATE_SERVER_TIMESTAMP,
@@ -586,19 +620,22 @@ test("creates a pending automatch with profile metadata and exact roots", async 
   assert.equal(match.gameVariant, "Classic");
   assert.equal(queue.gameVariant, "Classic");
   assert.equal(typeof match.fen, "string");
-  assert.deepEqual(invite, {
-    version: 2,
-    hostId: "guest-uid",
-    hostColor: "black",
-    guestId: null,
-    password: "lmnopqrstuvwxyz",
-    automatchStateHint: "pending",
-    automatchCanceledAt: null,
-    automatchOperationIds: {
-      [identity.uid]: AUTOMATCH_OPERATION_ID,
-    },
-    telegramDeliveryVersion: 2,
-  });
+  assert.deepEqual(
+    invite,
+    inviteDocumentFixture({
+      version: 2,
+      hostId: "guest-uid",
+      hostColor: "black",
+      guestId: null,
+      password: "lmnopqrstuvwxyz",
+      automatchStateHint: "pending",
+      automatchCanceledAt: null,
+      automatchOperationIds: {
+        [identity.uid]: AUTOMATCH_OPERATION_ID,
+      },
+      telegramDeliveryVersion: 2,
+    }),
+  );
   assert.equal(telegram.lifecycle, "pending");
   assert.equal(telegram.generation, 1);
   assert.match(
@@ -709,7 +746,7 @@ test("uses client metadata without canonical ownership for an unlinked login", a
     string,
     unknown
   >;
-  assert.equal(queue.profileId, "");
+  assert.equal(queue.profileId, null);
   assert.equal(queue.rating, 0);
   assert.equal(queue.emojiId, 3);
   assert.equal(match.emojiId, 3);
@@ -751,18 +788,20 @@ test("automatch queue failures preserve the committed response and outboxes", as
   assert.deepEqual(
     updates["profileGameProjectionOutbox/automatch/auto_aaaaaaaaaaa"],
     {
-      schemaVersion: 1,
+      schemaVersion: 2,
       status: "pending",
       requestId: "request-1",
       reason: "automatch-queue",
       sourceUpdatedAtMs: STATE_SERVER_TIMESTAMP,
       lastQueuedAtMs: STATE_SERVER_TIMESTAMP,
+      historicalMatches: {},
+      archiveRetry: null,
     },
   );
   assert.deepEqual(
     updates["telegramProjectionOutbox/automatch/auto_aaaaaaaaaaa"],
     {
-      schemaVersion: 1,
+      schemaVersion: 2,
       status: "pending",
       requestId: "request-1",
       updatedAtMs: STATE_SERVER_TIMESTAMP,
@@ -1466,9 +1505,9 @@ test("serializes concurrent starts for logins on the same profile", async () => 
       }),
     getStatePath: async (path, query) => {
       const queueMatch = /^automatch\/([^/]+)$/.exec(path);
-      if (queueMatch) return queued.get(queueMatch[1]) || null;
+      if (queueMatch) return queued.get(queueMatch[1]!) || null;
       const inviteMatch = /^invites\/([^/]+)$/.exec(path);
-      if (inviteMatch) return invites.get(inviteMatch[1]) || null;
+      if (inviteMatch) return invites.get(inviteMatch[1]!) || null;
       if (path !== "automatch") return null;
       const entries = Array.from(queued.entries()).filter(([, value]) =>
         query?.orderBy === "uid" ? value.uid === query.equalTo : true,
@@ -1480,23 +1519,23 @@ test("serializes concurrent starts for logins on the same profile", async () => 
       for (const [path, value] of Object.entries(updates)) {
         const queueMatch = /^automatch\/([^/]+)$/.exec(path);
         if (queueMatch && value && typeof value === "object") {
-          queued.set(queueMatch[1], value as Record<string, unknown>);
+          queued.set(queueMatch[1]!, { ...Object(value), timestamp: 1 });
           queueWrites++;
         }
         const inviteMatch = /^invites\/([^/]+)$/.exec(path);
         if (inviteMatch && value && typeof value === "object") {
-          invites.set(inviteMatch[1], value as Record<string, unknown>);
+          invites.set(inviteMatch[1]!, value as Record<string, unknown>);
         }
         const operationMatch =
           /^invites\/([^/]+)\/automatchOperationIds\/([^/]+)$/.exec(path);
         if (operationMatch) {
-          const invite = invites.get(operationMatch[1]) || {};
-          invites.set(operationMatch[1], {
+          const invite = invites.get(operationMatch[1]!) || {};
+          invites.set(operationMatch[1]!, {
             ...invite,
             automatchOperationIds: {
               ...((invite.automatchOperationIds as Record<string, unknown>) ||
                 {}),
-              [operationMatch[2]]: value,
+              [operationMatch[2]!]: value,
             },
           });
         }
@@ -1643,13 +1682,13 @@ test("converges pending queues after their owners merge", async () => {
           return matches.length ? Object.fromEntries(matches) : null;
         }
         const queueMatch = /^automatch\/(.+)$/.exec(path);
-        if (queueMatch) return queues.get(queueMatch[1]) || null;
+        if (queueMatch) return queues.get(queueMatch[1]!) || null;
         const inviteRootMatch = /^invites\/([^/]+)$/.exec(path);
-        if (inviteRootMatch) return invites.get(inviteRootMatch[1]) || null;
+        if (inviteRootMatch) return invites.get(inviteRootMatch[1]!) || null;
         const inviteMatch =
           /^invites\/(.+)\/(guestId|hostId|automatchOperationIds)$/.exec(path);
         if (inviteMatch) {
-          return invites.get(inviteMatch[1])?.[inviteMatch[2]] ?? null;
+          return invites.get(inviteMatch[1]!)?.[inviteMatch[2]!] ?? null;
         }
         assert.fail(`unexpected path ${path}`);
       },
@@ -1657,12 +1696,12 @@ test("converges pending queues after their owners merge", async () => {
         patches.push(updates);
         for (const [path, value] of Object.entries(updates)) {
           const queueMatch = /^automatch\/(.+)$/.exec(path);
-          if (queueMatch && value === null) queues.delete(queueMatch[1]);
+          if (queueMatch && value === null) queues.delete(queueMatch[1]!);
           const inviteMatch = /^invites\/(.+)\/(.+)$/.exec(path);
           if (inviteMatch) {
-            invites.set(inviteMatch[1], {
-              ...(invites.get(inviteMatch[1]) || {}),
-              [inviteMatch[2]]: value,
+            invites.set(inviteMatch[1]!, {
+              ...(invites.get(inviteMatch[1]!) || {}),
+              [inviteMatch[2]!]: value,
             });
           }
         }
@@ -1689,9 +1728,9 @@ test("converges pending queues after their owners merge", async () => {
   assert.deepEqual([...queues.keys()], ["auto_newer"]);
   assert.equal(invites.get("auto_older")?.automatchStateHint, "canceled");
   assert.equal(patches.length, 2);
-  assert.equal(patches[0]["automatch/auto_older"], null);
+  assert.equal(patches[0]!["automatch/auto_older"], null);
   assertPendingReceiptUpdates(
-    patches[1],
+    patches[1]!,
     "auto_newer",
     AUTOMATCH_OPERATION_ID,
     "first-uid",
@@ -1750,13 +1789,13 @@ test("repeatedly converges same-UID queues hidden behind the bounded query", asy
           return visible.length ? Object.fromEntries(visible) : null;
         }
         const queueMatch = /^automatch\/(.+)$/.exec(path);
-        if (queueMatch) return queues.get(queueMatch[1]) || null;
+        if (queueMatch) return queues.get(queueMatch[1]!) || null;
         const inviteRootMatch = /^invites\/([^/]+)$/.exec(path);
-        if (inviteRootMatch) return invites.get(inviteRootMatch[1]) || null;
+        if (inviteRootMatch) return invites.get(inviteRootMatch[1]!) || null;
         const inviteMatch =
           /^invites\/(.+)\/(guestId|hostId|automatchOperationIds)$/.exec(path);
         if (inviteMatch) {
-          return invites.get(inviteMatch[1])?.[inviteMatch[2]] ?? null;
+          return invites.get(inviteMatch[1]!)?.[inviteMatch[2]!] ?? null;
         }
         assert.fail(`unexpected path ${path}`);
       },
@@ -1772,14 +1811,14 @@ test("repeatedly converges same-UID queues hidden behind the bounded query", asy
         for (const [path, value] of Object.entries(updates)) {
           const queueMatch = /^automatch\/(.+)$/.exec(path);
           if (queueMatch && value === null) {
-            queues.delete(queueMatch[1]);
-            canceledInviteIds.push(queueMatch[1]);
+            queues.delete(queueMatch[1]!);
+            canceledInviteIds.push(queueMatch[1]!);
           }
           const inviteMatch = /^invites\/(.+)\/(.+)$/.exec(path);
           if (inviteMatch) {
-            invites.set(inviteMatch[1], {
-              ...(invites.get(inviteMatch[1]) || {}),
-              [inviteMatch[2]]: value,
+            invites.set(inviteMatch[1]!, {
+              ...(invites.get(inviteMatch[1]!) || {}),
+              [inviteMatch[2]!]: value,
             });
           }
         }
@@ -1830,7 +1869,7 @@ test("cancellation rejects stale queue and invite snapshots", async (t) => {
     { name: "timestamp", queue: { timestamp: 2 }, invite: {} },
     {
       name: "delivery version",
-      queue: { telegramDeliveryVersion: 1 },
+      queue: { telegramDeliveryVersion: null },
       invite: {},
     },
     { name: "host", queue: {}, invite: { hostId: "different-host" } },
@@ -1865,8 +1904,8 @@ test("cancellation rejects stale queue and invite snapshots", async (t) => {
   }
 });
 
-test("non-v2 cancellations request only the profile projection", async (t) => {
-  for (const telegramDeliveryVersion of [undefined, 1, "2"]) {
+test("cancellations with Telegram disabled request only the profile projection", async (t) => {
+  for (const telegramDeliveryVersion of [null]) {
     await t.test(String(telegramDeliveryVersion), async () => {
       const queued = {
         inviteId: "auto_legacy_cancel",
@@ -1888,6 +1927,7 @@ test("non-v2 cancellations request only the profile projection", async (t) => {
 
       const canceled = await cancelQueuedAutomatch(queued, value, {
         createProjectionRequestId: () => "legacy-cancel",
+        now: () => 1000,
         assertMutationAllowed: async () => {
           events.push("guard");
         },
@@ -1923,7 +1963,7 @@ test("non-v2 cancellations request only the profile projection", async (t) => {
         inviteId: queued.inviteId,
         value: {
           automatchStateHint: "canceled",
-          automatchCanceledAt: STATE_SERVER_TIMESTAMP,
+          automatchCanceledAt: 1000,
         },
       });
     });
@@ -1952,9 +1992,11 @@ test("cancellation requires the matching outbox request to prove an ambiguous co
     });
   value.readAutomatchProfileOutbox = async () => {
     proofReads += 1;
-    return createAutomatchProfileOutboxSnapshot({
-      requestId: "another-cancellation",
-    });
+    return createAutomatchProfileOutboxSnapshot(
+      canonicalAutomatchFixture("profileGameProjectionOutbox/automatch", {
+        requestId: "another-cancellation",
+      }),
+    );
   };
   value.commitSessionChanges = async () => {
     attempted = true;
@@ -2583,10 +2625,10 @@ test("public cancellation succeeds when the last of two queues commits before ab
             return queue?.[inviteId] || null;
           }
           if (path === `invites/${inviteId}/guestId`) {
-            return invites[inviteId].guestId;
+            return invites[inviteId]!.guestId;
           }
           if (path === `invites/${inviteId}/hostId`) {
-            return invites[inviteId].hostId;
+            return invites[inviteId]!.hostId;
           }
           if (path === `invites/${inviteId}`) return invites[inviteId];
           if (
@@ -2609,7 +2651,7 @@ test("public cancellation succeeds when the last of two queues commits before ab
           if (Object.keys(queue).length === 0) queue = null;
         }
         invites[inviteId] = {
-          ...invites[inviteId],
+          ...invites[inviteId]!,
           automatchStateHint: "canceled",
           automatchCanceledAt: 2,
         };
@@ -2694,10 +2736,10 @@ test("public cancellation does not hide a third queued match after abort", async
               return queues.get(inviteId) || null;
             }
             if (path === `invites/${inviteId}/guestId`) {
-              return invites[inviteId].guestId;
+              return invites[inviteId]!.guestId;
             }
             if (path === `invites/${inviteId}/hostId`) {
-              return invites[inviteId].hostId;
+              return invites[inviteId]!.hostId;
             }
             if (path === `invites/${inviteId}`) return invites[inviteId];
             if (
@@ -2716,7 +2758,7 @@ test("public cancellation does not hide a third queued match after abort", async
           assert.ok(inviteId);
           queues.delete(inviteId);
           invites[inviteId] = {
-            ...invites[inviteId],
+            ...invites[inviteId]!,
             automatchStateHint: "canceled",
             automatchCanceledAt: 2,
           };
@@ -2918,13 +2960,13 @@ test("converges a candidate owner before consuming its surviving queue", async (
           return matches.length ? Object.fromEntries(matches) : null;
         }
         const queueMatch = /^automatch\/(.+)$/.exec(path);
-        if (queueMatch) return queues.get(queueMatch[1]) || null;
+        if (queueMatch) return queues.get(queueMatch[1]!) || null;
         const inviteRootMatch = /^invites\/([^/]+)$/.exec(path);
-        if (inviteRootMatch) return invites.get(inviteRootMatch[1]) || null;
+        if (inviteRootMatch) return invites.get(inviteRootMatch[1]!) || null;
         const inviteMatch =
           /^invites\/(.+)\/(guestId|hostId|automatchOperationIds)$/.exec(path);
         if (inviteMatch) {
-          return invites.get(inviteMatch[1])?.[inviteMatch[2]] ?? null;
+          return invites.get(inviteMatch[1]!)?.[inviteMatch[2]!] ?? null;
         }
         assert.fail(`unexpected path ${path}`);
       },
@@ -2932,16 +2974,16 @@ test("converges a candidate owner before consuming its surviving queue", async (
         patches.push(updates);
         for (const [path, value] of Object.entries(updates)) {
           const queueMatch = /^automatch\/(.+)$/.exec(path);
-          if (queueMatch && value === null) queues.delete(queueMatch[1]);
+          if (queueMatch && value === null) queues.delete(queueMatch[1]!);
           const inviteRootMatch = /^invites\/([^/]+)$/.exec(path);
           if (inviteRootMatch && value && typeof value === "object") {
-            invites.set(inviteRootMatch[1], value as Record<string, unknown>);
+            invites.set(inviteRootMatch[1]!, value as Record<string, unknown>);
           }
           const inviteFieldMatch = /^invites\/([^/]+)\/([^/]+)$/.exec(path);
           if (inviteFieldMatch) {
-            invites.set(inviteFieldMatch[1], {
-              ...(invites.get(inviteFieldMatch[1]) || {}),
-              [inviteFieldMatch[2]]: value,
+            invites.set(inviteFieldMatch[1]!, {
+              ...(invites.get(inviteFieldMatch[1]!) || {}),
+              [inviteFieldMatch[2]!]: value,
             });
           }
         }
@@ -2964,8 +3006,8 @@ test("converges a candidate owner before consuming its surviving queue", async (
     [identity.uid]: AUTOMATCH_OPERATION_ID,
   });
   assert.equal(patches.length, 2);
-  assert.equal(patches[0]["automatch/auto_older"], null);
-  assert.equal(patches[1]["automatch/auto_newer"], null);
+  assert.equal(patches[0]!["automatch/auto_older"], null);
+  assert.equal(patches[1]!["automatch/auto_newer"], null);
 });
 
 test("backs off boundedly while the profile queue lock is busy", async () => {
@@ -2995,7 +3037,7 @@ test("backs off boundedly while the profile queue lock is busy", async () => {
   );
 
   assert.ok(delays.length < 30);
-  assert.ok(delays[0] >= 25);
+  assert.ok(delays[0]! >= 25);
   assert.ok(delays.at(-1)! >= 1_000);
   assert.ok(delays.every((delay) => delay <= 1_250));
 });
@@ -3099,7 +3141,7 @@ test("retries a busy selected invite within the original owner deadline", async 
       assert.ok(busyLockIds.length > 1);
       assert.ok(busyLockIds.every((lockId) => lockId === inviteId));
       assert.ok(delays.length < 30);
-      assert.ok(delays[0] >= 25);
+      assert.ok(delays[0]! >= 25);
       assert.ok(delays.at(-1)! >= 1_000);
       assert.ok(delays.every((delay) => delay <= 1_250));
       assert.equal(stores.lockRows.size, 0);
@@ -3453,20 +3495,23 @@ test("matches a different v2 candidate without rereading a known commit", async 
       requestId: "request-1",
     },
   ]);
-  assert.deepEqual(updates["invites/auto_existing"], {
-    version: 2,
-    hostId: "host-uid",
-    hostColor: "black",
-    guestId: "guest-uid",
-    password: "password",
-    automatchStateHint: "matched",
-    automatchCanceledAt: null,
-    automatchOperationIds: {
-      "host-uid": "host-operation",
-      [identity.uid]: AUTOMATCH_OPERATION_ID,
-    },
-    telegramDeliveryVersion: 2,
-  });
+  assert.deepEqual(
+    updates["invites/auto_existing"],
+    inviteDocumentFixture({
+      version: 2,
+      hostId: "host-uid",
+      hostColor: "black",
+      guestId: "guest-uid",
+      password: "password",
+      automatchStateHint: "matched",
+      automatchCanceledAt: null,
+      automatchOperationIds: {
+        "host-uid": "host-operation",
+        [identity.uid]: AUTOMATCH_OPERATION_ID,
+      },
+      telegramDeliveryVersion: 2,
+    }),
+  );
   const match = updates["players/guest-uid/matches/auto_existing"] as Record<
     string,
     unknown
@@ -3489,7 +3534,7 @@ test("matches a different v2 candidate without rereading a known commit", async 
   assert.deepEqual(
     updates["telegramProjectionOutbox/automatch/auto_existing"],
     {
-      schemaVersion: 1,
+      schemaVersion: 2,
       status: "pending",
       requestId: "request-1",
       updatedAtMs: STATE_SERVER_TIMESTAMP,
@@ -3498,12 +3543,14 @@ test("matches a different v2 candidate without rereading a known commit", async 
   assert.deepEqual(
     updates["profileGameProjectionOutbox/automatch/auto_existing"],
     {
-      schemaVersion: 1,
+      schemaVersion: 2,
       status: "pending",
       requestId: "request-1",
       reason: "automatch-queue",
       sourceUpdatedAtMs: STATE_SERVER_TIMESTAMP,
       lastQueuedAtMs: STATE_SERVER_TIMESTAMP,
+      historicalMatches: {},
+      archiveRetry: null,
     },
   );
 });
@@ -3571,12 +3618,14 @@ test("keeps legacy matches free of Telegram v2 updates", async () => {
   assert.deepEqual(
     updates["profileGameProjectionOutbox/automatch/auto_legacy"],
     {
-      schemaVersion: 1,
+      schemaVersion: 2,
       status: "pending",
       requestId: "legacy-request",
       reason: "automatch-queue",
       sourceUpdatedAtMs: STATE_SERVER_TIMESTAMP,
       lastQueuedAtMs: STATE_SERVER_TIMESTAMP,
+      historicalMatches: {},
+      archiveRetry: null,
     },
   );
   assert.deepEqual(profileProjectionTasks, [
@@ -3587,11 +3636,9 @@ test("keeps legacy matches free of Telegram v2 updates", async () => {
     },
   ]);
   assert.equal(
-    Object.hasOwn(
-      updates["invites/auto_legacy"] as Record<string, unknown>,
-      "telegramDeliveryVersion",
-    ),
-    false,
+    (updates["invites/auto_legacy"] as Record<string, unknown>)
+      .telegramDeliveryVersion,
+    null,
   );
   assert.deepEqual(
     (updates["invites/auto_legacy"] as Record<string, unknown>)
@@ -3964,7 +4011,7 @@ test("rejects a committed match with a conflicting receipt", async () => {
       patchStateRoot: async (updates) => {
         receipt = {
           ...(receiptFromUpdates(updates) as Record<string, unknown>),
-          aura: "different",
+          aura: "rainbow" as const,
         };
         committed = true;
         throw new Error("response-lost-after-commit");

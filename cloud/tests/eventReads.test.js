@@ -2,13 +2,21 @@
 
 const assert = require("node:assert/strict");
 const test = require("node:test");
+const { event: eventFixture } = require("./fixtures/canonicalEvents");
 const { createEventRuntime } = require("../runtime/events");
 
 const {
   encodeEventUpdates,
-} = require("../workers/api/src/eventCompatibilityCodec.ts");
+} = require("../workers/api/test/eventLegacyFixtureCodec.ts");
 const eventId = "NN3eRzoZo80";
 
+/**
+ * @typedef {Parameters<typeof createEventRuntime>[0]} Dependencies
+ * @typedef {import("../runtime/shared/events").EventRecord} EventRecord
+ * @typedef {import("./fixtures/canonicalEvents").EventPatch} EventPatch
+ * @typedef {import("../runtime/eventReads").EventPrizeAssignmentRecord} Assignment
+ */
+/** @param {{lockedEvent: EventPatch, prizeSelections?: Record<string, string>, lockOwned?: boolean | ((checks: number) => boolean), trackLeaseChecks?: boolean, readMatchPairs?: Dependencies["readMatchPairs"], readProfileOwnershipSnapshot?: Dependencies["readProfileOwnershipSnapshot"], readEventPrizeWithdrawals?: NonNullable<Dependencies["readEventPrizeWithdrawals"]>, projectedPrizes?: Record<string, Assignment | null>}} input */
 function createRuntime({
   lockedEvent,
   prizeSelections = {},
@@ -19,61 +27,73 @@ function createRuntime({
   readEventPrizeWithdrawals = () => assert.fail("unexpected withdrawal read"),
   projectedPrizes = {},
 }) {
+  const snapshotEvent = eventFixture({ eventId, ...lockedEvent });
+  /** @type {string[]} */
   const calls = [];
-  let event = { status: "scheduled", startAtMs: 10_000 };
+  let event = eventFixture({ eventId, startAtMs: 10_000 });
+  /** @type {Record<string, unknown>[]} */
   const patches = [];
+  /** @type {(readonly import("../runtime/eventCommands").EventCommand[])[]} */
   const plans = [];
   let leaseChecks = 0;
-  const runtime = createEventRuntime({
-    state: {
-      read: () => assert.fail("unexpected generic event read"),
-      readEvent: async (candidateEventId) => {
-        assert.equal(candidateEventId, eventId);
-        calls.push("read");
-        return structuredClone(event);
-      },
-      readEventSnapshot: async (candidateEventId) => {
-        assert.equal(candidateEventId, eventId);
-        calls.push("snapshot");
-        return {
-          event: structuredClone(lockedEvent),
-          eventId,
-          prizeSelections: structuredClone(prizeSelections),
-          revision: 1,
-        };
-      },
-      readEventPrizeSelections: () =>
-        assert.fail("snapshot already includes prize selections"),
-      commitEventPlan: async (plan) => {
-        const updates = encodeEventUpdates(plan);
-        calls.push("write");
-        patches.push(updates);
-        plans.push(structuredClone(plan));
-        for (const [key, value] of Object.entries(updates)) {
-          const parts = key.split("/");
-          if (parts[0] === "events") event[parts[2]] = value;
-        }
-        event.persistedRevision = 2;
-      },
-      transactProfileEventPrize: async (
-        profileId,
-        candidateEventId,
-        update,
-      ) => {
-        assert.equal(candidateEventId, eventId);
-        calls.push(`project:${profileId}`);
-        const current = projectedPrizes[profileId] ?? null;
-        const decision = update(current);
-        const committed = decision.commit !== false;
-        if (committed) projectedPrizes[profileId] = decision.value;
-        return { committed, value: committed ? decision.value : current };
-      },
+  /** @type {import("../runtime/eventCommands").EventRuntimeStore & {read(): never, readEventPrizeSelections(): never}} */
+  const state = {
+    read: () => assert.fail("unexpected generic event read"),
+    transactEventSyncThrottle: () => assert.fail("unexpected sync throttle"),
+    readEvent: async (candidateEventId) => {
+      assert.equal(candidateEventId, eventId);
+      calls.push("read");
+      return structuredClone(event);
     },
+    readEventSnapshot: async (candidateEventId) => {
+      assert.equal(candidateEventId, eventId);
+      calls.push("snapshot");
+      return {
+        event: structuredClone(snapshotEvent),
+        eventId,
+        prizeSelections: structuredClone(prizeSelections),
+        revision: 1,
+      };
+    },
+    readEventPrizeSelections: () =>
+      assert.fail("snapshot already includes prize selections"),
+    commitEventPlan: async (plan) => {
+      const updates = encodeEventUpdates(plan);
+      calls.push("write");
+      patches.push(updates);
+      plans.push(structuredClone(plan));
+      for (const [key, value] of Object.entries(updates)) {
+        const parts = key.split("/");
+        if (parts[0] === "events") {
+          assert.ok(parts[2]);
+          Reflect.set(event, parts[2], value);
+        }
+      }
+      event.updatedAtMs = 1_001;
+    },
+    transactProfileEventPrize: async (profileId, candidateEventId, update) => {
+      assert.equal(candidateEventId, eventId);
+      calls.push(`project:${profileId}`);
+      const current = projectedPrizes[profileId] ?? null;
+      const decision = update(current);
+      if ("commit" in decision) return { committed: false, value: current };
+      projectedPrizes[profileId] = decision.value;
+      return { committed: true, value: decision.value };
+    },
+  };
+  const runtime = createEventRuntime({
+    state: state,
     eventLockManager: {
       acquireEventLockWithRetry: async () => {
         calls.push("lock");
-        event = structuredClone(lockedEvent);
-        return { eventId };
+        event = structuredClone(snapshotEvent);
+        return {
+          eventId,
+          key: { kind: "event", id: eventId },
+          lockId: "fixture-lock",
+          ownerUid: "worker",
+          lockRoot: "eventLocks",
+        };
       },
       isEventLockStillOwned: async () => {
         leaseChecks += 1;
@@ -115,8 +135,10 @@ test("sync uses the locked event and selections snapshot and rereads after commi
     syncLog: {},
   });
 
+  assert.ok(result.event);
   assert.equal(result.event.status, "dismissed");
-  assert.equal(result.event.persistedRevision, 2);
+  assert.equal(result.event.updatedAtMs, 1_001);
+  assert.ok(patches[0]);
   assert.equal(patches[0][`eventPrizeSelections/${eventId}`], null);
   assert.deepEqual(calls, [
     "read",
@@ -129,6 +151,7 @@ test("sync uses the locked event and selections snapshot and rereads after commi
 });
 
 test("sync discards a stale planned transition when the event lock is lost", async () => {
+  /** @type {EventPatch} */
   const lockedEvent = { status: "scheduled", startAtMs: 500, participants: {} };
   const { runtime, calls, patches } = createRuntime({
     lockedEvent,
@@ -143,12 +166,12 @@ test("sync discards a stale planned transition when the event lock is lost", asy
   });
 
   assert.equal(result.reason, "locked");
-  assert.deepEqual(result.event, lockedEvent);
+  assert.deepEqual(result.event, eventFixture({ eventId, ...lockedEvent }));
   assert.deepEqual(patches, []);
   assert.deepEqual(calls, ["read", "lock", "snapshot", "read", "release"]);
 });
 
-for (const status of ["active", "ended"]) {
+for (const status of /** @type {const} */ (["active", "ended"])) {
   test(`${status} sync does not commit when a round batch read fails`, async () => {
     const failure = new Error("match-state-source-changed");
     let batches = 0;
@@ -160,8 +183,10 @@ for (const status of ["active", "ended"]) {
           0: {
             matches: {
               "0_0": {
-                status: "active",
+                status: "pending",
                 inviteId: "event-match",
+                hostProfileId: "host-profile",
+                guestProfileId: "guest-profile",
                 hostLoginUid: "host-login",
                 guestLoginUid: "guest-login",
               },
@@ -198,9 +223,10 @@ for (const status of ["active", "ended"]) {
   });
 }
 
+/** @param {"active" | "ended"} status */
 function completedFinalEvent(status) {
   const ended = status === "ended";
-  return {
+  return eventFixture({
     eventId,
     status,
     currentRoundIndex: 0,
@@ -236,9 +262,10 @@ function completedFinalEvent(status) {
         },
       },
     },
-  };
+  });
 }
 
+/** @param {number} assignedAtMs @returns {Record<string, Assignment>} */
 function prizeAssignments(assignedAtMs) {
   return Object.fromEntries(
     ["p1", "p2"].map((profileId, index) => [
@@ -246,7 +273,7 @@ function prizeAssignments(assignedAtMs) {
       {
         eventId,
         profileId,
-        place: index + 1,
+        place: index === 0 ? 1 : 2,
         prizeId: index === 0 ? "1514" : "1092",
         assignedAtMs,
       },
@@ -254,6 +281,7 @@ function prizeAssignments(assignedAtMs) {
   );
 }
 
+/** @param {EventRecord} lockedEvent @param {Partial<Parameters<typeof createRuntime>[0]>} [options] */
 function prizeRuntime(lockedEvent, options = {}) {
   const profileIds = Object.keys(lockedEvent.participants);
   return createRuntime({
@@ -275,6 +303,7 @@ function prizeRuntime(lockedEvent, options = {}) {
   });
 }
 
+/** @param {import("../runtime/events").EventRuntime} runtime */
 const synchronize = (runtime) =>
   runtime.runEventSyncState({
     eventId,
@@ -287,8 +316,11 @@ const synchronize = (runtime) =>
 test("active completion preserves command order before prize projection and cleanup", async () => {
   const memory = prizeRuntime(completedFinalEvent("active"));
   const result = await synchronize(memory.runtime);
+  assert.ok(memory.plans[0]);
   assert.deepEqual(
-    memory.plans[0].map((command) => command.field),
+    memory.plans[0].map((command) =>
+      "field" in command ? command.field : undefined,
+    ),
     [
       "prizeSelectionsLockedAtMs",
       "prizeAssignments",
@@ -301,10 +333,11 @@ test("active completion preserves command order before prize projection and clea
       "updatedAtMs",
     ],
   );
+  assert.ok(result.event);
   assert.equal(result.event.status, "ended");
   assert.equal(result.event.endedAtMs, 1_000);
   assert.deepEqual(result.event.prizeAssignments, prizeAssignments(1_000));
-  assert.equal(Object.hasOwn(result.event, "thirdPlaceMatch"), false);
+  assert.equal(result.event.thirdPlaceMatch, null);
   assert.deepEqual(memory.calls, [
     "read",
     "lock",
@@ -350,10 +383,14 @@ test("ended prize repair preserves the original completion time and terminal fie
   event.prizeSelectionsLockedAtMs = null;
   const memory = prizeRuntime(event);
   const result = await synchronize(memory.runtime);
+  assert.ok(memory.plans[0]);
   assert.deepEqual(
-    memory.plans[0].map((command) => command.field),
+    memory.plans[0].map((command) =>
+      "field" in command ? command.field : undefined,
+    ),
     ["prizeSelectionsLockedAtMs", "prizeAssignments", "updatedAtMs"],
   );
+  assert.ok(result.event);
   assert.equal(result.event.prizeSelectionsLockedAtMs, 500);
   assert.deepEqual(result.event.prizeAssignments, prizeAssignments(500));
   assert.deepEqual(result.event.participants, event.participants);

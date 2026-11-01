@@ -1,4 +1,8 @@
-import { retainedInviteSourceFixture } from "./inviteDocumentFixture.ts";
+import { applicationRequest } from "./testEnv.ts";
+import {
+  retainedInviteSourceFixture,
+  inviteDocumentFixture,
+} from "./inviteDocumentFixture.ts";
 import type { MatchPresentation } from "@mons/shared/match-presentation";
 import assert from "node:assert/strict";
 import test from "node:test";
@@ -36,7 +40,7 @@ function request(
     headers?: Record<string, string>;
   } = {},
 ) {
-  return new Request(
+  return applicationRequest(
     `https://api.mons.link${options.path || "/invites/invite-one/matches/invite-one/presentation"}`,
     {
       method,
@@ -77,7 +81,7 @@ function setup(invite: unknown = paired, uid = "host-login") {
         matchId,
         actorUid,
         emojiId: actorUid === "host-login" ? 10 : 1001,
-        aura: "",
+        aura: "none" as const,
         revision: 0,
       });
   const repository = createGameplayRepository(env, {
@@ -178,33 +182,23 @@ test("presentation invite validation keeps missing and malformed failures distin
     const state = setup(source);
     await assert.rejects(
       readPresentationInvite(state.repository, "invite-one"),
-      { status, message },
+      source === null ? { status, message } : TypeError,
     );
     assert.deepEqual(state.calls.reads, ["invites/invite-one"]);
     assert.deepEqual(state.calls.updated, []);
   }
 });
 
-test("presentation invites retain fields while normalizing only guests and rematch types", async () => {
-  const source = {
-    hostId: paired.hostId,
-    hostColor: 7,
-    hostRematches: false,
-    guestRematches: " 1;2x ",
-    eventId: { malformed: true },
-    password: null,
-    custom: { retained: true },
-  };
+test("presentation invites preserve complete canonical metadata", async () => {
+  const source = inviteDocumentFixture({
+    ...paired,
+    hostRematches: { state: "ended", indices: [1, 2] },
+    guestRematches: { state: "open", indices: [1, 2] },
+  });
   const before = structuredClone(source);
   const state = setup(source);
   const invite = await readPresentationInvite(state.repository, "invite-one");
-  assert.deepEqual(invite, {
-    ...source,
-    guestId: null,
-    hostRematches: undefined,
-  });
-  assert.notEqual(invite, source);
-  assert.equal(invite.custom, source.custom);
+  assert.deepEqual(invite, source);
   assert.deepEqual(source, before);
   assert.deepEqual(state.calls.reads, ["invites/invite-one"]);
 });
@@ -322,7 +316,7 @@ test("linked accounts write the original player's presentation", async () => {
   const state = setup(undefined, "linked-login");
   const profile = {
     profileId: "profile-one",
-    aura: "",
+    aura: "none" as const,
     emoji: 1,
     eth: "",
     sol: "",
@@ -399,8 +393,8 @@ test("updates target each actor's latest match, including only their own pending
   }
   const finished = setup({
     ...paired,
-    hostRematches: "1x",
-    guestRematches: "1x",
+    hostRematches: { state: "ended", indices: [1] },
+    guestRematches: { state: "ended", indices: [1] },
   });
   assert.equal(
     (
@@ -420,8 +414,8 @@ test("updates target each actor's latest match, including only their own pending
 test("current presentation checks reject unrelated actors before match eligibility", async () => {
   const state = setup({
     ...paired,
-    hostRematches: "1;2",
-    guestRematches: "1",
+    hostRematches: { state: "open", indices: [1, 2] },
+    guestRematches: { state: "open", indices: [1] },
   });
   const invite = await readPresentationInvite(state.repository, "invite-one");
   for (const matchId of ["invite-one1", "invite-one2", "invite-one9"]) {
@@ -445,7 +439,11 @@ test("current presentation checks reject unrelated actors before match eligibili
 test("an ended series keeps the latest approved match current when a proposal was unanswered", async () => {
   for (const uid of ["host-login", "guest-login"]) {
     const state = setup(
-      { ...paired, hostRematches: "1", guestRematches: "x" },
+      {
+        ...paired,
+        hostRematches: { state: "open", indices: [1] },
+        guestRematches: { state: "ended", indices: [] },
+      },
       uid,
     );
     assert.equal(
@@ -673,7 +671,11 @@ test("durable presentation reads and updates use registered cosmetics without Fi
 });
 
 test("durable pending rematches expose only registered actors", async () => {
-  const state = setup({ ...paired, hostRematches: "1", guestRematches: "" });
+  const state = setup({
+    ...paired,
+    hostRematches: { state: "open", indices: [1] },
+    guestRematches: { state: "open", indices: [] },
+  });
   state.dependencies.readPresentationControl = async () => ({
     phase: "durable",
   });
@@ -712,7 +714,11 @@ test("durable pending rematches expose only registered actors", async () => {
 
 test("durable ensured guest matches remain readable before a guest rematch proposal", async () => {
   const state = setup(
-    { ...paired, hostRematches: "1", guestRematches: "" },
+    {
+      ...paired,
+      hostRematches: { state: "open", indices: [1] },
+      guestRematches: { state: "open", indices: [] },
+    },
     "guest-login",
   );
   state.dependencies.readPresentationControl = async () => ({

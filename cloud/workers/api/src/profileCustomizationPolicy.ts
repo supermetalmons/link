@@ -36,13 +36,11 @@ function inventoryRequirement(
   if (request.field === "cardBackgroundId" && request.value === 100) {
     return { collection: "specials", id: 1, count: 1 };
   }
-  if (request.field === "profileMons" && request.value.split(",")[2] === "5") {
+  if (request.field === "profileMons" && request.value?.drainer === 5) {
     return { collection: "specials", id: 0, count: 1 };
   }
   if (request.field === "cardStickers" && request.value) {
-    const parsed: unknown = JSON.parse(request.value);
-    const stickers = parsed as { "big-mon-top-right"?: unknown };
-    if (stickers["big-mon-top-right"] === "gate") {
+    if (request.value["big-mon-top-right"] === "gate") {
       return { collection: "specials", id: 2, count: 1 };
     }
   }

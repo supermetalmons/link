@@ -1,3 +1,4 @@
+import { canonicalProfile, required } from "./fixtures/canonicalData.mjs";
 import assert from "node:assert/strict";
 import { registerHooks } from "node:module";
 import test from "node:test";
@@ -22,15 +23,22 @@ const { MINING_MATERIAL_NAMES } =
   await import("../src/connection/connectionModels.ts");
 
 const settle = () => new Promise(setImmediate);
-const profile = (id, materials = {}) => ({
-  id,
-  mining: {
-    lastRockDate: null,
-    materials: { dust: 0, slime: 0, gum: 0, metal: 0, ice: 0, ...materials },
-  },
-});
+/** @param {string} id @param {Partial<import("@mons/shared/mining").MiningMaterials>} [materials] */
+const profile = (id, materials = {}) =>
+  canonicalProfile({
+    id,
+    mining: {
+      lastRockDate: null,
+      materials: { dust: 0, slime: 0, gum: 0, metal: 0, ice: 0, ...materials },
+    },
+  });
 
+/** @param {{api?: Partial<import("../src/connection/profileClient.ts").ProfileClientApi>;
+ * authenticate?: () => Promise<void>; wait?: (milliseconds: number) => void | Promise<void>; now?: () => number}} [options] */
 function harness({ api: handlers = {}, authenticate, wait, now } = {}) {
+  /** @type {{now: number; user: Parameters<typeof createUserBoundAuthTokenProvider>[0]; profileId: string | null;
+   * storedAura: import("@mons/shared/appearance").Aura; authCalls: number; providerCalls: number;
+   * providerError: Error | null; invalidations: number; auraReads: number; waits: number[]}} */
   const state = {
     now: 100,
     user: { uid: "login", getIdToken: async () => "token" },
@@ -43,7 +51,9 @@ function harness({ api: handlers = {}, authenticate, wait, now } = {}) {
     auraReads: 0,
     waits: [],
   };
+  /** @type {Array<{name: keyof import("../src/connection/profileClient.ts").ProfileClientApi; args: unknown[]}>} */
   const calls = [];
+  /** @type {import("../src/connection/profileClient.ts").ProfileClientApi} */
   const defaults = {
     getProfileByLoginIdViaApi: async (id) => profile(id),
     getProfileByIdViaApi: async (id) => profile(id),
@@ -52,15 +62,47 @@ function harness({ api: handlers = {}, authenticate, wait, now } = {}) {
     editUsernameViaApi: async () => ({ ok: true }),
     updateProfileCustomizationViaApi: async () => ({ ok: true }),
   };
-  const api = Object.fromEntries(
-    Object.entries(defaults).map(([name, handler]) => [
-      name,
-      (...args) => {
-        calls.push({ name, args });
-        return (handlers[name] ?? handler)(...args);
-      },
-    ]),
-  );
+  /** @type {import("../src/connection/profileClient.ts").ProfileClientApi} */
+  const api = {
+    getProfileByLoginIdViaApi: (...args) => {
+      calls.push({ name: "getProfileByLoginIdViaApi", args });
+      return (
+        handlers.getProfileByLoginIdViaApi ?? defaults.getProfileByLoginIdViaApi
+      )(...args);
+    },
+    getProfileByIdViaApi: (...args) => {
+      calls.push({ name: "getProfileByIdViaApi", args });
+      return (handlers.getProfileByIdViaApi ?? defaults.getProfileByIdViaApi)(
+        ...args,
+      );
+    },
+    resolveProfileIdViaApi: (...args) => {
+      calls.push({ name: "resolveProfileIdViaApi", args });
+      return (
+        handlers.resolveProfileIdViaApi ?? defaults.resolveProfileIdViaApi
+      )(...args);
+    },
+    readLeaderboardViaApi: (...args) => {
+      calls.push({ name: "readLeaderboardViaApi", args });
+      return (handlers.readLeaderboardViaApi ?? defaults.readLeaderboardViaApi)(
+        ...args,
+      );
+    },
+    editUsernameViaApi: (...args) => {
+      calls.push({ name: "editUsernameViaApi", args });
+      return (handlers.editUsernameViaApi ?? defaults.editUsernameViaApi)(
+        ...args,
+      );
+    },
+    updateProfileCustomizationViaApi: (...args) => {
+      calls.push({ name: "updateProfileCustomizationViaApi", args });
+      return (
+        handlers.updateProfileCustomizationViaApi ??
+        defaults.updateProfileCustomizationViaApi
+      )(...args);
+    },
+  };
+  /** @type {import("../src/services/apiTransport.ts").AuthTokenProvider} */
   const tokenProvider = (forceRefresh) => state.user.getIdToken(forceRefresh);
   const client = new ProfileClient({
     ensureAuthenticated: async () => {
@@ -89,9 +131,13 @@ function harness({ api: handlers = {}, authenticate, wait, now } = {}) {
   return { client, state, calls, tokenProvider };
 }
 
-test.beforeEach((t) => t.mock.method(console, "error", () => {}));
+test.beforeEach((t) => {
+  assert.ok("mock" in t);
+  t.mock.method(console, "error", () => {});
+});
 
 test("profile lookups preserve blank-ID handling, auth sequencing and unbound tokens", async () => {
+  /** @type {PromiseWithResolvers<void>} */
   const authenticated = Promise.withResolvers();
   const h = harness({ authenticate: () => authenticated.promise });
   assert.equal(await h.client.getProfileById("  "), null);
@@ -104,7 +150,7 @@ test("profile lookups preserve blank-ID handling, auth sequencing and unbound to
   assert.deepEqual(h.calls, []);
   authenticated.resolve();
   assert.equal((await login).id, " login ");
-  assert.equal((await canonical).id, "profile");
+  assert.equal(required(await canonical).id, "profile");
   assert.deepEqual(
     h.calls.map(({ name, args }) => [name, ...args]),
     [
@@ -116,6 +162,7 @@ test("profile lookups preserve blank-ID handling, auth sequencing and unbound to
 });
 
 test("plain lookups preserve null results, failures and late unbound replies", async () => {
+  /** @type {PromiseWithResolvers<import("@mons/shared/profiles").CompletePlayerProfile | null>} */
   const response = Promise.withResolvers();
   const failure = new Error("profile-not-found");
   const h = harness({
@@ -136,6 +183,7 @@ test("plain lookups preserve null results, failures and late unbound replies", a
 });
 
 test("canonical resolution trims IDs, preserves null and rejects stale auth replies", async () => {
+  /** @type {PromiseWithResolvers<string | null>} */
   const response = Promise.withResolvers();
   const h = harness({
     api: { resolveProfileIdViaApi: () => response.promise },
@@ -143,8 +191,8 @@ test("canonical resolution trims IDs, preserves null and rejects stale auth repl
   const pending = h.client.resolveProfileId(" retired-profile ");
   await settle();
   assert.equal(h.state.authCalls, 1);
-  assert.equal(h.calls[0].args[0], "retired-profile");
-  assert.notEqual(h.calls[0].args[1], h.tokenProvider);
+  assert.equal(required(h.calls[0]).args[0], "retired-profile");
+  assert.notEqual(required(h.calls[0]).args[1], h.tokenProvider);
   h.state.user = { ...h.state.user };
   response.resolve("canonical-profile");
   await assert.rejects(pending, /authentication-changed/);
@@ -175,9 +223,9 @@ test("player lookup retries once after one second with the same bound provider",
   assert.equal(h.state.providerCalls, 1);
   assert.deepEqual(h.state.waits, [1_000]);
   assert.equal(h.calls.length, 2);
-  assert.equal(h.calls[0].args[0], "player-login");
-  assert.equal(h.calls[0].args[1], h.calls[1].args[1]);
-  assert.notEqual(h.calls[0].args[1], h.tokenProvider);
+  assert.equal(required(h.calls[0]).args[0], "player-login");
+  assert.equal(required(h.calls[0]).args[1], required(h.calls[1]).args[1]);
+  assert.notEqual(required(h.calls[0]).args[1], h.tokenProvider);
 });
 
 test("player lookup stops when its caller expires before authentication, response or retry", async () => {
@@ -190,6 +238,7 @@ test("player lookup stops when its caller expires before authentication, respons
   assert.equal(inactive.state.providerCalls, 0);
   assert.deepEqual(inactive.calls, []);
 
+  /** @type {PromiseWithResolvers<import("@mons/shared/profiles").CompletePlayerProfile>} */
   const response = Promise.withResolvers();
   let current = true;
   const late = harness({
@@ -221,6 +270,7 @@ test("player lookup stops when its caller expires before authentication, respons
 });
 
 test("player lookup rejects a replaced auth owner and propagates the final failure", async () => {
+  /** @type {PromiseWithResolvers<import("@mons/shared/profiles").CompletePlayerProfile>} */
   const response = Promise.withResolvers();
   const h = harness({
     api: { getProfileByLoginIdViaApi: () => response.promise },
@@ -272,10 +322,12 @@ test("material leaderboards share a complete batch until TTL expiry or profile r
 });
 
 test("material batches publish only when complete and retain independent simultaneous fetches", async () => {
+  /** @type {Array<PromiseWithResolvers<import("@mons/shared/profiles").CompletePlayerProfile[]>>} */
   const responses = [];
   const h = harness({
     api: {
       readLeaderboardViaApi: () => {
+        /** @type {PromiseWithResolvers<import("@mons/shared/profiles").CompletePlayerProfile[]>} */
         const response = Promise.withResolvers();
         responses.push(response);
         return response.promise;
@@ -291,17 +343,17 @@ test("material batches publish only when complete and retain independent simulta
   for (const response of responses.slice(0, 5)) {
     response.resolve([profile("batch-0")]);
   }
-  assert.equal((await first)[0].id, "batch-0");
+  assert.equal(required((await first)[0]).id, "batch-0");
   for (const response of responses.slice(5)) {
     response.resolve([profile("batch-1")]);
   }
-  assert.equal((await second)[0].id, "batch-1");
+  assert.equal(required((await second)[0]).id, "batch-1");
 
   let shouldFail = true;
   const failure = new Error("one-material-unavailable");
   const failing = harness({
     api: {
-      readLeaderboardViaApi: async (type) => {
+      readLeaderboardViaApi: async (/** @type {string} */ type) => {
         if (shouldFail && type === "gum") throw failure;
         return [profile(type)];
       },
@@ -313,8 +365,9 @@ test("material batches publish only when complete and retain independent simulta
   assert.equal(failing.calls.length, 10);
 });
 
-for (const type of ["dust", "total"]) {
+for (const type of /** @type {const} */ (["dust", "total"])) {
   test(`profile reset rejects a pending ${type} batch without filling the cache`, async () => {
+    /** @type {PromiseWithResolvers<import("@mons/shared/profiles").CompletePlayerProfile[]>} */
     const response = Promise.withResolvers();
     const freshRows = [profile("fresh")];
     let requests = 0;
@@ -338,6 +391,7 @@ for (const type of ["dust", "total"]) {
   });
 
   test(`profile reset during ${type} authentication prevents stale reads`, async () => {
+    /** @type {PromiseWithResolvers<void>} */
     const authentication = Promise.withResolvers();
     const h = harness({ authenticate: () => authentication.promise });
     const rejected = assert.rejects(
@@ -354,11 +408,13 @@ for (const type of ["dust", "total"]) {
 }
 
 test("old material batches cannot replace a new profile cache or extend its TTL", async () => {
+  /** @type {Array<PromiseWithResolvers<import("@mons/shared/profiles").CompletePlayerProfile[]>>} */
   const batches = Array.from({ length: 4 }, () => Promise.withResolvers());
   let requests = 0;
   const h = harness({
     api: {
-      readLeaderboardViaApi: () => batches[Math.floor(requests++ / 5)].promise,
+      readLeaderboardViaApi: () =>
+        required(batches[Math.floor(requests++ / 5)]).promise,
     },
   });
   const firstRejected = assert.rejects(
@@ -376,12 +432,12 @@ test("old material batches cannot replace a new profile cache or extend its TTL"
   const fresh = h.client.getLeaderboard("ice");
   await settle();
   const freshRows = [profile("fresh")];
-  batches[2].resolve(freshRows);
+  required(batches[2]).resolve(freshRows);
   assert.equal(await fresh, freshRows);
 
   h.state.now += 59_999;
-  batches[1].resolve([profile("second-stale")]);
-  batches[0].resolve([profile("first-stale")]);
+  required(batches[1]).resolve([profile("second-stale")]);
+  required(batches[0]).resolve([profile("first-stale")]);
   await Promise.all([firstRejected, secondRejected]);
   assert.equal(await h.client.getLeaderboard("dust"), freshRows);
   assert.equal(h.calls.length, 15);
@@ -391,11 +447,11 @@ test("old material batches cannot replace a new profile cache or extend its TTL"
   await settle();
   assert.equal(h.calls.length, 20);
   const refreshedRows = [profile("refreshed")];
-  batches[3].resolve(refreshedRows);
+  required(batches[3]).resolve(refreshedRows);
   assert.equal(await refresh, refreshedRows);
 });
 
-for (const type of ["dust", "total"]) {
+for (const type of /** @type {const} */ (["dust", "total"])) {
   test(`profile reset between ${type} publication and return rejects the old caller`, async () => {
     let resetScheduled = false;
     const h = harness({
@@ -411,13 +467,14 @@ for (const type of ["dust", "total"]) {
       h.client.getLeaderboard(type),
       /authentication-changed/,
     );
-    assert.equal((await h.client.getLeaderboard("ice"))[0].id, "ice");
+    assert.equal(required((await h.client.getLeaderboard("ice"))[0]).id, "ice");
     assert.equal(h.calls.length, 10);
   });
 }
 
-for (const type of ["rating", "mp"]) {
+for (const type of /** @type {const} */ (["rating", "mp"])) {
   test(`profile reset rejects pending ${type} results before they reach UI caches`, async () => {
+    /** @type {PromiseWithResolvers<import("@mons/shared/profiles").CompletePlayerProfile[]>} */
     const response = Promise.withResolvers();
     const h = harness({
       api: { readLeaderboardViaApi: () => response.promise },
@@ -438,18 +495,23 @@ test("total leaderboards preserve first records, summed ordering, ties and the 9
   const first = profile("duplicate", { dust: 3, slime: 7 });
   const tied = profile("tie", { ice: 10 });
   const highest = profile("highest", { dust: 15 });
-  const noMining = { id: "no-mining" };
-  const rows = [first, tied, noMining];
-  const h = harness({
-    api: {
-      readLeaderboardViaApi: async (type) =>
-        type === "dust"
-          ? rows
-          : type === "slime"
-            ? [profile("duplicate", { dust: 500 }), highest]
-            : [],
-    },
+  const { mining: omittedMining, ...noMining } = canonicalProfile({
+    id: "no-mining",
   });
+  void omittedMining;
+  const rows = [first, tied, noMining];
+  const rawHandlers = {};
+  const h = harness({ api: rawHandlers });
+  Reflect.set(
+    rawHandlers,
+    "readLeaderboardViaApi",
+    async (/** @type {string} */ type) =>
+      type === "dust"
+        ? rows
+        : type === "slime"
+          ? [profile("duplicate", { dust: 500 }), highest]
+          : [],
+  );
   const result = await h.client.getLeaderboard("total");
   assert.deepEqual(result, [highest, first, tied, noMining]);
   assert.deepEqual(rows, [first, tied, noMining]);
@@ -457,7 +519,7 @@ test("total leaderboards preserve first records, summed ordering, ties and the 9
 
   const capped = harness({
     api: {
-      readLeaderboardViaApi: async (type) =>
+      readLeaderboardViaApi: async (/** @type {string} */ type) =>
         type === "dust"
           ? Array.from({ length: 101 }, (_, index) =>
               profile(String(index), { dust: index }),
@@ -467,8 +529,8 @@ test("total leaderboards preserve first records, summed ordering, ties and the 9
   });
   const top = await capped.client.getLeaderboard("total");
   assert.equal(top.length, 99);
-  assert.equal(top[0].id, "100");
-  assert.equal(top.at(-1).id, "2");
+  assert.equal(required(top[0]).id, "100");
+  assert.equal(required(top.at(-1)).id, "2");
 });
 
 test("rating and mana leaderboards remain uncached and default to rating", async () => {
@@ -485,14 +547,16 @@ test("rating and mana leaderboards remain uncached and default to rating", async
 });
 
 test("username edits preserve response validation, auth guards and successful invalidation", async () => {
+  /** @type {import("@mons/shared/usernames").UsernameEditResponse} */
   const ok = { ok: true };
   const h = harness({ api: { editUsernameViaApi: async () => ok } });
   assert.equal(await h.client.editUsername(" Player "), ok);
-  assert.equal(h.calls[0].args[0], " Player ");
-  assert.notEqual(h.calls[0].args[1], h.tokenProvider);
+  assert.equal(required(h.calls[0]).args[0], " Player ");
+  assert.notEqual(required(h.calls[0]).args[1], h.tokenProvider);
   assert.equal(h.state.authCalls, 1);
   assert.equal(h.state.invalidations, 1);
 
+  /** @type {import("@mons/shared/usernames").UsernameEditResponse} */
   const invalid = { ok: false, validationError: "Reserved" };
   const rejected = harness({
     api: { editUsernameViaApi: async () => invalid },
@@ -500,6 +564,7 @@ test("username edits preserve response validation, auth guards and successful in
   assert.equal(await rejected.client.editUsername("reserved"), invalid);
   assert.equal(rejected.state.invalidations, 0);
 
+  /** @type {PromiseWithResolvers<import("@mons/shared/usernames").UsernameEditResponse>} */
   const response = Promise.withResolvers();
   const late = harness({ api: { editUsernameViaApi: () => response.promise } });
   const pending = late.client.editUsername("stale");
@@ -523,23 +588,52 @@ test("username edits preserve response validation, auth guards and successful in
 
 test("customization methods remain void and send exact fields without authentication waits", async () => {
   const h = harness();
+  /** @type {import("@mons/shared/appearance").StickerMap} */
+  const stickers = { mana: "blue-mana" };
+  const completed = ["first", "second"];
+  /** @type {Array<{invoke: () => void; request: import("@mons/shared/profiles").ProfileCustomizationUpdateRequest}>} */
   const requests = [
-    ["updateCardBackgroundId", 0, "cardBackgroundId"],
-    ["updateCardSubtitleId", 3, "cardSubtitleId"],
-    ["updateProfileCounter", "gp", "profileCounter"],
-    ["updateProfileCounter", "mp", "profileCounter"],
-    ["updateProfileMons", "", "profileMons"],
-    ["updateCardStickers", '{ "mana": "blue-mana" }', "cardStickers"],
-    ["updateCompletedProblems", ["first", "second"], "completedProblems"],
-    ["updateTutorialCompleted", false, "tutorialCompleted"],
+    {
+      invoke: () => h.client.updateCardBackgroundId(0),
+      request: { field: "cardBackgroundId", value: 0 },
+    },
+    {
+      invoke: () => h.client.updateCardSubtitleId(3),
+      request: { field: "cardSubtitleId", value: 3 },
+    },
+    {
+      invoke: () => h.client.updateProfileCounter("gp"),
+      request: { field: "profileCounter", value: "gp" },
+    },
+    {
+      invoke: () => h.client.updateProfileCounter("mp"),
+      request: { field: "profileCounter", value: "mp" },
+    },
+    {
+      invoke: () => h.client.updateProfileMons(null),
+      request: { field: "profileMons", value: null },
+    },
+    {
+      invoke: () => h.client.updateCardStickers(stickers),
+      request: { field: "cardStickers", value: stickers },
+    },
+    {
+      invoke: () => h.client.updateCompletedProblems(completed),
+      request: { field: "completedProblems", value: completed },
+    },
+    {
+      invoke: () => h.client.updateTutorialCompleted(false),
+      request: { field: "tutorialCompleted", value: false },
+    },
   ];
-  for (const [method, value] of requests) {
-    assert.equal(h.client[method](value), undefined);
-  }
-  assert.equal(h.client.updateProfileCounter("unsupported"), undefined);
+  for (const { invoke } of requests) assert.equal(invoke(), undefined);
+  assert.equal(
+    Reflect.apply(h.client.updateProfileCounter, h.client, ["unsupported"]),
+    undefined,
+  );
   assert.deepEqual(
     h.calls.map(({ args }) => args[0]),
-    requests.map(([, value, field]) => ({ field, value })),
+    requests.map(({ request }) => request),
   );
   assert.equal(h.state.authCalls, 0);
   assert.equal(h.state.invalidations, 0);
@@ -548,21 +642,23 @@ test("customization methods remain void and send exact fields without authentica
   assert.equal(h.state.invalidations, requests.length);
 });
 
-test("stored emoji updates retain nullish aura fallback and rainbow normalization", async () => {
+test("stored emoji updates preserve canonical aura and an omitted aura uses the current preference", async () => {
   const h = harness();
-  for (const aura of [undefined, null, "", "rainbow", "other"]) {
-    assert.equal(h.client.updateStoredEmoji(7, aura), undefined);
+  for (const aura of /** @type {const} */ ([undefined, "none", "rainbow"])) {
+    assert.equal(h.client.updateStoredEmoji(1009, aura), undefined);
   }
-  h.state.storedAura = "other";
+  h.state.storedAura = "none";
   h.client.updateStoredEmoji(8, undefined);
   assert.deepEqual(
     h.calls.map(({ args }) => args[0]),
-    ["rainbow", "rainbow", "", "rainbow", "", ""].map((aura, index) => ({
-      field: "emojiAndAura",
-      value: { emoji: index === 5 ? 8 : 7, aura },
-    })),
+    [
+      { field: "emojiAndAura", value: { emoji: 1009, aura: "rainbow" } },
+      { field: "emojiAndAura", value: { emoji: 1009, aura: "none" } },
+      { field: "emojiAndAura", value: { emoji: 1009, aura: "rainbow" } },
+      { field: "emojiAndAura", value: { emoji: 8, aura: "none" } },
+    ],
   );
-  assert.equal(h.state.auraReads, 3);
+  assert.equal(h.state.auraReads, 2);
   await settle();
 });
 
@@ -587,6 +683,7 @@ test("customization skips absent profiles and provider failures and ignores reje
   await settle();
   assert.equal(failed.state.invalidations, 0);
 
+  /** @type {PromiseWithResolvers<import("@mons/shared/profiles").ProfileCustomizationUpdateResponse>} */
   const response = Promise.withResolvers();
   const late = harness({
     api: { updateProfileCustomizationViaApi: () => response.promise },

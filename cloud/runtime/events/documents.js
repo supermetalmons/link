@@ -1,47 +1,50 @@
 // Generated from src/events/documents.ts. Run npm run generate:runtime.
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.createEventMatchesDocument =
-  exports.createEventRoundsDocument =
-  exports.createEventParticipantsDocument =
-  exports.createEventRoundDocument =
-  exports.createEventMatchDocument =
-  exports.createEventParticipantDocument =
-  exports.createEventDocument =
+exports.cloneEventMatch =
+  exports.cloneEventParticipants =
+  exports.cloneEventRounds =
+  exports.eventPrizeOwnerProfileIds =
+  exports.eventMatchEntries =
+  exports.plainEventParticipantEntries =
+  exports.eventParticipantEntries =
+  exports.eventParticipantIsAbsent =
+  exports.plainEventParticipantAt =
+  exports.eventParticipantAt =
+  exports.eventMatchEntryKind =
+  exports.eventMatchAt =
+  exports.eventRoundMatches =
+  exports.eventRoundAt =
+  exports.eventThirdPlaceMatch =
+  exports.eventRounds =
+  exports.plainEventParticipants =
   exports.eventParticipantJoinedOrder =
   exports.eventCurrentRoundIndex =
+  exports.eventParticipantProjectionState =
+  exports.readEventMatchesDocument =
+  exports.readEventRoundsDocument =
+  exports.readEventParticipantsDocument =
+  exports.readEventRoundDocument =
+  exports.readEventMatchDocument =
+  exports.readPlainEventParticipantDocument =
+  exports.readEventParticipantDocument =
+  exports.readPlainEventDocument =
+  exports.readEventDocument =
     void 0;
-exports.readEventDocument = readEventDocument;
-exports.readPlainEventDocument = readPlainEventDocument;
-exports.readEventParticipantDocument = readEventParticipantDocument;
-exports.readPlainEventParticipantDocument = readPlainEventParticipantDocument;
-exports.readEventMatchDocument = readEventMatchDocument;
-exports.readEventRoundDocument = readEventRoundDocument;
-exports.readEventParticipantsDocument = readEventParticipantsDocument;
-exports.readEventRoundsDocument = readEventRoundsDocument;
-exports.readEventMatchesDocument = readEventMatchesDocument;
 exports.eventState = eventState;
 exports.eventParticipantState = eventParticipantState;
-exports.eventParticipantProjectionState = eventParticipantProjectionState;
 exports.eventMatchState = eventMatchState;
 exports.eventRoundState = eventRoundState;
 exports.eventParticipants = eventParticipants;
-exports.plainEventParticipants = plainEventParticipants;
-exports.eventRounds = eventRounds;
-exports.eventThirdPlaceMatch = eventThirdPlaceMatch;
-exports.eventRoundAt = eventRoundAt;
-exports.eventRoundMatches = eventRoundMatches;
-exports.eventMatchAt = eventMatchAt;
-exports.eventMatchEntryKind = eventMatchEntryKind;
 exports.eventPlacementMatches = eventPlacementMatches;
-exports.eventParticipantAt = eventParticipantAt;
-exports.plainEventParticipantAt = plainEventParticipantAt;
-exports.eventParticipantIsAbsent = eventParticipantIsAbsent;
-exports.eventParticipantEntries = eventParticipantEntries;
-exports.plainEventParticipantEntries = plainEventParticipantEntries;
-exports.eventMatchEntries = eventMatchEntries;
-exports.eventPrizeOwnerProfileIds = eventPrizeOwnerProfileIds;
 exports.eventPrizeAssignments = eventPrizeAssignments;
+exports.createEventDocument = createEventDocument;
+exports.createEventParticipantDocument = createEventParticipantDocument;
+exports.createEventMatchDocument = createEventMatchDocument;
+exports.createEventRoundDocument = createEventRoundDocument;
+exports.createEventParticipantsDocument = createEventParticipantsDocument;
+exports.createEventRoundsDocument = createEventRoundsDocument;
+exports.createEventMatchesDocument = createEventMatchesDocument;
 exports.patchEventDocument = patchEventDocument;
 exports.patchEventMatch = patchEventMatch;
 exports.patchEventRound = patchEventRound;
@@ -52,264 +55,211 @@ exports.withEventParticipant = withEventParticipant;
 exports.setEventRound = setEventRound;
 exports.setEventMatch = setEventMatch;
 exports.cloneEventDocument = cloneEventDocument;
-exports.cloneEventRounds = cloneEventRounds;
-exports.cloneEventParticipants = cloneEventParticipants;
-exports.cloneEventMatch = cloneEventMatch;
 exports.setEventMatchSlotBlocked = setEventMatchSlotBlocked;
 exports.copyEventParticipantToMatchSlot = copyEventParticipantToMatchSlot;
 exports.copyEventWinnerDisplayName = copyEventWinnerDisplayName;
 exports.createEventMatchInvite = createEventMatchInvite;
 const invite_records_js_1 = require("../shared/invite-records.js");
-const eventPrizeAwards_js_1 = require("../eventPrizeAwards.js");
-const object = (value) => value !== null && typeof value === "object";
-const record = (value) => object(value) && !Array.isArray(value);
-const source = (value) => value;
-const string = (value) => (typeof value === "string" ? value : undefined);
-const number = (value) => (typeof value === "number" ? value : undefined);
-const nullableString = (value) => (value === null ? null : string(value));
-const trimmed = (value) => string(value)?.trim() || "";
-const integer = (value, fallback) => {
-  const numeric = typeof value === "number" ? value : Number(value);
-  return Number.isFinite(numeric) ? Math.floor(numeric) : fallback;
-};
-function readEventDocument(value) {
-  return object(value) ? value : null;
-}
-function readPlainEventDocument(value) {
-  return record(value) ? value : null;
-}
-function readEventParticipantDocument(value) {
-  return object(value) ? value : null;
-}
-function readPlainEventParticipantDocument(value) {
-  return record(value) ? value : null;
-}
-function readEventMatchDocument(value) {
-  return object(value) ? value : null;
-}
-function readEventRoundDocument(value) {
-  return object(value) ? value : null;
-}
-function readEventParticipantsDocument(value) {
-  return object(value) ? value : null;
-}
-function readEventRoundsDocument(value) {
-  return object(value) ? value : null;
-}
-function readEventMatchesDocument(value) {
-  return object(value) ? value : null;
-}
+const event_views_js_1 = require("../shared/event-views.js");
+const readEventDocument = (value) =>
+  (0, event_views_js_1.isEventRecord)(value) ? value : null;
+exports.readEventDocument = readEventDocument;
+exports.readPlainEventDocument = exports.readEventDocument;
+const readEventParticipantDocument = (value) =>
+  (0, event_views_js_1.isEventParticipantRecord)(value) ? value : null;
+exports.readEventParticipantDocument = readEventParticipantDocument;
+exports.readPlainEventParticipantDocument =
+  exports.readEventParticipantDocument;
+const readEventMatchDocument = (value) =>
+  (0, event_views_js_1.isEventMatchRecord)(value) ? value : null;
+exports.readEventMatchDocument = readEventMatchDocument;
+const readEventRoundDocument = (value) =>
+  (0, event_views_js_1.isEventRoundRecord)(value) ? value : null;
+exports.readEventRoundDocument = readEventRoundDocument;
+const readEventParticipantsDocument = (value) =>
+  (0, event_views_js_1.isEventParticipants)(value) ? value : null;
+exports.readEventParticipantsDocument = readEventParticipantsDocument;
+const readEventRoundsDocument = (value) =>
+  (0, event_views_js_1.isEventRounds)(value) ? value : null;
+exports.readEventRoundsDocument = readEventRoundsDocument;
+const readEventMatchesDocument = (value) =>
+  (0, event_views_js_1.isEventMatches)(value) ? value : null;
+exports.readEventMatchesDocument = readEventMatchesDocument;
 function eventState(event) {
-  const value = event ? source(event) : {};
   return {
-    eventId: string(value.eventId),
-    status: string(value.status),
-    createdAtMs: number(value.createdAtMs),
-    updatedAtMs: number(value.updatedAtMs),
-    startAtMs: number(value.startAtMs),
-    startedAtMs: number(value.startedAtMs),
-    endedAtMs: number(value.endedAtMs),
-    currentRoundIndex: number(value.currentRoundIndex),
-    bracketSize: number(value.bracketSize),
-    roundCount: number(value.roundCount),
-    createdByLoginUid: string(value.createdByLoginUid),
-    createdByProfileId: string(value.createdByProfileId),
-    winnerProfileId: nullableString(value.winnerProfileId),
-    winnerDisplayName: nullableString(value.winnerDisplayName),
-    prizeSelectionsLockedAtMs: number(value.prizeSelectionsLockedAtMs),
+    eventId: event?.eventId,
+    status: event?.status,
+    createdAtMs: event?.createdAtMs,
+    updatedAtMs: event?.updatedAtMs,
+    startAtMs: event?.startAtMs,
+    startedAtMs: event?.startedAtMs,
+    endedAtMs: event?.endedAtMs,
+    currentRoundIndex: event?.currentRoundIndex,
+    bracketSize: event?.bracketSize,
+    roundCount: event?.roundCount,
+    createdByLoginUid: event?.createdByLoginUid,
+    createdByProfileId: event?.createdByProfileId,
+    winnerProfileId: event?.winnerProfileId,
+    winnerDisplayName: event?.winnerDisplayName,
+    prizeSelectionsLockedAtMs: event?.prizeSelectionsLockedAtMs,
     hasPrizeSelectionLock:
-      value.prizeSelectionsLockedAtMs !== undefined &&
-      value.prizeSelectionsLockedAtMs !== null,
-    supportsThirdPlaceMatch: value.supportsThirdPlaceMatch === true,
+      event != null && event.prizeSelectionsLockedAtMs !== null,
+    supportsThirdPlaceMatch: event?.supportsThirdPlaceMatch ?? false,
   };
 }
 function eventParticipantState(participant) {
-  const value = participant ? source(participant) : {};
   return {
-    profileId: string(value.profileId),
-    loginUid: string(value.loginUid),
-    username: string(value.username),
-    displayName: string(value.displayName),
-    emojiId: number(value.emojiId),
-    aura: nullableString(value.aura),
-    joinedAtMs: number(value.joinedAtMs),
-    state: string(value.state),
-    eliminatedRoundIndex: number(value.eliminatedRoundIndex),
-    eliminatedByProfileId: nullableString(value.eliminatedByProfileId),
+    profileId: participant?.profileId,
+    loginUid: participant?.loginUid,
+    username: participant?.username,
+    displayName: participant?.displayName,
+    emojiId: participant?.emojiId,
+    aura: participant?.aura,
+    joinedAtMs: participant?.joinedAtMs,
+    state: participant?.state,
+    eliminatedRoundIndex: participant?.eliminatedRoundIndex,
+    eliminatedByProfileId: participant?.eliminatedByProfileId,
   };
 }
-function eventParticipantProjectionState(participant) {
-  const value = source(participant);
-  return {
-    ...eventParticipantState(participant),
-    emojiId:
-      typeof value.emojiId === "number" || typeof value.emojiId === "string"
-        ? value.emojiId
-        : undefined,
-  };
-}
+exports.eventParticipantProjectionState = eventParticipantState;
 function eventMatchState(match) {
-  const value = match ? source(match) : {};
   return {
-    matchKey: string(value.matchKey),
-    inviteId: nullableString(value.inviteId),
-    status: string(value.status),
-    resolvedAtMs: number(value.resolvedAtMs),
-    winnerDisqualified: value.winnerDisqualified === true,
-    winnerProfileId: nullableString(value.winnerProfileId),
-    loserProfileId: nullableString(value.loserProfileId),
-    hostSlotBlocked: value.hostSlotBlocked === true,
-    hostProfileId: nullableString(value.hostProfileId),
-    hostLoginUid: nullableString(value.hostLoginUid),
-    hostDisplayName: nullableString(value.hostDisplayName),
-    hostEmojiId: number(value.hostEmojiId),
-    hostAura: nullableString(value.hostAura),
-    guestSlotBlocked: value.guestSlotBlocked === true,
-    guestProfileId: nullableString(value.guestProfileId),
-    guestLoginUid: nullableString(value.guestLoginUid),
-    guestDisplayName: nullableString(value.guestDisplayName),
-    guestEmojiId: number(value.guestEmojiId),
-    guestAura: nullableString(value.guestAura),
+    matchKey: match?.matchKey,
+    inviteId: match?.inviteId,
+    status: match?.status,
+    resolvedAtMs: match?.resolvedAtMs,
+    winnerDisqualified: match?.winnerDisqualified ?? false,
+    winnerProfileId: match?.winnerProfileId,
+    loserProfileId: match?.loserProfileId,
+    hostSlotBlocked: match?.hostSlotBlocked ?? false,
+    hostProfileId: match?.hostProfileId,
+    hostLoginUid: match?.hostLoginUid,
+    hostDisplayName: match?.hostDisplayName,
+    hostEmojiId: match?.hostEmojiId,
+    hostAura: match?.hostAura,
+    guestSlotBlocked: match?.guestSlotBlocked ?? false,
+    guestProfileId: match?.guestProfileId,
+    guestLoginUid: match?.guestLoginUid,
+    guestDisplayName: match?.guestDisplayName,
+    guestEmojiId: match?.guestEmojiId,
+    guestAura: match?.guestAura,
   };
 }
 function eventRoundState(round) {
-  const value = source(round);
   return {
-    roundIndex: number(value.roundIndex),
-    status: string(value.status),
-    createdAtMs: number(value.createdAtMs),
-    completedAtMs: number(value.completedAtMs),
-    completedAtIsNull: value.completedAtMs === null,
+    roundIndex: round.roundIndex,
+    status: round.status,
+    createdAtMs: round.createdAtMs,
+    completedAtMs: round.completedAtMs,
+    completedAtIsNull: round.completedAtMs === null,
   };
 }
 const eventCurrentRoundIndex = (event, fallback) =>
-  integer(source(event).currentRoundIndex, fallback);
+  event.currentRoundIndex ?? fallback;
 exports.eventCurrentRoundIndex = eventCurrentRoundIndex;
-const eventParticipantJoinedOrder = (participant, fallback = 0) =>
-  integer(source(participant).joinedAtMs, fallback);
+const eventParticipantJoinedOrder = (participant) => participant.joinedAtMs;
 exports.eventParticipantJoinedOrder = eventParticipantJoinedOrder;
 function eventParticipants(event) {
-  return readEventParticipantsDocument(event && source(event).participants);
+  return event?.participants ?? null;
 }
-function plainEventParticipants(event) {
-  const value = source(event).participants;
-  return record(value) ? readEventParticipantsDocument(value) : null;
-}
-function eventRounds(event) {
-  return readEventRoundsDocument(event && source(event).rounds);
-}
-function eventThirdPlaceMatch(event) {
-  return readEventMatchDocument(event && source(event).thirdPlaceMatch);
-}
-function eventRoundAt(rounds, key) {
-  return readEventRoundDocument(rounds && source(rounds)[key]);
-}
-function eventRoundMatches(round) {
-  return readEventMatchesDocument(round && source(round).matches);
-}
-function eventMatchAt(matches, key) {
-  return readEventMatchDocument(matches && source(matches)[key]);
-}
-function eventMatchEntryKind(matches, key) {
-  const value = matches && source(matches)[key];
-  return !value ? "missing" : object(value) ? "match" : "invalid";
-}
+exports.plainEventParticipants = eventParticipants;
+const eventRounds = (event) => event?.rounds ?? null;
+exports.eventRounds = eventRounds;
+const eventThirdPlaceMatch = (event) => event?.thirdPlaceMatch ?? null;
+exports.eventThirdPlaceMatch = eventThirdPlaceMatch;
+const eventRoundAt = (rounds, key) => rounds?.[key] ?? null;
+exports.eventRoundAt = eventRoundAt;
+const eventRoundMatches = (round) => round?.matches ?? null;
+exports.eventRoundMatches = eventRoundMatches;
+const eventMatchAt = (matches, key) => matches?.[key] ?? null;
+exports.eventMatchAt = eventMatchAt;
+const eventMatchEntryKind = (matches, key) =>
+  matches?.[key] === undefined ? "missing" : "match";
+exports.eventMatchEntryKind = eventMatchEntryKind;
 function eventPlacementMatches(round) {
-  const matches = round ? source(round).matches : null;
-  const indexed = Object(matches || {});
   return Object.fromEntries(
-    Object.keys(indexed).map((key) => [
+    Object.entries(round?.matches ?? {}).map(([key, match]) => [
       key,
-      {
-        present: Boolean(indexed[key]),
-        match: readEventMatchDocument(indexed[key]),
-      },
+      { present: true, match },
     ]),
   );
 }
-function eventParticipantAt(participants, key) {
-  return readEventParticipantDocument(
-    participants && source(participants)[key],
+const eventParticipantAt = (participants, key) => participants?.[key] ?? null;
+exports.eventParticipantAt = eventParticipantAt;
+exports.plainEventParticipantAt = exports.eventParticipantAt;
+const eventParticipantIsAbsent = (participants, profileId) =>
+  participants?.[profileId] === undefined;
+exports.eventParticipantIsAbsent = eventParticipantIsAbsent;
+const eventParticipantEntries = (participants) =>
+  Object.entries(participants ?? {});
+exports.eventParticipantEntries = eventParticipantEntries;
+exports.plainEventParticipantEntries = exports.eventParticipantEntries;
+const eventMatchEntries = (matches) => Object.entries(matches ?? {});
+exports.eventMatchEntries = eventMatchEntries;
+const eventPrizeOwnerProfileIds = (event) =>
+  Object.values(event?.prizeAssignments ?? {}).map(
+    (assignment) => assignment.profileId,
   );
-}
-function plainEventParticipantAt(participants, key) {
-  return readPlainEventParticipantDocument(
-    participants && source(participants)[key],
-  );
-}
-function eventParticipantIsAbsent(participants, profileId) {
-  return (participants ? source(participants)[profileId] : null) == null;
-}
-function eventParticipantEntries(participants) {
-  return Object.entries(participants ? source(participants) : {}).flatMap(
-    ([key, value]) => {
-      const participant = readEventParticipantDocument(value);
-      return participant ? [[key, participant]] : [];
-    },
-  );
-}
-function plainEventParticipantEntries(participants) {
-  return eventParticipantEntries(participants).filter(([, value]) =>
-    record(value),
-  );
-}
-function eventMatchEntries(matches) {
-  return Object.entries(matches ? source(matches) : {}).map(([key, value]) => [
-    key,
-    readEventMatchDocument(value),
-  ]);
-}
-function eventPrizeOwnerProfileIds(event) {
-  const value = source(event).prizeAssignments;
-  return object(value)
-    ? Object.values(value).map((assignment) =>
-        trimmed(object(assignment) ? assignment.profileId : null),
-      )
-    : [];
-}
+exports.eventPrizeOwnerProfileIds = eventPrizeOwnerProfileIds;
 function eventPrizeAssignments(event, eventId) {
-  return (0, eventPrizeAwards_js_1.normalizeEventPrizeAssignments)(
-    event && source(event).prizeAssignments,
-    eventId,
-  );
+  if (event && event.eventId !== eventId)
+    throw new TypeError("event-identity-mismatch");
+  return { ...event?.prizeAssignments };
 }
-const createEventDocument = (value) => readEventDocument(value);
-exports.createEventDocument = createEventDocument;
-const createEventParticipantDocument = (value) =>
-  readEventParticipantDocument(value);
-exports.createEventParticipantDocument = createEventParticipantDocument;
-const createEventMatchDocument = (value) => readEventMatchDocument(value);
-exports.createEventMatchDocument = createEventMatchDocument;
-const createEventRoundDocument = (value) => readEventRoundDocument(value);
-exports.createEventRoundDocument = createEventRoundDocument;
-const createEventParticipantsDocument = (value = {}) =>
-  readEventParticipantsDocument(value);
-exports.createEventParticipantsDocument = createEventParticipantsDocument;
-const createEventRoundsDocument = (value = {}) =>
-  readEventRoundsDocument(value);
-exports.createEventRoundsDocument = createEventRoundsDocument;
-const createEventMatchesDocument = (value = {}) =>
-  readEventMatchesDocument(value);
-exports.createEventMatchesDocument = createEventMatchesDocument;
+function createEventDocument(value) {
+  const event = (0, exports.readEventDocument)(value);
+  if (!event) throw new TypeError("invalid-canonical-event");
+  return event;
+}
+function createEventParticipantDocument(value) {
+  const participant = (0, exports.readEventParticipantDocument)(value);
+  if (!participant) throw new TypeError("invalid-canonical-event-participant");
+  return participant;
+}
+function createEventMatchDocument(value) {
+  const match = (0, exports.readEventMatchDocument)(value);
+  if (!match) throw new TypeError("invalid-canonical-event-match");
+  return match;
+}
+function createEventRoundDocument(value) {
+  const round = (0, exports.readEventRoundDocument)(value);
+  if (!round) throw new TypeError("invalid-canonical-event-round");
+  return round;
+}
+function createEventParticipantsDocument(value = {}) {
+  if (!(0, event_views_js_1.isEventParticipants)(value))
+    throw new TypeError("invalid-canonical-event-participants");
+  return value;
+}
+function createEventRoundsDocument(value = {}) {
+  if (!(0, event_views_js_1.isEventRounds)(value))
+    throw new TypeError("invalid-canonical-event-rounds");
+  return value;
+}
+function createEventMatchesDocument(value = {}) {
+  if (!(0, event_views_js_1.isEventMatches)(value))
+    throw new TypeError("invalid-canonical-event-matches");
+  return value;
+}
 function patchEventDocument(event, patch) {
-  Object.assign(source(event), patch);
+  Object.assign(event, patch);
 }
 function patchEventMatch(match, patch) {
-  Object.assign(source(match), patch);
+  Object.assign(match, patch);
 }
 function patchEventRound(round, patch) {
-  Object.assign(source(round), patch);
+  Object.assign(round, patch);
 }
 function copyEventParticipant(participant, patch) {
-  return readEventParticipantDocument({ ...source(participant), ...patch });
+  return createEventParticipantDocument({ ...participant, ...patch });
 }
 function copyEventDocument(event, patch) {
-  return readEventDocument({ ...source(event), ...patch });
+  return createEventDocument({ ...event, ...patch });
 }
 function copyEventParticipants(participants, replacements) {
-  return readEventParticipantsDocument(
+  return createEventParticipantsDocument(
     Object.fromEntries(
-      Object.entries(source(participants)).map(([key, value]) => [
+      Object.entries(participants).map(([key, value]) => [
         key,
         replacements.get(key) ?? value,
       ]),
@@ -317,69 +267,78 @@ function copyEventParticipants(participants, replacements) {
   );
 }
 function withEventParticipant(participants, profileId, participant) {
-  return readEventParticipantsDocument({
-    ...(participants ? source(participants) : {}),
+  return createEventParticipantsDocument({
+    ...participants,
     [profileId]: participant,
   });
 }
 function setEventRound(rounds, key, round) {
-  source(rounds)[key] = round;
+  if (key !== String(round.roundIndex))
+    throw new TypeError("event-round-identity-mismatch");
+  rounds[key] = round;
 }
 function setEventMatch(matches, key, match) {
-  source(matches)[key] = match;
+  if (key !== match.matchKey)
+    throw new TypeError("event-match-identity-mismatch");
+  matches[key] = match;
 }
-function cloneEventDocument(event, mode = "json") {
-  const value =
-    mode === "structured"
-      ? structuredClone(event)
-      : JSON.parse(JSON.stringify(event));
-  return readEventDocument(value);
+function cloneEventDocument(event, _mode = "json") {
+  return structuredClone(event);
 }
-function cloneEventRounds(rounds) {
-  return readEventRoundsDocument(JSON.parse(JSON.stringify(rounds)));
-}
-function cloneEventParticipants(participants) {
-  return readEventParticipantsDocument(
-    JSON.parse(JSON.stringify(participants)),
-  );
-}
-function cloneEventMatch(match) {
-  return readEventMatchDocument(JSON.parse(JSON.stringify(match)));
-}
+const cloneEventRounds = (rounds) => structuredClone(rounds);
+exports.cloneEventRounds = cloneEventRounds;
+const cloneEventParticipants = (participants) => structuredClone(participants);
+exports.cloneEventParticipants = cloneEventParticipants;
+const cloneEventMatch = (match) => structuredClone(match);
+exports.cloneEventMatch = cloneEventMatch;
 function setEventMatchSlotBlocked(match, slot, blocked) {
-  const value = source(match);
   const field = slot === "guest" ? "guestSlotBlocked" : "hostSlotBlocked";
-  const next = blocked === true;
-  if (value[field] === next) return false;
-  value[field] = next;
+  if (match[field] === blocked) return false;
+  match[field] = blocked;
   return true;
 }
 function copyEventParticipantToMatchSlot(match, slot, participant) {
-  const target = source(match);
-  const current = participant ? source(participant) : null;
-  const values = {
-    ProfileId: current ? current.profileId : null,
-    LoginUid: current ? current.loginUid : null,
-    DisplayName: current ? current.displayName : null,
-    EmojiId: current ? current.emojiId : null,
-    Aura: current ? current.aura || null : null,
-  };
-  let didChange = false;
-  for (const [suffix, value] of Object.entries(values)) {
-    const field = `${slot}${suffix}`;
-    if (target[field] !== value) {
-      target[field] = value;
-      didChange = true;
-    }
+  const profileId = participant?.profileId ?? null;
+  const loginUid = participant?.loginUid ?? null;
+  const displayName = participant?.displayName ?? null;
+  const emojiId = participant?.emojiId ?? null;
+  const aura = participant?.aura ?? null;
+  let didChange;
+  if (slot === "host") {
+    didChange =
+      match.hostProfileId !== profileId ||
+      match.hostLoginUid !== loginUid ||
+      match.hostDisplayName !== displayName ||
+      match.hostEmojiId !== emojiId ||
+      match.hostAura !== aura;
+    Object.assign(match, {
+      hostProfileId: profileId,
+      hostLoginUid: loginUid,
+      hostDisplayName: displayName,
+      hostEmojiId: emojiId,
+      hostAura: aura,
+    });
+  } else {
+    didChange =
+      match.guestProfileId !== profileId ||
+      match.guestLoginUid !== loginUid ||
+      match.guestDisplayName !== displayName ||
+      match.guestEmojiId !== emojiId ||
+      match.guestAura !== aura;
+    Object.assign(match, {
+      guestProfileId: profileId,
+      guestLoginUid: loginUid,
+      guestDisplayName: displayName,
+      guestEmojiId: emojiId,
+      guestAura: aura,
+    });
   }
   if (participant && setEventMatchSlotBlocked(match, slot, false))
     didChange = true;
   return didChange;
 }
 function copyEventWinnerDisplayName(event, participant) {
-  source(event).winnerDisplayName = participant
-    ? source(participant).displayName
-    : null;
+  event.winnerDisplayName = participant?.displayName ?? null;
 }
 function createEventMatchInvite(
   match,
@@ -387,16 +346,16 @@ function createEventMatchInvite(
   matchKey,
   useStoredMatchKey = false,
 ) {
-  return (0, invite_records_js_1.readInviteDocument)({
+  const invite = (0, invite_records_js_1.createEventInviteDocument)({
     version: value.version,
     hostId: value.hostId,
     hostColor: value.hostColor,
     guestId: value.guestId,
     eventId: value.eventId,
     eventRoundIndex: value.eventRoundIndex,
-    eventMatchKey: useStoredMatchKey
-      ? source(match).matchKey || matchKey
-      : matchKey,
+    eventMatchKey: useStoredMatchKey ? match.matchKey : matchKey,
     eventOwned: true,
   });
+  if (!invite) throw new TypeError("invalid-event-match-invite");
+  return invite;
 }

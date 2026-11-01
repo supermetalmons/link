@@ -265,7 +265,7 @@ async function assertDeployment(
   deployments.sort((left, right) =>
     String(right.created_on).localeCompare(String(left.created_on)),
   );
-  const versions = deployments[0].versions;
+  const versions = deployments[0]!.versions;
   const active =
     Array.isArray(versions) && versions.length === 1
       ? record(versions[0])
@@ -343,7 +343,7 @@ async function allInspected<T>(operations: Array<Promise<T>>): Promise<T[]> {
   const failures = outcomes.filter(
     (value): value is PromiseRejectedResult => value.status === "rejected",
   );
-  if (failures.length === 1) throw failures[0].reason;
+  if (failures.length === 1) throw failures[0]!.reason;
   if (failures.length)
     throw new AggregateError(
       failures.map((failure) => failure.reason),
@@ -396,8 +396,8 @@ export async function publishCloudflareWorkflows(
   }
   const published: WorkflowPublication[] = [];
   for (let index = 0; index < selected.length; index++) {
-    const definition = selected[index];
-    const plan = plans[index];
+    const definition = selected[index]!;
+    const plan = plans[index]!;
     const before = await inspect(deps, definition);
     if (canonicalJson(before) !== canonicalJson(plan))
       throw new Error(
@@ -451,11 +451,11 @@ export async function publishCloudflareWorkflows(
   );
   for (let index = 0; index < final.length; index++) {
     if (
-      final[index].workflowId !== published[index].workflowId ||
-      final[index].previousWorkflowVersionId !==
-        published[index].workflowVersionId ||
-      canonicalJson(final[index].publishBody) !==
-        canonicalJson(published[index].publishBody)
+      final[index]!.workflowId !== published[index]!.workflowId ||
+      final[index]!.previousWorkflowVersionId !==
+        published[index]!.workflowVersionId ||
+      canonicalJson(final[index]!.publishBody) !==
+        canonicalJson(published[index]!.publishBody)
     )
       throw new Error("workflow-publication-changed-during-final-verification");
   }

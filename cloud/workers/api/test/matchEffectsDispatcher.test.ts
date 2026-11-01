@@ -110,7 +110,7 @@ test("overlapping drains share delivery and complete only after it succeeds", as
 test("a failed effect retries in sixty seconds without starving the next effect", async (t) => {
   const logged = t.mock.method(console, "error", () => {});
   const f = fixture(2);
-  const firstId = [...f.pending.keys()][0];
+  const firstId = [...f.pending.keys()][0]!;
   f.dependencies.deliver = async (effect) => {
     f.delivered.push(matchEffectIdFixture(effect));
     if (matchEffectIdFixture(effect) === firstId) {
@@ -128,7 +128,7 @@ test("a failed effect retries in sixty seconds without starving the next effect"
   assert.deepEqual(f.alarms, [60_500]);
   assert.equal(f.pending.get(firstId)?.attempts, 1);
   assert.equal(f.pending.get(firstId)?.nextAtMs, 60_500);
-  assert.deepEqual(logged.mock.calls[0].arguments, [
+  assert.deepEqual(logged.mock.calls[0]!.arguments, [
     {
       event: "canonical_match_effect_retry",
       inviteId: "invite",

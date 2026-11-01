@@ -1,13 +1,21 @@
+import { applyCanonicalTestMigrations } from "./canonicalTestMigrations.ts";
+import {
+  APPLICATION_DATA_HEADER,
+  APPLICATION_DATA_EPOCH,
+} from "@mons/shared/data-contract";
+import { activateCanonicalApplicationFixture } from "./applicationRoomFixture.ts";
+import { publicMatchFixture } from "../test/matchRecordFixture.ts";
+import { matchDocumentFixture } from "../test/matchRecordFixture.ts";
+import { canonicalMatchRpc as getMatchStateRpc } from "./canonicalMatchTestFixture.ts";
 import { unwrapMatchStateWireFixture } from "../test/matchRecordFixture.ts";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { env as runtimeEnv, exports } from "cloudflare:workers";
-import { applyD1Migrations, type D1Migration } from "cloudflare:test";
-import { getMatchStateRpc } from "../src/matchStateRpc.ts";
+import type { D1Migration } from "cloudflare:test";
 
 const env = runtimeEnv;
 const testEnv = runtimeEnv as Env & { TEST_D1_MIGRATIONS: D1Migration[] };
 
-const snapshot = { color: "white", fen: "current-fen" };
+const snapshot = publicMatchFixture({ color: "white", fen: "current-fen" });
 
 describe("public match snapshot Worker runtime", () => {
   it("dispatches public preflight and validation through the Worker entrypoint", async () => {
@@ -19,7 +27,9 @@ describe("public match snapshot Worker runtime", () => {
     expect(preflight.status).toBe(204);
     expect(preflight.headers.get("Access-Control-Allow-Origin")).toBe("*");
     const invalid = await exports.default.fetch(
-      new Request("https://api.mons.link/matches/snapshot?playerId=player-1"),
+      new Request("https://api.mons.link/matches/snapshot?playerId=player-1", {
+        headers: { [APPLICATION_DATA_HEADER]: String(APPLICATION_DATA_EPOCH) },
+      }),
     );
     expect(invalid.status).toBe(400);
     expect(await invalid.json()).toEqual({
@@ -36,7 +46,7 @@ describe("public canonical match routing", () => {
       entry.name.includes("0024_match_state"),
     );
     if (!migration) throw new Error("missing-match-state-migration");
-    await applyD1Migrations(env.PROFILE_GAMES_DB, [migration]);
+    await applyCanonicalTestMigrations(env.PROFILE_GAMES_DB, [migration]);
     await env.PROFILE_GAMES_DB.prepare(
       `UPDATE match_state_control SET backend = 'durable', epoch = 2,
        candidate_version_id = 'candidate', import_id = 'import',
@@ -54,6 +64,11 @@ describe("public canonical match routing", () => {
     exports.default.fetch(
       new Request(
         `https://api.mons.link/matches/snapshot?${new URLSearchParams({ playerId, matchId })}`,
+        {
+          headers: {
+            [APPLICATION_DATA_HEADER]: String(APPLICATION_DATA_EPOCH),
+          },
+        },
       ),
     );
 
@@ -73,13 +88,16 @@ describe("public canonical match routing", () => {
             matchId: inviteId,
             playerId,
             marker: "creation-one",
-            value: { ...snapshot, sessionCreation: "private" },
+            value: matchDocumentFixture({
+              ...snapshot,
+              sessionCreation: "private",
+            }),
           },
         ],
       }),
     );
     await env.PROFILE_GAMES_DB.prepare(
-      "INSERT INTO match_state_routes(actor_uid, match_id, kind, invite_id, epoch) VALUES (?, ?, 'durable', ?, 2)",
+      "INSERT INTO match_state_routes_canonical(actor_uid, match_id, kind, invite_id, epoch) VALUES (?, ?, 'durable', ?, 2)",
     )
       .bind(playerId, inviteId, inviteId)
       .run();
@@ -106,11 +124,16 @@ describe("public canonical match routing", () => {
       .mockRejectedValue(new Error("unexpected-network"));
     await env.PROFILE_GAMES_DB.batch([
       env.PROFILE_GAMES_DB.prepare(
-        "INSERT INTO match_state_routes(actor_uid, match_id, kind, invite_id, epoch) VALUES (?, ?, 'legacy', NULL, 2)",
+        "INSERT INTO match_state_routes_canonical(actor_uid, match_id, kind, invite_id, epoch) VALUES (?, ?, 'archive', NULL, 2)",
       ).bind(playerId, matchId),
       env.PROFILE_GAMES_DB.prepare(
-        "INSERT INTO match_state_legacy_records(actor_uid, match_id, record_json, source_digest, import_id, disposition) VALUES (?, ?, ?, ?, 'import', 'missing-invite')",
-      ).bind(playerId, matchId, JSON.stringify(snapshot), "a".repeat(64)),
+        "INSERT INTO match_state_records_canonical(actor_uid, match_id, record_json, source_digest, import_id, disposition) VALUES (?, ?, ?, ?, 'import', 'missing-invite')",
+      ).bind(
+        playerId,
+        matchId,
+        JSON.stringify(matchDocumentFixture(snapshot)),
+        "a".repeat(64),
+      ),
     ]);
     expect(await (await read(playerId, matchId)).json()).toMatchObject({
       ok: true,
@@ -143,13 +166,13 @@ describe("public canonical match routing", () => {
             matchId: inviteId,
             playerId: "retained-player",
             marker: "creation-one",
-            value: snapshot,
+            value: matchDocumentFixture(snapshot),
           },
         ],
       }),
     );
     await env.PROFILE_GAMES_DB.prepare(
-      "INSERT INTO match_state_routes(actor_uid, match_id, kind, invite_id, epoch) VALUES (?, ?, 'durable', ?, 2)",
+      "INSERT INTO match_state_routes_canonical(actor_uid, match_id, kind, invite_id, epoch) VALUES (?, ?, 'durable', ?, 2)",
     )
       .bind(playerId, inviteId, inviteId)
       .run();
@@ -179,15 +202,20 @@ describe("public canonical match routing", () => {
       .mockRejectedValue(new Error("unexpected-network"));
     await env.PROFILE_GAMES_DB.batch([
       env.PROFILE_GAMES_DB.prepare(
-        "INSERT INTO match_state_routes(actor_uid, match_id, kind, invite_id, epoch) VALUES (?, ?, 'legacy', NULL, 2)",
+        "INSERT INTO match_state_routes_canonical(actor_uid, match_id, kind, invite_id, epoch) VALUES (?, ?, 'archive', NULL, 2)",
       ).bind(playerId, matchId),
+
       env.PROFILE_GAMES_DB.prepare(
-        "INSERT INTO match_state_legacy_records(actor_uid, match_id, record_json, source_digest, import_id, disposition) VALUES (?, ?, '{}', ?, 'import', 'malformed')",
-      ).bind(playerId, matchId, "a".repeat(64)),
-      env.PROFILE_GAMES_DB.prepare(
-        "INSERT INTO match_state_routes(actor_uid, match_id, kind, invite_id, epoch) VALUES (?, ?, 'durable', ?, 2)",
+        "INSERT INTO match_state_routes_canonical(actor_uid, match_id, kind, invite_id, epoch) VALUES (?, ?, 'durable', ?, 2)",
       ).bind("unavailable-player", matchId, matchId),
     ]);
+    await expect(
+      env.PROFILE_GAMES_DB.prepare(
+        "INSERT INTO match_state_records_canonical(actor_uid, match_id, record_json, source_digest, import_id, disposition) VALUES (?, ?, '{}', ?, 'import', 'malformed')",
+      )
+        .bind(playerId, matchId, "a".repeat(64))
+        .run(),
+    ).rejects.toThrow();
     for (const actor of [playerId, "unavailable-player"]) {
       const response = await read(actor, matchId);
       expect(response.status).toBe(503);
@@ -200,3 +228,5 @@ describe("public canonical match routing", () => {
     expect(external).not.toHaveBeenCalled();
   });
 });
+
+beforeAll(activateCanonicalApplicationFixture);

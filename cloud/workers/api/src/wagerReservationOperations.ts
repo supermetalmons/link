@@ -1,12 +1,13 @@
-import { wagerReferencesReservationOperation } from "./wagerModel.ts";
+import {
+  wagerReferencesReservationOperation,
+  type WagerProposal,
+} from "./wagerModel.ts";
 import type { WagerKey } from "./wagerStateRepository.ts";
 import {
-  applyMaterialDeltas,
+  MATERIAL_KEYS,
   applyMaterialDeltasWithCap,
   computeAcceptedReservation,
   computeAvailableCount,
-  isMaterialName,
-  normalizeCount,
   type MiningMaterialName,
   type MiningMaterials,
 } from "@mons/shared/mining";
@@ -37,8 +38,18 @@ export type WagerMutationContext = {
   refreshLease: () => Promise<void>;
 };
 
-function normalizeString(value: unknown): string {
-  return typeof value === "string" ? value.trim() : "";
+function applyExactFrozenDeltas(
+  current: MiningMaterials,
+  deltas: Partial<MiningMaterials>,
+): MiningMaterials {
+  const materials = { ...current };
+  for (const material of MATERIAL_KEYS) {
+    const next = materials[material] + (deltas[material] ?? 0);
+    if (!Number.isSafeInteger(next) || next < 0)
+      throw new Error("wager-operation-unavailable");
+    materials[material] = next;
+  }
+  return materials;
 }
 
 async function applyFrozenOperation(
@@ -50,6 +61,20 @@ async function applyFrozenOperation(
     materials: MiningMaterials;
     count?: number;
     deltas: Partial<MiningMaterials>;
+    identity:
+      | { kind: FrozenDeltaOperationKind }
+      | {
+          kind: "send-reserve";
+          material: MiningMaterialName;
+          requestedCount: number;
+        }
+      | {
+          kind: "accept-reserve";
+          material: MiningMaterialName;
+          requestedCount: number;
+          ownMaterial: MiningMaterialName | null;
+          ownCount: number;
+        };
   } | null,
   now: () => number,
   signal?: AbortSignal,
@@ -93,7 +118,16 @@ async function applyFrozenOperation(
         if (!created) {
           return { commit: false, decision: "operation-rejected" };
         }
+        const expected = applyExactFrozenDeltas(current.frozen, created.deltas);
+        if (
+          MATERIAL_KEYS.some(
+            (material) => expected[material] !== created.materials[material],
+          )
+        ) {
+          throw new Error("wager-operation-unavailable");
+        }
         const parsedOperation = parseFrozenOperation({
+          ...created.identity,
           fingerprint,
           appliedAtMs: now(),
           ...(created.count === undefined ? {} : { count: created.count }),
@@ -161,7 +195,7 @@ function invertFrozenDeltas(
     throw new Error("wager-operation-unavailable");
   }
   return Object.fromEntries(
-    Object.entries(operation.expectedDeltas).map(([material, delta]) => [
+    Object.entries(operation.deltas).map(([material, delta]) => [
       material,
       -delta,
     ]),
@@ -203,7 +237,7 @@ export async function consumeWagerReservationOperation(
         if (!isReversibleReservationKind(state.operation.kind)) {
           return { commit: false, decision: "reservation-invalid" };
         }
-        const materials = applyMaterialDeltas(
+        const materials = applyExactFrozenDeltas(
           current.frozen,
           invertFrozenDeltas(state.operation),
         );
@@ -261,8 +295,9 @@ export async function updateFrozenMaterialsOnce(
     (current) => ({
       materials: totalMaterials
         ? applyMaterialDeltasWithCap(current, deltas, totalMaterials)
-        : applyMaterialDeltas(current, deltas),
+        : applyExactFrozenDeltas(current, deltas),
       deltas,
+      identity: { kind },
     }),
     now,
     signal,
@@ -357,6 +392,7 @@ export async function reserveFrozenMaterialsOnce(
       materials[material] += reservedCount;
       return {
         materials,
+        identity: { kind: "send-reserve", material, requestedCount: count },
         count: reservedCount,
         deltas: { [material]: reservedCount },
       };
@@ -364,7 +400,7 @@ export async function reserveFrozenMaterialsOnce(
     now,
     signal,
   );
-  return operation?.count || 0;
+  return operation && "count" in operation ? operation.count : 0;
 }
 
 export async function reserveAcceptedMaterialsOnce(
@@ -373,7 +409,7 @@ export async function reserveAcceptedMaterialsOnce(
   operationId: string,
   material: MiningMaterialName,
   proposedCount: number,
-  ownProposal: Record<string, unknown> | null,
+  ownProposal: Pick<WagerProposal, "material" | "count"> | null,
   totalMaterials: MiningMaterials,
   now: () => number,
   signal: AbortSignal,
@@ -381,15 +417,13 @@ export async function reserveAcceptedMaterialsOnce(
   acceptedCount: number;
   appliedDelta: Partial<MiningMaterials> | null;
 }> {
-  const ownMaterial = normalizeString(ownProposal?.material);
-  const ownCount = normalizeCount(ownProposal?.count);
+  const ownMaterial = ownProposal?.material ?? null;
+  const ownCount = ownProposal?.count ?? 0;
   const fingerprint = operationFingerprint(
     "accept-reserve",
-    `${material}:${ownMaterial}`,
+    `${material}:${ownMaterial ?? ""}`,
     proposedCount,
-    isMaterialName(ownMaterial) && ownCount > 0
-      ? { [ownMaterial]: ownCount }
-      : {},
+    ownMaterial !== null && ownCount > 0 ? { [ownMaterial]: ownCount } : {},
   );
   const operation = await applyFrozenOperation(
     repository,
@@ -407,6 +441,13 @@ export async function reserveAcceptedMaterialsOnce(
       if (!reservation.materials) return null;
       return {
         materials: reservation.materials,
+        identity: {
+          kind: "accept-reserve",
+          material,
+          requestedCount: proposedCount,
+          ownMaterial,
+          ownCount,
+        },
         count: reservation.acceptedCount,
         deltas: reservation.appliedDelta || {},
       };
@@ -416,7 +457,7 @@ export async function reserveAcceptedMaterialsOnce(
   );
   return operation
     ? {
-        acceptedCount: operation.count || 0,
+        acceptedCount: "count" in operation ? operation.count : 0,
         appliedDelta: operation.deltas,
       }
     : { acceptedCount: 0, appliedDelta: null };

@@ -1,7 +1,7 @@
+import { normalizeRecordKey } from "@mons/shared/ids";
 import {
-  retainProfileGameProjection,
+  parseProfileGameProjectionRecord,
   type ProfileGameProjectionDocument,
-  type ProfileGameProjectionWrite,
 } from "../../../runtime/profileGameProjectionRecords.js";
 import {
   mapProfileGameProjection,
@@ -23,19 +23,19 @@ type ProjectionWrite = {
     }
   | {
       type: "create";
-      data: ProfileGameProjectionDocument | ProfileGameProjectionWrite;
+      data: ProfileGameProjectionDocument;
       requireAbsent?: boolean;
       expectedVersion?: never;
     }
   | {
       type: "update";
-      data: ProfileGameProjectionDocument | ProfileGameProjectionWrite;
+      data: ProfileGameProjectionDocument;
       expectedVersion?: number;
       requireAbsent?: never;
     }
   | {
       type: "merge";
-      data: ProfileGameProjectionDocument | ProfileGameProjectionWrite;
+      data: ProfileGameProjectionDocument;
       expectedVersion?: never;
       requireAbsent?: never;
     }
@@ -63,7 +63,7 @@ type ProjectionRow = {
 };
 
 const PROJECTION_VALUES_SQL = `
-  INSERT INTO profile_game_projections (
+  INSERT INTO profile_game_projections_canonical (
     profile_id,
     projection_id,
     entity_type,
@@ -80,12 +80,12 @@ const PROJECTION_VALUES_SQL = `
     sort_bucket = excluded.sort_bucket,
     list_sort_at_ms = excluded.list_sort_at_ms,
     updated_at_ms = excluded.updated_at_ms,
-    version = profile_game_projections.version + 1,
+    version = profile_game_projections_canonical.version + 1,
     payload_json = excluded.payload_json
 `;
 
 const UPSERT_MERGE_PROJECTION_SQL = `${PROJECTION_VALUES_SQL}
-  WHERE excluded.updated_at_ms >= profile_game_projections.updated_at_ms
+  WHERE excluded.updated_at_ms >= profile_game_projections_canonical.updated_at_ms
 `;
 
 const ASSERT_CREATE_ABSENT_SQL = `
@@ -93,7 +93,7 @@ const ASSERT_CREATE_ABSENT_SQL = `
   SELECT 0
   WHERE EXISTS (
     SELECT 1
-    FROM profile_game_projections
+    FROM profile_game_projections_canonical
     WHERE profile_id = ? AND projection_id = ?
   )
 `;
@@ -103,7 +103,7 @@ const ASSERT_UPDATE_VERSION_SQL = `
   SELECT 0
   WHERE NOT EXISTS (
     SELECT 1
-    FROM profile_game_projections
+    FROM profile_game_projections_canonical
     WHERE profile_id = ? AND projection_id = ?
       AND version = ?
       AND updated_at_ms <= ?
@@ -115,7 +115,7 @@ const ASSERT_UPDATE_LIST_SORT_SQL = `
   SELECT 0
   WHERE NOT EXISTS (
     SELECT 1
-    FROM profile_game_projections
+    FROM profile_game_projections_canonical
     WHERE profile_id = ? AND projection_id = ?
       AND list_sort_at_ms = ?
       AND updated_at_ms <= ?
@@ -127,7 +127,7 @@ const ASSERT_DELETE_VERSION_SQL = `
   SELECT 0
   WHERE NOT EXISTS (
     SELECT 1
-    FROM profile_game_projections
+    FROM profile_game_projections_canonical
     WHERE profile_id = ? AND projection_id = ? AND version = ?
   )
 `;
@@ -143,94 +143,32 @@ const ASSERT_EVENT_PROJECTION_FENCE_SQL = `
 `;
 
 const DELETE_PROJECTION_SQL = `
-  DELETE FROM profile_game_projections
+  DELETE FROM profile_game_projections_canonical
   WHERE profile_id = ? AND projection_id = ?
 `;
-
-function toRecord(value: unknown): Record<string, unknown> | null {
-  return value && typeof value === "object" && !Array.isArray(value)
-    ? (value as Record<string, unknown>)
-    : null;
-}
-
-export function projectionTimestampMillis(value: unknown): number {
-  return typeof value === "number" && Number.isFinite(value)
-    ? Math.floor(value)
-    : 0;
-}
-
-function normalizeProjectionJson(value: unknown, depth = 0): unknown {
-  if (depth > 32) throw new TypeError("projection-value-too-deep");
-  if (value === null || value === undefined) return null;
-  if (typeof value === "string" || typeof value === "boolean") return value;
-  if (typeof value === "number") {
-    if (!Number.isFinite(value))
-      throw new TypeError("invalid-projection-number");
-    return value;
-  }
-  if (Array.isArray(value)) {
-    return value.map((entry) => normalizeProjectionJson(entry, depth + 1));
-  }
-  const record = toRecord(value);
-  if (!record) throw new TypeError("invalid-projection-value");
-  return Object.fromEntries(
-    Object.entries(record)
-      .filter(([, entry]) => entry !== undefined)
-      .sort(([left], [right]) => left.localeCompare(right))
-      .map(([key, entry]) => [key, normalizeProjectionJson(entry, depth + 1)]),
-  );
-}
 
 export function encodeProfileGameProjection(
   profileId: string,
   projectionId: string,
-  data: ProfileGameProjectionDocument | ProfileGameProjectionWrite,
+  data: ProfileGameProjectionDocument,
 ): ProjectionRow {
-  const normalized = normalizeProjectionJson(data);
-  const payload = toRecord(normalized);
-  if (!profileId || !projectionId || !payload) {
-    throw new TypeError("invalid-profile-game-projection");
-  }
-  const listSortAtMs = projectionTimestampMillis(payload.listSortAt);
-  if (!Number.isSafeInteger(listSortAtMs) || listSortAtMs <= 0) {
-    throw new TypeError("invalid-profile-game-projection-list-sort");
-  }
-  payload.listSortAt = listSortAtMs;
-  for (const field of [
-    "automatchCanceledAt",
-    "createdAt",
-    "endedAt",
-    "lastEventAt",
-    "startAt",
-    "updatedAt",
-  ]) {
-    const value = payload[field];
-    if (value === null || value === undefined) continue;
-    const millis = projectionTimestampMillis(value);
-    if (!Number.isSafeInteger(millis) || millis <= 0) {
-      throw new TypeError("invalid-profile-game-projection-timestamp");
-    }
-    payload[field] = millis;
-  }
-  const item = mapProfileGameProjection(payload, projectionId);
-  if (!item || item.id !== projectionId) {
-    throw new TypeError("invalid-profile-game-projection-payload");
-  }
-  const updatedAtMs =
-    projectionTimestampMillis(payload.updatedAt) ||
-    projectionTimestampMillis(payload.lastEventAt) ||
-    item.listSortAtMs;
-  if (!Number.isSafeInteger(updatedAtMs) || updatedAtMs <= 0) {
-    throw new TypeError("invalid-profile-game-projection-timestamp");
-  }
+  const payload = parseProfileGameProjectionRecord(data);
+  if (
+    normalizeRecordKey(profileId) !== profileId ||
+    normalizeRecordKey(projectionId) !== projectionId ||
+    payload.ownerProfileId !== profileId ||
+    (payload.entityType === "game" ? payload.inviteId : payload.id) !==
+      projectionId
+  )
+    throw new TypeError("invalid-profile-game-projection-identity");
   return {
     profile_id: profileId,
     projection_id: projectionId,
-    entity_type: item.entityType,
-    status: item.status,
-    sort_bucket: item.sortBucket,
-    list_sort_at_ms: listSortAtMs,
-    updated_at_ms: updatedAtMs,
+    entity_type: payload.entityType,
+    status: payload.status,
+    sort_bucket: payload.sortBucket,
+    list_sort_at_ms: payload.listSortAt,
+    updated_at_ms: payload.updatedAt,
     version: 1,
     payload_json: JSON.stringify(payload),
   };
@@ -323,6 +261,7 @@ export async function reserveEventProfileGameProjectionFence(
       `INSERT INTO event_profile_game_projection_fences (event_id, generation)
        VALUES (?, 1)
        ON CONFLICT (event_id) DO UPDATE SET generation = generation + 1
+       WHERE generation < 9007199254740991
        RETURNING generation`,
     )
     .bind(eventId)
@@ -391,27 +330,15 @@ export async function commitProfileGameProjectionWrites(
   await db.batch(statements);
 }
 
-function parseProjectionPayload(value: unknown): Record<string, unknown> {
-  if (typeof value !== "string") {
+function parseProjectionPayload(value: unknown): ProfileGameProjectionDocument {
+  if (typeof value !== "string")
     throw new TypeError("invalid-profile-game-projection-json");
-  }
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(value) as unknown;
-  } catch {
-    throw new TypeError("invalid-profile-game-projection-json");
-  }
-  const record = toRecord(parsed);
-  if (!record) throw new TypeError("invalid-profile-game-projection-json");
-  return record;
+  return parseProfileGameProjectionRecord(JSON.parse(value));
 }
-
-function parseProjectionRecord(row: {
-  payload_json: string;
-  version: number;
-}): ProjectionRecord {
+function parseProjectionRecord(row: ProjectionRow): ProjectionRecord {
+  parseProjectionRow(row);
   return {
-    data: retainProfileGameProjection(parseProjectionPayload(row.payload_json)),
+    data: parseProjectionPayload(row.payload_json),
     version: parseProjectionVersion(row.version),
   };
 }
@@ -424,17 +351,13 @@ export async function getProfileGameProjections(
   if (projectionIds.length === 0) return new Map();
   const result = await db
     .prepare(
-      `SELECT projection_id, payload_json, version
-       FROM profile_game_projections
+      `SELECT *
+       FROM profile_game_projections_canonical
        WHERE profile_id = ?
          AND projection_id IN (SELECT value FROM json_each(?))`,
     )
     .bind(profileId, JSON.stringify([...new Set(projectionIds)]))
-    .all<{
-      projection_id: string;
-      payload_json: string;
-      version: number;
-    }>();
+    .all<ProjectionRow>();
   return new Map(
     result.results.map((row) => [
       row.projection_id,
@@ -453,8 +376,8 @@ export async function getInviteProfileGameProjections(
   for (let offset = 0; offset < uniqueProfileIds.length; offset += 100) {
     const result = await db
       .prepare(
-        `SELECT profile_id, payload_json, version
-         FROM profile_game_projections
+        `SELECT *
+         FROM profile_game_projections_canonical
          WHERE projection_id = ?
            AND profile_id IN (SELECT value FROM json_each(?))`,
       )
@@ -462,11 +385,7 @@ export async function getInviteProfileGameProjections(
         inviteId,
         JSON.stringify(uniqueProfileIds.slice(offset, offset + 100)),
       )
-      .all<{
-        profile_id: string;
-        payload_json: string;
-        version: number;
-      }>();
+      .all<ProjectionRow>();
     for (const row of result.results) {
       projections.set(row.profile_id, parseProjectionRecord(row));
     }
@@ -481,18 +400,14 @@ export async function listProfileGameProjectionPage(
 ): Promise<Array<ProjectionRecord & { projectionId: string }>> {
   const result = await db
     .prepare(
-      `SELECT projection_id, payload_json, version
-       FROM profile_game_projections
+      `SELECT *
+       FROM profile_game_projections_canonical
        WHERE profile_id = ?
        ORDER BY projection_id ASC
        LIMIT ?`,
     )
     .bind(profileId, limit)
-    .all<{
-      payload_json: string;
-      projection_id: string;
-      version: number;
-    }>();
+    .all<ProjectionRow>();
   return result.results.map((row) => ({
     ...parseProjectionRecord(row),
     projectionId: row.projection_id,
@@ -508,7 +423,11 @@ function parseProjectionRow(row: ProjectionRow): NavigationItem {
     item.entityType !== row.entity_type ||
     item.status !== row.status ||
     item.sortBucket !== row.sort_bucket ||
-    item.listSortAtMs !== row.list_sort_at_ms
+    item.listSortAtMs !== row.list_sort_at_ms ||
+    payload.updatedAt !== row.updated_at_ms ||
+    payload.ownerProfileId !== row.profile_id ||
+    !Number.isSafeInteger(row.version) ||
+    row.version < 1
   ) {
     throw new TypeError("invalid-profile-game-projection-row");
   }
@@ -521,26 +440,33 @@ export async function readProfileGamesPage(
   limit: number,
   cursor: NavigationGamesCursor | null,
 ): Promise<ReadNavigationGamesResponse> {
+  if (
+    normalizeRecordKey(profileId) !== profileId ||
+    !Number.isSafeInteger(limit) ||
+    limit < 1 ||
+    limit > 1000
+  )
+    throw new TypeError("invalid-navigation-page");
   const pageLimit = limit + 1;
   const statement = cursor
     ? db
         .prepare(
           `WITH later_buckets AS (
              SELECT projection_id, sort_bucket, list_sort_at_ms
-             FROM profile_game_projections
+             FROM profile_game_projections_canonical
              WHERE profile_id = ?1 AND sort_bucket > ?2
              ORDER BY sort_bucket ASC, list_sort_at_ms DESC, projection_id ASC
              LIMIT ?5
            ), earlier_times AS (
              SELECT projection_id, sort_bucket, list_sort_at_ms
-             FROM profile_game_projections
+             FROM profile_game_projections_canonical
              WHERE profile_id = ?1
                AND sort_bucket = ?2 AND list_sort_at_ms < ?3
              ORDER BY sort_bucket ASC, list_sort_at_ms DESC, projection_id ASC
              LIMIT ?5
            ), later_ids AS (
              SELECT projection_id, sort_bucket, list_sort_at_ms
-             FROM profile_game_projections
+             FROM profile_game_projections_canonical
              WHERE profile_id = ?1
                AND sort_bucket = ?2 AND list_sort_at_ms = ?3
                AND projection_id > ?4
@@ -555,7 +481,7 @@ export async function readProfileGamesPage(
            )
            SELECT projection.*
            FROM page
-           JOIN profile_game_projections AS projection
+           JOIN profile_game_projections_canonical AS projection
              ON projection.profile_id = ?1
             AND projection.projection_id = page.projection_id
            ORDER BY page.sort_bucket ASC,
@@ -572,7 +498,7 @@ export async function readProfileGamesPage(
     : db
         .prepare(
           `SELECT *
-           FROM profile_game_projections
+           FROM profile_game_projections_canonical
            WHERE profile_id = ?
            ORDER BY sort_bucket ASC, list_sort_at_ms DESC, projection_id ASC
            LIMIT ?`,
@@ -604,7 +530,7 @@ export async function getD1NavigationGame(
   const row = await db
     .prepare(
       `SELECT status
-       FROM profile_game_projections
+       FROM profile_game_projections_canonical
        WHERE profile_id = ? AND projection_id = ?`,
     )
     .bind(profileId, projectionId)
@@ -619,8 +545,8 @@ export async function deleteD1NavigationGame(
 ): Promise<"deleted" | "missing"> {
   const result = await db
     .prepare(
-      `DELETE FROM profile_game_projections
-       WHERE profile_id = ? AND projection_id = ? AND status = 'waiting'`,
+      `DELETE FROM profile_game_projections_canonical
+       WHERE profile_id = ? AND projection_id = ? AND entity_type = 'game' AND status = 'waiting'`,
     )
     .bind(profileId, projectionId)
     .run();

@@ -32,7 +32,7 @@ test("event preparation emits exact outboxes and generations for sorted unique e
       {
         kind: "invite",
         inviteId: "invite-1",
-        value: inviteDocumentFixture({ status: "active" }),
+        value: inviteDocumentFixture({}),
       },
     ],
     {
@@ -104,7 +104,7 @@ test("non-event commands prepare no telegram projection work", () => {
       {
         kind: "invite",
         inviteId: "invite-1",
-        value: inviteDocumentFixture({ status: "active" }),
+        value: inviteDocumentFixture({}),
       },
     ],
     {

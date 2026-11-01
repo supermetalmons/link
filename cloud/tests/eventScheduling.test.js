@@ -18,7 +18,7 @@ const {
   resolveScheduledDateTimeStartAtMs,
 } = require("../runtime/events/scheduling");
 
-test("new event requests reject the retired announcement flag while stored events remain readable", () => {
+test("new event requests reject the retired announcement flag and use explicit canonical preferences", () => {
   const request = { startsInMinutes: MIN_STARTS_IN_MINUTES };
   assert.equal(isCreateEventRequest(request), true);
   for (const announceOnTelegram of [true, false, undefined]) {
@@ -37,17 +37,13 @@ test("new event requests reject the retired announcement flag while stored event
     matches: false,
     results: false,
   });
-  assert.deepEqual(
-    resolveEventTelegramAnnouncements({ announceOnTelegram: true }),
-    {
-      invite: true,
-      matches: true,
-      results: true,
-    },
-  );
+  assert.deepEqual(resolveEventTelegramAnnouncements({}), {
+    invite: false,
+    matches: false,
+    results: false,
+  });
   assert.deepEqual(
     resolveEventTelegramAnnouncements({
-      announceOnTelegram: true,
       telegramAnnouncements,
     }),
     telegramAnnouncements,

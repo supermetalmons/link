@@ -50,7 +50,7 @@ const trapModalFocus = (
   const nextElement = shouldWrapBackward
     ? focusableElements[focusableElements.length - 1]
     : focusableElements[0];
-  nextElement.focus({ preventScroll: true });
+  nextElement!.focus({ preventScroll: true });
 };
 
 export const handleModalKeyDown = (

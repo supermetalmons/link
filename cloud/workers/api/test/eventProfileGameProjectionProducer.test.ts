@@ -3,7 +3,6 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import type { EventCommand } from "../../../runtime/eventCommands.js";
 import {
-  decodeEventCompatibilityPlanFixture,
   eventDocumentFixture,
   eventRoundFixture,
 } from "./eventCompatibilityFixture.ts";
@@ -34,9 +33,8 @@ test("event preparation emits sparse outbox fields and deduplicated cleanup owne
         assert.equal(eventId, "event-1");
         return eventDocumentFixture({
           participants: {
-            source: { profileId: "source-profile" },
-            target: { profileId: "target-profile" },
-            duplicate: { profileId: "source-profile" },
+            "source-profile": { profileId: "source-profile" },
+            "target-profile": { profileId: "target-profile" },
           },
         });
       },
@@ -122,7 +120,7 @@ test("event replacement and deletion preserve accumulated cleanup children", asy
       {
         readEvent: async () =>
           eventDocumentFixture({
-            participants: { owner: { profileId: previousOwner } },
+            participants: { [previousOwner]: { profileId: previousOwner } },
           }),
       },
       {
@@ -138,9 +136,13 @@ test("event replacement and deletion preserve accumulated cleanup children", asy
     },
   ]);
   previousOwner = "owner-b";
-  const second = await prepare(
-    decodeEventCompatibilityPlanFixture({ "events/event-1": null }),
-  );
+  const second = await prepare([
+    {
+      kind: "event",
+      eventId: "event-1",
+      value: eventDocumentFixture({ participants: {} }),
+    },
+  ]);
   assert.ok(first);
   assert.ok(second);
   assert.deepEqual(
@@ -183,7 +185,7 @@ test("irrelevant commands prepare no profile game projection work", async () => 
     {
       kind: "invite",
       inviteId: "invite-1",
-      value: inviteDocumentFixture({ status: "active" }),
+      value: inviteDocumentFixture({}),
     },
     {
       kind: "event-round",

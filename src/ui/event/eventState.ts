@@ -1,3 +1,4 @@
+import type { Aura } from "@mons/shared/appearance";
 import type {
   EventMatch,
   EventParticipant,
@@ -405,7 +406,7 @@ export type MatchSideData = {
   loginUid: string | null;
   displayName: string | null;
   emojiId: number | null;
-  aura: string | null;
+  aura: Aura | null;
 };
 
 export type BracketMatchAction =
@@ -551,7 +552,7 @@ export const buildParticipantFromMatchSide = (
     username: displayName,
     displayName,
     emojiId,
-    aura: sideData.aura ?? "",
+    aura: sideData.aura ?? "none",
     joinedAtMs: 0,
     state: "active",
     eliminatedRoundIndex: null,

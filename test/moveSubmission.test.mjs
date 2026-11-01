@@ -1,3 +1,4 @@
+import { canonicalMatch, required } from "./fixtures/canonicalData.mjs";
 import { createConnectionWagerClientHarness } from "./wagerClientHarness.mjs";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
@@ -14,6 +15,7 @@ import {
   REMATCH_END_STORAGE_PREFIX,
 } from "../src/connection/rematchEndDelivery.ts";
 import { rematchSeriesEnded } from "@mons/shared/rematches";
+import { MATCH_TIMER_DURATION_MS } from "@mons/shared/timers";
 
 registerHooks({
   resolve(specifier, context, nextResolve) {
@@ -43,6 +45,7 @@ const source = ts.createSourceFile(
 const declaration = source.statements.find(
   (node) => ts.isClassDeclaration(node) && node.name?.text === "Connection",
 );
+assert.ok(declaration && ts.isClassDeclaration(declaration));
 const names = [
   "moveDeliveryScope",
   "isCurrentMoveBoard",
@@ -70,7 +73,7 @@ const names = [
   "sendRematchProposal",
 ];
 const methods = names.map((name) => {
-  const method = declaration.members.find(
+  const method = required(declaration).members.find(
     (node) => node.name?.getText(source) === name,
   );
   assert.ok(method, `missing Connection.${name}`);
@@ -84,19 +87,24 @@ const { outputText } = ts.transpileModule(
   { compilerOptions: { target: ts.ScriptTarget.ES2022 } },
 );
 class GameplayApiError extends Error {
+  /**
+   * @param {string} code
+   * @param {string | undefined} message
+   */
   constructor(code, message) {
     super(message);
     this.code = code;
   }
 }
+/** @template [T=void] @returns {PromiseWithResolvers<T>} */
 const deferred = () => {
-  let resolve;
-  let reject;
-  const promise = new Promise((yes, no) => {
-    resolve = yes;
-    reject = no;
-  });
-  return { promise, resolve, reject };
+  /** @type {PromiseWithResolvers<T>} */
+  const pending = Promise.withResolvers();
+  return {
+    promise: pending.promise,
+    resolve: pending.resolve,
+    reject: pending.reject,
+  };
 };
 const settle = () => new Promise(setImmediate);
 const scope = {
@@ -105,6 +113,27 @@ const scope = {
   matchId: "abcdefghijk1",
   playerId: "actor",
 };
+/**
+ * @typedef {typeof import("../src/connection/connection.ts").connection} SourceConnection
+ * @typedef {typeof import("../src/services/gameplayApi.ts")} GameplayApi
+ * @typedef {import("../src/session/sessionAuth.ts").SessionUser} SessionUser
+ * @typedef {import("../src/services/authApi.ts").AuthTokenProvider} TokenProvider
+ * @typedef {import("@mons/shared/game-sessions").SubmitMoveResponse} MoveResponse
+ * @typedef {import("@mons/shared/game-sessions").SubmitMoveRequest} MoveRequest
+ * @typedef {{fen: string; status?: string; timer?: string; emojiId?: number; flatMovesString?: string; gameVariant?: string}} LocalMatchProbe
+ * @typedef {{inviteId: string; matchId?: string; playerId?: string; opponentId?: string; operationId?: string}} TerminalRequest
+ * @typedef {"surrender" | "timer" | "claim" | "rating" | "wager" | "end" | "rematch"} TerminalKind
+ * @typedef {import("@mons/shared/game-sessions").SurrenderMatchResponse & import("@mons/shared/game-sessions").EndRematchResponse & import("@mons/shared/timers").StartMatchTimerResponse & {mining: null}} TerminalReceipt
+ * @typedef {{request: MoveRequest; bearer: string; options: {signal: AbortSignal; timeoutMs: number}; pending: PromiseWithResolvers<MoveResponse>}} MoveCall
+ * @typedef {{moveDeliveryScope: SourceConnection["moveDeliveryScope"]; isCurrentMoveBoard: SourceConnection["isCurrentMoveBoard"]; recoverMoveBoard: SourceConnection["recoverMoveBoard"]; getMoveDelivery: SourceConnection["getMoveDelivery"]; flushPendingMoves: SourceConnection["flushPendingMoves"]; refreshMoveDeliveries: SourceConnection["refreshMoveDeliveries"]; sendMove: SourceConnection["sendMove"]; createSessionGuard: SourceConnection["createSessionGuard"]; createMatchContextGuard: SourceConnection["createMatchContextGuard"]; isSessionEpochActive: SourceConnection["isSessionEpochActive"]; isContextActive: SourceConnection["isContextActive"]; isCurrentAuthUser: SourceConnection["isCurrentAuthUser"]; requireWritableContext: SourceConnection["requireWritableContext"]; surrender: SourceConnection["surrender"]; startTimer: SourceConnection["startTimer"]; claimVictoryByTimer: SourceConnection["claimVictoryByTimer"]; updateRatings: SourceConnection["updateRatings"]; resolveWagerOutcome: SourceConnection["resolveWagerOutcome"]; getRematchEndDelivery: SourceConnection["getRematchEndDelivery"]; isRematchEndPending: SourceConnection["isRematchEndPending"]; refreshRematchEndDeliveries: SourceConnection["refreshRematchEndDeliveries"]; submitRematchEnd: SourceConnection["submitRematchEnd"]; sendEndMatchIndicator: SourceConnection["sendEndMatchIndicator"]; sendRematchProposal: SourceConnection["sendRematchProposal"]; getUserBoundAuthTokenProvider: SourceConnection["getUserBoundAuthTokenProvider"]; ensureAuthenticated: SourceConnection["ensureAuthenticated"]; getOpponentId: SourceConnection["getOpponentId"]; notifyNavigationGamesChanged: SourceConnection["notifyNavigationGamesChanged"]; logContextEvent: SourceConnection["logContextEvent"]; reconnectAfterMatchUpdateFailure: SourceConnection["reconnectAfterMatchUpdateFailure"]; rematchSeriesEndIsIndicated: SourceConnection["rematchSeriesEndIsIndicated"]; getRematchIndexAvailableForNewProposal: SourceConnection["getRematchIndexAvailableForNewProposal"]; getCachedHistoricalMatchPair: SourceConnection["getCachedHistoricalMatchPair"]; sessionEpoch: SourceConnection["sessionEpoch"]; activeContext: SourceConnection["activeContext"]; moveDeliveries: SourceConnection["moveDeliveries"]; rematchEndDeliveries: SourceConnection["rematchEndDeliveries"]; confirmedSurrenders: SourceConnection["confirmedSurrenders"]; reconcilingMoveKeys: SourceConnection["reconcilingMoveKeys"]; moveRecoveryTimers: SourceConnection["moveRecoveryTimers"]; moveReconnectCooldownMs: SourceConnection["moveReconnectCooldownMs"]; moveReconnectLastAttemptAt: SourceConnection["moveReconnectLastAttemptAt"]; moveReconnectInFlight: SourceConnection["moveReconnectInFlight"]; wagerClient: SourceConnection["wagerClient"]; auth: {currentUser: SessionUser | null; getTokenRemainingMs(token: string): number}; myMatch: LocalMatchProbe; latestInvite: {hostId: string; guestId: string}}} FixtureConnection
+ */
+/** @param {string} uid @param {SessionUser["getIdToken"]} [getIdToken] @returns {SessionUser} */
+const user = (uid, getIdToken = async () => "login-token") => ({
+  uid,
+  sessionId: "session",
+  generation: "generation",
+  getIdToken,
+});
 const initialMatch = {
   status: "",
   timer: "timer",
@@ -113,33 +142,74 @@ const initialMatch = {
   flatMovesString: "first",
   gameVariant: "Classic",
 };
+/** @param {{token?: SessionUser["getIdToken"]; records?: Map<string, string>; onTerminal?: (kind: TerminalKind, request: TerminalRequest) => Promise<{ok: true} | void>; onReconnect?: FixtureConnection["reconnectAfterMatchUpdateFailure"]}} [options] */
 function harness({ token, records = new Map(), onTerminal, onReconnect } = {}) {
+  /** @type {FixtureConnection} */
   let instance;
+  /** @type {MoveCall[]} */
   const calls = [];
+  /** @type {Array<{kind: TerminalKind; request: TerminalRequest}>} */
   const terminal = [];
+  /** @type {Array<{inviteId: string | null; guard: () => boolean}>} */
   const reconnects = [];
+  /** @type {unknown[][]} */
   const errors = [];
+  /** @type {Array<string | null | undefined>} */
   const bindings = [];
+  /** @type {Pick<Storage, "length" | "key" | "getItem" | "setItem" | "removeItem">} */
   const localStorage = {
     get length() {
       return records.size;
     },
-    key: (index) => [...records.keys()][index] ?? null,
+    key: (/** @type {number} */ index) => [...records.keys()][index] ?? null,
     getItem: (key) => records.get(key) ?? null,
     setItem: (key, value) => records.set(key, value),
     removeItem: (key) => records.delete(key),
   };
+  /** @param {TerminalKind} kind @returns {(request: TerminalRequest, provider: TokenProvider) => Promise<TerminalReceipt>} */
   const terminalCall = (kind) => async (request, provider) => {
     await provider(false);
+    assert.ok(provider.assertCurrentUser);
     provider.assertCurrentUser();
     terminal.push({ kind, request });
+    /** @returns {TerminalReceipt} */
+    const receipt = () => ({
+      ok: true,
+      inviteId: request.inviteId,
+      matchId: request.matchId ?? scope.matchId,
+      actorUid: scope.playerId,
+      rematches: { state: "ended", indices: [] },
+      timer: {
+        state: "running",
+        turnNumber: 1,
+        deadlineAtMs: Date.now() + MATCH_TIMER_DURATION_MS,
+      },
+      duration: MATCH_TIMER_DURATION_MS,
+      mining: null,
+    });
     if (onTerminal) {
       const response = await onTerminal(kind, request);
       provider.assertCurrentUser();
-      if (response !== undefined) return response;
+      if (response !== undefined) return { ...receipt(), ...response };
     }
     if (kind === "rematch") return new Promise(() => {});
-    return { ok: true, actorUid: scope.playerId, rematches: "x" };
+    return receipt();
+  };
+  /** @type {GameplayApi["submitMoveViaApi"]} */
+  const submitMoveViaApi = async (request, provider, options) => {
+    const bearer = await provider(false);
+    assert.ok(provider.assertCurrentUser);
+    provider.assertCurrentUser();
+    const signal = required(options?.signal);
+    const timeoutMs = required(options?.timeoutMs);
+    if (signal.aborted)
+      throw new GameplayApiError("aborted", "request-aborted");
+    /** @type {PromiseWithResolvers<MoveResponse>} */
+    const pending = deferred();
+    calls.push({ request, bearer, options: { signal, timeoutMs }, pending });
+    const value = await pending.promise;
+    provider.assertCurrentUser();
+    return value;
   };
   const dependencies = {
     MoveDelivery,
@@ -157,27 +227,54 @@ function harness({ token, records = new Map(), onTerminal, onReconnect } = {}) {
       getPlayerEmojiId: () => "3",
     },
     getPlayersEmojiId: () => 3,
-    console: { log() {}, warn() {}, error: (...args) => errors.push(args) },
-    submitMoveViaApi: async (request, provider, options) => {
-      const bearer = await provider(false);
-      provider.assertCurrentUser();
-      if (options.signal.aborted)
-        throw new GameplayApiError("aborted", "request-aborted");
-      const pending = deferred();
-      calls.push({ request, bearer, options, pending });
-      const value = await pending.promise;
-      provider.assertCurrentUser();
-      return value;
+    console: {
+      log() {},
+      warn() {},
+      error: (/** @type {unknown[]} */ ...args) => errors.push(args),
     },
-    readMatchSnapshotViaApi: async () => ({ match: { ...initialMatch } }),
-    readInviteMetadataViaApi: async (_inviteId, provider) => {
-      await provider(false);
-      provider.assertCurrentUser();
-      return {
-        snapshot: { hostRematches: "", guestRematches: "" },
-        viewer: { role: "host", actorUid: scope.playerId },
-      };
-    },
+    submitMoveViaApi,
+    readMatchSnapshotViaApi:
+      /** @satisfies {GameplayApi["readMatchSnapshotViaApi"]} */ (
+        async (request) => ({
+          ok: true,
+          ...request,
+          match: canonicalMatch({
+            fen: initialMatch.fen,
+            flatMovesString: initialMatch.flatMovesString,
+            emojiId: initialMatch.emojiId,
+            gameVariant: initialMatch.gameVariant,
+          }),
+        })
+      ),
+    readInviteMetadataViaApi:
+      /** @satisfies {typeof import("../src/services/inviteMetadataApi.ts").readInviteMetadataViaApi} */ (
+        async (inviteId, provider) => {
+          assert.ok(provider);
+          await provider(false);
+          assert.ok(provider.assertCurrentUser);
+          provider.assertCurrentUser();
+          return {
+            ok: true,
+            snapshot: {
+              inviteId,
+              revision: 1,
+              hostId: scope.playerId,
+              guestId: "opponent",
+              hostColor: "white",
+              automatchStateHint: null,
+              eventId: null,
+              eventOwned: false,
+              hostRematches: { state: "open", indices: [] },
+              guestRematches: { state: "open", indices: [] },
+            },
+            viewer: {
+              role: "host",
+              actorUid: scope.playerId,
+              automatchOperationId: null,
+            },
+          };
+        }
+      ),
     surrenderMatchViaApi: terminalCall("surrender"),
     startMatchTimerViaApi: terminalCall("timer"),
     claimMatchVictoryByTimerViaApi: terminalCall("claim"),
@@ -186,56 +283,60 @@ function harness({ token, records = new Map(), onTerminal, onReconnect } = {}) {
     endRematchViaApi: terminalCall("end"),
     proposeRematchViaApi: terminalCall("rematch"),
   };
-  const Constructor = new Function(
-    ...Object.keys(dependencies),
-    `${outputText}\nreturn Connection;`,
-  )(...Object.values(dependencies));
-  instance = Object.assign(new Constructor(), {
-    auth: {
-      currentUser: {
-        uid: "login",
-        getIdToken: token || (async () => "login-token"),
+  const Constructor = /** @type {new () => FixtureConnection} */ (
+    new Function(
+      ...Object.keys(dependencies),
+      `${outputText}\nreturn Connection;`,
+    )(...Object.values(dependencies))
+  );
+  instance = Object.assign(
+    new Constructor(),
+    /** @satisfies {Partial<FixtureConnection>} */ ({
+      auth: {
+        currentUser: user("login", token),
+        getTokenRemainingMs: () => 60_000,
       },
-    },
-    sessionEpoch: 2,
-    activeContext: {
-      contextId: 4,
       sessionEpoch: 2,
-      ...scope,
-      actorUid: scope.playerId,
-      canWrite: true,
-      role: "host",
-    },
-    myMatch: { ...initialMatch },
-    latestInvite: { hostId: scope.playerId, guestId: "opponent" },
-    moveDeliveries: new Map(),
-    rematchEndDeliveries: new Map(),
-    confirmedSurrenders: new Set(),
-    reconcilingMoveKeys: new Set(),
-    moveRecoveryTimers: new Map(),
-    moveReconnectCooldownMs: 3000,
-    moveReconnectLastAttemptAt: 0,
-    moveReconnectInFlight: false,
-    getUserBoundAuthTokenProvider: (uid) => {
-      bindings.push(uid);
-      assert.equal(instance.auth.currentUser?.uid, uid);
-      return createUserBoundAuthTokenProvider(
-        instance.auth.currentUser,
-        () => instance.auth.currentUser,
-      );
-    },
-    ensureAuthenticated: async () => {},
-    getOpponentId: () => "opponent",
-    notifyNavigationGamesChanged() {},
-    logContextEvent() {},
-    reconnectAfterMatchUpdateFailure: (inviteId, guard) => {
-      reconnects.push({ inviteId, guard });
-      onReconnect?.(inviteId, guard);
-    },
-    rematchSeriesEndIsIndicated: () => false,
-    getRematchIndexAvailableForNewProposal: () => 1,
-    getCachedHistoricalMatchPair: () => null,
-  });
+      activeContext: {
+        contextId: 4,
+        sessionEpoch: 2,
+        ...scope,
+        actorUid: scope.playerId,
+        canWrite: true,
+        role: "host",
+        createdAtMs: 0,
+      },
+      myMatch: { ...initialMatch },
+      latestInvite: { hostId: scope.playerId, guestId: "opponent" },
+      moveDeliveries: new Map(),
+      rematchEndDeliveries: new Map(),
+      confirmedSurrenders: new Set(),
+      reconcilingMoveKeys: new Set(),
+      moveRecoveryTimers: new Map(),
+      moveReconnectCooldownMs: 3000,
+      moveReconnectLastAttemptAt: 0,
+      moveReconnectInFlight: false,
+      getUserBoundAuthTokenProvider: (uid) => {
+        bindings.push(uid);
+        assert.equal(instance.auth.currentUser?.uid, uid);
+        return createUserBoundAuthTokenProvider(
+          required(instance.auth.currentUser),
+          () => instance.auth.currentUser,
+        );
+      },
+      ensureAuthenticated: async () => {},
+      getOpponentId: () => "opponent",
+      notifyNavigationGamesChanged() {},
+      logContextEvent() {},
+      reconnectAfterMatchUpdateFailure: (inviteId, guard) => {
+        reconnects.push({ inviteId, guard });
+        onReconnect?.(inviteId, guard);
+      },
+      rematchSeriesEndIsIndicated: () => false,
+      getRematchIndexAvailableForNewProposal: () => "1",
+      getCachedHistoricalMatchPair: () => null,
+    }),
+  );
   const wagerHarness = createConnectionWagerClientHarness(instance);
   wagerHarness.dependencies.api.resolveWagerOutcomeViaApi =
     dependencies.resolveWagerOutcomeViaApi;
@@ -250,12 +351,21 @@ function harness({ token, records = new Map(), onTerminal, onReconnect } = {}) {
     records,
     send: (move = "second", fen = "second-fen") =>
       instance.sendMove(move, fen, scope.matchId),
-    acknowledge: (index, response = { outcome: "applied" }) =>
-      calls[index].pending.resolve(response),
+    acknowledge: (/** @type {number} */ index) => {
+      const call = required(calls[index]);
+      call.pending.resolve({
+        ok: true,
+        inviteId: call.request.inviteId,
+        matchId: call.request.matchId,
+        actorUid: call.request.playerId,
+        outcome: "applied",
+      });
+    },
   };
 }
 
 test("rapid actions keep one journal and retain both predecessors while authentication is pending", async () => {
+  /** @type {PromiseWithResolvers<string>} */
   const token = deferred();
   const h = harness({ token: () => token.promise });
   h.send();
@@ -263,12 +373,17 @@ test("rapid actions keep one journal and retain both predecessors while authenti
   h.send("third", "third-fen");
   assert.equal(h.calls.length, 0);
   assert.equal(h.instance.myMatch.flatMovesString, "first-second-z-third");
-  const stored = JSON.parse(h.records.get(moveDeliveryStorageKey(scope)));
+  const stored = storedObject(
+    JSON.parse(required(h.records.get(moveDeliveryStorageKey(scope)))),
+  );
+  assert.ok(Array.isArray(stored.pending));
+  /** @type {unknown[]} */
+  const pendingMoves = stored.pending;
   assert.deepEqual(
-    stored.pending.map(({ moveFen }) => moveFen),
+    pendingMoves.map((entry) => storedObject(entry).moveFen),
     ["second", "z", "third"],
   );
-  token.resolve("login-token");
+  required(token.resolve)("login-token");
   await settle();
   assert.equal(h.calls.length, 2);
   assert.deepEqual(
@@ -278,7 +393,10 @@ test("rapid actions keep one journal and retain both predecessors while authenti
   h.acknowledge(1);
   await settle();
   assert.equal(h.calls.length, 3);
-  assert.equal(h.calls[2].request.flatMovesString, "first-second-z-third");
+  assert.equal(
+    required(h.calls[2]).request.flatMovesString,
+    "first-second-z-third",
+  );
   h.acknowledge(2);
   h.acknowledge(0);
   await settle();
@@ -304,26 +422,21 @@ test("navigation keeps accepted delivery alive without changing the newly displa
 });
 
 test("auth change cancels dispatch and retains the original UID journal for safe resume", async () => {
+  /** @type {PromiseWithResolvers<string>} */
   const token = deferred();
   const h = harness({ token: () => token.promise });
   h.send();
-  h.instance.auth.currentUser = {
-    uid: "other",
-    getIdToken: async () => "other-token",
-  };
+  h.instance.auth.currentUser = user("other", async () => "other-token");
   h.instance.refreshMoveDeliveries();
-  token.resolve("old-token");
+  required(token.resolve)("old-token");
   await settle();
   assert.equal(h.calls.length, 0);
   assert.ok(h.records.has(moveDeliveryStorageKey(scope)));
-  h.instance.auth.currentUser = {
-    uid: "login",
-    getIdToken: async () => "replacement-token",
-  };
+  h.instance.auth.currentUser = user("login", async () => "replacement-token");
   h.instance.refreshMoveDeliveries();
   await settle();
   assert.equal(h.calls.length, 1);
-  assert.equal(h.calls[0].bearer, "replacement-token");
+  assert.equal(required(h.calls[0]).bearer, "replacement-token");
   h.acknowledge(0);
   await settle();
   assert.equal(h.records.has(moveDeliveryStorageKey(scope)), false);
@@ -331,7 +444,7 @@ test("auth change cancels dispatch and retains the original UID journal for safe
 
 test("the wrong authenticated account cannot enqueue into the prior board", async () => {
   const h = harness();
-  h.instance.auth.currentUser = { uid: "other" };
+  h.instance.auth.currentUser = user("other");
   h.send();
   await settle();
   assert.equal(h.instance.myMatch.fen, initialMatch.fen);
@@ -339,7 +452,7 @@ test("the wrong authenticated account cannot enqueue into the prior board", asyn
   assert.equal(h.calls.length, 0);
 });
 
-for (const [method, kind] of [
+for (const [method, kind] of /** @type {const} */ ([
   ["surrender", "surrender"],
   ["startTimer", "timer"],
   ["claimVictoryByTimer", "claim"],
@@ -347,7 +460,7 @@ for (const [method, kind] of [
   ["resolveWagerOutcome", "wager"],
   ["sendEndMatchIndicator", "end"],
   ["sendRematchProposal", "rematch"],
-]) {
+])) {
   test(`${kind} waits until accepted moves are confirmed`, async () => {
     const h = harness();
     h.send();
@@ -364,7 +477,7 @@ for (const [method, kind] of [
     h.acknowledge(0);
     await settle();
     assert.equal(h.terminal.length, 1);
-    assert.equal(h.terminal[0].kind, kind);
+    assert.equal(required(h.terminal[0]).kind, kind);
     if (result instanceof Promise) await result;
     if (kind === "end")
       assert.equal(h.records.has(rematchEndDeliveryStorageKey(scope)), false);
@@ -373,7 +486,7 @@ for (const [method, kind] of [
   });
 }
 
-const endingActions = [
+const endingActions = /** @type {const} */ ([
   [
     "surrender",
     "surrender",
@@ -399,7 +512,7 @@ const endingActions = [
     "wager",
     { inviteId: scope.inviteId, matchId: scope.matchId },
   ],
-];
+]);
 
 for (const [method, kind, expectedRequest] of endingActions) {
   for (const change of ["navigation", "reconnect"]) {
@@ -409,8 +522,13 @@ for (const [method, kind, expectedRequest] of endingActions) {
       const result = h.instance[method]();
       const acceptedEnd =
         kind === "end"
-          ? JSON.parse(h.records.get(rematchEndDeliveryStorageKey(scope)))
-              .record
+          ? storedObject(
+              storedObject(
+                JSON.parse(
+                  required(h.records.get(rematchEndDeliveryStorageKey(scope))),
+                ),
+              ).record,
+            )
           : null;
       if (kind === "end") assert.equal(result, true);
       const completed =
@@ -422,7 +540,7 @@ for (const [method, kind, expectedRequest] of endingActions) {
         change === "navigation"
           ? null
           : {
-              ...h.instance.activeContext,
+              ...required(h.instance.activeContext),
               contextId: 5,
               sessionEpoch: h.instance.sessionEpoch,
             };
@@ -432,10 +550,10 @@ for (const [method, kind, expectedRequest] of endingActions) {
       await settle();
       assert.ok(!((await completed) instanceof Error));
       assert.equal(h.terminal.length, 1);
-      assert.equal(h.terminal[0].kind, kind);
-      const { operationId, ...request } = h.terminal[0].request;
+      assert.equal(required(h.terminal[0]).kind, kind);
+      const { operationId, ...request } = required(h.terminal[0]).request;
       if (kind === "end") {
-        assert.equal(operationId, acceptedEnd.operationId);
+        assert.equal(operationId, required(acceptedEnd).operationId);
         assert.equal(h.records.has(rematchEndDeliveryStorageKey(scope)), false);
       } else assert.equal(operationId, undefined);
       assert.deepEqual(request, expectedRequest);
@@ -460,10 +578,7 @@ for (const [method, kind, expectedRequest] of endingActions) {
       const completed =
         result instanceof Promise ? result.catch(() => undefined) : result;
       await settle();
-      h.instance.auth.currentUser = {
-        uid,
-        getIdToken: async () => "replacement-token",
-      };
+      h.instance.auth.currentUser = user(uid, async () => "replacement-token");
       h.acknowledge(0);
       await settle();
       for (let index = 1; index < h.calls.length; index++) {
@@ -492,14 +607,14 @@ test("rating settlement captures its match before authentication waits", async (
   const completed = h.instance.updateRatings();
   h.instance.sessionEpoch++;
   h.instance.activeContext = {
-    ...h.instance.activeContext,
+    ...required(h.instance.activeContext),
     contextId: 5,
     sessionEpoch: h.instance.sessionEpoch,
     inviteId: "zyxwvutsrqp",
     matchId: "zyxwvutsrqp1",
   };
   h.instance.getOpponentId = () => "new-opponent";
-  authenticationReady.resolve();
+  required(authenticationReady.resolve)();
   await settle();
   assert.equal(h.terminal.length, 0);
   h.acknowledge(0);
@@ -517,11 +632,11 @@ test("rating settlement captures its match before authentication waits", async (
   ]);
 });
 
-for (const [method, kind] of [
+for (const [method, kind] of /** @type {const} */ ([
   ["startTimer", "timer"],
   ["claimVictoryByTimer", "timer claim"],
   ["sendRematchProposal", "rematch proposal"],
-]) {
+])) {
   test(`a move barrier cannot dispatch a dependent ${kind} after its board context changes`, async () => {
     const h = harness();
     h.send();
@@ -543,6 +658,7 @@ for (const [method, kind] of [
 test("returning to the same game reconciles a surrender only after the server commits it", async () => {
   const pendingSurrender = deferred();
   let serverMatch = { ...initialMatch };
+  /** @type {({ status: string; timer: string; emojiId: number; fen: string; flatMovesString: string; gameVariant: string; })[]} */
   const recovered = [];
   const h = harness({
     onTerminal: async (kind) => {
@@ -564,13 +680,13 @@ test("returning to the same game reconciles a surrender only after the server co
   await settle();
   h.instance.sessionEpoch++;
   h.instance.activeContext = {
-    ...h.instance.activeContext,
+    ...required(h.instance.activeContext),
     contextId: 5,
     sessionEpoch: h.instance.sessionEpoch,
   };
   const delivery = h.instance.moveDeliveries.get(moveDeliveryStorageKey(scope));
-  h.instance.myMatch = { ...initialMatch, ...delivery.latest };
-  serverMatch = { ...initialMatch, ...delivery.latest };
+  h.instance.myMatch = { ...initialMatch, ...required(delivery).latest };
+  serverMatch = { ...initialMatch, ...required(delivery).latest };
   h.acknowledge(0);
   await settle();
   assert.equal(h.terminal.length, 1);
@@ -579,7 +695,7 @@ test("returning to the same game reconciles a surrender only after the server co
   assert.equal(recovered.length, 0);
   assert.equal(h.instance.confirmedSurrenders.size, 0);
 
-  pendingSurrender.resolve();
+  required(pendingSurrender.resolve)();
   await settle();
   assert.equal(h.instance.myMatch.status, "surrendered");
   assert.equal(recovered.length, 1);
@@ -591,6 +707,7 @@ test("returning to the same game reconciles a surrender only after the server co
 
 for (const change of ["another match", "another account"]) {
   test(`a surrender response cannot reconcile ${change}`, async () => {
+    /** @type {PromiseWithResolvers<{ok: true}>} */
     const pendingSurrender = deferred();
     const h = harness({ onTerminal: () => pendingSurrender.promise });
     h.send();
@@ -601,20 +718,17 @@ for (const change of ["another match", "another account"]) {
     assert.equal(h.terminal.length, 1);
     h.instance.sessionEpoch++;
     h.instance.activeContext = {
-      ...h.instance.activeContext,
+      ...required(h.instance.activeContext),
       contextId: 5,
       sessionEpoch: h.instance.sessionEpoch,
       ...(change === "another match" ? { matchId: "abcdefghijk2" } : {}),
     };
     if (change === "another account") {
-      h.instance.auth.currentUser = {
-        uid: "other",
-        getIdToken: async () => "other-token",
-      };
+      h.instance.auth.currentUser = user("other", async () => "other-token");
     }
     const replacement = { fen: "replacement", status: "" };
     h.instance.myMatch = replacement;
-    pendingSurrender.resolve({ ok: true });
+    required(pendingSurrender.resolve)({ ok: true });
     await settle();
     assert.equal(h.instance.myMatch, replacement);
     assert.equal(replacement.status, "");
@@ -632,7 +746,7 @@ test("surrender recovery rechecks the displayed match and account after its cool
     await settle();
     h.instance.sessionEpoch++;
     h.instance.activeContext = {
-      ...h.instance.activeContext,
+      ...required(h.instance.activeContext),
       contextId: 5,
       sessionEpoch: h.instance.sessionEpoch,
     };
@@ -644,14 +758,11 @@ test("surrender recovery rechecks the displayed match and account after its cool
     assert.equal(h.instance.moveRecoveryTimers.size, 1);
     if (change === "match") {
       h.instance.activeContext = {
-        ...h.instance.activeContext,
+        ...required(h.instance.activeContext),
         matchId: "abcdefghijk2",
       };
     } else if (change === "account") {
-      h.instance.auth.currentUser = {
-        uid: "other",
-        getIdToken: async () => "other-token",
-      };
+      h.instance.auth.currentUser = user("other", async () => "other-token");
     }
     t.mock.timers.tick(3000);
     assert.equal(h.reconnects.length, change === "none" ? 1 : 0);
@@ -665,13 +776,13 @@ test("confirmed terminal cancellation releases ending actions without calling th
   const rating = h.instance.updateRatings();
   await settle();
   const delivery = h.instance.moveDeliveries.get(moveDeliveryStorageKey(scope));
-  const revision = delivery.confirmationVersion;
-  h.calls[0].pending.reject(
+  const revision = required(delivery).confirmationVersion;
+  required(h.calls[0]).pending.reject(
     new GameplayApiError("failed-precondition", "match-move-finished"),
   );
   await rating;
-  assert.equal(h.terminal.at(-1).kind, "rating");
-  assert.equal(delivery.confirmationVersion, revision);
+  assert.equal(required(h.terminal.at(-1)).kind, "rating");
+  assert.equal(required(delivery).confirmationVersion, revision);
   assert.ok(h.records.has(`${moveDeliveryStorageKey(scope)}:finished`));
   h.send("another", "another-fen");
   await settle();
@@ -688,7 +799,7 @@ test("own-state recovery waits out reconnect cooldown and still respects navigat
     const delivery = h.instance.moveDeliveries.get(
       moveDeliveryStorageKey(scope),
     );
-    delivery.reconcile({
+    required(delivery).reconcile({
       fen: "remote-next",
       flatMovesString: "first-second-third",
     });
@@ -702,3 +813,11 @@ test("own-state recovery waits out reconnect cooldown and still respects navigat
     await settle();
   }
 });
+
+/** @param {unknown} value @returns {Record<string, unknown>} */
+function storedObject(value) {
+  assert.ok(
+    typeof value === "object" && value !== null && !Array.isArray(value),
+  );
+  return Object.fromEntries(Object.entries(value));
+}

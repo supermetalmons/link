@@ -377,7 +377,7 @@ export function createCanonicalIdentityProfiles({
     if (usernameKey) {
       usernameOwner = await db
         .prepare(
-          "SELECT profile_id, revision FROM profile_records WHERE username_key = ?",
+          "SELECT profile_id, revision FROM profile_records_canonical WHERE username_key = ?",
         )
         .bind(usernameKey)
         .first<{ profile_id: string; revision: number }>();
@@ -462,7 +462,6 @@ export function createCanonicalIdentityProfiles({
       profile: merged,
       state: targetProfile.state,
       mergedIntoProfileId: targetProfile.mergedIntoProfileId,
-      legacyFields: targetProfile.legacyFields,
       createdAtMs: targetProfile.createdAtMs,
       updatedAtMs: timestamp,
       mergedAtMs: timestamp,
@@ -490,7 +489,6 @@ export function createCanonicalIdentityProfiles({
           targetProfileId: resolvedTargetProfileId,
           mergedAtMs: timestamp,
           opId,
-          sourceLegacyFields: sourceProfile.legacyFields,
         },
       },
       { kind: "update-active-profile", value: mergedValue },

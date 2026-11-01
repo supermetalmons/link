@@ -1,3 +1,4 @@
+import { readRetainedTimerClaim } from "../src/matchClaimCodec.ts";
 import { retainedInviteSourceFixture } from "./inviteDocumentFixture.ts";
 import { timerClaimFixture } from "./matchClaimFixture.ts";
 import {
@@ -36,43 +37,29 @@ const request = {
   fen: "first",
 };
 
-test("move decision preserves every non-move field and fills only missing variants", () => {
-  const source = {
-    fen: "initial",
-    flatMovesString: "",
-    gameVariant: "Classic",
-    timer: "7;123",
-    status: "",
+test("move decisions preserve every canonical non-move field and reject variant changes", () => {
+  const source = matchDocumentFixture({
+    timer: formatMatchTimer(7, 123),
     sessionCreation: "creation",
-    custom: { nested: ["legacy", 2] },
-  };
-  const next = decideMatchStateMove(source, {
-    ...request,
-    gameVariant: "Other",
   });
+  const next = decideMatchStateMove(source, request);
   assert.equal(next.outcome, "applied");
   assert.deepEqual(next.value, {
     ...source,
     fen: request.fen,
     flatMovesString: request.flatMovesString,
   });
-  assert.equal(
-    matchRecordFixture(
-      decideMatchStateMove(
-        { ...source, gameVariant: "" },
-        { ...request, gameVariant: "Other" },
-      ).value,
-    )!.gameVariant,
-    "Other",
+  assert.throws(
+    () => decideMatchStateMove(source, { ...request, gameVariant: "Other" }),
+    /variant/,
   );
-  assert.deepEqual(source.custom, { nested: ["legacy", 2] });
 });
 
 test("cumulative decisions reject an intermediate FEN mismatch", () => {
   assert.throws(
     () =>
       decideMatchStateMove(
-        { fen: "different", flatMovesString: "a" },
+        matchDocumentFixture({ fen: "different", flatMovesString: "a" }),
         {
           ...request,
           fen: "second",
@@ -102,26 +89,14 @@ test("canonical JSON rejects values that cannot be retained exactly", () => {
   );
 });
 
-test("new creation normalization matches null deletion and array readback", () => {
-  const input = {
+test("new creation normalization preserves a complete canonical record", () => {
+  const input = matchDocumentFixture({
     sessionCreation: "creation",
-    aura: null,
-    empty: { gone: null },
-    nested: { remove: null, keep: "value" },
-    array: [null, { remove: null, keep: "value" }, null],
-    sparse: [null, null, "value"],
-    numeric: { "0": "zero", "1": "one" },
-    emptyArray: [],
-  };
-  assert.deepEqual(normalizeCreatedMatchState(matchDocumentFixture(input)), {
-    sessionCreation: "creation",
-    nested: { keep: "value" },
-    array: [null, { keep: "value" }],
-    sparse: { "2": "value" },
-    numeric: ["zero", "one"],
+    aura: "none",
   });
-  assert.equal(input.aura, null);
-  assert.deepEqual(input.array, [null, { remove: null, keep: "value" }, null]);
+  assert.deepEqual(normalizeCreatedMatchState(input), input);
+  const malformed = { ...input, custom: true };
+  assert.throws(() => normalizeCreatedMatchState(malformed), /invalid/);
 });
 
 test("committed fences require complete terminal claim evidence", () => {
@@ -136,19 +111,13 @@ test("committed fences require complete terminal claim evidence", () => {
     expiresAtMs: null,
   });
   assert.equal(isCommittedMatchStateClaim(claim, "invite-one"), true);
-  assert.equal(
-    isCommittedMatchStateClaim(
-      timerClaimFixture({ ...claim, expiresAtMs: 123_010 }),
-      "invite-one",
-    ),
-    false,
+  assert.throws(
+    () => readRetainedTimerClaim({ ...claim, expiresAtMs: 123_010 }),
+    /invalid-claim/,
   );
-  assert.equal(
-    isCommittedMatchStateClaim(
-      timerClaimFixture({ ...claim, turnNumber: 8 }),
-      "invite-one",
-    ),
-    false,
+  assert.throws(
+    () => readRetainedTimerClaim({ ...claim, turnNumber: 8 }),
+    /invalid-claim/,
   );
   assert.equal(isCommittedMatchStateClaim(claim, "other-invite"), false);
 });
@@ -165,6 +134,8 @@ function canonicalRepository(guestId = "guest-login") {
         guestId,
         hostRematches: "",
         guestRematches: "",
+        eventRoundIndex: 0,
+        eventMatchKey: "0_0",
         eventOwned: true,
         eventId: "event-one",
       });
@@ -289,31 +260,10 @@ function cumulativeMove(): SubmitMoveRequest {
   };
 }
 
-test("move decisions preserve existing variants and optional legacy fields", () => {
-  for (const gameVariant of [undefined, "", "Custom"]) {
-    for (const requestedVariant of [undefined, "Classic"]) {
-      const source = {
-        fen: "initial",
-        ...(gameVariant === undefined ? {} : { gameVariant }),
-        extra: { retained: true },
-      };
-      const next = decideMatchStateMove(source, {
-        ...request,
-        ...(requestedVariant === undefined
-          ? {}
-          : { gameVariant: requestedVariant }),
-      });
-      const expectedVariant = gameVariant || requestedVariant;
-      assert.equal(next.outcome, "applied");
-      assert.deepEqual(next.value, {
-        ...source,
-        ...(expectedVariant ? { gameVariant: expectedVariant } : {}),
-        fen: request.fen,
-        flatMovesString: request.flatMovesString,
-      });
-      assert.deepEqual(source.extra, { retained: true });
-    }
-  }
+test("move decisions retain a stored variant when the request omits it", () => {
+  const source = matchDocumentFixture({ gameVariant: "Custom" });
+  const next = decideMatchStateMove(source, request);
+  assert.equal(next.value.gameVariant, "Custom");
 });
 
 test("cumulative moves apply from the base or any matching checkpoint", () => {
@@ -323,13 +273,12 @@ test("cumulative moves apply from the base or any matching checkpoint", () => {
     ["moves-a", "after-a"],
     ["moves-a-z", "fen"],
   ]) {
-    const source = {
+    const source = matchDocumentFixture({
       flatMovesString,
       fen,
-      timer: "current-timer",
+      timer: formatMatchTimer(7, 123),
       status: "surrendered",
-      extra: { preserved: true },
-    };
+    });
     const next = decideMatchStateMove(source, input);
     assert.equal(next.outcome, "applied");
     assert.deepEqual(next.value, {
@@ -342,13 +291,13 @@ test("cumulative moves apply from the base or any matching checkpoint", () => {
   }
 });
 
-test("newer cumulative state supersedes late prefixes and preserves legacy semantics", () => {
+test("newer cumulative state supersedes late prefixes and preserves exact replay semantics", () => {
   const latest = cumulativeMove();
-  const source = {
+  const source = matchDocumentFixture({
     fen: latest.fen,
     flatMovesString: latest.flatMovesString,
-    timer: "retained",
-  };
+    timer: formatMatchTimer(7, 123),
+  });
   const older = {
     ...latest,
     fen: "after-a",
@@ -357,10 +306,10 @@ test("newer cumulative state supersedes late prefixes and preserves legacy seman
   };
   const late = decideMatchStateMove(source, older);
   assert.equal(late.outcome, "superseded");
-  assert.equal(late.value, source);
+  assert.deepEqual(late.value, source);
   const replay = decideMatchStateMove(source, latest);
   assert.equal(replay.outcome, "already-applied");
-  assert.equal(replay.value, source);
+  assert.deepEqual(replay.value, source);
   const legacyOlder: SubmitMoveRequest = { ...older };
   delete legacyOlder.previousStates;
   assert.throws(
@@ -380,7 +329,7 @@ test("newer cumulative state supersedes late prefixes and preserves legacy seman
     matchRecordFixture(next.value)!.flatMovesString,
     legacyNext.flatMovesString,
   );
-  assert.equal(matchRecordFixture(next.value)!.timer, "retained");
+  assert.deepEqual(matchRecordFixture(next.value)!.timer, source.timer);
 });
 
 test("cumulative moves reject divergent histories, partial-entry prefixes and mismatching FEN", () => {
@@ -394,19 +343,24 @@ test("cumulative moves reject divergent histories, partial-entry prefixes and mi
     ["moves-a", "other-prefix"],
     ["moves-a-z-next", "other-target"],
   ]) {
-    const source = { fen, flatMovesString, timer: "retained" };
+    const source = matchDocumentFixture({
+      fen,
+      flatMovesString,
+      timer: formatMatchTimer(7, 123),
+    });
     assert.throws(
       () => decideMatchStateMove(source, input),
       /move-chain-conflict/,
     );
-    assert.deepEqual(source, { fen, flatMovesString, timer: "retained" });
+    assert.equal(source.fen, fen);
+    assert.equal(source.flatMovesString, flatMovesString);
   }
   const legacy = { ...input };
   delete legacy.previousStates;
   assert.throws(
     () =>
       decideMatchStateMove(
-        { fen: "after-a", flatMovesString: "moves-a" },
+        matchDocumentFixture({ fen: "after-a", flatMovesString: "moves-a" }),
         legacy,
       ),
     /move-chain-conflict/,
@@ -447,7 +401,11 @@ test("real moves and takebacks retain distinct history when the board repeats", 
     previousStates: final.previousStates!.slice(0, 2),
   };
   const undoneState = decideMatchStateMove(
-    { fen: baseFen, flatMovesString: "", extra: true },
+    matchDocumentFixture({
+      fen: baseFen,
+      flatMovesString: "",
+      sessionCreation: "original-marker",
+    }),
     undoOnly,
   );
   assert.equal(undoneState.outcome, "applied");
@@ -462,10 +420,10 @@ test("real moves and takebacks retain distinct history when the board repeats", 
     matchRecordFixture(finalState.value)!.flatMovesString,
     final.flatMovesString,
   );
-  assert.equal(matchRecordFixture(finalState.value)!.extra, true);
+  assert.equal(finalState.value.sessionCreation, "original-marker");
   const late = decideMatchStateMove(finalState.value, undoOnly);
   assert.equal(late.outcome, "superseded");
-  assert.equal(late.value, finalState.value);
+  assert.deepEqual(late.value, finalState.value);
 });
 
 test("cumulative moves reject oversized stored fields before returning superseded", () => {

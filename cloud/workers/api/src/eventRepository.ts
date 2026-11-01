@@ -150,7 +150,7 @@ function createEventStore(
       admit((admission) =>
         eventD1.transactEventPrizeSelection(db, eventId, profileId, updater, {
           admission,
-          signal,
+          ...(signal ? { signal } : {}),
         }),
       ),
     transactProfileEventPrize: (profileId, eventId, updater, signal) =>
@@ -178,7 +178,7 @@ function createEventStore(
           updater,
           {
             admission,
-            signal,
+            ...(signal ? { signal } : {}),
             eventLease: guard,
           },
         ),
@@ -196,14 +196,14 @@ function createEventStore(
       admit((admission) =>
         eventD1.transactEventProgressOutbox(db, id, updater, {
           admission,
-          signal,
+          ...(signal ? { signal } : {}),
         }),
       ),
     transactEventProgressDeadOutbox: (id, updater, signal) =>
       admit((admission) =>
         eventD1.transactEventProgressDeadOutbox(db, id, updater, {
           admission,
-          signal,
+          ...(signal ? { signal } : {}),
         }),
       ),
     claimEventProfileGameProjectionOutbox: (
@@ -220,14 +220,14 @@ function createEventStore(
           requestId,
           expected,
           nowMs,
-          { admission, signal },
+          { admission, ...(signal ? { signal } : {}) },
         ),
       ),
     acknowledgeEventProfileGameProjectionOutbox: (id, requestId, signal) =>
       admit((admission) =>
         eventD1.acknowledgeEventProfileGameProjectionOutbox(db, id, requestId, {
           admission,
-          signal,
+          ...(signal ? { signal } : {}),
         }),
       ),
     claimEventTelegramProjectionOutbox: (
@@ -244,21 +244,21 @@ function createEventStore(
           requestId,
           expected,
           nowMs,
-          { admission, signal },
+          { admission, ...(signal ? { signal } : {}) },
         ),
       ),
     acknowledgeEventTelegramProjectionOutbox: (id, requestId, signal) =>
       admit((admission) =>
         eventD1.acknowledgeEventTelegramProjectionOutbox(db, id, requestId, {
           admission,
-          signal,
+          ...(signal ? { signal } : {}),
         }),
       ),
     transactEventTelegramProjectionState: (id, updater, signal) =>
       admit((admission) =>
         eventD1.transactEventTelegramProjectionState(db, id, updater, {
           admission,
-          signal,
+          ...(signal ? { signal } : {}),
         }),
       ),
   };
@@ -295,7 +295,7 @@ export function createEventStateRepository(
     env,
     matchState: raw,
     prepareMatchPresentations,
-    schedule: options.schedule,
+    ...(options.schedule ? { schedule: options.schedule } : {}),
   });
   return {
     ...base,

@@ -1,12 +1,75 @@
 // Generated from src/shared/invite-records.ts. Run npm run generate:runtime.
+import { type RematchSeries } from "./rematches.js";
 import type { CONTROLLER_VERSION } from "./match-protocol.js";
-declare const inviteDocument: unique symbol;
-export type InviteDocument = {
-  readonly [inviteDocument]: true;
+export type InviteTransitionEvidence = {
+  transitionId: string;
+  sequence: number;
+  digest: string;
 };
-export declare function readInviteDocument(
+export type InviteAutomatchMessage = {
+  name: string;
+  text: string;
+  telegramMessageId: number;
+};
+type InviteFields = {
+  schemaVersion: 1;
+  version: typeof CONTROLLER_VERSION;
+  hostId: string;
+  guestId: string | null;
+  hostColor: "white" | "black";
+  hostRematches: RematchSeries;
+  guestRematches: RematchSeries;
+  sessionTransition: InviteTransitionEvidence | null;
+  automatchMessage: InviteAutomatchMessage | null;
+  automatchOperationIds: Record<string, string>;
+};
+type NonEventInvite = {
+  eventOwned: false;
+  eventId: null;
+  eventRoundIndex: null;
+  eventMatchKey: null;
+};
+export type ManualInviteDocument = InviteFields &
+  NonEventInvite & {
+    kind: "manual";
+    password: null;
+    automatchStateHint: null;
+    automatchCanceledAt: null;
+    telegramDeliveryVersion: null;
+  };
+export type AutomatchInviteDocument = InviteFields &
+  NonEventInvite & {
+    kind: "automatch";
+    password: string;
+    automatchStateHint: "pending" | "matched" | "canceled" | null;
+    automatchCanceledAt: number | null;
+    telegramDeliveryVersion: 2 | null;
+  };
+export type EventInviteDocument = InviteFields & {
+  kind: "event";
+  password: null;
+  automatchStateHint: null;
+  automatchCanceledAt: null;
+  telegramDeliveryVersion: null;
+  eventOwned: true;
+  eventId: string;
+  eventRoundIndex: number | null;
+  eventMatchKey: string;
+};
+export type InviteDocument =
+  ManualInviteDocument | AutomatchInviteDocument | EventInviteDocument;
+export declare function isInviteTransitionEvidence(
   value: unknown,
-): InviteDocument | null;
+): value is InviteTransitionEvidence;
+export declare function isInviteAutomatchMessage(
+  value: unknown,
+): value is InviteAutomatchMessage;
+export declare function isInviteDocument(
+  value: unknown,
+): value is InviteDocument;
+export declare const readInviteDocument: (
+  value: unknown,
+) => InviteDocument | null;
 export type InviteParticipantsRead =
   | {
       status: "missing";
@@ -35,16 +98,14 @@ export declare function inviteTrimmedParticipants(
   guestId: string;
 };
 export declare function inviteRematchState(value: InviteDocument): {
-  hostRematches: string | undefined;
-  guestRematches: string | undefined;
+  hostRematches: RematchSeries;
+  guestRematches: RematchSeries;
   hostColor: "white" | "black";
 };
-export type PresentationInviteView = {
-  hostId: string;
-  guestId: string | null;
-  hostRematches?: string;
-  guestRematches?: string;
-};
+export type PresentationInviteView = Pick<
+  InviteDocument,
+  "hostId" | "guestId" | "hostRematches" | "guestRematches"
+>;
 export declare function presentationInviteView(
   value: Extract<
     InviteParticipantsRead,
@@ -76,9 +137,9 @@ export declare function inviteMatchesParticipants(
 export declare function inviteProjectionState(value: InviteDocument | null): {
   hostId: string;
   guestId: string;
-  automatchStateHint: string | null;
+  automatchStateHint: "pending" | "matched" | "canceled" | null;
   automatchCanceledAt: number | null;
-  telegramDeliveryVersion: number | null;
+  telegramDeliveryVersion: 2 | null;
 };
 export declare function inviteSourceEventState(value: InviteDocument | null): {
   hostId: string | undefined;
@@ -99,17 +160,13 @@ export type ManualInviteWrite = InviteIdentityWrite & {
   guestId: null;
 };
 export type PendingAutomatchInviteWrite = ManualInviteWrite & {
-  guestId: null;
   password: string;
   automatchStateHint: "pending";
   automatchCanceledAt: null;
   automatchOperationIds: Record<string, string>;
   telegramDeliveryVersion: 2;
 };
-export type MatchedAutomatchInviteWrite = {
-  version: typeof CONTROLLER_VERSION;
-  hostId: string;
-  hostColor: string;
+export type MatchedAutomatchInviteWrite = InviteIdentityWrite & {
   guestId: string;
   password: string;
   automatchStateHint: "matched";
@@ -130,13 +187,8 @@ export type InviteFieldChanges = {
   hostColor?: "white" | "black";
   password?: string;
   automatchStateHint?: "pending" | "matched" | "canceled";
-  automatchCanceledAt?:
-    | number
-    | {
-        readonly ".sv": "timestamp";
-      }
-    | null;
-  telegramDeliveryVersion?: number;
+  automatchCanceledAt?: number | null;
+  telegramDeliveryVersion?: 2;
 };
 export declare const createManualInviteDocument: (
   value: ManualInviteWrite,
@@ -152,10 +204,10 @@ export declare const createEventInviteDocument: (
 ) => InviteDocument;
 export declare const createInviteFieldDocument: (
   value: InviteFieldChanges,
-) => InviteDocument;
+) => InviteFieldChanges;
 export declare function inviteHistoricalParticipants(value: InviteDocument): {
   hostId: string;
-  guestId: string;
+  guestId: string | null;
 };
 export declare function mergeInviteAutomatchOperation(
   value: InviteDocument,
@@ -163,11 +215,4 @@ export declare function mergeInviteAutomatchOperation(
   uid: string,
   operationId: string,
 ): InviteDocument;
-export declare function inviteRatingWager(
-  value: InviteDocument,
-  matchId: string,
-): {
-  material: string;
-  count: number;
-};
 export {};

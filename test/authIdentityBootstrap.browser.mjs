@@ -1,5 +1,10 @@
+import { browserServerOrigin } from "./browserViteServer.mjs";
+import {
+  canonicalAppearance,
+  canonicalEvent,
+} from "./fixtures/canonicalData.mjs";
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
+import { readFile, rm } from "node:fs/promises";
 import { createServer as createHttpServer } from "node:http";
 import { createRequire } from "node:module";
 import { extname, resolve } from "node:path";
@@ -10,21 +15,47 @@ import { eventSnapshotEtag } from "@mons/shared/events";
 import { createBrowserViteServer } from "./browserViteServer.mjs";
 
 const require = createRequire(import.meta.url);
+/** @type {typeof import("playwright")} */
 const { chromium } = require(process.env.MONS_PLAYWRIGHT_PATH || "playwright");
+/** @template Value @param {Value} value @returns {NonNullable<Value>} */
+function present(value) {
+  assert.ok(value !== null && value !== undefined);
+  return value;
+}
+/** @param {unknown} value @returns {Record<string, unknown>} */
+function jsonRecord(value) {
+  assert.ok(
+    value !== null && typeof value === "object" && !Array.isArray(value),
+  );
+  return /** @type {Record<string, unknown>} */ (value);
+}
+/** @param {unknown} value @returns {string} */
+function stringValue(value) {
+  assert.ok(typeof value === "string");
+  return value;
+}
 const repository = fileURLToPath(new URL("../", import.meta.url));
+const cacheDirectory = resolve(
+  repository,
+  "node_modules/.vite-browser-tests",
+  `auth-identity-${process.pid}`,
+);
+test.after(() => rm(cacheDirectory, { recursive: true, force: true }));
 const buildDirectory = process.env.MONS_IDENTITY_BUILD;
 const uid = "u".repeat(28);
 const guestId = "g".repeat(28);
 const inviteId = "IdentityBootstrapGame";
 const eventId = "identity-bootstrap-event";
 const cachedName = "CachedBeforeVerification";
+/** @type {import("@mons/shared/profiles").CompletePlayerProfile & {username: string}} */
 const profile = {
+  ...canonicalAppearance(),
   id: "canonical-identity-profile",
   username: "VerifiedFastPlayer",
   eth: null,
   sol: null,
   emoji: 7,
-  aura: "",
+  aura: "none",
   rating: 1777,
   nonce: 43,
   totalManaPoints: 321,
@@ -36,26 +67,36 @@ const profile = {
     materials: { dust: 2, slime: 3, gum: 4, metal: 5, ice: 6 },
   },
 };
+/** @type {typeof profile} */
 const presentationProfile = {
   ...profile,
   cardBackgroundId: 3,
   cardSubtitleId: 1,
-  cardStickers: JSON.stringify({ mana: "blue-mana" }),
+  cardStickers: { mana: "blue-mana" },
   profileCounter: "mp",
-  profileMons: "0,0,0,0,0",
+  profileMons: { demon: 0, angel: 0, drainer: 0, spirit: 0, mystic: 0 },
 };
 const fen = new Game({ variant: "Classic" }).toFen();
+/** @param {"white" | "black"} color @returns {import("@mons/shared/game-sessions").GameSessionMatch} */
 const matchRecord = (color) => ({
+  schemaVersion: 1,
   version: 2,
   color,
   emojiId: 1,
-  aura: "",
+  aura: "none",
   gameVariant: "Classic",
   fen,
-  status: "",
+  status: "active",
   flatMovesString: "",
-  timer: "",
+  timer: { state: "idle" },
 });
+/**
+ * @typedef {import("@mons/shared/game-bootstrap").ReadGameBootstrapResponse} IdentityGameFixture
+ * @typedef {{path: string, query: string, method: string, body: Record<string, unknown> | undefined}} IdentityRequest
+ * @typedef {{page: import("playwright").Page, context: import("playwright").BrowserContext, origin: string, requests: IdentityRequest[], appGate: PromiseWithResolvers<void>, sessionGate: PromiseWithResolvers<void>, identityGate: PromiseWithResolvers<void>, appRequested: PromiseWithResolvers<void>, sessionRequested: PromiseWithResolvers<void>, identityRequested: PromiseWithResolvers<void>, metadataConnected: PromiseWithResolvers<void>, setAuthoritativeProfile(next: typeof profile): void, fillGuest(): void}} IdentityFixtureContext
+ * @typedef {{path?: string, restored?: boolean, holdApp?: boolean, holdSession?: boolean, holdIdentity?: boolean, spectator?: boolean, unpaired?: boolean, quotaKey?: string | null, storedUsername?: string, holdPresentationFrames?: boolean, identity?: unknown, fallbackIdentity?: unknown}} IdentityOptions
+ */
+/** @type {IdentityGameFixture} */
 const gameBootstrap = {
   ok: true,
   schemaVersion: 1,
@@ -65,8 +106,8 @@ const gameBootstrap = {
     hostId: uid,
     guestId,
     hostColor: "white",
-    hostRematches: "",
-    guestRematches: "",
+    hostRematches: { state: "open", indices: [] },
+    guestRematches: { state: "open", indices: [] },
     automatchStateHint: null,
     eventId: null,
     eventOwned: false,
@@ -88,24 +129,31 @@ const eventSeed = {
     ok: true,
     eventId,
     revision: 1,
-    event: { eventId, status: "scheduled" },
+    event: canonicalEvent({ eventId }),
     prizeSelections: {},
   },
   etag: eventSnapshotEtag(eventId, 1),
   bookmark: "mons-d1-v1:11111111-1111-4111-8111-111111111111:identity",
 };
 
+/** @returns {PromiseWithResolvers<void>} */
+const deferred = () => Promise.withResolvers();
+
+/** @template Value @param {Promise<Value>} promise @returns {Promise<Value>} */
 async function withinDeadline(promise) {
+  /** @type {ReturnType<typeof setTimeout> | undefined} */
   let timer;
   try {
     return await Promise.race([
       promise,
-      new Promise((_, reject) => {
-        timer = setTimeout(
-          () => reject(new Error("identity-browser-fixture-timeout")),
-          20_000,
-        );
-      }),
+      /** @type {Promise<never>} */ (
+        new Promise((_, reject) => {
+          timer = setTimeout(
+            () => reject(new Error("identity-browser-fixture-timeout")),
+            20_000,
+          );
+        })
+      ),
     ]);
   } finally {
     clearTimeout(timer);
@@ -116,6 +164,7 @@ async function serve() {
   if (!buildDirectory) {
     const server = await createBrowserViteServer({
       root: repository,
+      cacheDir: cacheDirectory,
       server: {
         host: "127.0.0.1",
         port: 0,
@@ -127,7 +176,7 @@ async function serve() {
     });
     await server.listen();
     return {
-      origin: `http://127.0.0.1:${server.httpServer.address().port}`,
+      origin: browserServerOrigin(server),
       appPath: "/src/index.tsx",
       close: () => server.close(),
     };
@@ -144,7 +193,7 @@ async function serve() {
   );
   const appPath = new URL(appImport, `http://fixture${entryPath}`).pathname;
   const server = createHttpServer(async (request, response) => {
-    const pathname = new URL(request.url, "http://fixture").pathname;
+    const pathname = new URL(request.url ?? "/", "http://fixture").pathname;
     const relative = extname(pathname) ? pathname.slice(1) : "index.html";
     try {
       const content = await readFile(resolve(root, relative));
@@ -164,14 +213,22 @@ async function serve() {
       response.end();
     }
   });
-  await new Promise((done) => server.listen(0, "127.0.0.1", done));
+  await /** @type {Promise<void>} */ (
+    new Promise((done) => server.listen(0, "127.0.0.1", done))
+  );
+  const address = server.address();
+  assert.ok(address && typeof address !== "string");
   return {
-    origin: `http://127.0.0.1:${server.address().port}`,
+    origin: `http://127.0.0.1:${address.port}`,
     appPath,
-    close: () => new Promise((done) => server.close(done)),
+    close: () =>
+      /** @type {Promise<void>} */ (
+        new Promise((done) => server.close(() => done()))
+      ),
   };
 }
 
+/** @param {(context: IdentityFixtureContext) => Promise<void>} run @param {IdentityOptions} [options] */
 async function fixture(
   run,
   {
@@ -189,6 +246,7 @@ async function fixture(
     fallbackIdentity = { ok: true, profile },
   } = {},
 ) {
+  /** @type {IdentityGameFixture} */
   let routedGameBootstrap =
     spectator || unpaired
       ? {
@@ -208,8 +266,10 @@ async function fixture(
         }
       : gameBootstrap;
   let authoritativeProfile = profile;
+  /** @type {Set<import("playwright").WebSocketRoute>} */
   const metadataSockets = new Set();
-  const metadataConnected = Promise.withResolvers();
+  const metadataConnected = deferred();
+  /** @param {string} playerId @param {boolean} [broadcast] */
   const pairGame = (playerId, broadcast = false) => {
     routedGameBootstrap = {
       ...routedGameBootstrap,
@@ -241,15 +301,19 @@ async function fixture(
         );
   };
   const server = await serve();
-  const appGate = Promise.withResolvers();
-  const sessionGate = Promise.withResolvers();
-  const identityGate = Promise.withResolvers();
-  const appRequested = Promise.withResolvers();
-  const sessionRequested = Promise.withResolvers();
-  const identityRequested = Promise.withResolvers();
+  const appGate = deferred();
+  const sessionGate = deferred();
+  const identityGate = deferred();
+  const appRequested = deferred();
+  const sessionRequested = deferred();
+  const identityRequested = deferred();
+  /** @type {IdentityRequest[]} */
   const requests = [];
+  /** @type {{name: string, message: string, stack: string | undefined}[]} */
   const errors = [];
+  /** @type {Set<string>} */
   const sessions = new Set();
+  /** @type {import("playwright").Browser | undefined} */
   let browser;
   let closed = false;
   if (!holdApp) appGate.resolve();
@@ -299,31 +363,42 @@ async function fixture(
       if (url.origin !== "https://api.mons.link") return route.abort();
       const headers = {
         "Access-Control-Allow-Origin": origin,
-        "Access-Control-Allow-Headers": "Authorization, Content-Type",
+        "Access-Control-Allow-Headers":
+          "Authorization, Content-Type, X-Mons-Data-Epoch",
         "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
         "Timing-Allow-Origin": origin,
         "Server-Timing": "session;dur=1, identity;dur=2, total;dur=3",
       };
       if (request.method() === "OPTIONS")
         return route.fulfill({ status: 204, headers });
-      const body = request.postData() ? request.postDataJSON() : undefined;
+      if (url.pathname === "/release")
+        return route.fulfill({
+          status: 200,
+          headers,
+          json: { state: "active", dataEpoch: 1, generation: 1 },
+        });
+      const body = request.postData()
+        ? jsonRecord(request.postDataJSON())
+        : undefined;
       requests.push({
         path: url.pathname,
         query: url.search,
         method: request.method(),
         body,
       });
+      /** @type {unknown} */
       let json;
       if (/^\/auth\/session\/(anonymous|refresh)$/.test(url.pathname)) {
         const sessionId = url.pathname.endsWith("/anonymous")
-          ? body.sessionId
-          : request.headers().authorization.split(".")[1];
+          ? stringValue(jsonRecord(body).sessionId)
+          : stringValue(present(request.headers().authorization).split(".")[1]);
         if (url.pathname.endsWith("/anonymous")) sessions.add(sessionId);
         assert.ok(sessions.has(sessionId));
         sessionRequested.resolve();
         await sessionGate.promise;
         const exp = Math.floor(Date.now() / 1000) + 300;
-        json = {
+        /** @type {Record<string, unknown>} */
+        const sessionResponse = {
           ok: true,
           uid,
           sessionId,
@@ -334,15 +409,16 @@ async function fixture(
           url.searchParams.get("bootstrapIdentity") === "1" &&
           identity !== "missing"
         )
-          json.identityBootstrap = identity;
+          sessionResponse.identityBootstrap = identity;
         if (url.searchParams.has("bootstrapInviteId"))
-          json.gameBootstrap = {
+          sessionResponse.gameBootstrap = {
             inviteId,
             selection: "current",
             result: routedGameBootstrap,
           };
         if (url.searchParams.has("bootstrapEventId"))
-          json.eventBootstrap = { eventId, result: eventSeed };
+          sessionResponse.eventBootstrap = { eventId, result: eventSeed };
+        json = sessionResponse;
       } else if (url.pathname === "/auth/identity") {
         identityRequested.resolve();
         await identityGate.promise;
@@ -359,7 +435,7 @@ async function fixture(
       } else if (url.pathname === "/profiles/lookup") {
         json = {
           ok: true,
-          profile: body.id === uid ? authoritativeProfile : null,
+          profile: jsonRecord(body).id === uid ? authoritativeProfile : null,
         };
       } else if (url.pathname === "/invites/join") {
         pairGame(uid);
@@ -387,7 +463,7 @@ async function fixture(
           matchId: inviteId,
           actorUid: routedGameBootstrap.metadata.hostId,
           emojiId: body?.emojiId ?? profile.emoji,
-          aura: "",
+          aura: "none",
           revision: 1,
         };
         json = {
@@ -415,8 +491,11 @@ async function fixture(
     });
     await context.addInitScript(
       ({ expectedName, quotaKey, holdPresentationFrames }) => {
-        localStorage.setItem("preferredAssetsSet", "pixel");
-        localStorage.setItem("isMuted", "true");
+        localStorage.setItem(
+          "mons:data:v1:preferredAssetsSet",
+          JSON.stringify("Pixel"),
+        );
+        localStorage.setItem("mons:data:v1:isMuted", "true");
         globalThis.identitySessionStorageProbe = { opens: 0, puts: 0 };
         const open = indexedDB.open;
         indexedDB.open = function (...args) {
@@ -425,35 +504,45 @@ async function fixture(
           return open.apply(this, args);
         };
         const put = IDBObjectStore.prototype.put;
-        IDBObjectStore.prototype.put = function (...args) {
-          if (this.transaction.db.name === "mons-link-sessions-v1")
-            globalThis.identitySessionStorageProbe.puts += 1;
-          return put.apply(this, args);
-        };
-        const cosmeticKeys = new Set([
-          "cardBackgroundId",
-          "cardStickers",
-          "cardSubtitleId",
-          "profileCounter",
-          "profileMons",
-        ]);
+        IDBObjectStore.prototype.put =
+          /** @this {IDBObjectStore} @param {[value: unknown, key?: IDBValidKey | undefined]} args */ function (
+            ...args
+          ) {
+            if (this.transaction.db.name === "mons-link-sessions-v1")
+              globalThis.identitySessionStorageProbe.puts += 1;
+            return put.apply(this, args);
+          };
+        const cosmeticKeys = new Set(
+          [
+            "cardBackgroundId",
+            "cardStickers",
+            "cardSubtitleId",
+            "profileCounter",
+            "profileMons",
+          ].map((key) => `mons:data:v1:${key}`),
+        );
         globalThis.identityCosmeticWrites = [];
         const recordSetItem = Storage.prototype.setItem;
-        Storage.prototype.setItem = function (key, value) {
-          if (this === localStorage && cosmeticKeys.has(key)) {
-            globalThis.identityCosmeticWrites.push({
-              key,
-              value,
-              time: performance.now(),
-              nameVisible:
-                performance.getEntriesByName("auth:name-visible").length > 0,
-            });
-          }
-          return recordSetItem.call(this, key, value);
-        };
+        Storage.prototype.setItem =
+          /** @this {Storage} @param {string} key @param {string} value */ function (
+            key,
+            value,
+          ) {
+            if (this === localStorage && cosmeticKeys.has(key)) {
+              globalThis.identityCosmeticWrites.push({
+                key,
+                value,
+                time: performance.now(),
+                nameVisible:
+                  performance.getEntriesByName("auth:name-visible").length > 0,
+              });
+            }
+            return recordSetItem.call(this, key, value);
+          };
         if (holdPresentationFrames) {
           const requestFrame = requestAnimationFrame;
           const cancelFrame = cancelAnimationFrame;
+          /** @type {Map<number, FrameRequestCallback>} */
           const heldFrames = new Map();
           let nextFrame = -1;
           let released = false;
@@ -481,24 +570,28 @@ async function fixture(
         }
         if (quotaKey) {
           if (quotaKey === "cardStickers")
-            localStorage.setItem("cardStickers", "{}");
+            localStorage.setItem("mons:data:v1:cardStickers", "{}");
           globalThis.identityQuotaFailures = 0;
           const setItem = Storage.prototype.setItem;
-          Storage.prototype.setItem = function (key, value) {
-            if (
-              this === localStorage &&
-              key === quotaKey &&
-              location.pathname !== "/__identity-seed" &&
-              value.length > (this.getItem(key)?.length ?? 0)
+          Storage.prototype.setItem =
+            /** @this {Storage} @param {string} key @param {string} value */ function (
+              key,
+              value,
             ) {
-              globalThis.identityQuotaFailures += 1;
-              throw new DOMException(
-                "Local profile cache quota exceeded",
-                "QuotaExceededError",
-              );
-            }
-            return setItem.call(this, key, value);
-          };
+              if (
+                this === localStorage &&
+                key === `mons:data:v1:${quotaKey}` &&
+                location.pathname !== "/__identity-seed" &&
+                value.length > (this.getItem(key)?.length ?? 0)
+              ) {
+                globalThis.identityQuotaFailures += 1;
+                throw new DOMException(
+                  "Local profile cache quota exceeded",
+                  "QuotaExceededError",
+                );
+              }
+              return setItem.call(this, key, value);
+            };
         }
         globalThis.identityMarkProbe = [];
         const mark = performance.mark.bind(performance);
@@ -532,38 +625,47 @@ async function fixture(
       await page.goto(`${origin}/__identity-seed`);
       await page.evaluate(
         ({ sessionId, uid, cachedName }) =>
-          new Promise((resolve, reject) => {
-            localStorage.setItem("loginId", uid);
-            localStorage.setItem("profileId", "cached-before-canonical-merge");
-            localStorage.setItem("username", cachedName);
-            const open = indexedDB.open("mons-link-sessions-v1", 1);
-            open.onupgradeneeded = () => open.result.createObjectStore("state");
-            open.onerror = () => reject(open.error);
-            open.onsuccess = () => {
-              const db = open.result;
-              const transaction = db.transaction("state", "readwrite");
-              transaction.objectStore("state").put(
-                {
-                  generation: crypto.randomUUID(),
-                  revision: 1,
-                  initialized: true,
-                  session: {
-                    sessionId,
-                    uid,
-                    refreshSecret: "a".repeat(42) + "A",
-                    revokeSecret: "b".repeat(42) + "A",
-                  },
-                  revocations: [],
-                },
-                "current",
+          /** @type {Promise<void>} */ (
+            new Promise((resolve, reject) => {
+              localStorage.setItem("mons:data:v1:loginId", JSON.stringify(uid));
+              localStorage.setItem(
+                "mons:data:v1:profileId",
+                JSON.stringify("cached-before-canonical-merge"),
               );
-              transaction.oncomplete = () => {
-                db.close();
-                resolve();
+              localStorage.setItem(
+                "mons:data:v1:username",
+                JSON.stringify(cachedName),
+              );
+              const open = indexedDB.open("mons-link-sessions-v1", 1);
+              open.onupgradeneeded = () =>
+                open.result.createObjectStore("state");
+              open.onerror = () => reject(open.error);
+              open.onsuccess = () => {
+                const db = open.result;
+                const transaction = db.transaction("state", "readwrite");
+                transaction.objectStore("state").put(
+                  {
+                    generation: crypto.randomUUID(),
+                    revision: 1,
+                    initialized: true,
+                    session: {
+                      sessionId,
+                      uid,
+                      refreshSecret: "a".repeat(42) + "A",
+                      revokeSecret: "b".repeat(42) + "A",
+                    },
+                    revocations: [],
+                  },
+                  "current",
+                );
+                transaction.oncomplete = () => {
+                  db.close();
+                  resolve();
+                };
+                transaction.onerror = () => reject(transaction.error);
               };
-              transaction.onerror = () => reject(transaction.error);
-            };
-          }),
+            })
+          ),
         { sessionId, uid, cachedName: storedUsername },
       );
     }
@@ -587,6 +689,7 @@ async function fixture(
         fillGuest: () => pairGame(guestId, true),
       });
     } catch (error) {
+      assert.ok(error instanceof Error);
       error.message += `\nBrowser errors: ${JSON.stringify(errors)}`;
       throw error;
     }
@@ -601,27 +704,27 @@ async function fixture(
   }
 }
 
+/** @param {IdentityRequest[]} requests @param {boolean} [restored] */
 function assertSingleIdentitySession(requests, restored = true) {
   const session = requests.filter(({ path }) =>
     /^\/auth\/session\/(anonymous|refresh)$/.test(path),
   );
   assert.equal(session.length, 1, JSON.stringify(requests));
+  const first = present(session[0]);
   assert.equal(
-    session[0].path,
+    first.path,
     `/auth/session/${restored ? "refresh" : "anonymous"}`,
   );
-  assert.equal(
-    new URLSearchParams(session[0].query).get("bootstrapIdentity"),
-    "1",
-  );
+  assert.equal(new URLSearchParams(first.query).get("bootstrapIdentity"), "1");
   assert.equal(
     requests.some(({ path }) => path === "/auth/profile/sync"),
     false,
     JSON.stringify(requests),
   );
-  return new URLSearchParams(session[0].query);
+  return new URLSearchParams(first.query);
 }
 
+/** @param {import("playwright").Page} page */
 async function assertVerifiedProfile(page) {
   await page
     .getByRole("button", { name: profile.username, exact: true })
@@ -641,12 +744,12 @@ async function assertVerifiedProfile(page) {
           "playerTotalManaPoints",
           "playerMiningMaterials",
           "tutorialCompleted",
-        ].map((key) => [key, localStorage.getItem(key)]),
+        ].map((key) => [key, localStorage.getItem(`mons:data:v1:${key}`)]),
       ),
     ),
     {
-      profileId: profile.id,
-      username: profile.username,
+      profileId: JSON.stringify(profile.id),
+      username: JSON.stringify(profile.username),
       playerRating: String(profile.rating),
       playerNonce: String(profile.nonce),
       playerTotalManaPoints: String(profile.totalManaPoints),
@@ -717,11 +820,15 @@ test(
           .dispatchEvent("click");
         assert.deepEqual(
           await page.evaluate(() => ({
-            background: localStorage.getItem("cardBackgroundId"),
-            counter: localStorage.getItem("profileCounter"),
+            background: localStorage.getItem("mons:data:v1:cardBackgroundId"),
+            counter: localStorage.getItem("mons:data:v1:profileCounter"),
             writes: globalThis.identityCosmeticWrites.length,
           })),
-          { background: "3", counter: "mp", writes: 5 },
+          {
+            background: JSON.stringify(presentationProfile.cardBackgroundId),
+            counter: JSON.stringify(presentationProfile.profileCounter),
+            writes: 5,
+          },
         );
         await page.evaluate(() =>
           globalThis.releaseIdentityPresentationFrames(),
@@ -746,20 +853,32 @@ test(
           route.fulfill({
             headers: {
               "Access-Control-Allow-Origin": origin,
-              "Access-Control-Allow-Headers": "Authorization, Content-Type",
+              "Access-Control-Allow-Headers":
+                "Authorization, Content-Type, X-Mons-Data-Epoch",
               "Access-Control-Allow-Methods": "POST, OPTIONS",
             },
             json: { ok: true, profiles: [] },
           }),
         );
         await page.evaluate(() => {
-          localStorage.setItem("cardBackgroundId", "7");
-          localStorage.setItem("profileMons", "1,1,1,1,1");
+          localStorage.setItem("mons:data:v1:cardBackgroundId", "7");
+          localStorage.setItem(
+            "mons:data:v1:profileMons",
+            JSON.stringify({
+              demon: 1,
+              angel: 1,
+              drainer: 1,
+              spirit: 1,
+              mystic: 1,
+            }),
+          );
         });
         sessionGate.resolve();
         await assertVerifiedProfile(page);
         assert.equal(
-          await page.evaluate(() => localStorage.getItem("cardBackgroundId")),
+          await page.evaluate(() =>
+            localStorage.getItem("mons:data:v1:cardBackgroundId"),
+          ),
           "7",
         );
         await page.locator('button:has(img[alt=""])').dispatchEvent("click");
@@ -776,18 +895,23 @@ test(
               .get("rating")
               ?.find((row) => row.id === profileId)?.profile;
             return {
-              storedBackground: localStorage.getItem("cardBackgroundId"),
-              storedMons: localStorage.getItem("profileMons"),
+              storedBackground: localStorage.getItem(
+                "mons:data:v1:cardBackgroundId",
+              ),
+              storedMons: localStorage.getItem("mons:data:v1:profileMons"),
               cachedBackground: cachedProfile?.cardBackgroundId,
               cachedMons: cachedProfile?.profileMons,
               cachedUsername: cachedProfile?.username,
             };
           }, profile.id);
         const expected = {
-          storedBackground: null,
-          storedMons: null,
-          cachedBackground: 0,
-          cachedMons: "",
+          storedBackground: JSON.stringify(profile.cardBackgroundId),
+          storedMons:
+            profile.profileMons === null
+              ? null
+              : JSON.stringify(profile.profileMons),
+          cachedBackground: profile.cardBackgroundId,
+          cachedMons: profile.profileMons,
           cachedUsername: profile.username,
         };
         assert.deepEqual(await readPresentation(), expected);
@@ -812,14 +936,18 @@ test(
       async ({ page }) => {
         await assertVerifiedProfile(page);
         await page.evaluate(() => {
-          localStorage.setItem("cardBackgroundId", "7");
+          localStorage.setItem("mons:data:v1:cardBackgroundId", "7");
           globalThis.releaseIdentityPresentationFrames();
         });
         await page.waitForFunction(
-          () => localStorage.getItem("profileCounter") === "mp",
+          () =>
+            localStorage.getItem("mons:data:v1:profileCounter") ===
+            JSON.stringify("mp"),
         );
         assert.equal(
-          await page.evaluate(() => localStorage.getItem("cardBackgroundId")),
+          await page.evaluate(() =>
+            localStorage.getItem("mons:data:v1:cardBackgroundId"),
+          ),
           "7",
         );
       },
@@ -855,7 +983,16 @@ test(
       {
         identity: {
           ok: true,
-          profile: { ...presentationProfile, profileMons: "1,1,1,1,1" },
+          profile: {
+            ...presentationProfile,
+            profileMons: {
+              demon: 1,
+              angel: 1,
+              drainer: 1,
+              spirit: 1,
+              mystic: 1,
+            },
+          },
         },
         holdPresentationFrames: true,
       },
@@ -876,14 +1013,16 @@ test(
           await connection.signOut();
           storage.signOut();
           globalThis.releaseIdentityPresentationFrames();
-          await new Promise((resolve) =>
-            requestAnimationFrame(() => requestAnimationFrame(resolve)),
+          await /** @type {Promise<number>} */ (
+            new Promise((resolve) =>
+              requestAnimationFrame(() => requestAnimationFrame(resolve)),
+            )
           );
         });
         assert.deepEqual(
           await page.evaluate(() => ({
-            background: localStorage.getItem("cardBackgroundId"),
-            counter: localStorage.getItem("profileCounter"),
+            background: localStorage.getItem("mons:data:v1:cardBackgroundId"),
+            counter: localStorage.getItem("mons:data:v1:profileCounter"),
             writes: globalThis.identityCosmeticWrites.length,
           })),
           { background: null, counter: null, writes: 0 },
@@ -913,6 +1052,14 @@ test(
             if (
               !handleLoginSuccess({
                 ok: true,
+                linkedMethods: {
+                  apple: true,
+                  eth: false,
+                  sol: false,
+                  x: false,
+                },
+                appleLinked: true,
+                opId: "identity-browser-login",
                 ...profile,
                 uid,
                 profileId: "newer-verified-profile",
@@ -924,8 +1071,10 @@ test(
               throw new Error("newer-login-rejected");
             setAuthStatusGlobally("authenticated");
             globalThis.releaseIdentityPresentationFrames();
-            await new Promise((resolve) =>
-              requestAnimationFrame(() => requestAnimationFrame(resolve)),
+            await /** @type {Promise<number>} */ (
+              new Promise((resolve) =>
+                requestAnimationFrame(() => requestAnimationFrame(resolve)),
+              )
             );
           },
           { uid, profile: presentationProfile },
@@ -935,15 +1084,15 @@ test(
           .waitFor({ state: "visible" });
         assert.deepEqual(
           await page.evaluate(() => ({
-            profileId: localStorage.getItem("profileId"),
-            background: localStorage.getItem("cardBackgroundId"),
-            counter: localStorage.getItem("profileCounter"),
+            profileId: localStorage.getItem("mons:data:v1:profileId"),
+            background: localStorage.getItem("mons:data:v1:cardBackgroundId"),
+            counter: localStorage.getItem("mons:data:v1:profileCounter"),
             writes: globalThis.identityCosmeticWrites.length,
           })),
           {
-            profileId: "newer-verified-profile",
+            profileId: JSON.stringify("newer-verified-profile"),
             background: "7",
-            counter: "gp",
+            counter: JSON.stringify("gp"),
             writes: 5,
           },
         );
@@ -973,7 +1122,9 @@ test(
         sessionGate.resolve();
         await assertVerifiedProfile(page);
         await page.waitForFunction(
-          () => localStorage.getItem("profileCounter") === "mp",
+          () =>
+            localStorage.getItem("mons:data:v1:profileCounter") ===
+            JSON.stringify("mp"),
         );
         assert.equal(
           await page.evaluate(() => globalThis.identityCosmeticWrites.length),
@@ -1000,7 +1151,7 @@ test(
       async ({ page }) => {
         await assertVerifiedProfile(page);
         await page.waitForFunction(
-          () => localStorage.getItem("cardBackgroundId") === "3",
+          () => localStorage.getItem("mons:data:v1:cardBackgroundId") === "3",
         );
         await page.evaluate(
           async ({ profile, uid }) => {
@@ -1013,7 +1164,7 @@ test(
           { profile: presentationProfile, uid },
         );
         await page.waitForFunction(
-          () => localStorage.getItem("cardBackgroundId") === "9",
+          () => localStorage.getItem("mons:data:v1:cardBackgroundId") === "9",
         );
         assert.equal(
           await page
@@ -1027,7 +1178,11 @@ test(
   },
 );
 
-for (const { label, path, target } of [
+for (const {
+  label,
+  path,
+  target,
+} of /** @type {{label: string, path: string, target?: [string, string]}[]} */ ([
   { label: "home", path: "/" },
   {
     label: "invite",
@@ -1040,7 +1195,7 @@ for (const { label, path, target } of [
     target: ["bootstrapEventId", eventId],
   },
   { label: "watch", path: "/watch" },
-]) {
+])) {
   test(
     `${label} restores its verified full profile from one session request before the application loads`,
     { timeout: 60_000 },
@@ -1066,7 +1221,7 @@ for (const { label, path, target } of [
           assert.equal(
             requests.some(
               ({ path, body }) =>
-                path === "/profiles/lookup" && body.id === uid,
+                path === "/profiles/lookup" && jsonRecord(body).id === uid,
             ),
             false,
             JSON.stringify(requests),
@@ -1103,9 +1258,12 @@ for (const { label, path, target } of [
           );
           assert.ok(orderedMarks.every(Boolean), JSON.stringify(marks));
           for (let index = 1; index < orderedMarks.length; index += 1)
-            assert.ok(orderedMarks[index].time >= orderedMarks[index - 1].time);
-          assert.equal(orderedMarks[4].nameInDom, true);
-          assert.equal(orderedMarks[5].nameInDom, true);
+            assert.ok(
+              present(orderedMarks[index]).time >=
+                present(orderedMarks[index - 1]).time,
+            );
+          assert.equal(present(orderedMarks[4]).nameInDom, true);
+          assert.equal(present(orderedMarks[5]).nameInDom, true);
         },
         { path, holdApp: true },
       );
@@ -1144,7 +1302,8 @@ test(
         );
         assert.equal(
           requests.some(
-            ({ path, body }) => path === "/profiles/lookup" && body.id === uid,
+            ({ path, body }) =>
+              path === "/profiles/lookup" && jsonRecord(body).id === uid,
           ),
           false,
           JSON.stringify(requests),
@@ -1182,7 +1341,7 @@ for (const join of [true, false]) {
           assert.equal(
             requests.some(
               ({ path, body }) =>
-                path === "/profiles/lookup" && body.id === uid,
+                path === "/profiles/lookup" && jsonRecord(body).id === uid,
             ),
             false,
           );
@@ -1204,7 +1363,7 @@ for (const join of [true, false]) {
             (request) =>
               new URL(request.url()).pathname === "/profiles/lookup" &&
               request.method() === "POST" &&
-              request.postDataJSON().id === uid,
+              jsonRecord(request.postDataJSON()).id === uid,
           );
           if (join) await joinButton.click();
           else {
@@ -1212,12 +1371,20 @@ for (const join of [true, false]) {
             fillGuest();
           }
           await ownLookup;
-          await page.waitForFunction(
-            () =>
+          await page.waitForFunction(() => {
+            const materials = /** @type {unknown} */ (
               JSON.parse(
-                localStorage.getItem("playerMiningMaterials") ?? "null",
-              )?.dust === 77,
-          );
+                localStorage.getItem("mons:data:v1:playerMiningMaterials") ??
+                  "null",
+              )
+            );
+            return (
+              materials !== null &&
+              typeof materials === "object" &&
+              "dust" in materials &&
+              materials.dust === 77
+            );
+          });
           assert.deepEqual(
             await page.evaluate(async () => {
               const { rocksMiningService } =
@@ -1234,7 +1401,7 @@ for (const join of [true, false]) {
           assert.equal(
             requests.filter(
               ({ path, body }) =>
-                path === "/profiles/lookup" && body.id === uid,
+                path === "/profiles/lookup" && jsonRecord(body).id === uid,
             ).length,
             1,
           );
@@ -1286,12 +1453,12 @@ test(
         );
         const snapshot = await page.evaluate(() => ({
           failures: globalThis.identityQuotaFailures,
-          cardStickers: localStorage.getItem("cardStickers"),
-          loginId: localStorage.getItem("loginId"),
+          cardStickers: localStorage.getItem("mons:data:v1:cardStickers"),
+          loginId: localStorage.getItem("mons:data:v1:loginId"),
         }));
         assert.ok(snapshot.failures > 0);
         assert.equal(snapshot.cardStickers, "{}");
-        assert.equal(snapshot.loginId, uid);
+        assert.equal(snapshot.loginId, JSON.stringify(uid));
         assert.equal(
           await page
             .getByRole("button", { name: "Sign In", exact: true })
@@ -1313,10 +1480,10 @@ test(
           ok: true,
           profile: {
             ...profile,
-            cardStickers: JSON.stringify({
+            cardStickers: {
               mana: "blue-mana",
               "bottom-left": "rock",
-            }),
+            },
           },
         },
       },
@@ -1341,11 +1508,11 @@ test(
         );
         const snapshot = await page.evaluate(() => ({
           failures: globalThis.identityQuotaFailures,
-          username: localStorage.getItem("username"),
+          username: localStorage.getItem("mons:data:v1:username"),
           marks: globalThis.identityMarkProbe,
         }));
         assert.ok(snapshot.failures > 0);
-        assert.equal(snapshot.username, storedUsername);
+        assert.equal(snapshot.username, JSON.stringify(storedUsername));
         for (const name of ["auth:name-committed", "auth:name-visible"])
           assert.deepEqual(
             snapshot.marks
@@ -1387,7 +1554,9 @@ test(
           false,
         );
         assert.equal(
-          await page.evaluate(() => localStorage.getItem("profileId")),
+          await page.evaluate(() =>
+            localStorage.getItem("mons:data:v1:profileId"),
+          ),
           null,
         );
       },
@@ -1480,6 +1649,14 @@ test(
             if (
               !handleLoginSuccess({
                 ok: true,
+                linkedMethods: {
+                  apple: true,
+                  eth: false,
+                  sol: false,
+                  x: false,
+                },
+                appleLinked: true,
+                opId: "identity-browser-login",
                 ...profile,
                 profileId: "newer-verified-profile",
                 uid,
@@ -1501,8 +1678,10 @@ test(
         await (await response).finished();
         await page.evaluate(
           () =>
-            new Promise((resolve) =>
-              requestAnimationFrame(() => requestAnimationFrame(resolve)),
+            /** @type {Promise<number>} */ (
+              new Promise((resolve) =>
+                requestAnimationFrame(() => requestAnimationFrame(resolve)),
+              )
             ),
         );
         assert.equal(
@@ -1512,8 +1691,10 @@ test(
           true,
         );
         assert.equal(
-          await page.evaluate(() => localStorage.getItem("profileId")),
-          "newer-verified-profile",
+          await page.evaluate(() =>
+            localStorage.getItem("mons:data:v1:profileId"),
+          ),
+          JSON.stringify("newer-verified-profile"),
         );
       },
       { identity: { ok: false, status: 503 }, holdIdentity: true },
@@ -1550,7 +1731,9 @@ test(
           0,
         );
         assert.equal(
-          await page.evaluate(() => localStorage.getItem("profileId")),
+          await page.evaluate(() =>
+            localStorage.getItem("mons:data:v1:profileId"),
+          ),
           null,
         );
       },

@@ -1,6 +1,12 @@
 import { isMobile } from "./misc";
 import { getIsMuted, subscribeToMuteState } from "../runtime/muteStore";
 
+declare global {
+  interface Window {
+    webkitAudioContext?: typeof AudioContext;
+  }
+}
+
 class SoundPlayer {
   private audioContext!: AudioContext;
   private masterGainNode: GainNode | null = null;
@@ -75,7 +81,7 @@ class SoundPlayer {
 
   private async performInitialization(force: boolean): Promise<void> {
     this.audioContext = new (
-      window.AudioContext || (window as any).webkitAudioContext
+      window.AudioContext || window.webkitAudioContext
     )();
     this.masterGainNode = this.audioContext.createGain();
     this.masterGainNode.gain.value = getIsMuted() ? 0 : 1;
@@ -220,7 +226,7 @@ class SoundPlayer {
 
   private attachStateChangeHandler(): void {
     if (!this.audioContext) return;
-    const ctx: any = this.audioContext as any;
+    const ctx = this.audioContext;
     const handle = () => {
       if (!this.audioContext) return;
       if (this.audioContext.state !== "running") {
@@ -228,12 +234,9 @@ class SoundPlayer {
       }
     };
     if (typeof this.audioContext.addEventListener === "function") {
-      this.audioContext.addEventListener(
-        "statechange",
-        handle as EventListener,
-      );
+      this.audioContext.addEventListener("statechange", handle);
     } else {
-      (this.audioContext as any).onstatechange = handle;
+      this.audioContext.onstatechange = handle;
     }
     if (ctx && typeof ctx.addEventListener === "function") {
       try {

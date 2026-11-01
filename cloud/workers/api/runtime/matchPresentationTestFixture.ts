@@ -15,19 +15,71 @@ export async function resetMatchPresentationTestState(
   const insertGuards = migrations.find((entry) =>
     entry.name.includes("0023_match_presentation_insert_guards"),
   );
-  await db.batch([
-    ...(sourceExceptions
-      ? [db.prepare("DROP TABLE match_presentation_source_exceptions")]
-      : []),
-    db.prepare("DROP TRIGGER match_presentation_manual_completion_guard"),
-    db.prepare("DROP TRIGGER match_presentation_event_publication_guard"),
-    db.prepare("DROP TABLE match_presentation_registrations"),
-    db.prepare("DROP TABLE match_presentation_registration_guards"),
-    db.prepare("DROP TABLE match_presentation_control"),
-    ...migration.queries.map((query) => db.prepare(query)),
-    ...(sourceExceptions?.queries.map((query) => db.prepare(query)) || []),
-    ...(insertGuards?.queries.map((query) => db.prepare(query)) || []),
-  ]);
+  const cleanup = migrations.find(({ name }) =>
+    name.endsWith("_retire_canonical_source_tables.sql"),
+  );
+  const cleaned =
+    cleanup &&
+    (await db
+      .prepare("SELECT name FROM d1_migrations WHERE name = ?")
+      .bind(cleanup.name)
+      .first());
+  if (cleaned) {
+    const deleteGuard = migration.queries.find((query) =>
+      query.includes("CREATE TRIGGER match_presentation_control_delete_guard"),
+    );
+    if (!deleteGuard)
+      throw new Error("missing-presentation-control-delete-guard");
+    await db.batch([
+      db.prepare("DROP TRIGGER match_presentation_control_delete_guard"),
+      db.prepare("DELETE FROM match_presentation_control"),
+      db.prepare(
+        "INSERT INTO match_presentation_control (singleton, phase) VALUES (1, 'legacy')",
+      ),
+      db.prepare(deleteGuard),
+      db.prepare("DELETE FROM match_presentation_registration_guards"),
+    ]);
+  } else
+    await db.batch([
+      ...(sourceExceptions
+        ? [db.prepare("DROP TABLE match_presentation_source_exceptions")]
+        : []),
+      db.prepare("DROP TRIGGER match_presentation_manual_completion_guard"),
+      db.prepare("DROP TRIGGER match_presentation_event_publication_guard"),
+      db.prepare("DROP TABLE match_presentation_registrations"),
+      db.prepare("DROP TABLE match_presentation_registration_guards"),
+      db.prepare("DROP TABLE match_presentation_control"),
+      ...migration.queries.map((query) => db.prepare(query)),
+      ...(sourceExceptions?.queries.map((query) => db.prepare(query)) || []),
+      ...(insertGuards?.queries.map((query) => db.prepare(query)) || []),
+    ]);
+  const canonical = migrations.find((entry) => entry.name.startsWith("0030_"));
+  if (canonical) {
+    const resetTables = [
+      "match_presentation_registrations_canonical",
+      "match_presentation_source_exceptions_canonical",
+    ];
+    for (const table of resetTables) {
+      const exists = await db
+        .prepare(
+          "SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?",
+        )
+        .bind(table)
+        .first();
+      if (!exists) continue;
+      const trigger = `${table}_delete_guard`;
+      const definition = canonical.queries.find((query) =>
+        query.includes(`CREATE TRIGGER ${trigger} `),
+      );
+      if (!definition)
+        throw new Error("missing-canonical-presentation-delete-guard");
+      await db.batch([
+        db.prepare(`DROP TRIGGER ${trigger}`),
+        db.prepare(`DELETE FROM ${table}`),
+        db.prepare(definition),
+      ]);
+    }
+  }
   if (phase) {
     await db
       .prepare(

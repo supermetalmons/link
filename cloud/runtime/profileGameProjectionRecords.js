@@ -1,6 +1,8 @@
 // Generated from src/profileGameProjectionRecords.ts. Run npm run generate:runtime.
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
+exports.isProfileGameProjectionRecord =
+  exports.parseProfileGameProjectionRecord = void 0;
 exports.retainProfileGameProjection = retainProfileGameProjection;
 exports.createGameProjection = createGameProjection;
 exports.createEventProjection = createEventProjection;
@@ -15,92 +17,95 @@ exports.projectionLastFingerprint = projectionLastFingerprint;
 exports.projectionTime = projectionTime;
 exports.projectionMergeFreshness = projectionMergeFreshness;
 exports.copyProjectionOwner = copyProjectionOwner;
-const fields = (value) => {
-  const retained = value;
-  return retained;
-};
-const text = (value) =>
-  typeof value === "string" && value.trim() !== "" ? value.trim() : null;
-const timestamp = (value) =>
-  typeof value === "number" && Number.isFinite(value)
-    ? Math.floor(value)
-    : null;
-const emoji = (value) => {
-  if (typeof value === "number" && Number.isFinite(value))
-    return Math.floor(value);
-  if (typeof value === "string" && value.trim() !== "") {
-    const parsed = Number(value);
-    if (Number.isFinite(parsed)) return Math.floor(parsed);
-  }
-  return null;
-};
+const appearance_js_1 = require("./shared/appearance.js");
+const profile_game_projections_js_1 = require("./shared/profile-game-projections.js");
+var profile_game_projections_js_2 = require("./shared/profile-game-projections.js");
+Object.defineProperty(exports, "parseProfileGameProjectionRecord", {
+  enumerable: true,
+  get: function () {
+    return profile_game_projections_js_2.parseProfileGameProjectionRecord;
+  },
+});
+Object.defineProperty(exports, "isProfileGameProjectionRecord", {
+  enumerable: true,
+  get: function () {
+    return profile_game_projections_js_2.isProfileGameProjectionRecord;
+  },
+});
 function retainProfileGameProjection(value) {
-  return value;
-}
-function createGameProjection(value) {
-  const retained = value;
-  return retained;
-}
-function createEventProjection(value) {
-  const retained = value;
-  return retained;
-}
-function retainProjectionProfile(value) {
-  return value;
-}
-function createProjectionProfile(value) {
-  const retained = value;
-  return retained;
-}
-function projectionOwnerLoginId(value) {
-  return text(fields(value).ownerLoginId);
-}
-function projectionOwnerRole(profileId, value) {
-  const data = value && fields(value);
-  const ownerRole = text(data && data.ownerRole);
-  if (ownerRole === "host" || ownerRole === "guest") return ownerRole;
-  const ownerProfileId = text(data && data.ownerProfileId) || profileId;
-  if (ownerProfileId === text(data && data.hostProfileId)) return "host";
-  if (ownerProfileId === text(data && data.guestProfileId)) return "guest";
-  return null;
-}
-function projectionOpponentName(value) {
-  const data = value && fields(value);
-  return text(data ? (data.opponentName ?? data.opponentDisplayName) : null);
-}
-function projectionOpponentEmoji(value) {
-  const data = value && fields(value);
-  return emoji(data ? (data.opponentEmoji ?? data.opponentEmojiId) : null);
-}
-function projectionFreshness(value) {
-  const data = fields(value);
-  return [
-    data.updatedAt,
-    data.lastEventAt,
-    data.listSortAt,
-    data.createdAt,
-  ].reduce((current, value) => {
-    const millis = timestamp(value);
-    return Number.isFinite(millis) ? Math.max(current, millis) : current;
-  }, Number.NEGATIVE_INFINITY);
-}
-function projectionLastFingerprint(value) {
-  const data = value && fields(value);
-  return data && typeof data.lastEventFingerprint === "string"
-    ? data.lastEventFingerprint
-    : null;
-}
-function projectionTime(value, field) {
-  const data = value && fields(value);
-  return timestamp(data && data[field]);
-}
-function projectionMergeFreshness(value) {
-  const data = fields(value);
-  return Math.max(
-    timestamp(data.updatedAt) ?? 0,
-    timestamp(data.listSortAt) ?? 0,
+  return (0, profile_game_projections_js_1.parseProfileGameProjectionRecord)(
+    value,
   );
 }
+function createGameProjection(value) {
+  return (0, profile_game_projections_js_1.parseProfileGameProjectionRecord)(
+    value,
+  );
+}
+function createEventProjection(value) {
+  return (0, profile_game_projections_js_1.parseProfileGameProjectionRecord)(
+    value,
+  );
+}
+function retainProjectionProfile(value) {
+  if (value === null || typeof value !== "object" || Array.isArray(value))
+    throw new TypeError("invalid-projection-profile");
+  const fields = Object.fromEntries(Object.entries(value));
+  if (
+    Object.keys(fields).length !== 4 ||
+    typeof fields.eth !== "string" ||
+    typeof fields.sol !== "string" ||
+    typeof fields.username !== "string" ||
+    !(fields.emoji === null || (0, appearance_js_1.isEmojiId)(fields.emoji))
+  )
+    throw new TypeError("invalid-projection-profile");
+  return {
+    eth: fields.eth,
+    sol: fields.sol,
+    username: fields.username,
+    emoji: fields.emoji,
+  };
+}
+function createProjectionProfile(value) {
+  return retainProjectionProfile(value);
+}
+function projectionOwnerLoginId(value) {
+  return value.entityType === "game" ? value.ownerLoginId : null;
+}
+function projectionOwnerRole(_profileId, value) {
+  return value?.entityType === "game" ? value.ownerRole : null;
+}
+function projectionOpponentName(value) {
+  return value?.entityType === "game" ? value.opponentName : null;
+}
+function projectionOpponentEmoji(value) {
+  return value?.entityType === "game" ? value.opponentEmoji : null;
+}
+function projectionFreshness(value) {
+  return value.entityType === "game"
+    ? Math.max(
+        value.updatedAt,
+        value.lastEventAt,
+        value.listSortAt,
+        value.createdAt,
+      )
+    : Math.max(value.updatedAt, value.listSortAt);
+}
+function projectionLastFingerprint(value) {
+  return value?.entityType === "game" ? value.lastEventFingerprint : null;
+}
+function projectionTime(value, field) {
+  if (value === null) return null;
+  if (field === "createdAt")
+    return value.entityType === "game" ? value.createdAt : null;
+  return value[field];
+}
+function projectionMergeFreshness(value) {
+  return Math.max(value.updatedAt, value.listSortAt);
+}
 function copyProjectionOwner(value, ownerProfileId) {
-  return retainProfileGameProjection({ ...value, ownerProfileId });
+  return (0, profile_game_projections_js_1.parseProfileGameProjectionRecord)({
+    ...value,
+    ownerProfileId,
+  });
 }

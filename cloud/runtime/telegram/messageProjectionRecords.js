@@ -9,17 +9,8 @@ const desiredStateCore_js_1 = require("./desiredStateCore.js");
 const projectionCore_js_1 = require("./projectionCore.js");
 const deliveryState_js_1 = require("./deliveryState.js");
 const records_js_1 = require("./records.js");
-const asObject = (value) =>
-  value && typeof value === "object" && !Array.isArray(value) ? value : {};
-const guardField = "eventTelegramProjectionGuard";
-const generation = (value) => {
-  const stored = asObject(asObject(value)[guardField]).generation;
-  return typeof stored === "number" &&
-    Number.isSafeInteger(stored) &&
-    stored >= 0
-    ? stored
-    : 0;
-};
+const generation = (value) =>
+  value?.eventTelegramProjectionGuard?.generation ?? 0;
 function replaceTelegramDesired(current, desired) {
   return (0, records_js_1.updateTelegramMessage)(
     (0, records_js_1.messageDocument)(current),
@@ -78,61 +69,58 @@ function projectEventMessage(
   expectedGeneration,
   expectedApplied,
 ) {
-  const record = asObject(current);
-  if (generation(record.desired) > expectedGeneration) {
+  const record = (0, records_js_1.messageDocument)(current);
+  if (generation(record.desired) > expectedGeneration)
     return { commit: false, decision: "newer-projection" };
-  }
-  if (expectedApplied) {
-    const desired = asObject(value);
-    const delivery = asObject(record.delivery);
-    const abandoned = asObject(delivery.abandonedSend);
+  if (expectedApplied !== undefined) {
+    const desired = value;
+    const delivery = record.delivery;
+    const abandoned = delivery?.abandonedSend;
     if (
-      delivery.status === "terminal" &&
-      asObject(delivery.lastError).code === "manually-abandoned" &&
-      abandoned.destination === desired.destination &&
+      delivery?.status === "terminal" &&
+      delivery.lastError?.code === "manually-abandoned" &&
+      abandoned?.destination === desired.destination &&
+      desired.operation !== "delete" &&
       abandoned.instanceKey === desired.instanceKey
     )
       return { commit: false, decision: "abandoned" };
-    const applied = asObject(record.applied);
-    const expected = asObject(expectedApplied);
+    const applied = record.applied;
     if (
-      delivery.sendInFlight ||
+      delivery?.sendInFlight ||
       [
         "destination",
         "instanceKey",
         "messageId",
         "contentHash",
         "revision",
-      ].some((key) => applied[key] !== expected[key])
+      ].some((key) => applied?.[key] !== expectedApplied?.[key])
     ) {
-      const previousDesired = asObject(record.desired);
+      const previousDesired = record.desired;
       if (
         desired.operation === "edit" &&
         desired.ifMissing === "skip" &&
+        previousDesired &&
+        previousDesired.operation !== "delete" &&
         previousDesired.destination === desired.destination &&
         previousDesired.instanceKey === desired.instanceKey
       ) {
         const next = {
-          ...Reflect.apply(
-            desiredStateCore_js_1.buildTelegramEditDesired,
-            undefined,
-            [
-              {
-                ...previousDesired,
-                ifMissing: "skip",
-                sourceRevision: desired.sourceRevision,
-              },
-            ],
-          ),
-          [guardField]: desired[guardField],
+          ...(0, desiredStateCore_js_1.buildTelegramEditDesired)({
+            ...previousDesired,
+            ifMissing: "skip",
+            sourceRevision: desired.sourceRevision,
+          }),
+          ...(desired.eventTelegramProjectionGuard
+            ? {
+                eventTelegramProjectionGuard:
+                  desired.eventTelegramProjectionGuard,
+              }
+            : {}),
         };
         return {
-          value: (0, records_js_1.updateTelegramMessage)(
-            (0, records_js_1.messageDocument)(record),
-            {
-              desired: (0, records_js_1.desiredDocument)(next),
-            },
-          ),
+          value: (0, records_js_1.updateTelegramMessage)(record, {
+            desired: next,
+          }),
           decision: "delivery-changed",
         };
       }
@@ -140,10 +128,7 @@ function projectEventMessage(
     }
   }
   return {
-    value: (0, records_js_1.updateTelegramMessage)(
-      (0, records_js_1.messageDocument)(record),
-      { desired: value },
-    ),
+    value: (0, records_js_1.updateTelegramMessage)(record, { desired: value }),
     decision: "projection-committed",
   };
 }

@@ -111,7 +111,7 @@ declare const createEventBracketRuntime: (
     roundCount: number;
     currentRoundIndex: number;
     rounds: EventRounds;
-    thirdPlaceMatch: EventMatch | null;
+    thirdPlaceMatch: import("../shared/event-types.js").EventMatchRecord | null;
     inviteUpdates: EventCommitPlan;
   }>;
   buildScheduledEventDueUpdates: (
@@ -170,7 +170,7 @@ declare const createEventBracketRuntime: (
     didChange: boolean;
     finalRoundIndex: number | null;
     earliestUnresolvedRoundIndex: number | null;
-    finalRoundWinnerProfileId: string | null;
+    finalRoundWinnerProfileId: string | null | undefined;
   };
   reconcileBracketMatchReadiness: (
     input: Omit<MatchReadinessInput, "buildRandomGameSeed">,
@@ -196,7 +196,7 @@ declare const createEventBracketRuntime: (
       }
     | {
         didChange: boolean;
-        thirdPlaceMatch: EventMatch;
+        thirdPlaceMatch: import("../shared/event-types.js").EventMatchRecord;
       }
   >;
   removeCompletedEventPrizeProjections: ({
@@ -258,7 +258,7 @@ export declare const addEventPrizeAssignmentUpdates: ({
     roundCount: number;
     currentRoundIndex: number;
     rounds: EventRounds;
-    thirdPlaceMatch: EventMatch | null;
+    thirdPlaceMatch: import("../shared/event-types.js").EventMatchRecord | null;
     inviteUpdates: EventCommitPlan;
   }>,
   buildScheduledEventDueUpdates: (
@@ -314,7 +314,7 @@ export declare const addEventPrizeAssignmentUpdates: ({
       }
     | {
         didChange: boolean;
-        thirdPlaceMatch: EventMatch;
+        thirdPlaceMatch: import("../shared/event-types.js").EventMatchRecord;
       }
   >,
   removeCompletedEventPrizeProjections: ({

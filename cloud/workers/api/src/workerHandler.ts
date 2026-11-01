@@ -1,6 +1,4 @@
 import { handleFetch, handleRequest } from "./router.ts";
-import { requireActiveDurableMatchState } from "./matchStateAuthority.ts";
-import { readMatchStateControl } from "./matchStateD1.ts";
 import {
   AUTH_RECOVERY_QUEUE_NAME,
   handleAuthRecoverySweep,
@@ -37,22 +35,22 @@ import {
 } from "./profileGameProjectionTasks.ts";
 import { sweepGameSessionMutationReceipts } from "./gameSessionMutationRunner.ts";
 import { sweepExpiredAuthState } from "./authStateD1.ts";
-import {
-  assertProfileMutationAllowed,
-  profileBackgroundMutationsEnabled,
-} from "./profileCanonicalActivation.ts";
+import { profileBackgroundMutationsEnabled } from "./profileCanonicalActivation.ts";
 import { createGameplayRepository } from "./gameplayRepository.ts";
 import { createAutomatchPersistence } from "./automatchPersistence.ts";
 import { createMatchStateSource } from "./matchStateSource.ts";
-import {
-  createGameSessionMutationLockStore,
-  createMatchTimerStartStore,
-} from "./gameplayCoordinationD1.ts";
-import { sweepMatchTimerStarts } from "./matchTimerStartSweep.ts";
+import { createGameSessionMutationLockStore } from "./gameplayCoordinationD1.ts";
 import { recoverEventTransitionIntents } from "./eventRepository.ts";
 import { readAutomatchRuntimeControl } from "./automatchD1.ts";
 import { runScheduledTasks } from "./scheduledTasks.ts";
 import { withD1OperationTelemetry } from "./d1Telemetry.ts";
+import { runApplicationOperation } from "./applicationExecution.ts";
+import { ApplicationDataUnavailable } from "./applicationDataControl.ts";
+import {
+  canonicalQueueBatch,
+  type QueueBinding,
+  type CanonicalQueueEnvelope,
+} from "./queueEnvelope.ts";
 
 export { extractIdFromJsonUri } from "./helius.ts";
 export type { ProviderFetch } from "./provider.ts";
@@ -66,7 +64,6 @@ type ScheduledTasks = {
   gameSessionLocks: () => Promise<unknown>;
   gameSessionReceipts: () => Promise<unknown>;
   gameSessionTransitions: () => Promise<unknown>;
-  matchTimerStarts: () => Promise<unknown>;
   profileGameProjection: () => Promise<unknown>;
   telegramProjection: () => Promise<unknown>;
 };
@@ -128,24 +125,6 @@ async function handleScheduledTasks(
         throw new Error("game-session-transition-recovery-failed");
       return result;
     },
-    matchTimerStarts: async () => {
-      if (
-        (await readMatchStateControl(env.PROFILE_GAMES_DB)).state !== "active"
-      )
-        return;
-      await requireActiveDurableMatchState(env.PROFILE_GAMES_DB);
-      return sweepMatchTimerStarts(
-        createMatchTimerStartStore(env.PROFILE_GAMES_DB),
-        createGameplayRepository(env),
-        {
-          assertMutationAllowed: async () => {
-            await assertProfileMutationAllowed(env);
-            await requireActiveDurableMatchState(env.PROFILE_GAMES_DB);
-          },
-          now: () => controller.scheduledTime,
-        },
-      );
-    },
     profileGameProjection: () =>
       handleProfileGameProjectionSweep(controller, env),
     telegramProjection: () => handleTelegramProjectionSweep(controller, env),
@@ -184,10 +163,6 @@ async function handleScheduledTasks(
             runPersistenceTask(tasks.gameSessionTransitions),
           ),
       },
-      {
-        name: "matchTimerStarts",
-        run: () => runProfileTask(tasks.matchTimerStarts),
-      },
       { name: "gameSessionLocks", run: tasks.gameSessionLocks },
       {
         name: "gameSessionReceipts",
@@ -208,6 +183,7 @@ function retryQueueMessages(batch: MessageBatch<unknown>): void {
 }
 
 type QueueHandler = {
+  binding: QueueBinding;
   handle: (batch: MessageBatch<unknown>, env: Env) => Promise<void>;
   profileWrites: boolean;
   persistenceWrites: boolean;
@@ -217,6 +193,7 @@ const queueHandlers: ReadonlyMap<string, QueueHandler> = new Map([
   [
     AUTH_RECOVERY_QUEUE_NAME,
     {
+      binding: "AUTH_RECOVERY_QUEUE",
       handle: handleAuthRecoveryQueue,
       profileWrites: true,
       persistenceWrites: false,
@@ -225,6 +202,7 @@ const queueHandlers: ReadonlyMap<string, QueueHandler> = new Map([
   [
     PROFILE_GAME_PROJECTION_QUEUE_NAME,
     {
+      binding: "PROFILE_GAME_PROJECTION_QUEUE",
       handle: handleProfileGameProjectionQueue,
       profileWrites: true,
       persistenceWrites: true,
@@ -233,6 +211,7 @@ const queueHandlers: ReadonlyMap<string, QueueHandler> = new Map([
   [
     EVENT_PROFILE_GAME_PROJECTION_QUEUE_NAME,
     {
+      binding: "EVENT_PROFILE_GAME_PROJECTION_QUEUE",
       handle: handleEventProfileGameProjectionQueue,
       profileWrites: true,
       persistenceWrites: true,
@@ -241,14 +220,16 @@ const queueHandlers: ReadonlyMap<string, QueueHandler> = new Map([
   [
     TELEGRAM_PROJECTION_QUEUE_NAME,
     {
+      binding: "TELEGRAM_PROJECTION_QUEUE",
       handle: handleTelegramProjectionQueue,
       profileWrites: true,
       persistenceWrites: true,
     },
   ],
   [
-    "mons-link-telegram-delivery",
+    "mons-link-telegram-delivery-data1",
     {
+      binding: "TELEGRAM_DELIVERY_QUEUE",
       handle: handleTelegramQueue,
       profileWrites: false,
       persistenceWrites: false,
@@ -257,6 +238,7 @@ const queueHandlers: ReadonlyMap<string, QueueHandler> = new Map([
   [
     WAGER_SETTLEMENT_QUEUE_NAME,
     {
+      binding: "WAGER_SETTLEMENT_QUEUE",
       handle: handleWagerSettlementQueue,
       profileWrites: false,
       persistenceWrites: false,
@@ -289,20 +271,45 @@ async function handleQueue(
     retryQueueMessages(batch);
     return;
   }
-  return handler.handle(batch, env);
+  return handler.handle(canonicalQueueBatch(batch, handler.binding), env);
 }
 
 export default {
   fetch: handleFetch,
-  queue: handleQueue,
-  scheduled(controller, env) {
-    return handleScheduled(controller, env);
+  async queue(batch, env, ctx?: Pick<ExecutionContext, "waitUntil">) {
+    try {
+      await runApplicationOperation(
+        env,
+        "queue",
+        1,
+        (admittedEnv) => handleQueue(batch, admittedEnv),
+        ctx,
+      );
+    } catch (error) {
+      if (!(error instanceof ApplicationDataUnavailable)) throw error;
+      retryQueueMessages(batch);
+    }
+  },
+  async scheduled(controller, env, ctx?: Pick<ExecutionContext, "waitUntil">) {
+    try {
+      await runApplicationOperation(
+        env,
+        "scheduled",
+        1,
+        (admittedEnv) => handleScheduled(controller, admittedEnv),
+        ctx,
+      );
+    } catch (error) {
+      if (!(error instanceof ApplicationDataUnavailable)) throw error;
+    }
   },
 } satisfies ExportedHandler<
   Env,
-  | AuthRecoveryTask
-  | ProfileGameProjectionTask
-  | TelegramTaskPayload
-  | WagerSettlementRetryTask
-  | TelegramProjectionTask
+  CanonicalQueueEnvelope<
+    | AuthRecoveryTask
+    | ProfileGameProjectionTask
+    | TelegramTaskPayload
+    | WagerSettlementRetryTask
+    | TelegramProjectionTask
+  >
 >;

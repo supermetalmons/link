@@ -1,26 +1,25 @@
 // Generated from src/telegram/projectionCore.ts. Run npm run generate:runtime.
-import type { RetainedAutomatchValue } from "../automatchRecords.js";
+import { type AutomatchTelegramSourceRecord } from "../automatchRecords.js";
 import { type InviteDocument } from "@mons/shared/invite-records";
 import type {
   TelegramAutomatchProjectionGuardWrite,
   TelegramMessageDocument,
 } from "./records.js";
-export type AutomatchTelegramSourceDocument =
-  RetainedAutomatchValue<"telegramAutomatches">;
+export type AutomatchTelegramSourceDocument = AutomatchTelegramSourceRecord;
 export type TelegramRatingProjectionInput = {
-  telegramDeliveryVersion?: number | null;
-  status?: string;
-  isEventMatch?: boolean;
-  eventOwned?: boolean;
-  eventId?: string | null;
-  inviteId?: string;
-  matchId?: string;
-  updateRatingMessage?: string;
-  completedAtMs?: number;
+  telegramDeliveryVersion: 2 | null;
+  status: "processing" | "done" | "blocked";
+  isEventMatch: boolean;
+  eventOwned: boolean;
+  eventId: string | null;
+  inviteId: string;
+  matchId: string;
+  updateRatingMessage: string | null;
+  completedAtMs: number | null;
 };
 export declare function retainAutomatchTelegramSource(
   value: unknown,
-): AutomatchTelegramSourceDocument;
+): AutomatchTelegramSourceDocument | null;
 export type AutomatchLifecycle = "pending" | "matched" | "canceled";
 export type AutomatchTelegramProjection = {
   operation: "send" | "edit";

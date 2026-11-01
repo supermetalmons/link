@@ -149,7 +149,7 @@ export function playNextTrack(): void {
   if (audioElement) {
     if (trackHistoryIndex < trackHistory.length - 1) {
       trackHistoryIndex += 1;
-      playTrack(trackHistory[trackHistoryIndex]);
+      playTrack(trackHistory[trackHistoryIndex]!);
       return;
     }
 
@@ -178,7 +178,7 @@ export function playPreviousTrack(): void {
   }
 
   trackHistoryIndex -= 1;
-  playTrack(trackHistory[trackHistoryIndex]);
+  playTrack(trackHistory[trackHistoryIndex]!);
 }
 
 function playTrack(track: string): void {
@@ -193,12 +193,12 @@ function playTrack(track: string): void {
 
 function getRandomTrack(excludedTrack = ""): string {
   if (tracks.length === 1) {
-    return tracks[0];
+    return tracks[0]!;
   }
 
   const availableTracks = tracks.filter((track) => track !== excludedTrack);
   const randomIndex = Math.floor(Math.random() * availableTracks.length);
-  return availableTracks[randomIndex];
+  return availableTracks[randomIndex]!;
 }
 
 function getTrackUrl(track: string): string {

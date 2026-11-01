@@ -1,5 +1,6 @@
+import { applyPreCleanupTestMigrations } from "./canonicalTestMigrations.ts";
 import { env } from "cloudflare:workers";
-import { applyD1Migrations, type D1Migration } from "cloudflare:test";
+import type { D1Migration } from "cloudflare:test";
 import { beforeAll, describe, expect, it } from "vitest";
 import { applyRetiredProfileMigrations } from "./profileTestMigrations.ts";
 
@@ -9,8 +10,8 @@ const finalizationIndex = testEnv.TEST_PROFILE_D1_MIGRATIONS.findIndex(
   (migration) => migration.name === "0014_finalize_wager_reservations.sql",
 );
 const finalize = () =>
-  applyD1Migrations(db, [
-    testEnv.TEST_PROFILE_D1_MIGRATIONS[finalizationIndex],
+  applyPreCleanupTestMigrations(db, [
+    testEnv.TEST_PROFILE_D1_MIGRATIONS[finalizationIndex]!,
   ]);
 
 describe("wager reservation schema finalization", () => {

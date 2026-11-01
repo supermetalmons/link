@@ -1,15 +1,22 @@
+import { required } from "./fixtures/canonicalData.mjs";
 import assert from "node:assert/strict";
 import { registerHooks } from "node:module";
 import test from "node:test";
 
+/**
+ * @typedef {import("../src/navigation/routeState.ts").RouteState} Route
+ * @typedef {{ bootstraps: Route[], teardowns: Route[], profileTeardowns: number, loaded: number, pushes: number, replaces: number, onBootstrap: ((target: Route) => void | Promise<void>) | undefined }} HarnessState
+ * @typedef {Partial<Pick<Route, "mode" | "inviteId" | "eventId">>} ExpectedView
+ */
+/** @type {Map<string, HarnessState>} */
 const harnesses = new Map();
 const harnessKey = Symbol.for("mons.eventNavigation.testHarnesses");
-globalThis[harnessKey] = harnesses;
+Object.assign(globalThis, { [harnessKey]: harnesses });
 let nextHarnessId = 0;
 
 registerHooks({
   resolve(specifier, context, nextResolve) {
-    const parent = context.parentURL && new URL(context.parentURL);
+    const parent = context.parentURL ? new URL(context.parentURL) : null;
     if (
       parent?.pathname.endsWith(".ts") &&
       (specifier.startsWith("./") || specifier.startsWith("../")) &&
@@ -58,6 +65,7 @@ registerHooks({
   },
 });
 
+/** @param {() => boolean} condition @param {string} message */
 const until = async (condition, message) => {
   for (let attempt = 0; attempt < 1000; attempt += 1) {
     if (condition()) {
@@ -68,9 +76,11 @@ const until = async (condition, message) => {
   assert.fail(message);
 };
 
+/** @param {test.TestContext} t @param {string} initialPath @param {HarnessState["onBootstrap"]} [onBootstrap] */
 const createHarness = async (t, initialPath, onBootstrap) => {
   t.mock.method(console, "log", () => {});
   const id = String(++nextHarnessId);
+  /** @type {HarnessState} */
   const h = {
     bootstraps: [],
     teardowns: [],
@@ -86,34 +96,39 @@ const createHarness = async (t, initialPath, onBootstrap) => {
     globalThis,
     "document",
   );
+  /** @type {Map<string, Set<(event: { type: string }) => void>>} */
   const listeners = new Map();
   const entries = [new URL(initialPath, "https://mons.link").href];
   let index = 0;
-  const location = new URL(entries[index]);
+  const location = new URL(
+    entries[index] ?? assert.fail("initial history entry missing"),
+  );
   const board = {};
-  const moveInHistory = (offset) => {
+  const moveInHistory = (/** @type {number} */ offset) => {
     const nextIndex = index + offset;
     if (nextIndex < 0 || nextIndex >= entries.length) {
       return;
     }
     index = nextIndex;
-    location.href = entries[index];
+    location.href = entries[index] ?? assert.fail("history entry missing");
     for (const listener of listeners.get("popstate") ?? []) {
       listener({ type: "popstate" });
     }
   };
   const history = {
+    /** @param {unknown} _state @param {string} _unused @param {string | URL} path */
     pushState(_state, _unused, path) {
       h.pushes += 1;
       entries.splice(index + 1);
       entries.push(new URL(path, location).href);
       index = entries.length - 1;
-      location.href = entries[index];
+      location.href = entries[index] ?? assert.fail("history entry missing");
     },
+    /** @param {unknown} _state @param {string} _unused @param {string | URL} path */
     replaceState(_state, _unused, path) {
       h.replaces += 1;
       entries[index] = new URL(path, location).href;
-      location.href = entries[index];
+      location.href = entries[index] ?? assert.fail("history entry missing");
     },
     back: () => moveInHistory(-1),
     forward: () => moveInHistory(1),
@@ -124,34 +139,43 @@ const createHarness = async (t, initialPath, onBootstrap) => {
       location,
       history,
       setTimeout,
+      /** @param {string} type @param {(event: { type: string }) => void} listener */
       addEventListener(type, listener) {
         if (!listeners.has(type)) {
           listeners.set(type, new Set());
         }
-        listeners.get(type).add(listener);
+        const registered = listeners.get(type);
+        assert.ok(registered);
+        registered.add(listener);
       },
     },
   });
   Object.defineProperty(globalThis, "document", {
     configurable: true,
     value: {
-      getElementById: (elementId) => (elementId === "monsboard" ? board : null),
+      getElementById: (/** @type {string} */ elementId) =>
+        elementId === "monsboard" ? board : null,
     },
   });
   t.after(() => {
-    for (const [key, descriptor] of [
+    for (const [
+      key,
+      descriptor,
+    ] of /** @type {[string, PropertyDescriptor | undefined][]} */ ([
       ["window", originalWindow],
       ["document", originalDocument],
-    ]) {
+    ])) {
       if (descriptor) {
         Object.defineProperty(globalThis, key, descriptor);
       } else {
-        delete globalThis[key];
+        Reflect.deleteProperty(globalThis, key);
       }
     }
     harnesses.delete(id);
   });
-  const load = (path) => import(`${path}?eventNavigationTest=${id}`);
+  const load = (/** @type {string} */ path) =>
+    import(`${path}?eventNavigationTest=${id}`);
+  /** @type {[typeof import("../src/session/AppSessionManager.ts"), typeof import("../src/ui/event/modalState.ts"), typeof import("../src/navigation/routeState.ts"), typeof import("../src/navigation/appNavigation.ts"), typeof import("../src/game/matchSession.ts")]} */
   const [manager, modal, routes, navigation, sessions] = await Promise.all([
     load("../src/session/AppSessionManager.ts"),
     load("../src/ui/event/modalState.ts"),
@@ -159,7 +183,7 @@ const createHarness = async (t, initialPath, onBootstrap) => {
     load("../src/navigation/appNavigation.ts"),
     load("../src/game/matchSession.ts"),
   ]);
-  Object.assign(h, {
+  const complete = Object.assign(h, {
     manager,
     modal,
     routes,
@@ -183,9 +207,10 @@ const createHarness = async (t, initialPath, onBootstrap) => {
     }),
   });
   manager.initializeAppSessionManager();
-  return h;
+  return complete;
 };
 
+/** @param {Awaited<ReturnType<typeof createHarness>>} h @param {ExpectedView} expected */
 const assertView = (h, { mode = "invite", inviteId, eventId }) => {
   const route = h.routes.getCurrentRouteState();
   const modal = h.modal.getEventModalState();
@@ -196,7 +221,8 @@ const assertView = (h, { mode = "invite", inviteId, eventId }) => {
   assert.equal(modal.eventId, eventId ?? null);
 };
 
-const inviteTarget = (inviteId) => ({
+/** @returns {Route} */
+const inviteTarget = (/** @type {string} */ inviteId) => ({
   mode: "invite",
   path: inviteId,
   inviteId,
@@ -205,7 +231,7 @@ const inviteTarget = (inviteId) => ({
   autojoin: false,
 });
 
-for (const [path, expected] of [
+for (const [path, expected] of /** @type {[string, ExpectedView][]} */ ([
   [
     "/ExactGameID?event=event-A",
     { inviteId: "ExactGameID", eventId: "event-A" },
@@ -217,7 +243,7 @@ for (const [path, expected] of [
     "/snapshot/snapshot%2Fone?event=event-A",
     { mode: "snapshot", eventId: "event-A" },
   ],
-]) {
+])) {
   test(`restores the background and overlay directly from ${path}`, async (t) => {
     const h = await createHarness(t, path);
     await h.settled();
@@ -301,19 +327,20 @@ test("legacy lobby overlays open and dismiss without resetting the lobby", async
   assert.deepEqual(h.resources(), baseline);
 });
 
-for (const [path, expected] of [
+for (const [path, expected] of /** @type {[string, ExpectedView][]} */ ([
   [
     "/match/?event=A&source=hello%20world#x",
     { inviteId: "match", eventId: "A" },
   ],
   ["/?event=A", { mode: "home", eventId: "A" }],
-]) {
+])) {
   test(`reopening the current overlay preserves the shared URL ${path}`, async (t) => {
     const h = await createHarness(t, path);
     await h.settled();
     const baseline = h.resources();
     const originalUrl = h.location.href;
     const originalState = h.modal.getEventModalState();
+    /** @type {ReturnType<typeof h.modal.getEventModalState>[]} */
     const changes = [];
     const unsubscribe = h.modal.subscribeToEventModalState((state) =>
       changes.push(state),
@@ -390,6 +417,7 @@ test("launching the same game only closes its overlay and a different game trans
   const h = await createHarness(t, "/ExactGameID?event=event-A");
   await h.settled();
   const baseline = h.resources();
+  /** @type {ReturnType<typeof h.modal.getEventModalState>["lastCloseReason"][]} */
   const closeReasons = [];
   const unsubscribe = h.modal.subscribeToEventModalState((state) => {
     if (!state.isOpen) {
@@ -415,11 +443,12 @@ test("launching the same game only closes its overlay and a different game trans
   assert.equal(h.pushes, pushesBeforeLaunch + 1);
   assert.equal(h.bootstraps.length, baseline.bootstraps + 1);
   assert.equal(h.teardowns.length, baseline.teardowns + 1);
-  assert.equal(h.bootstraps.at(-1).inviteId, "DifferentGameID");
-  assert.equal(h.bootstraps.at(-1).eventId, null);
+  assert.equal(required(h.bootstraps.at(-1)).inviteId, "DifferentGameID");
+  assert.equal(required(h.bootstraps.at(-1)).eventId, null);
 });
 
 test("rapid overlay changes during initial loading keep the latest history state", async (t) => {
+  /** @type {PromiseWithResolvers<void>} */
   const gate = Promise.withResolvers();
   t.after(() => gate.resolve());
   const h = await createHarness(
@@ -458,6 +487,7 @@ test("rapid overlay changes during initial loading keep the latest history state
 test("a forced same-game refresh cannot restore a dismissed or switched overlay", async (t) => {
   const h = await createHarness(t, "/ExactGameID?event=event-A");
   await h.settled();
+  /** @type {PromiseWithResolvers<void>} */
   const gate = Promise.withResolvers();
   t.after(() => gate.resolve());
   h.onBootstrap = () => gate.promise;
@@ -491,6 +521,7 @@ test("a forced same-game refresh cannot restore a dismissed or switched overlay"
 });
 
 test("queued game navigation uses the latest overlay without extra game bootstraps", async (t) => {
+  /** @type {PromiseWithResolvers<void>} */
   const gate = Promise.withResolvers();
   t.after(() => gate.resolve());
   const h = await createHarness(
@@ -517,7 +548,7 @@ test("queued game navigation uses the latest overlay without extra game bootstra
     h.bootstraps.map(({ inviteId }) => inviteId),
     ["FirstGameID", "SecondGameID"],
   );
-  assert.equal(h.bootstraps.at(-1).eventId, null);
+  assert.equal(required(h.bootstraps.at(-1)).eventId, null);
   assert.equal(h.teardowns.length, 2);
   assert.equal(h.pushes, 3);
 });

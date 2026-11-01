@@ -1,3 +1,4 @@
+import { createGuardedOperatorRunner } from "./operator/guardedSql.ts";
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import {
@@ -5,11 +6,7 @@ import {
   AUTOMATCH_QUEUE_INVALID_COLUMNS,
   AUTOMATCH_QUEUE_SCHEMA_OBJECTS,
 } from "../cloud/workers/api/src/automatchQueueSql.ts";
-import {
-  createWranglerRunner,
-  resolveCloudflareToken,
-  type SqlRunner,
-} from "./operator/runtime.ts";
+import { resolveCloudflareToken, type SqlRunner } from "./operator/runtime.ts";
 
 const DATABASE = "mons-link-profile-games";
 const VERSION_PATTERN =
@@ -32,9 +29,9 @@ export function parseArgs(argv: string[]): Arguments {
     argv.length === 3 &&
     argv[0] === "--activate" &&
     argv[1] === "--candidate-version-id" &&
-    VERSION_PATTERN.test(argv[2])
+    VERSION_PATTERN.test(argv[2]!)
   )
-    return { operation: "activate", candidateVersionId: argv[2] };
+    return { operation: "activate", candidateVersionId: argv[2]! };
   throw new Error(
     "use --inspect or --activate --candidate-version-id <promoted-compatible-version-id>",
   );
@@ -137,7 +134,7 @@ export async function manageAutomatchQueue(
       Number(control.freeze_generation),
     ],
   );
-  if (activated.length !== 1 || activated[0].mode !== "fifo")
+  if (activated.length !== 1 || activated[0]!.mode !== "fifo")
     throw new Error(
       "automatch queue activation was not confirmed; inspect current state",
     );
@@ -148,10 +145,13 @@ export async function manageAutomatchQueue(
   });
 }
 
-export async function execute(argv = process.argv.slice(2)): Promise<void> {
+export async function execute(
+  argv = process.argv.slice(2),
+  createRunner: typeof createGuardedOperatorRunner = createGuardedOperatorRunner,
+): Promise<void> {
   const args = parseArgs(argv);
   await manageAutomatchQueue(args, {
-    run: createWranglerRunner({ apiToken: resolveCloudflareToken() }),
+    run: createRunner({ apiToken: resolveCloudflareToken() }),
     log: (value) => console.log(JSON.stringify(value)),
   });
 }

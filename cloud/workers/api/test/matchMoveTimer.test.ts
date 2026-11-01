@@ -69,7 +69,7 @@ function harness({
       assertMutationAllowed?: () => Promise<void>;
     } = {}) =>
       submitMove({ uid: "actor" }, body, repository, {
-        signal,
+        ...(signal ? { signal } : {}),
         assertMutationAllowed,
         async submitCanonical(input) {
           steps.push("canonical");

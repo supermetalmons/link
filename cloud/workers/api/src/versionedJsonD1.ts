@@ -1,16 +1,17 @@
 const KEY_COLUMNS = {
-  telegram_delivery_control: ["singleton"],
-  telegram_messages: ["message_key"],
-  event_prize_withdrawals: ["event_id", "prize_id"],
+  telegram_delivery_control_canonical: ["singleton"],
+  telegram_messages_canonical: ["message_key"],
+  event_prize_withdrawals_canonical: ["event_id", "prize_id"],
 } as const;
 
 type RowIdentity =
   | {
-      table: "telegram_delivery_control" | "telegram_messages";
+      table:
+        "telegram_delivery_control_canonical" | "telegram_messages_canonical";
       key: readonly [string | number];
     }
   | {
-      table: "event_prize_withdrawals";
+      table: "event_prize_withdrawals_canonical";
       key: readonly [string, string];
     };
 

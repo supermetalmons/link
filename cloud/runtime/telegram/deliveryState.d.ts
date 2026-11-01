@@ -31,7 +31,6 @@ import type {
   TelegramRetryDocument,
 } from "./records.js";
 import { type RetainedTelegramDeleteInput } from "./client.js";
-type RawRecord = Record<string, unknown>;
 export type MessageMutation = (
   record: TelegramMessageDocument,
 ) => TransactionDecision<TelegramMessageDocument>;
@@ -165,46 +164,28 @@ export type CleanupAcquireDecision =
   | "exhausted"
   | "deferred"
   | "acquired";
-declare const sendEvidence: unique symbol;
-export type PreservedSendEvidence = {
-  readonly [sendEvidence]: {
-    value: unknown;
-    present: boolean;
-  };
-};
+export type PreservedSendEvidence = TelegramSendEvidence | undefined;
 export declare function preserveSendEvidence(
-  value: unknown,
+  value: TelegramSendEvidence | undefined,
   present?: boolean,
 ): PreservedSendEvidence;
 export declare function writeDelivery(
   transition: DeliveryTransition & TelegramDeliveryMetadata,
 ): TelegramDeliveryDocument;
 export declare function writeCleanup(
-  transition: CleanupTransition & TelegramCleanupFields,
+  transition: CleanupTransition & Partial<TelegramCleanupFields>,
 ): TelegramCleanupDocument;
 export type ProofInput = TelegramProofInput;
 export type ExactRetryInput =
   TelegramExactRetryInput | RetainedTelegramExactRetryInput;
 export declare const normalizeString: (value: unknown) => string;
 export declare const hashValue: (value: unknown) => string;
-declare class StoredSnapshot {
-  constructor(value: unknown);
+declare class RetrySnapshot<
+  T extends TelegramDeliveryDocument | TelegramCleanupDocument,
+> {
+  readonly document: Partial<T>;
+  constructor(document?: Partial<T>);
   get present(): boolean;
-}
-export declare function deliveryDocument(
-  value: DeliverySnapshot,
-): TelegramDeliveryDocument;
-export declare function pendingDeleteDocument(
-  value: PendingDeleteSnapshot,
-): TelegramCleanupDocument;
-export declare function retryDocument(
-  value:
-    | TelegramDeliveryDocument
-    | TelegramCleanupDocument
-    | DeliverySnapshot
-    | PendingDeleteSnapshot,
-): TelegramRetryDocument;
-declare class RetrySnapshot extends StoredSnapshot {
   get attempts(): number;
   get leaseOwner(): string;
   get leaseExpiresAtMs(): number;
@@ -220,17 +201,30 @@ declare class RetrySnapshot extends StoredSnapshot {
   get apiGateOwner(): string;
   get apiGateGeneration(): string;
   get apiGateStartedAtMs(): number;
-  get apiGateProofRequired(): TelegramRetryProofDocument;
+  get apiGateProofRequired(): TelegramRetryProofDocument | undefined;
   get apiGateProofOwner(): string;
 }
-export declare class DeliverySnapshot extends RetrySnapshot {
+export declare function deliveryDocument(
+  value: DeliverySnapshot,
+): Partial<TelegramDeliveryDocument>;
+export declare function pendingDeleteDocument(
+  value: PendingDeleteSnapshot,
+): Partial<TelegramCleanupDocument>;
+export declare function retryDocument(
+  value:
+    | Partial<TelegramDeliveryDocument>
+    | Partial<TelegramCleanupDocument>
+    | DeliverySnapshot
+    | PendingDeleteSnapshot,
+): TelegramRetryDocument;
+export declare class DeliverySnapshot extends RetrySnapshot<TelegramDeliveryDocument> {
   get status(): DeliveryStatus | undefined;
-  get kind(): DeliveryStatus | "legacy";
+  get kind(): DeliveryStatus | "missing";
   get revision(): string | undefined;
   matchesRevision(revision: string): this is this & {
     revision: string;
   };
-  get sendInFlight(): TelegramSendEvidence;
+  get sendInFlight(): TelegramSendEvidence | undefined;
   get hasSendInFlight(): boolean;
   get hasAppliedStateUnknown(): boolean;
   get hasRawApiGateOwner(): boolean;
@@ -246,22 +240,34 @@ export declare class DeliverySnapshot extends RetrySnapshot {
     field: "apiGateSettleOwner" | "pendingDeleteApiGateSettleOwner",
   ): string;
 }
-export declare class PendingDeleteSnapshot extends RetrySnapshot {
+export declare class PendingDeleteSnapshot extends RetrySnapshot<TelegramCleanupDocument> {
   get status(): CleanupStatus | undefined;
-  get kind(): CleanupStatus | "legacy" | "missing";
+  get kind(): CleanupStatus | "missing";
   get pendingDeleteId(): string;
   get chatIdText(): string;
   get numericMessageId(): number;
   deleteInput(): RetainedTelegramDeleteInput;
 }
-export declare function readDelivery(value: unknown): DeliverySnapshot;
+export declare function readDelivery(
+  value:
+    Partial<TelegramDeliveryDocument> | DeliverySnapshot | null | undefined,
+): DeliverySnapshot;
 export declare function readPendingDelete(
-  value: unknown,
+  value:
+    Partial<TelegramCleanupDocument> | PendingDeleteSnapshot | null | undefined,
 ): PendingDeleteSnapshot;
-export declare const omitKeys: (
-  value: unknown,
+export declare function omitKeys(
+  value: DeliverySnapshot,
   keys: readonly string[],
-) => Record<string, unknown>;
+): Partial<TelegramDeliveryDocument>;
+export declare function omitKeys(
+  value: PendingDeleteSnapshot,
+  keys: readonly string[],
+): Partial<TelegramCleanupDocument>;
+export declare function omitKeys<T extends object>(
+  value: T,
+  keys: readonly string[],
+): T;
 export declare const buildPendingDeleteId: ({
   chatId,
   messageId,
@@ -270,14 +276,16 @@ export declare const buildPendingDeleteId: ({
   messageId: number;
 }) => string;
 export declare const buildApiGateOwner: (...parts: unknown[]) => string;
-export declare const resolvePendingDeleteId: (pendingDelete: unknown) => string;
+export declare const resolvePendingDeleteId: (
+  pendingDelete: Partial<TelegramCleanupDocument> | PendingDeleteSnapshot,
+) => string;
 export declare const promotePendingDeleteQueue: (
-  delivery: unknown,
-) => RawRecord;
+  input: Partial<TelegramDeliveryDocument> | DeliverySnapshot,
+) => Partial<TelegramDeliveryDocument>;
 export declare const appendPendingDelete: (
-  delivery: unknown,
-  pendingDelete: unknown,
-) => RawRecord;
+  delivery: Partial<TelegramDeliveryDocument>,
+  pendingDelete: TelegramCleanupDocument,
+) => Partial<TelegramDeliveryDocument>;
 export declare const ensureCommitted: <
   T extends {
     committed: boolean;
@@ -288,13 +296,11 @@ export declare const ensureCommitted: <
 ) => T;
 export declare const validateDesiredForDelivery: (
   desired: unknown,
-) => desired is TelegramDesiredDocument & {
-  revision: string;
-};
+) => desired is TelegramDesiredDocument;
 export type DesiredRetryInput = DesiredContext & {
   result: TelegramRetryFailure;
   safeRejectedAttemptId?: string;
-  currentDelivery: TelegramDeliveryDocument | DeliverySnapshot;
+  currentDelivery: Partial<TelegramDeliveryDocument> | DeliverySnapshot;
   apiGateOwner?: string;
   proofTaskKind?: "desired" | "pending-delete";
   pendingDeleteId?: string;
@@ -304,7 +310,7 @@ export type DesiredRetryInput = DesiredContext & {
 export type DesiredSendOperations = {
   finishExpiredOwnedRetryWindow(
     input: DesiredContext & {
-      currentDelivery: TelegramDeliveryDocument | DeliverySnapshot;
+      currentDelivery: Partial<TelegramDeliveryDocument> | DeliverySnapshot;
     },
   ): Promise<{
     status: string;
@@ -315,4 +321,14 @@ export type DesiredSendOperations = {
     input: FinishStatusInput,
   ): Promise<TransactionResult<TelegramMessageDocument>>;
 };
+export declare function documentFields(
+  value: DeliverySnapshot,
+): Partial<TelegramDeliveryDocument>;
+export declare function documentFields(
+  value: PendingDeleteSnapshot,
+): Partial<TelegramCleanupDocument>;
+export declare function documentFields<T extends object>(value: T): T;
+export declare function documentFields<T extends object>(
+  value: T | null | undefined,
+): Partial<T>;
 export {};

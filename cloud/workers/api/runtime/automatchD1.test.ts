@@ -1,11 +1,16 @@
-import { retainedAutomatchMutationFixture } from "../test/automatchRecordFixture.ts";
+import { applyCanonicalTestMigrations } from "./canonicalTestMigrations.ts";
+import { inviteDocumentFixture } from "../test/inviteDocumentFixture.ts";
+import {
+  canonicalAutomatchFixture,
+  retainedAutomatchMutationFixture,
+} from "../test/automatchRecordFixture.ts";
 import {
   AUTOMATCH_ROOTS,
   parseAutomatchPath,
 } from "../test/legacyAutomatchStoreFixture.ts";
 import { createLegacyAutomatchD1Store as createAutomatchD1Store } from "../test/legacyAutomatchStoreFixture.ts";
 import { env } from "cloudflare:workers";
-import { applyD1Migrations, type D1Migration } from "cloudflare:test";
+import type { D1Migration } from "cloudflare:test";
 import { beforeAll, beforeEach, describe, expect, it } from "vitest";
 import {
   acquireAutomatchWriteAdmission,
@@ -15,7 +20,6 @@ import {
   isAutomatchRevisionConflict,
   readAutomatchRuntimeControl,
   releaseAutomatchWriteAdmission,
-  type AutomatchRoot,
 } from "../src/automatchD1.ts";
 import { isInviteSourceRevisionConflict } from "../src/inviteSourceD1.ts";
 import { classifyD1Failure } from "../src/d1Failure.ts";
@@ -76,13 +80,13 @@ function observeMutationReads(afterBatch?: () => void) {
 
 describe("D1 automatch state", () => {
   beforeAll(async () => {
-    await applyD1Migrations(db, testEnv.TEST_D1_MIGRATIONS);
+    await applyCanonicalTestMigrations(db, testEnv.TEST_D1_MIGRATIONS);
   });
 
   beforeEach(async () => {
     await db.batch([
-      db.prepare("DELETE FROM game_session_transition_resources"),
-      db.prepare("DELETE FROM game_session_transitions"),
+      db.prepare("DELETE FROM game_session_transition_resources_canonical"),
+      db.prepare("DELETE FROM game_session_transitions_canonical"),
       ...[
         ...new Set(
           Object.values(AUTOMATCH_RECORD_TABLES).map(({ table }) => table),
@@ -106,11 +110,7 @@ describe("D1 automatch state", () => {
       nested: ["uid"],
     });
     expect(parseAutomatchPath("profileGameProjectionOutbox/automatch")).toEqual(
-      {
-        root: "profileGameProjectionOutbox/automatch",
-        key: null,
-        nested: [],
-      },
+      { root: "profileGameProjectionOutbox/automatch", key: null, nested: [] },
     );
     expect(
       parseAutomatchPath("profileGameProjectionOutbox/event/id"),
@@ -154,7 +154,12 @@ describe("D1 automatch state", () => {
     await expect(
       store.transactAutomatchTelegramOutbox("invite", () => {
         decisions++;
-        return { value: { requestId: "new" } };
+        return {
+          value: canonicalAutomatchFixture(
+            "telegramProjectionOutbox/automatch",
+            { requestId: "new" },
+          ),
+        };
       }),
     ).rejects.toThrow("CHECK constraint failed");
     expect(decisions).toBe(1);
@@ -203,7 +208,9 @@ describe("D1 automatch state", () => {
       revision: 1,
     });
     await store.transactAutomatchTelegramOutbox("invite", () => ({
-      value: { requestId: "first" },
+      value: canonicalAutomatchFixture("telegramProjectionOutbox/automatch", {
+        requestId: "first",
+      }),
     }));
     const beforeDelete = await store.read(root, "invite");
     expect(beforeDelete.revision).toBe(2);
@@ -224,10 +231,16 @@ describe("D1 automatch state", () => {
     }
     await store.transactAutomatchTelegramOutbox("invite", (current) => {
       expect(current).toBeNull();
-      return { value: { requestId: "recreated" } };
+      return {
+        value: canonicalAutomatchFixture("telegramProjectionOutbox/automatch", {
+          requestId: "recreated",
+        }),
+      };
     });
     expect(await store.read(root, "invite")).toMatchObject({
-      value: { requestId: "recreated" },
+      value: canonicalAutomatchFixture("telegramProjectionOutbox/automatch", {
+        requestId: "recreated",
+      }),
       revision: 4,
     });
     expect(await store.commit([{ current: deleted, value: null }])).toBe(false);
@@ -250,7 +263,7 @@ describe("D1 automatch state", () => {
     await store.patchRoot({ "gameplayMutationReceipts/operation": null });
     expect(
       await store.getPath("gameplayMutationReceiptExpirations/operation"),
-    ).toEqual({ completedAtMs: 10 });
+    ).toEqual({ schemaVersion: 1, completedAtMs: 10 });
     expect(
       await store.read("gameplayMutationReceipts", "operation"),
     ).toMatchObject({ value: null, revision: 2 });
@@ -259,7 +272,9 @@ describe("D1 automatch state", () => {
     ).toMatchObject({ revision: 1 });
     expect(
       await db
-        .prepare("SELECT COUNT(*) AS count FROM game_session_mutation_receipts")
+        .prepare(
+          "SELECT COUNT(*) AS count FROM game_session_mutation_receipts_canonical",
+        )
         .first("count"),
     ).toBe(1);
   });
@@ -269,7 +284,7 @@ describe("D1 automatch state", () => {
     for (const roots of [
       ["gameplayMutationReceipts", "gameplayMutationReceiptExpirations"],
       ["gameplayMutationReceiptExpirations", "gameplayMutationReceipts"],
-    ]) {
+    ] as const) {
       const key = roots[0];
       await store.patchRoot(
         Object.fromEntries(
@@ -280,75 +295,12 @@ describe("D1 automatch state", () => {
         Object.fromEntries(roots.map((root) => [`${root}/${key}`, null])),
       );
       for (const root of roots) {
-        expect(await store.read(root as AutomatchRoot, key)).toMatchObject({
+        expect(await store.read(root, key)).toMatchObject({
           value: null,
           revision: 2,
         });
       }
     }
-  });
-
-  it("preserves malformed source JSON and Firebase child-value query ordering", async () => {
-    const { store } = await writableStore();
-    const root = "profileGameProjectionOutbox/automatch";
-    const fixtures = {
-      nullChild: { lastQueuedAtMs: null, broken: true },
-      missingChild: { invalid: "outbox" },
-      falseChild: { lastQueuedAtMs: false },
-      trueChild: { lastQueuedAtMs: true },
-      zeroChild: { lastQueuedAtMs: 0 },
-      laterChild: { lastQueuedAtMs: 20 },
-      stringChild: { lastQueuedAtMs: "2" },
-      objectChild: { lastQueuedAtMs: { unexpected: 1 } },
-      malformed: "not-an-outbox",
-      array: ["malformed"],
-    };
-    await store.patchRoot(
-      Object.fromEntries(
-        Object.entries(fixtures).map(([key, value]) => [
-          `${root}/${key}`,
-          value,
-        ]),
-      ),
-    );
-    expect(await store.getPath(`${root}/malformed`)).toBe("not-an-outbox");
-    expect(await store.getPath(`${root}/array`)).toEqual(["malformed"]);
-    expect(
-      (
-        await store.list(root, { orderBy: "lastQueuedAtMs", equalTo: null })
-      ).map(({ key }) => key),
-    ).toEqual(["array", "malformed", "missingChild", "nullChild"]);
-    expect(
-      (
-        await store.list(root, {
-          orderBy: "lastQueuedAtMs",
-          startAt: 0,
-          endAt: 20,
-        })
-      ).map(({ key }) => key),
-    ).toEqual(["zeroChild", "laterChild"]);
-    expect(
-      (
-        await store.list(root, {
-          orderBy: "lastQueuedAtMs",
-          endAt: 0,
-          limitToFirst: 20,
-        })
-      ).map(({ key }) => key),
-    ).toEqual([
-      "array",
-      "malformed",
-      "missingChild",
-      "nullChild",
-      "falseChild",
-      "trueChild",
-      "zeroChild",
-    ]);
-    expect(
-      (await store.list(root, { orderBy: "lastQueuedAtMs", equalTo: "2" })).map(
-        ({ key }) => key,
-      ),
-    ).toEqual(["stringChild"]);
   });
 
   it("preserves numeric Firebase key ordering and deterministic UID limits", async () => {
@@ -363,7 +315,7 @@ describe("D1 automatch state", () => {
       "auto-a",
     ]) {
       await store.patchRoot({
-        [`automatch/${key}`]: { uid: "same", timestamp: key },
+        [`automatch/${key}`]: { uid: "same", timestamp: 1 },
       });
     }
     expect(
@@ -408,8 +360,11 @@ describe("D1 automatch state", () => {
     });
     const prepared = await store.preparePatch(
       {
-        "telegramAutomatches/invite/generation": { ".sv": { increment: 1 } },
-        "telegramAutomatches/invite/updatedAtMs": { ".sv": "timestamp" },
+        "telegramAutomatches/invite/generation": {
+          kind: "increment",
+          delta: 1,
+        },
+        "telegramAutomatches/invite/updatedAtMs": { kind: "timestamp" },
         "profileGameProjectionOutbox/automatch/invite/sourceUpdatedAtMs": {
           ".sv": "timestamp",
         },
@@ -419,21 +374,25 @@ describe("D1 automatch state", () => {
       500,
     );
     expect(await store.commit(prepared)).toBe(true);
-    expect(await store.getPath("telegramAutomatches/invite")).toEqual({
-      generation: 3,
-      lifecycle: "pending",
-      updatedAtMs: 500,
-    });
+    expect(await store.getPath("telegramAutomatches/invite")).toEqual(
+      canonicalAutomatchFixture("telegramAutomatches", {
+        generation: 3,
+        lifecycle: "pending",
+        updatedAtMs: 500,
+      }),
+    );
     expect(
       await store.getPath("profileGameProjectionOutbox/automatch/invite"),
-    ).toEqual({
-      requestId: "old",
-      sourceUpdatedAtMs: 500,
-      historicalMatches: {
-        first: { finalizedAtMs: 1 },
-        second: { finalizedAtMs: 2 },
-      },
-    });
+    ).toEqual(
+      canonicalAutomatchFixture("profileGameProjectionOutbox/automatch", {
+        requestId: "old",
+        sourceUpdatedAtMs: 500,
+        historicalMatches: {
+          first: { finalizedAtMs: 1 },
+          second: { finalizedAtMs: 2 },
+        },
+      }),
+    );
     await expect(
       store.preparePatch({ "automatch/id": {}, "automatch/id/uid": "host" }),
     ).rejects.toThrow("overlapping");
@@ -454,47 +413,59 @@ describe("D1 automatch state", () => {
           kind: "telegram-source-merge",
           inviteId: "invite",
           value: {
-            generation: { ".sv": { increment: 1 } },
-            updatedAtMs: { ".sv": "timestamp" },
+            generation: { kind: "increment", delta: 1 },
+            updatedAtMs: { kind: "timestamp" },
           },
         },
         {
           kind: "profile-outbox-merge",
           inviteId: "invite",
           value: {
-            schemaVersion: 1,
+            schemaVersion: 2,
             status: "pending",
+            historicalMatches: {},
+            archiveRetry: null,
             requestId: "next",
             reason: "joined",
-            sourceUpdatedAtMs: { ".sv": "timestamp" },
-            lastQueuedAtMs: { ".sv": "timestamp" },
+            sourceUpdatedAtMs: { kind: "timestamp" },
+            lastQueuedAtMs: { kind: "timestamp" },
+          },
+          historicalMatches: {
+            second: {
+              finalizedAtMs: 2,
+              hostPlayerId: "host",
+              guestPlayerId: "guest",
+              source: "transition",
+              retryNotBeforeMs: null,
+            },
           },
         },
-        ...legacySessionChanges({
-          "profileGameProjectionOutbox/automatch/invite/historicalMatches/second":
-            { finalizedAtMs: 2 },
-        }),
       ],
       500,
     );
     expect(await store.commit(prepared)).toBe(true);
-    expect(await store.readAutomatchTelegramSource("invite")).toEqual({
-      generation: 3,
-      lifecycle: "pending",
-      updatedAtMs: 500,
-    });
-    expect(await store.readAutomatchProfileOutbox("invite")).toEqual({
-      schemaVersion: 1,
-      status: "pending",
-      requestId: "next",
-      reason: "joined",
-      sourceUpdatedAtMs: 500,
-      lastQueuedAtMs: 500,
-      historicalMatches: {
-        first: { finalizedAtMs: 1 },
-        second: { finalizedAtMs: 2 },
-      },
-    });
+    expect(await store.readAutomatchTelegramSource("invite")).toEqual(
+      canonicalAutomatchFixture("telegramAutomatches", {
+        generation: 3,
+        lifecycle: "pending",
+        updatedAtMs: 500,
+      }),
+    );
+    expect(await store.readAutomatchProfileOutbox("invite")).toEqual(
+      canonicalAutomatchFixture("profileGameProjectionOutbox/automatch", {
+        schemaVersion: 2,
+        status: "pending",
+        archiveRetry: null,
+        requestId: "next",
+        reason: "joined",
+        sourceUpdatedAtMs: 500,
+        lastQueuedAtMs: 500,
+        historicalMatches: {
+          first: { finalizedAtMs: 1 },
+          second: { finalizedAtMs: 2 },
+        },
+      }),
+    );
   });
 
   it("resolves repeated typed increments against the original snapshot", async () => {
@@ -504,13 +475,17 @@ describe("D1 automatch state", () => {
       [2, 4].map((increment) => ({
         kind: "telegram-source-merge" as const,
         inviteId: "invite",
-        value: { generation: { ".sv": { increment } } },
+        value: { generation: { kind: "increment", delta: increment } },
       })),
       500,
     );
     expect(prepared).toHaveLength(1);
-    expect(prepared[0].current.value).toEqual({ generation: 5 });
-    expect(prepared[0].value).toEqual({ generation: 9 });
+    expect(prepared[0]!.current.value).toEqual(
+      canonicalAutomatchFixture("telegramAutomatches", { generation: 5 }),
+    );
+    expect(prepared[0]!.value).toEqual(
+      canonicalAutomatchFixture("telegramAutomatches", { generation: 9 }),
+    );
   });
 
   it("preloads each physical record once in one primary batch and preserves mutation order", async () => {
@@ -519,14 +494,14 @@ describe("D1 automatch state", () => {
       legacySessionChanges({
         "telegramAutomatches/shared": { generation: 2 },
         "gameplayMutationReceipts/shared": {
-          completedAtMs: { ".sv": "timestamp" },
+          completedAtMs: { kind: "timestamp" },
         },
         "gameplayMutationReceiptExpirations/shared": {
-          completedAtMs: { ".sv": "timestamp" },
+          completedAtMs: { kind: "timestamp" },
         },
         "automatch/shared": { uid: "host" },
         "telegramAutomatches/shared/lifecycle": "pending",
-        "telegramAutomatches/shared/updatedAtMs": { ".sv": "timestamp" },
+        "telegramAutomatches/shared/updatedAtMs": { kind: "timestamp" },
       }),
       500,
     );
@@ -535,7 +510,7 @@ describe("D1 automatch state", () => {
     expect(observed.queries).toHaveLength(3);
     expect(
       observed.queries.filter((query) =>
-        query.includes("FROM game_session_mutation_receipts"),
+        query.includes("FROM game_session_mutation_receipts_canonical"),
       ),
     ).toHaveLength(1);
     expect(prepared).toEqual([
@@ -546,7 +521,11 @@ describe("D1 automatch state", () => {
           value: null,
           revision: 0,
         },
-        value: { generation: 2, lifecycle: "pending", updatedAtMs: 500 },
+        value: canonicalAutomatchFixture("telegramAutomatches", {
+          generation: 2,
+          lifecycle: "pending",
+          updatedAtMs: 500,
+        }),
       },
       {
         current: {
@@ -555,7 +534,9 @@ describe("D1 automatch state", () => {
           value: null,
           revision: 0,
         },
-        value: { completedAtMs: 500 },
+        value: canonicalAutomatchFixture("gameplayMutationReceipts", {
+          completedAtMs: 500,
+        }),
       },
       {
         current: {
@@ -564,11 +545,13 @@ describe("D1 automatch state", () => {
           value: null,
           revision: 0,
         },
-        value: { completedAtMs: 500 },
+        value: canonicalAutomatchFixture("gameplayMutationReceiptExpirations", {
+          completedAtMs: 500,
+        }),
       },
       {
         current: { root: "automatch", key: "shared", value: null, revision: 0 },
-        value: { uid: "host" },
+        value: canonicalAutomatchFixture("automatch", { uid: "host" }),
       },
     ]);
   });
@@ -596,7 +579,7 @@ describe("D1 automatch state", () => {
       {
         root: "gameplayMutationReceiptExpirations",
         key: "operation",
-        value: { completedAtMs: 10 },
+        value: { schemaVersion: 1, completedAtMs: 10 },
         revision: 1,
       },
     ]);
@@ -689,7 +672,7 @@ describe("D1 automatch state", () => {
   it("retries a conflicted transaction and fences stale queue settlement", async () => {
     const { store } = await writableStore();
     const path = "telegramProjectionOutbox/automatch/invite";
-    await store.patchRoot({ [path]: { requestId: "first", count: 1 } });
+    await store.patchRoot({ [path]: { requestId: "first", updatedAtMs: 1 } });
     let releaseFirst: () => void = () => {};
     const firstPaused = new Promise<void>((resolve) => {
       releaseFirst = resolve;
@@ -727,23 +710,26 @@ describe("D1 automatch state", () => {
     const pending = blocked.transactAutomatchTelegramOutbox(
       "invite",
       (current) => {
-        const input = current as { count: number; requestId: string };
-        observedCounts.push(input.count);
-        input.count = 1_000;
+        const input = current;
+        if (!input || input.status !== "pending")
+          throw new Error("expected pending outbox");
+        observedCounts.push(input.updatedAtMs);
         return {
           value: {
             ...input,
-            count: { ".sv": { increment: 1 } },
-            updatedAtMs: { ".sv": "timestamp" },
+            updatedAtMs: input.updatedAtMs + 1,
           },
           decision: `increment-${input.requestId}`,
         };
       },
     );
     await paused;
-    await store.patchRoot({ [path]: { requestId: "second", count: 5 } });
+    await store.patchRoot({ [path]: { requestId: "second", updatedAtMs: 5 } });
     releaseFirst();
-    const stored = { requestId: "second", count: 6, updatedAtMs: nowMs };
+    const stored = canonicalAutomatchFixture(
+      "telegramProjectionOutbox/automatch",
+      { requestId: "second", updatedAtMs: 6 },
+    );
     await expect(pending).resolves.toEqual({
       committed: true,
       decision: "increment-second",
@@ -752,8 +738,10 @@ describe("D1 automatch state", () => {
     expect(observedCounts).toEqual([1, 5]);
     await expect(
       store.transactAutomatchTelegramOutbox("invite", (current) => {
-        const input = current as { count: number; requestId: string };
-        input.count = 1_000;
+        const input = current;
+        if (!input || input.status !== "pending")
+          throw new Error("expected pending outbox");
+        input.updatedAtMs = 1_000;
         return input.requestId === "first"
           ? { value: null }
           : { commit: false, decision: "stale" };
@@ -764,6 +752,36 @@ describe("D1 automatch state", () => {
       value: stored,
     });
     expect(await store.getPath(path)).toEqual(stored);
+  });
+
+  it("keeps archival control metadata out of live admission reads", async () => {
+    const metadata =
+      '{ "queueSelection" : "fifo", "priorCutover" : { "epoch" : 1 } }';
+    await db
+      .prepare(
+        "UPDATE automatch_runtime_control SET metadata_json = ? WHERE singleton = 1",
+      )
+      .bind(metadata)
+      .run();
+    const control = await readAutomatchRuntimeControl(db);
+    expect(control).toMatchObject({
+      backend: "d1",
+      state: "active",
+      epoch: 2,
+      freezeGeneration: 1,
+    });
+    expect(Object.hasOwn(control, "metadata")).toBe(false);
+    const admission = await acquireAutomatchWriteAdmission(db, "test", {
+      now: () => nowMs,
+    });
+    expect(admission.epoch).toBe(2);
+    expect(
+      await db
+        .prepare(
+          "SELECT metadata_json FROM automatch_runtime_control WHERE singleton = 1",
+        )
+        .first("metadata_json"),
+    ).toBe(metadata);
   });
 
   it("requires explicit write guards and fails closed without control", async () => {
@@ -840,7 +858,7 @@ describe("D1 automatch state", () => {
       ),
     ]);
     await expect(acquireAutomatchWriteAdmission(db, "test")).rejects.toThrow(
-      "automatch-backend-retired",
+      "automatch-control-unavailable",
     );
     expect(
       await db
@@ -852,26 +870,44 @@ describe("D1 automatch state", () => {
     ).toBeNull();
   });
 
-  it("expires only numeric due receipt markers and preserves pending transitions", async () => {
+  it("expires due receipt markers and preserves pending transitions", async () => {
     const { store } = await writableStore();
     await store.patchRoot({
       "gameplayMutationReceipts/due": { kind: "invite-create" },
       "gameplayMutationReceiptExpirations/due": { completedAtMs: 10 },
       "gameplayMutationReceiptExpirations/orphan": { completedAtMs: 11 },
       "gameplayMutationReceiptExpirations/future": { completedAtMs: 30 },
-      "gameplayMutationReceiptExpirations/string": { completedAtMs: "10" },
-      "gameplayMutationReceiptExpirations/invalid": { malformed: true },
       "gameplayMutationReceipts/reserved": { kind: "automatch-start" },
       "gameplayMutationReceiptExpirations/reserved": { completedAtMs: 1 },
     });
     await db.batch([
-      db.prepare(
-        `INSERT INTO game_session_transitions
+      db
+        .prepare(
+          `INSERT INTO game_session_transitions_canonical
            (transition_id, invite_id, payload_json, status, created_at_ms, updated_at_ms)
-         VALUES ('pending-transition', 'invite', '{}', 'pending', 1, 1)`,
-      ),
+         VALUES ('pending-transition', 'invite', ?, 'pending', 1, 1)`,
+        )
+        .bind(
+          JSON.stringify({
+            version: 3,
+            transitionId: "pending-transition",
+            inviteId: "invite",
+            inviteSourceEpoch: 1,
+            operationDigest: "a".repeat(64),
+            resources: ["invite", "gameplay-operation:reserved"],
+            mutations: [],
+            creations: [],
+            createdAtMs: 1,
+            inviteMutations: [
+              {
+                current: { inviteId: "invite", value: null, revision: 0 },
+                value: inviteDocumentFixture({ hostId: "host" }),
+              },
+            ],
+          }),
+        ),
       db.prepare(
-        `INSERT INTO game_session_transition_resources (resource_key, transition_id)
+        `INSERT INTO game_session_transition_resources_canonical (resource_key, transition_id)
          VALUES ('gameplay-operation:reserved', 'pending-transition')`,
       ),
     ]);
@@ -886,7 +922,7 @@ describe("D1 automatch state", () => {
     expect(
       await store.read("gameplayMutationReceiptExpirations", "orphan"),
     ).toMatchObject({ value: null, revision: 2 });
-    for (const key of ["future", "string", "invalid", "reserved"]) {
+    for (const key of ["future", "reserved"]) {
       expect(
         (await store.read("gameplayMutationReceiptExpirations", key)).value,
       ).not.toBeNull();
@@ -902,9 +938,17 @@ describe("D1 automatch state", () => {
     await db
       .prepare(
         `WITH RECURSIVE records(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM records WHERE n < 1001)
-       INSERT INTO game_session_mutation_receipts
+       INSERT INTO game_session_mutation_receipts_canonical
          (record_key, payload_json, revision, expiration_json, expiration_revision, updated_at_ms)
-       SELECT 'operation-' || n, '{"kind":"automatch-start"}', 1, '{"completedAtMs":10}', 1, 1 FROM records`,
+       SELECT 'operation-' || n, json_set(?, '$.operationId', 'operation-' || n), 1, '{"schemaVersion":1,"completedAtMs":10}', 1, 1 FROM records`,
+      )
+      .bind(
+        JSON.stringify(
+          canonicalAutomatchFixture("gameplayMutationReceipts", {
+            kind: "automatch-start",
+            completedAtMs: 10,
+          }),
+        ),
       )
       .run();
     let batches = 0;
@@ -929,7 +973,7 @@ describe("D1 automatch state", () => {
     expect(
       await db
         .prepare(
-          "SELECT COUNT(*) AS count FROM game_session_mutation_receipts WHERE expiration_json IS NOT NULL",
+          "SELECT COUNT(*) AS count FROM game_session_mutation_receipts_canonical WHERE expiration_json IS NOT NULL",
         )
         .first("count"),
     ).toBe(1);

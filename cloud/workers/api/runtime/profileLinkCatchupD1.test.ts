@@ -1,3 +1,4 @@
+import { profileFixture } from "../test/profileDataBoundaryFixture.ts";
 import { env } from "cloudflare:workers";
 import type { D1Migration } from "cloudflare:test";
 import { beforeAll, describe, expect, it } from "vitest";
@@ -23,23 +24,23 @@ function uniqueId(prefix: string): string {
 async function createProfile(loginUids: string[] = []) {
   const profileId = uniqueId("profile");
   const value = materializeCanonicalProfile({
-    profile: {
+    profile: profileFixture({
       id: profileId,
       nonce: 0,
       rating: 1500,
       totalManaPoints: 0,
       win: false,
       emoji: 1,
-      username: "",
+      username: null,
       eth: null,
       sol: null,
       completedProblemIds: [],
       isTutorialCompleted: false,
       mining: {
-        lastRockDate: "",
+        lastRockDate: null,
         materials: { dust: 0, slime: 0, gum: 0, metal: 0, ice: 0 },
       },
-    },
+    }),
     createdAtMs: 1_000,
     updatedAtMs: 1_000,
   });
@@ -259,7 +260,7 @@ describe("profile-link catch-up D1", () => {
     ).rejects.toBeInstanceOf(CanonicalProfileConflict);
     await db
       .prepare(
-        "UPDATE profile_records SET state = 'retiring', merged_into_profile_id = ? WHERE profile_id = ?",
+        "UPDATE profile_records_canonical SET state = 'retiring', merged_at_ms = 1000, merged_into_profile_id = ? WHERE profile_id = ?",
       )
       .bind(targetProfileId, profileId)
       .run();
@@ -271,7 +272,7 @@ describe("profile-link catch-up D1", () => {
     } finally {
       await db
         .prepare(
-          "UPDATE profile_records SET state = 'active', merged_into_profile_id = NULL WHERE profile_id = ?",
+          "UPDATE profile_records_canonical SET state = 'active', merged_at_ms = NULL, merged_into_profile_id = NULL WHERE profile_id = ?",
         )
         .bind(profileId)
         .run();
@@ -312,7 +313,7 @@ describe("profile-link catch-up D1", () => {
       false,
     );
     await db
-      .prepare("DELETE FROM profile_login_owners WHERE login_uid = ?")
+      .prepare("DELETE FROM profile_login_owners_canonical WHERE login_uid = ?")
       .bind(loginUid)
       .run();
     expect(await store.settleMissing(loginUid, job.requestId, null)).toBe(true);
@@ -397,7 +398,7 @@ describe("profile-link catch-up D1", () => {
     }
     await db
       .prepare(
-        "UPDATE profile_link_catchup_jobs SET cleanup_profile_ids_json = '[1]' WHERE login_uid = ?",
+        "UPDATE profile_link_catchup_jobs_canonical SET cleanup_profile_ids_json = '[1]' WHERE login_uid = ?",
       )
       .bind(loginUid)
       .run();
@@ -415,7 +416,7 @@ describe("profile-link catch-up D1", () => {
     const targetProfileId = await createProfile();
     await db
       .prepare(
-        "UPDATE profile_link_catchup_jobs SET profile_id = ? WHERE login_uid = ?",
+        "UPDATE profile_link_catchup_jobs_canonical SET profile_id = ? WHERE login_uid = ?",
       )
       .bind(targetProfileId, loginUid)
       .run();

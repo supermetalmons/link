@@ -53,6 +53,7 @@ test("move contracts reject unknown fields and invalid match identities", () => 
     assert.equal(isSubmitMoveRequest({ ...request, [field]: "value" }), false);
   }
   for (const field of Object.keys(request)) {
+    /** @type {Record<string, unknown>} */
     const missing = { ...request };
     delete missing[field];
     assert.equal(isSubmitMoveRequest(missing), false);
@@ -198,7 +199,11 @@ test("move responses acknowledge only an exact identity and known outcome", () =
 test("history helpers distinguish complete entries and retain takebacks as progress", () => {
   assert.equal(countMoveHistory(""), 0);
   assert.equal(countMoveHistory("a-z-a"), 3);
-  for (const [prefix, history, expected] of [
+  for (const [
+    prefix,
+    history,
+    expected,
+  ] of /** @type {[string, string, boolean][]} */ ([
     ["", "", true],
     ["", "a", true],
     ["a", "a", true],
@@ -208,7 +213,7 @@ test("history helpers distinguish complete entries and retain takebacks as progr
     ["a-b", "a-bc", false],
     ["a-b", "a-c", false],
     ["a-b", "a", false],
-  ])
+  ]))
     assert.equal(isMoveHistoryPrefix(prefix, history), expected);
 });
 
@@ -358,6 +363,7 @@ test("superseded acknowledgements require only bounded current FEN and history",
   ])
     assert.equal(isSubmitMoveResponse(value), false);
   for (const field of Object.keys(superseded)) {
+    /** @type {Record<string, unknown>} */
     const missing = { ...superseded };
     delete missing[field];
     assert.equal(isSubmitMoveResponse(missing), false);

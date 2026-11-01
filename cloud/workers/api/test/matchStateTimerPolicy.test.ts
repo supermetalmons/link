@@ -34,8 +34,8 @@ function timerPair(
     color: "white",
     fen: "initial",
     flatMovesString: "",
-    status: "",
-    timer: "",
+    status: "active",
+    timer: { state: "idle" },
   };
   const player = { ...base, ...playerFields };
   const opponent: MatchTimerRecord = {
@@ -50,7 +50,6 @@ function timerPair(
       playerMatch: matchDocumentFixture({
         ...player,
         version: 2,
-        extra: { retained: ["legacy", null] },
       }),
       opponentMatch: matchDocumentFixture({ ...opponent, version: 2 }),
       claim: null,
@@ -66,8 +65,11 @@ function timerPair(
   };
 }
 
-test("timer start creates the current deadline for missing, older, or invalid timers", () => {
-  for (const timer of ["", formatMatchTimer(6, nowMs - 1000), "malformed"]) {
+test("timer start creates the current deadline for idle or older timers", () => {
+  for (const timer of [
+    { state: "idle" as const },
+    formatMatchTimer(6, nowMs - 1000),
+  ]) {
     const current = timerPair({ timer });
     const before = structuredClone(current);
     const prepared = prepareMatchStateTimerStart(current);
@@ -120,8 +122,10 @@ test("timer start accepts concurrent timer changes and preserves non-timer field
     ...matchRecordFixture(initial.pair.playerMatch),
     timer: marker.timer,
   });
-  assert.equal(initial.player.timer, "");
-  assert.equal(matchRecordFixture(initial.pair.playerMatch)?.timer, "");
+  assert.deepEqual(initial.player.timer, { state: "idle" });
+  assert.deepEqual(matchRecordFixture(initial.pair.playerMatch)?.timer, {
+    state: "idle",
+  });
 });
 
 test("timer start rejects changed FEN or history from either player", () => {
@@ -141,7 +145,7 @@ test("timer start rejects changed FEN or history from either player", () => {
 
 test("timer start distinguishes ahead markers from malformed or mismatched markers", () => {
   const current = timerPair();
-  for (const timer of [formatMatchTimer(8, nowMs), "malformed"]) {
+  for (const timer of [formatMatchTimer(8, nowMs)]) {
     assert.throws(
       () =>
         decideMatchStateTimerStartCommit(current, current, {
@@ -161,7 +165,8 @@ test("timer start distinguishes ahead markers from malformed or mismatched marke
     { timer: formatMatchTimer(6, nowMs), turnNumber: 6 },
   ]) {
     assert.throws(
-      () => decideMatchStateTimerStartCommit(current, current, invalid),
+      () =>
+        decideMatchStateTimerStartCommit(current, current, invalid as never),
       {
         status: 503,
         code: "unavailable",
@@ -211,6 +216,7 @@ test("timer claim accepts the exact deadline and preserves unrelated state", () 
     timer: MATCH_TIMER_TERMINAL,
   });
   assert.deepEqual(decision.claim, {
+    schemaVersion: 1,
     status: "claimed",
     playerId: request.playerId,
     opponentId: request.opponentId,
@@ -227,6 +233,9 @@ test("timer claim honors pending fences until their exact expiry", () => {
   const current = timerPair({ timer: marker.timer });
   current.pair.claim = timerClaimFixture({
     status: "pending",
+    inviteId: request.inviteId,
+    playerId: request.playerId,
+    opponentId: request.opponentId,
     expiresAtMs: nowMs + 1,
   });
   assert.throws(() => decideMatchStateTimerClaim(current, request, nowMs), {

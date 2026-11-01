@@ -10,7 +10,7 @@ type Dependencies = {
   connect: (
     url: string,
     options: import("ws").ClientOptions,
-    protocol: string,
+    protocol: string[],
   ) => import("ws").WebSocket;
   log: (message: string) => void;
   setTimeout: typeof setTimeout;
@@ -29,8 +29,8 @@ const SNAPSHOT = {
   hostId: "host-private-uid",
   guestId: "guest-private-uid",
   hostColor: "white",
-  hostRematches: "",
-  guestRematches: "",
+  hostRematches: { state: "open", indices: [] },
+  guestRematches: { state: "open", indices: [] },
   automatchStateHint: null,
   eventId: null,
   eventOwned: false,
@@ -76,7 +76,7 @@ function harness({
   const requests: {
     url: string;
     options: import("ws").ClientOptions;
-    protocol: string;
+    protocol: string[];
   }[] = [];
   const fetches: { url: string; options?: RequestInit }[] = [];
   const timers = new Map<
@@ -85,7 +85,7 @@ function harness({
   >();
   const dependencies: Dependencies = {
     fetch: (url, options) => {
-      fetches.push({ url: String(url), options });
+      fetches.push({ url: String(url), ...(options ? { options } : {}) });
       return fetchResponse(url, options);
     },
     connect: (url, options, protocol) => {
@@ -191,23 +191,30 @@ test("verifies public HTTP metadata and two socket snapshots with immediate hear
   await runSmoke(OPTIONS, state.dependencies);
   assert.equal(state.fetches.length, 1);
   assert.equal(
-    state.fetches[0].url,
+    state.fetches[0]!.url,
     "https://api.mons.link/invites/invite1/metadata",
   );
-  assert.equal(state.fetches[0].options?.method, "GET");
-  assert.equal(state.fetches[0].options?.redirect, "error");
-  assert.equal(state.fetches[0].options?.cache, "no-store");
-  assert.deepEqual(state.fetches[0].options?.headers, {
-    Accept: "application/json",
-    Origin: "https://mons.link",
-  });
+  assert.equal(state.fetches[0]!.options?.method, "GET");
+  assert.equal(state.fetches[0]!.options?.redirect, "error");
+  assert.equal(state.fetches[0]!.options?.cache, "no-store");
+  assert.deepEqual(
+    Object.fromEntries(new Headers(state.fetches[0]!.options?.headers)),
+    {
+      accept: "application/json",
+      origin: "https://mons.link",
+      "x-mons-data-epoch": "1",
+    },
+  );
   assert.equal(state.requests.length, 2);
   for (const request of state.requests) {
     assert.equal(
       request.url,
       "wss://api.mons.link/invites/invite1/metadata/socket",
     );
-    assert.equal(request.protocol, "mons-invite-metadata-v1");
+    assert.deepEqual(request.protocol, [
+      "mons-invite-metadata-v1",
+      "mons-data-v1",
+    ]);
     assert.deepEqual(request.options, {
       origin: "https://mons.link",
       followRedirects: false,
@@ -373,7 +380,7 @@ test("rejects invalid, binary, oversized, foreign, private and downgraded socket
       /invalid message or protocol/,
     );
     assert.equal(state.requests.length, 1);
-    assert.equal(state.sockets[0].terminated, 1);
+    assert.equal(state.sockets[0]!.terminated, 1);
     assert.equal(state.timers.size, 0);
   }
 });
@@ -455,7 +462,7 @@ test("stops on upgrades, early closes and heartbeat failures and sanitizes nativ
       fixture.expected,
     );
     assert.equal(state.requests.length, 1);
-    assert.equal(state.sockets[0].terminated, 1);
+    assert.equal(state.sockets[0]!.terminated, 1);
     assert.equal(state.timers.size, 0);
   }
   const state = harness({
@@ -501,7 +508,7 @@ test("bounds stalled HTTP and body reads by the shared thirty-second deadline", 
     assert.ok(timer);
     timer.callback();
     await rejected;
-    assert.equal(state.fetches[0].options?.signal?.aborted, true);
+    assert.equal(state.fetches[0]!.options?.signal?.aborted, true);
     assert.equal(state.requests.length, 0);
     assert.equal(state.timers.size, 0);
     assert.equal(canceled, stream);
@@ -526,7 +533,7 @@ test("socket and heartbeat timeouts release connections and all timers", async (
     assert.ok(timer);
     timer.callback();
     await rejected;
-    assert.equal(state.sockets[0].terminated, 1);
+    assert.equal(state.sockets[0]!.terminated, 1);
     assert.equal(state.timers.size, 0);
     assert.equal(state.logs.length, 1);
   }
@@ -549,7 +556,7 @@ test("shares the remaining deadline across HTTP and reconnect without resetting 
   const pending = runSmoke(OPTIONS, state.dependencies);
   const rejected = assert.rejects(pending, /timed out/);
   await flush();
-  assert.equal(state.requests[1].options.handshakeTimeout, 7_000);
+  assert.equal(state.requests[1]!.options.handshakeTimeout, 7_000);
   assert.ok(
     [...state.timers.values()].some((timer) => timer.milliseconds === 30_000),
   );
@@ -559,7 +566,7 @@ test("shares the remaining deadline across HTTP and reconnect without resetting 
   assert.ok(remaining);
   remaining.callback();
   await rejected;
-  assert.equal(state.sockets[1].terminated, 1);
+  assert.equal(state.sockets[1]!.terminated, 1);
   assert.equal(state.timers.size, 0);
 });
 
@@ -581,7 +588,7 @@ test("rejects invalid direct options before I/O and ignores late HTTP completion
   const pending = runSmoke(OPTIONS, late.dependencies);
   const rejected = assert.rejects(pending, /timed out/);
   await flush();
-  [...late.timers.values()][0].callback();
+  [...late.timers.values()][0]!.callback();
   await rejected;
   resolve(
     new Response(
@@ -608,6 +615,6 @@ test("rejects socket frames past the shared deadline even when timeout callbacks
   });
   await assert.rejects(runSmoke(OPTIONS, state.dependencies), /timed out/);
   assert.equal(state.requests.length, 1);
-  assert.equal(state.sockets[0].terminated, 1);
+  assert.equal(state.sockets[0]!.terminated, 1);
   assert.equal(state.timers.size, 0);
 });

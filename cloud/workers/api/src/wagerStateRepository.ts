@@ -1,9 +1,12 @@
-import { decodeWager, type DecodedWager } from "./wagerModel.ts";
+import {
+  decodeWager,
+  parseWagerRecord,
+  type DecodedWager,
+} from "./wagerModel.ts";
 import type {
   TransactionDecision,
   TransactionResult,
 } from "./repositoryContracts.ts";
-import { isSafeRecordKey } from "./recordKeys.ts";
 import { runOptimisticTransaction } from "./optimisticTransaction.ts";
 import {
   createWagerStateD1Store,
@@ -77,49 +80,6 @@ export type WagerWriter = WagerReader & {
 export type WagerStateRepositoryOptions = WagerStateD1Options & {
   notify?: (inviteId: string, committed: boolean) => Promise<void>;
 };
-function normalizeJson(value: unknown): unknown {
-  const active = new Set<object>();
-  const normalize = (entry: unknown, depth: number): unknown => {
-    if (depth > 64) throw new TypeError("invalid-wager-state-json");
-    if (
-      entry === null ||
-      typeof entry === "string" ||
-      typeof entry === "boolean" ||
-      (typeof entry === "number" && Number.isFinite(entry))
-    )
-      return entry;
-    if (!entry || typeof entry !== "object" || active.has(entry)) {
-      throw new TypeError("invalid-wager-state-json");
-    }
-    const prototype = Object.getPrototypeOf(entry);
-    if (
-      !Array.isArray(entry) &&
-      prototype !== Object.prototype &&
-      prototype !== null
-    ) {
-      throw new TypeError("invalid-wager-state-json");
-    }
-    active.add(entry);
-    let result: unknown;
-    if (Array.isArray(entry)) {
-      const values = entry.map((nested) => normalize(nested, depth + 1));
-      result = values.some((nested) => nested !== null) ? values : null;
-    } else {
-      const values = Object.entries(entry)
-        .map(([key, nested]) => {
-          if (!isSafeRecordKey(key))
-            throw new TypeError("invalid-wager-state-json");
-          return [key, normalize(nested, depth + 1)] as const;
-        })
-        .filter(([, nested]) => nested !== null);
-      result = values.length ? Object.fromEntries(values) : null;
-    }
-    active.delete(entry);
-    return result;
-  };
-  return normalize(value, 0);
-}
-
 export function createWagerStateReader(db: D1Database): WagerReader {
   const store = createWagerStateD1Store(db);
   const readWagerSnapshot = async (
@@ -158,12 +118,12 @@ export function createWagerStateRepository(
       throw new WagerStateD1Failure("wager-state-read-only");
     return runOptimisticTransaction({
       maxAttempts: 25,
-      signal,
+      ...(signal === undefined ? {} : { signal }),
       read: () => store.read(key, signal),
       getValue: (current) => decodeWager(current.wager),
       decide: (current) => reduce(structuredClone(current)),
       async write(current, next) {
-        const wager = complete ? next : normalizeJson(next);
+        const wager = parseWagerRecord(next);
         let committed: boolean;
         try {
           committed = await store.commit(

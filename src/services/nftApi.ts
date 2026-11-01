@@ -1,3 +1,4 @@
+import { fetchApplicationData } from "./applicationTransport.ts";
 import type {
   ApiHttpUrl,
   ApiRequest,
@@ -26,7 +27,7 @@ export async function fetchNftsFromApi(
   const timeoutId = setTimeout(() => controller.abort(), NFT_API_TIMEOUT_MS);
   const requestBody: NftApiRequest = { sol, eth };
   try {
-    const response = await fetch(NFT_API_URL, {
+    const response = await fetchApplicationData(NFT_API_URL, {
       method: "POST",
       headers: {
         Accept: "application/json",

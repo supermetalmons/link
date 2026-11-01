@@ -1,26 +1,35 @@
-import { applyD1Migrations, type D1Migration } from "cloudflare:test";
+import { applyCanonicalTestMigrations } from "./canonicalTestMigrations.ts";
+import { isAura, type Aura } from "@mons/shared/appearance";
+import type { D1Migration } from "cloudflare:test";
 import { env } from "cloudflare:workers";
 import { REACTION_SOCKET_PROTOCOL } from "@mons/shared/reactions";
 import { buildMatchPresentationRegistrationStatements } from "../src/matchPresentationRegistry.ts";
 import type { MatchPresentationSnapshot } from "@mons/shared/match-presentation";
-import { runInDurableObject } from "cloudflare:test";
+import { runInCanonicalMatchRoom as runInDurableObject } from "./canonicalMatchTestFixture.ts";
 import type { InviteReactions } from "../src/inviteReactions.ts";
 import { matchPresentationSeedDigest } from "../src/matchPresentationRegistry.ts";
 
 type Seeds = Record<string, { emojiId: number; aura: string }>;
 type Room = DurableObjectStub<InviteReactions>;
+function fixtureAura(value: string): Aura {
+  const aura = value === "" ? "none" : value;
+  if (!isAura(aura)) throw new TypeError("invalid fixture aura");
+  return aura;
+}
 
 export function readStoredPresentationsFromStorage(
   storage: DurableObjectStorage,
   matchId: string,
   frozen = false,
 ): MatchPresentationSnapshot {
-  const table = frozen ? "frozen_match_presentations" : "match_presentations";
+  const table = frozen
+    ? "frozen_match_presentations_canonical"
+    : "match_presentations_canonical";
   const rows = storage.sql
     .exec<{
       actor_uid: string;
       emoji_id: number;
-      aura: string;
+      aura: Aura;
       revision: number;
     }>(
       `SELECT actor_uid, emoji_id, aura, revision FROM ${table} WHERE match_id = ? ORDER BY actor_uid`,
@@ -63,7 +72,13 @@ export async function registerTestPresentations(
     inviteId,
     await Promise.all(
       Object.entries(seeds).map(async ([actorUid, appearance]) => {
-        const seed = { inviteId, matchId, actorUid, ...appearance };
+        const seed = {
+          inviteId,
+          matchId,
+          actorUid,
+          ...appearance,
+          aura: fixtureAura(appearance.aura),
+        };
         return {
           ...seed,
           seedDigest: await matchPresentationSeedDigest(seed),
@@ -86,11 +101,11 @@ export function seedHistoricalPresentations(
   return runInDurableObject(room, (_instance, state) => {
     for (const [actorUid, appearance] of Object.entries(seeds))
       state.storage.sql.exec(
-        "INSERT OR IGNORE INTO match_presentations (match_id, actor_uid, emoji_id, aura, revision) VALUES (?, ?, ?, ?, 0)",
+        "INSERT OR IGNORE INTO match_presentations_canonical (match_id, actor_uid, emoji_id, aura, revision) VALUES (?, ?, ?, ?, 0)",
         matchId,
         actorUid,
         appearance.emojiId,
-        appearance.aura,
+        fixtureAura(appearance.aura),
       );
     return readStoredPresentationsFromStorage(state.storage, matchId);
   });
@@ -105,7 +120,7 @@ export async function freezeHistoricalPresentations(
   return runInDurableObject(room, (_instance, state) => {
     for (const actorUid of Object.keys(seeds))
       state.storage.sql.exec(
-        "INSERT OR IGNORE INTO frozen_match_presentations (match_id, actor_uid, emoji_id, aura, revision) SELECT match_id, actor_uid, emoji_id, aura, revision FROM match_presentations WHERE match_id = ? AND actor_uid = ?",
+        "INSERT OR IGNORE INTO frozen_match_presentations_canonical (match_id, actor_uid, emoji_id, aura, revision) SELECT match_id, actor_uid, emoji_id, aura, revision FROM match_presentations_canonical WHERE match_id = ? AND actor_uid = ?",
         matchId,
         actorUid,
       );
@@ -118,7 +133,7 @@ export async function reactionSocketTestHeaders(
   inviteId: string,
   matchId = inviteId,
 ): Promise<Record<string, string>> {
-  await applyD1Migrations(
+  await applyCanonicalTestMigrations(
     env.PROFILE_GAMES_DB,
     (env as Env & { TEST_D1_MIGRATIONS: D1Migration[] }).TEST_D1_MIGRATIONS,
   );
@@ -132,7 +147,7 @@ export async function reactionSocketTestHeaders(
         provenance: "creation" | "backfill";
         source_id: string;
       }>(
-        "SELECT actor_uid, seed_digest, emoji_id, aura, provenance, source_id FROM match_presentation_seeds WHERE match_id = ? ORDER BY actor_uid",
+        "SELECT actor_uid, seed_digest, emoji_id, aura, provenance, source_id FROM match_presentation_seeds_canonical WHERE match_id = ? ORDER BY actor_uid",
         matchId,
       )
       .toArray(),
@@ -147,8 +162,8 @@ export async function reactionSocketTestHeaders(
           ]),
         )
       : {
-          "host-login": { emojiId: 1, aura: "" },
-          "guest-login": { emojiId: 2, aura: "" },
+          "host-login": { emojiId: 1, aura: "none" },
+          "guest-login": { emojiId: 2, aura: "none" },
         };
     await registerTestPresentations(room, inviteId, matchId, seeds);
   }

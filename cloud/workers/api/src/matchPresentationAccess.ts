@@ -1,7 +1,4 @@
-import {
-  presentationInviteView,
-  type PresentationInviteView,
-} from "@mons/shared/invite-records";
+import type { InviteDocument } from "@mons/shared/invite-records";
 import {
   isMatchPresentationSnapshot,
   type MatchPresentationSnapshot,
@@ -27,7 +24,7 @@ export type MatchPresentationReadDependencies = {
   readRegisteredPresentations?: typeof readRegisteredMatchPresentations;
 };
 
-export type PresentationInvite = PresentationInviteView;
+export type PresentationInvite = InviteDocument;
 
 export function isPresentationMatchId(
   inviteId: string,
@@ -52,7 +49,7 @@ export async function readPresentationInvite(
   if (participants.status === "invalid") {
     throw new AuthApiFailure(409, "failed-precondition", "invite-invalid");
   }
-  return presentationInviteView(participants);
+  return participants.source;
 }
 
 export function requirePresentationPair(invite: PresentationInvite): void {

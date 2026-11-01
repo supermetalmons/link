@@ -1,3 +1,5 @@
+import { inviteDocumentFixture } from "./inviteDocumentFixture.ts";
+import { publicMatchFixture } from "./matchRecordFixture.ts";
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
@@ -18,27 +20,30 @@ function metadata(
   value: Record<string, unknown> = {},
   inviteId = "invite-10",
 ): MatchSyncMetadata {
-  const result = normalizeInviteMetadata(inviteId, {
-    hostId: "host-login",
-    guestId: "guest-login",
-    hostColor: "white",
-    ...value,
-  });
+  const result = normalizeInviteMetadata(
+    inviteId,
+    inviteDocumentFixture({
+      hostId: "host-login",
+      guestId: "guest-login",
+      hostColor: "white",
+      ...value,
+    }),
+  );
   if (result.status !== "ok") throw new Error("invalid-fixture");
   return result;
 }
 
-const match = {
+const match = publicMatchFixture({
   version: 2,
   color: "white",
   emojiId: 1,
-  aura: "",
+  aura: "none" as const,
   gameVariant: "standard",
   fen: "initial",
   status: "",
   flatMovesString: "",
   timer: "",
-};
+});
 
 test("match sync includes only normalized public fields and permits pending creation", () => {
   const snapshot = createMatchSyncSnapshot(
@@ -46,8 +51,8 @@ test("match sync includes only normalized public fields and permits pending crea
     "invite-10",
     {
       ...match,
-      sessionCreation: { secret: "private-receipt" },
-      privateField: true,
+      sessionCreation: "private-receipt",
+      reaction: null,
     },
     null,
   );
@@ -161,10 +166,7 @@ test("pair envelope supports the largest escaped records allowed by the existing
     ...match,
     fen: "\u0001".repeat(16 * 1024),
     flatMovesString: "\u0001".repeat(64 * 1024),
-    status: "\u0001".repeat(1024),
-    timer: "\u0001".repeat(1024),
     gameVariant: "\u0001".repeat(256),
-    aura: "\u0001".repeat(32),
   };
   const snapshot = createMatchSyncSnapshot(metadata(), "invite-10", escaped, {
     ...escaped,

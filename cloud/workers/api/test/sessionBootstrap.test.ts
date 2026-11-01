@@ -1,3 +1,7 @@
+import { inviteDocumentFixture } from "./inviteDocumentFixture.ts";
+import { publicMatchFixture } from "./matchRecordFixture.ts";
+import { eventDocumentFixture } from "./eventCompatibilityFixture.ts";
+import { applicationRequest } from "./testEnv.ts";
 import { retainedInviteSourceFixture } from "./inviteDocumentFixture.ts";
 import { eventSnapshotEtag, type EventSnapshotSeed } from "@mons/shared/events";
 import {
@@ -30,24 +34,24 @@ const input = {
   refreshSecret: "A".repeat(43),
   revokeSecret: `${"B".repeat(42)}A`,
 };
-const match = {
+const match = publicMatchFixture({
   version: 2,
   color: "white",
   emojiId: 1,
-  aura: "",
+  aura: "none",
   gameVariant: "standard",
   fen: "initial",
-  status: "",
+  status: "active",
   flatMovesString: "",
-  timer: "",
-};
+  timer: { state: "idle" },
+});
 const flush = () => new Promise<void>((resolve) => setImmediate(resolve));
 const eventSeed: EventSnapshotSeed = {
   snapshot: {
     ok: true,
     eventId: "event-one",
     revision: 2,
-    event: { eventId: "event-one", status: "scheduled" },
+    event: eventDocumentFixture({ eventId: "event-one", status: "scheduled" }),
     prizeSelections: {},
   },
   etag: eventSnapshotEtag("event-one", 2),
@@ -55,7 +59,13 @@ const eventSeed: EventSnapshotSeed = {
 };
 
 function setup(source: Record<string, unknown> = {}) {
-  const raw = { hostId: uid, guestId: "guest", hostColor: "white", ...source };
+  const raw = inviteDocumentFixture({
+    hostId: uid,
+    guestId: "guest",
+    hostColor: "white",
+    ...source,
+    ...(source.password === true ? { password: "fixture-password" } : {}),
+  });
   const metadata = normalizeInviteMetadata(inviteId, raw);
   if (metadata.status !== "ok") throw new Error("invalid-fixture");
   const calls = {
@@ -126,7 +136,7 @@ function setup(source: Record<string, unknown> = {}) {
     query = `bootstrapInviteId=${inviteId}`,
     signal?: AbortSignal,
   ) =>
-    new Request(
+    applicationRequest(
       `https://api.mons.link/auth/session/${endpoint}${query ? `?${query}` : ""}`,
       {
         method: "POST",
@@ -139,7 +149,7 @@ function setup(source: Record<string, unknown> = {}) {
               }),
         },
         ...(endpoint === "anonymous" ? { body: JSON.stringify(input) } : {}),
-        signal,
+        ...(signal === undefined ? {} : { signal }),
       },
     );
   const read = (incoming = request()) =>
@@ -315,14 +325,16 @@ test("event bootstrap rejects ambiguous targets before allocating a session", as
 test("event bootstrap timeout returns its already issued token", async (t) => {
   t.mock.timers.enable({ apis: ["setTimeout"] });
   const h = setup();
-  let started = false;
+  const began = Promise.withResolvers<void>();
   h.bootstrap.readEventSnapshotSeed = async () => {
-    started = true;
+    began.resolve();
     return new Promise(() => undefined);
   };
   const pending = h.read(h.request("anonymous", "bootstrapEventId=event-one"));
-  for (let attempt = 0; attempt < 20 && !started; attempt++) await flush();
-  assert.equal(started, true);
+  await Promise.race([
+    began.promise,
+    pending.then(() => assert.fail("bootstrap did not start")),
+  ]);
   t.mock.timers.tick(1_000);
   const response = await pending;
   assert.equal(response.status, 200);
@@ -352,7 +364,7 @@ test("session composition honors approved selection for pending rematches", asyn
 test("missing, invalid, denied, failed and rate-limited game reads retain session success", async () => {
   for (const [status, source] of [
     [404, null],
-    [409, { invalid: true }],
+    [503, { invalid: true }],
     [
       403,
       { hostId: "other", guestId: null, hostColor: "white", password: true },
@@ -362,7 +374,11 @@ test("missing, invalid, denied, failed and rate-limited game reads retain sessio
     const h = setup();
     h.bootstrap.readAdmission = async () => {
       if (source instanceof Error) throw source;
-      return retainedInviteSourceFixture(source);
+      return retainedInviteSourceFixture(
+        source && "password" in source && source.password === true
+          ? { ...source, password: "fixture-password" }
+          : source,
+      );
     };
     const body = await composed(await h.read());
     assert.deepEqual(body.gameBootstrap.result, { ok: false, status });

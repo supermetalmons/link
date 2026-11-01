@@ -44,15 +44,16 @@ function isMatchHistoryWithinLimits(value) {
 }
 function buildFreshMatchRecord({ color, emojiId, aura, seed }) {
   return {
+    schemaVersion: 1,
     version: CONTROLLER_VERSION,
     color,
     emojiId,
     aura,
     gameVariant: seed.gameVariant,
     fen: seed.fen,
-    status: "",
+    status: "active",
     flatMovesString: "",
-    timer: "",
+    timer: { state: "idle" },
   };
 }
 function movesFromFlatString(value) {

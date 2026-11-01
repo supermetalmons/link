@@ -56,7 +56,7 @@ export async function commitEventMutationsInternal(
     mutations.push(
       db
         .prepare(
-          `DELETE FROM event_transition_intents
+          `DELETE FROM event_transition_intents_canonical
            WHERE transition_id = ? AND event_id = ? AND status = 'pending'`,
         )
         .bind(options.transition.transitionId, options.transition.eventId),

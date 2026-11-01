@@ -17,10 +17,7 @@ import {
   type GameSessionLeaseProof,
 } from "./gameSessionTransitions.ts";
 import type { GameSessionMutationLockStore } from "./gameplayCoordinationD1.ts";
-import type {
-  MatchStatePort,
-  TransactionDecision,
-} from "./repositoryContracts.ts";
+import type { MatchStatePort } from "./repositoryContracts.ts";
 import type { RawGameSessionPort } from "./gameSessionContracts.ts";
 import { createTypedGameSessionPort } from "./gameSessionRecordAdapter.ts";
 import {
@@ -44,10 +41,7 @@ import {
   readInviteMetadata,
   readInviteMetadataMany,
 } from "./automatchReadD1.ts";
-import {
-  isFifoAutomatchQueue,
-  readAutomatchQueueHead,
-} from "./automatchQueueD1.ts";
+import { readAutomatchQueueHead } from "./automatchQueueD1.ts";
 import {
   markAutomatchOutcome,
   measureAutomatchPhase,
@@ -134,17 +128,17 @@ export function createAutomatchPersistenceCompatibility(
       session
         .prepare(
           `SELECT MIN(resource_key) AS resource_key
-        FROM game_session_transition_resources
+        FROM game_session_transition_resources_canonical
         WHERE resource_key IN (SELECT value FROM json_each(?))
         GROUP BY transition_id`,
         )
         .bind(JSON.stringify([...new Set(keys)])),
     ]);
     assertAutomatchBackend(
-      parseAutomatchRuntimeControlRow(modeRows.results[0]),
+      parseAutomatchRuntimeControlRow(modeRows!.results[0]),
     );
     signal?.throwIfAborted();
-    if (!pending.results.length) return false;
+    if (!pending!.results.length) return false;
     markAutomatchOutcome("recovery");
     return write(
       "session-transition-recovery",
@@ -155,11 +149,13 @@ export function createAutomatchPersistenceCompatibility(
           store,
           now,
           onCommitted: notifyCommitted,
-          prepareMatchPresentations,
+          ...(prepareMatchPresentations === undefined
+            ? {}
+            : { prepareMatchPresentations }),
           writeGuards: () => automatchAdmissionGuardStatements(db, admission),
           inviteAdmission,
         });
-        for (const { resource_key } of pending.results) {
+        for (const { resource_key } of pending!.results) {
           await transitions.recoverResource(resource_key, signal);
         }
         return true;
@@ -211,18 +207,6 @@ export function createAutomatchPersistenceCompatibility(
       });
       return operation(guarded);
     });
-  const transactProjection = (
-    method:
-      | "transactAutomatchTelegramSource"
-      | "transactAutomatchTelegramOutbox"
-      | "transactAutomatchProfileOutbox",
-    inviteId: string,
-    update: (current: unknown) => TransactionDecision<unknown>,
-    signal?: AbortSignal,
-  ) =>
-    withProjectionWrite(inviteId, (guarded) =>
-      guarded[method](inviteId, update, signal),
-    );
   const rawClient: RawGameSessionPort = {
     claimAutomatchProfileOutbox: (
       inviteId,
@@ -288,8 +272,7 @@ export function createAutomatchPersistenceCompatibility(
       return store.listAutomatchEntriesByLogin(uid, limit, signal);
     },
     readFirstAutomatchEntry: async (signal) => {
-      if (!isFifoAutomatchQueue(await control()))
-        return store.readFirstAutomatchEntry(signal);
+      await control();
       while (true) {
         signal?.throwIfAborted();
         const head = await readAutomatchQueueHead(db, signal);
@@ -325,25 +308,16 @@ export function createAutomatchPersistenceCompatibility(
         signal,
       ),
     transactAutomatchTelegramSource: (inviteId, update, signal) =>
-      transactProjection(
-        "transactAutomatchTelegramSource",
-        inviteId,
-        update,
-        signal,
+      withProjectionWrite(inviteId, (guarded) =>
+        guarded.transactAutomatchTelegramSource(inviteId, update, signal),
       ),
     transactAutomatchTelegramOutbox: (inviteId, update, signal) =>
-      transactProjection(
-        "transactAutomatchTelegramOutbox",
-        inviteId,
-        update,
-        signal,
+      withProjectionWrite(inviteId, (guarded) =>
+        guarded.transactAutomatchTelegramOutbox(inviteId, update, signal),
       ),
     transactAutomatchProfileOutbox: (inviteId, update, signal) =>
-      transactProjection(
-        "transactAutomatchProfileOutbox",
-        inviteId,
-        update,
-        signal,
+      withProjectionWrite(inviteId, (guarded) =>
+        guarded.transactAutomatchProfileOutbox(inviteId, update, signal),
       ),
     listDueAutomatchTelegramOutboxes: async (atMs, limit, signal) => {
       await control();
@@ -424,7 +398,9 @@ export function createAutomatchPersistenceCompatibility(
               store,
               now,
               onCommitted: notifyCommitted,
-              prepareMatchPresentations,
+              ...(prepareMatchPresentations === undefined
+                ? {}
+                : { prepareMatchPresentations }),
               writeGuards: guards,
               inviteAdmission,
             }).commit(changes, [...held.values()], signal);
@@ -473,9 +449,9 @@ export function createAutomatchPersistenceCompatibility(
         prepareAutomatchRuntimeControlRead(session),
         prepareInviteSourceControlRead(session),
       ]);
-      const mode = parseAutomatchRuntimeControlRow(modeRows.results[0]);
+      const mode = parseAutomatchRuntimeControlRow(modeRows!.results[0]);
       assertAutomatchBackend(mode);
-      const inviteControl = parseInviteSourceControlRow(inviteRows.results[0]);
+      const inviteControl = parseInviteSourceControlRow(inviteRows!.results[0]);
       if (inviteControl.backend !== "d1") {
         throw new InviteSourceFailure("invite-source-backend-retired");
       }
@@ -513,7 +489,9 @@ export function createAutomatchPersistenceCompatibility(
           store,
           now,
           onCommitted: notifyCommitted,
-          prepareMatchPresentations,
+          ...(prepareMatchPresentations === undefined
+            ? {}
+            : { prepareMatchPresentations }),
           writeGuards: () => automatchAdmissionGuardStatements(db, admission),
           inviteAdmission,
         }).sweep(limit),

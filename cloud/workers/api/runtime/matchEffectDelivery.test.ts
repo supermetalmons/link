@@ -1,10 +1,10 @@
-import {
-  timerStartStoreFixture,
-  matchEffectFixture,
-} from "../test/matchClaimFixture.ts";
+import { matchDocumentFixture } from "../test/matchRecordFixture.ts";
+import { runInCanonicalMatchWriterFixture as runInDurableObject } from "./canonicalMatchTestFixture.ts";
+import { eventDocumentFixture } from "../test/eventCompatibilityFixture.ts";
+import { matchEffectFixture } from "../test/matchClaimFixture.ts";
 import { env } from "cloudflare:workers";
-import { runInDurableObject, type D1Migration } from "cloudflare:test";
-import { beforeAll, beforeEach, expect, it, vi } from "vitest";
+import { type D1Migration } from "cloudflare:test";
+import { beforeAll, beforeEach, expect, it } from "vitest";
 import { formatMatchTimer } from "@mons/shared/timers";
 import {
   createMatchEffectDelivery,
@@ -14,7 +14,6 @@ import {
   MatchStateStore,
   type MatchStateStoreOptions,
 } from "../src/matchStateStore.ts";
-import { createMatchTimerStartStore } from "../src/gameplayCoordinationD1.ts";
 import { buildEventProgressPlan } from "../src/eventProgressCodec.ts";
 import { readDueMatchEffect } from "../src/matchEffectCodec.ts";
 import {
@@ -48,18 +47,22 @@ const effect = matchEffectFixture({
   attempts: 0,
 });
 
-function environment(
-  onDispatch: () => Promise<void>,
-  cleanupLegacyTimerStarts: Parameters<typeof createMatchEffectDelivery>[1] = (
-    input,
-  ) =>
-    createMatchTimerStartStore(testEnv.PROFILE_GAMES_DB).deleteRetainedPair(
-      input,
-    ),
-) {
+function environment(onDispatch: () => Promise<void>) {
   let dispatched = 0;
   const value: Env = {
     ...testEnv,
+    PROFILE_GAMES_DB: new Proxy(testEnv.PROFILE_GAMES_DB, {
+      get(target, property) {
+        if (property === "prepare")
+          return (sql: string) => {
+            if (sql.includes("match_timer_starts"))
+              throw new Error("retired-timer-d1-access");
+            return target.prepare(sql);
+          };
+        const value: unknown = Reflect.get(target, property, target);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    }),
     EVENT_PROGRESS_WORKFLOW: {
       create: async () => {
         throw new Error("unexpected-workflow-create");
@@ -76,7 +79,7 @@ function environment(
     },
   };
   return {
-    deliver: createMatchEffectDelivery(value, cleanupLegacyTimerStarts),
+    deliver: createMatchEffectDelivery(value),
     dispatched: () => dispatched,
   };
 }
@@ -86,21 +89,7 @@ async function localTimerEffect(
   eventId: string | null,
 ) {
   const now = 2_000_000_000_000;
-  const timerStarts = timerStartStoreFixture({
-    getOrAdvance: vi.fn<MatchStateStoreOptions["timerStarts"]["getOrAdvance"]>(
-      async () => {
-        throw new Error("unexpected-d1-timer-write");
-      },
-    ),
-    deletePair: vi.fn<MatchStateStoreOptions["timerStarts"]["deletePair"]>(
-      async () => {
-        throw new Error("unexpected-d1-timer-cleanup");
-      },
-    ),
-  });
   const settings = {
-    timerStarts,
-    newMatchTimerStorage: "local",
     now: () => now,
     resolveGame: () => ({
       activeColor: "black",
@@ -123,13 +112,13 @@ async function localTimerEffect(
       matchId: input.matchId,
       playerId,
       marker: `${playerId}-created`,
-      value: {
+      value: matchDocumentFixture({
         color: index === 0 ? "white" : "black",
         fen: "initial",
         flatMovesString: "",
         status: "",
         timer: index === 0 ? formatMatchTimer(7, now - 1) : "",
-      },
+      }),
     })),
   });
   await store.startTimer(input);
@@ -137,23 +126,17 @@ async function localTimerEffect(
   return {
     store: new MatchStateStore(storage, {
       ...settings,
-      newMatchTimerStorage: "d1",
     }),
-    timerStarts,
     now,
   };
 }
 
 function localMarkers(storage: DurableObjectStorage) {
   return storage.sql
-    .exec("SELECT * FROM match_state_timer_starts ORDER BY match_id, player_id")
+    .exec(
+      "SELECT * FROM match_state_timer_starts_canonical ORDER BY match_id, player_id",
+    )
     .toArray();
-}
-
-async function timerCount() {
-  return testEnv.PROFILE_GAMES_DB.prepare(
-    "SELECT COUNT(*) AS count FROM match_timer_starts WHERE match_id = 'match'",
-  ).first<number>("count");
 }
 
 async function admissionCount() {
@@ -184,8 +167,8 @@ beforeAll(async () => {
         {
           kind: "event",
           eventId: "event",
-          value: {
-            schemaVersion: 2,
+          value: eventDocumentFixture({
+            schemaVersion: 3,
             eventId: "event",
             status: "active",
             createdAtMs: 100,
@@ -195,8 +178,7 @@ beforeAll(async () => {
             createdByLoginUid: "host",
             createdByUsername: "ivan",
             participants: {},
-            rounds: {},
-          },
+          }),
         },
       ],
       { admission },
@@ -212,27 +194,19 @@ beforeEach(async () => {
       "DROP TRIGGER IF EXISTS keep_match_effect_admission",
     ),
     testEnv.EVENT_DB.prepare("DELETE FROM event_write_admissions"),
-    testEnv.EVENT_DB.prepare("DELETE FROM event_progress_outboxes"),
+    testEnv.EVENT_DB.prepare("DELETE FROM event_progress_outboxes_canonical"),
   ]);
   await testEnv.PROFILE_DB.prepare(
     "UPDATE profile_canonical_control SET state = 'active' WHERE singleton = 1",
   ).run();
-  await testEnv.PROFILE_GAMES_DB.batch([
-    testEnv.PROFILE_GAMES_DB.prepare("DELETE FROM match_timer_starts"),
-    testEnv.PROFILE_GAMES_DB.prepare(
-      `INSERT INTO match_timer_starts (player_id, match_id, timer, turn_number, updated_at_ms)
-       VALUES ('host', 'match', '1;100', 1, 100), ('guest', 'match', '1;100', 1, 100)`,
-    ),
-  ]);
 });
 
 it("commits the event outbox and releases its admission before Workflow dispatch", async () => {
   const plan = await buildEventProgressPlan(
-    { eventId: "event", sourceKey: effect.sourceKey, reason: effect.reason },
+    { eventId: "event", sourceKey: effect.sourceKey, reason: effect.kind },
     effect.claimedAtMs,
   );
   const f = environment(async () => {
-    expect(await timerCount()).toBe(0);
     expect(
       await readEventProgressOutbox(testEnv.EVENT_DB, plan.outboxId),
     ).toEqual(plan.outbox);
@@ -253,11 +227,11 @@ it("retains the committed outbox without dispatch when admission release is unco
     "match-event-admission-release-unconfirmed",
   );
   expect(f.dispatched()).toBe(0);
-  expect(await timerCount()).toBe(0);
+
   expect(await admissionCount()).toBe(1);
   expect(
     await testEnv.EVENT_DB.prepare(
-      "SELECT COUNT(*) AS count FROM event_progress_outboxes",
+      "SELECT COUNT(*) AS count FROM event_progress_outboxes_canonical",
     ).first<number>("count"),
   ).toBe(1);
 });
@@ -267,7 +241,7 @@ it.each(["unconfirmed", "throws"] as const)(
   async (release) => {
     await testEnv.EVENT_DB.batch([
       testEnv.EVENT_DB.prepare(
-        `CREATE TRIGGER fail_match_effect_commit BEFORE INSERT ON event_progress_outboxes
+        `CREATE TRIGGER fail_match_effect_commit BEFORE INSERT ON event_progress_outboxes_canonical
          BEGIN SELECT RAISE(ABORT, 'match-effect-commit-failed'); END`,
       ),
       testEnv.EVENT_DB.prepare(
@@ -292,7 +266,7 @@ it.each(["unconfirmed", "throws"] as const)(
       expect(await admissionCount()).toBe(1);
       expect(
         await testEnv.EVENT_DB.prepare(
-          "SELECT COUNT(*) AS count FROM event_progress_outboxes",
+          "SELECT COUNT(*) AS count FROM event_progress_outboxes_canonical",
         ).first<number>("count"),
       ).toBe(0);
     } finally {
@@ -306,97 +280,51 @@ it.each(["unconfirmed", "throws"] as const)(
 );
 
 it.each(["event", null])(
-  "keeps timer markers for event %s when canonical profile writes are frozen",
+  "does not dispatch effects for event %s when canonical profile writes are frozen",
   async (eventId) => {
     await testEnv.PROFILE_DB.prepare(
       "UPDATE profile_canonical_control SET state = 'frozen' WHERE singleton = 1",
     ).run();
-    const cleanup = vi.fn(async () => {
-      throw new Error("unexpected-timer-cleanup");
-    });
-    const f = environment(async () => {}, cleanup);
+    const f = environment(async () => {});
     await expect(
       f.deliver(matchEffectFixture({ ...effect, eventId })),
     ).rejects.toThrow("profile-writes-disabled");
-    expect(cleanup).not.toHaveBeenCalled();
-    expect(await timerCount()).toBe(2);
+
     expect(await admissionCount()).toBe(0);
     expect(f.dispatched()).toBe(0);
   },
 );
 
-it("cleans non-event timer markers without creating an event outbox or Workflow", async () => {
+it("finishes non-event effects without an event outbox or Workflow", async () => {
   const f = environment(async () => {});
   await f.deliver(matchEffectFixture({ ...effect, eventId: null }));
-  expect(await timerCount()).toBe(0);
+
   expect(await admissionCount()).toBe(0);
   expect(f.dispatched()).toBe(0);
   expect(
     await testEnv.EVENT_DB.prepare(
-      "SELECT COUNT(*) AS count FROM event_progress_outboxes",
+      "SELECT COUNT(*) AS count FROM event_progress_outboxes_canonical",
     ).first<number>("count"),
   ).toBe(0);
 });
 
-it("cleans legacy timers before rejecting malformed progress fields and releases the admission", async () => {
-  const f = environment(async () => {
-    throw new Error("unexpected Workflow");
-  });
-  const retained = readDueMatchEffect({
-    payload_json: JSON.stringify({
-      ...effect,
-      eventId: 42,
-      sourceKey: ["retained"],
-      reason: 7,
-    }),
-    next_at_ms: 100,
-    attempts: 0,
-  });
-  await expect(f.deliver(retained)).rejects.toThrow(
-    "invalid-event-progress-outbox",
-  );
-  expect(await timerCount()).toBe(0);
-  expect(await admissionCount()).toBe(0);
-  expect(f.dispatched()).toBe(0);
-  expect(
-    await testEnv.EVENT_DB.prepare(
-      "SELECT COUNT(*) AS count FROM event_progress_outboxes",
-    ).first<number>("count"),
-  ).toBe(0);
-});
-
-it("local retained cleanup skips malformed actor fields before the non-event return", async () => {
-  const room = testEnv.INVITE_REACTIONS.getByName(crypto.randomUUID());
-  await runInDurableObject(room, async (_instance, ctx) => {
-    try {
-      const { store, timerStarts, now } = await localTimerEffect(
-        ctx.storage,
-        null,
-      );
-      const markers = localMarkers(ctx.storage);
-      const retained = readDueMatchEffect({
-        payload_json: JSON.stringify({
-          ...effect,
-          eventId: null,
-          playerId: [],
-          opponentId: { retained: true },
-        }),
-        next_at_ms: now,
+it("rejects malformed effects before event projection or Workflow dispatch", async () => {
+  for (const fields of [
+    { eventId: 42 },
+    { sourceKey: ["invalid"] },
+    { playerId: [] },
+    { opponentId: {} },
+  ]) {
+    expect(() =>
+      readDueMatchEffect({
+        payload_json: JSON.stringify({ ...effect, ...fields }),
+        next_at_ms: 100,
         attempts: 0,
-      });
-      const f = environment(async () => {
-        throw new Error("unexpected Workflow");
-      }, store.cleanupRetainedTimerStarts.bind(store));
-      await expect(f.deliver(retained)).resolves.toBeUndefined();
-      expect(localMarkers(ctx.storage)).toEqual(markers);
-      expect(timerStarts.deletePair).not.toHaveBeenCalled();
-      expect(await timerCount()).toBe(2);
-      expect(await admissionCount()).toBe(0);
-      expect(f.dispatched()).toBe(0);
-    } finally {
-      await ctx.storage.deleteAlarm();
-    }
-  });
+      }),
+    ).toThrow();
+  }
+
+  expect(await admissionCount()).toBe(0);
 });
 
 it.each(["event", null])(
@@ -405,18 +333,12 @@ it.each(["event", null])(
     const room = testEnv.INVITE_REACTIONS.getByName(crypto.randomUUID());
     await runInDurableObject(room, async (_instance, ctx) => {
       try {
-        const { store, timerStarts, now } = await localTimerEffect(
-          ctx.storage,
-          eventId,
-        );
+        const { store, now } = await localTimerEffect(ctx.storage, eventId);
         const pending = store.effects.listDueEffects(now);
         expect(pending).toHaveLength(1);
         const markers = localMarkers(ctx.storage);
         expect(markers).toHaveLength(1);
-        const f = environment(
-          async () => {},
-          store.cleanupRetainedTimerStarts.bind(store),
-        );
+        const f = environment(async () => {});
         await new MatchEffectsDispatcher(store.effects, {
           deliver: f.deliver,
           scheduleAlarm: async () => {},
@@ -426,14 +348,12 @@ it.each(["event", null])(
         expect(store.effects.listDueEffects(now)).toEqual([]);
         expect(store.effects.nextEffectAt()).toBeNull();
         expect(localMarkers(ctx.storage)).toEqual(markers);
-        expect(timerStarts.getOrAdvance).not.toHaveBeenCalled();
-        expect(timerStarts.deletePair).not.toHaveBeenCalled();
-        expect(await timerCount()).toBe(2);
+
         expect(f.dispatched()).toBe(eventId ? 1 : 0);
         expect(await admissionCount()).toBe(0);
         expect(
           await testEnv.EVENT_DB.prepare(
-            "SELECT COUNT(*) AS count FROM event_progress_outboxes",
+            "SELECT COUNT(*) AS count FROM event_progress_outboxes_canonical",
           ).first<number>("count"),
         ).toBe(eventId ? 1 : 0);
       } finally {
@@ -442,40 +362,3 @@ it.each(["event", null])(
     });
   },
 );
-
-it("rejects an inconsistent local cohort before cleanup or event dispatch", async () => {
-  const room = testEnv.INVITE_REACTIONS.getByName(crypto.randomUUID());
-  await runInDurableObject(room, async (_instance, ctx) => {
-    try {
-      const { store, timerStarts, now } = await localTimerEffect(
-        ctx.storage,
-        "event",
-      );
-      const pending = store.effects.listDueEffects(now);
-      expect(pending).toHaveLength(1);
-      const markers = localMarkers(ctx.storage);
-      ctx.storage.sql.exec("DELETE FROM match_state_timer_cohorts");
-      const f = environment(
-        async () => {},
-        store.cleanupRetainedTimerStarts.bind(store),
-      );
-
-      await expect(f.deliver(pending[0])).rejects.toThrow(
-        "match-timer-storage-invalid",
-      );
-      expect(store.effects.listDueEffects(now)).toEqual(pending);
-      expect(localMarkers(ctx.storage)).toEqual(markers);
-      expect(timerStarts.deletePair).not.toHaveBeenCalled();
-      expect(await timerCount()).toBe(2);
-      expect(f.dispatched()).toBe(0);
-      expect(await admissionCount()).toBe(0);
-      expect(
-        await testEnv.EVENT_DB.prepare(
-          "SELECT COUNT(*) AS count FROM event_progress_outboxes",
-        ).first<number>("count"),
-      ).toBe(0);
-    } finally {
-      await ctx.storage.deleteAlarm();
-    }
-  });
-});

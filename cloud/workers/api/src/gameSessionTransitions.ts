@@ -12,7 +12,6 @@ import type { GameSessionChange } from "./gameSessionContracts.ts";
 import {
   digest,
   readField,
-  resolveValue,
   sessionLayout,
   decodeSessionMatchCreation,
   encodeSessionMatchCreations,
@@ -21,7 +20,6 @@ import {
   serializeGameSessionIntent,
   gameSessionIntentResources,
   type GameSessionIntentWrite,
-  type RetainedGameSessionIntent,
 } from "./gameSessionCodec.ts";
 import { isSafeRecordKey } from "./recordKeys.ts";
 import { buildLoginMatchDiscoveryStatements } from "./loginMatchDiscoveryD1.ts";
@@ -62,19 +60,15 @@ type TransitionRow = {
   transition_id: string;
   invite_id: string;
   payload_json: string;
-  status: "pending" | "completed";
+  status: "pending" | "completed" | "cancelled" | "blocked";
 };
 type TransitionStore = Pick<
   ReturnType<typeof createAutomatchD1Store>,
-  | "prepareChanges"
-  | "buildRetainedCommitStatements"
-  | "buildRevisionGuardStatements"
+  "prepareChanges" | "buildCommitStatements" | "buildRevisionGuardStatements"
 >;
 type InviteTransitionStore = Pick<
   ReturnType<typeof createInviteSourceD1Store>,
-  | "prepareChanges"
-  | "buildRetainedCommitStatements"
-  | "buildRevisionGuardStatements"
+  "prepareChanges" | "buildCommitStatements" | "buildRevisionGuardStatements"
 >;
 type InviteAdmission = Awaited<ReturnType<typeof acquireInviteSourceAdmission>>;
 type InviteControl = Awaited<ReturnType<typeof readInviteSourceControl>>;
@@ -120,7 +114,7 @@ export function gameSessionResourceGuardStatements(
       .prepare(
         `INSERT INTO game_session_transition_guards (singleton)
       SELECT 0 WHERE EXISTS (
-        SELECT 1 FROM game_session_transition_resources WHERE resource_key = ?
+        SELECT 1 FROM game_session_transition_resources_canonical WHERE resource_key = ?
       )`,
       )
       .bind(key),
@@ -129,14 +123,14 @@ export function gameSessionResourceGuardStatements(
 
 function gameSessionIntentResourceGuards(
   db: Pick<D1Database, "prepare">,
-  intent: RetainedGameSessionIntent,
+  intent: GameSessionIntentWrite,
 ): D1PreparedStatement[] {
   return gameSessionIntentResources(intent).map((key) =>
     db
       .prepare(
         `INSERT INTO game_session_transition_guards (singleton)
           SELECT 0 WHERE NOT EXISTS (
-            SELECT 1 FROM game_session_transition_resources WHERE resource_key = ? AND transition_id = ?
+            SELECT 1 FROM game_session_transition_resources_canonical WHERE resource_key = ? AND transition_id = ?
           )`,
       )
       .bind(key, intent.transitionId),
@@ -165,8 +159,8 @@ export function prepareGameSessionResourceTransitionRead(
   return db
     .prepare(
       `SELECT t.transition_id, t.invite_id, t.payload_json, t.status
-        FROM game_session_transition_resources r
-        JOIN game_session_transitions t ON t.transition_id = r.transition_id
+        FROM game_session_transition_resources_canonical r
+        JOIN game_session_transitions_canonical t ON t.transition_id = r.transition_id
         WHERE r.resource_key = ?`,
     )
     .bind(resourceKey);
@@ -251,7 +245,7 @@ export function createGameSessionTransitions({
     db
       .withSession("first-primary")
       .prepare(
-        "SELECT transition_id, invite_id, payload_json, status FROM game_session_transitions WHERE transition_id = ?",
+        "SELECT transition_id, invite_id, payload_json, status FROM game_session_transitions_canonical WHERE transition_id = ?",
       )
       .bind(transitionId)
       .first<TransitionRow>();
@@ -265,7 +259,7 @@ export function createGameSessionTransitions({
     assertGameSessionResourceAvailable(db, resourceKey);
 
   async function materialize(
-    payload: RetainedGameSessionIntent,
+    payload: GameSessionIntentWrite,
     operation: InviteOperation,
     signal?: AbortSignal,
   ): Promise<MatchPresentationRegistration[]> {
@@ -314,6 +308,7 @@ export function createGameSessionTransitions({
     signal?: AbortSignal,
   ): Promise<void> {
     if (row.status === "completed") return;
+    if (row.status !== "pending") fail("manual-review-required");
     await requireActiveDurableMatchState(db);
     await applyAdmittedState(row, operation, signal);
   }
@@ -324,6 +319,7 @@ export function createGameSessionTransitions({
     signal?: AbortSignal,
   ): Promise<void> {
     if (row.status === "completed") return;
+    if (row.status !== "pending") fail("manual-review-required");
     const payload = readGameSessionIntent(row);
     try {
       const presentations = await materialize(payload, operation, signal);
@@ -342,7 +338,7 @@ export function createGameSessionTransitions({
           .prepare(
             `INSERT INTO game_session_transition_guards (singleton)
           SELECT 0 WHERE NOT EXISTS (
-            SELECT 1 FROM game_session_transitions WHERE transition_id = ? AND status = 'pending'
+            SELECT 1 FROM game_session_transitions_canonical WHERE transition_id = ? AND status = 'pending'
           )`,
           )
           .bind(payload.transitionId),
@@ -362,19 +358,16 @@ export function createGameSessionTransitions({
           }),
           now(),
         ),
-        ...store.buildRetainedCommitStatements(payload.mutations, now()),
-        ...inviteStore.buildRetainedCommitStatements(
-          payload.inviteMutations,
-          now(),
-        ),
+        ...store.buildCommitStatements(payload.mutations, now()),
+        ...inviteStore.buildCommitStatements(payload.inviteMutations, now()),
         db
           .prepare(
-            "UPDATE game_session_transitions SET status = 'completed', updated_at_ms = ?, last_error = NULL WHERE transition_id = ? AND status = 'pending'",
+            "UPDATE game_session_transitions_canonical SET status = 'completed', updated_at_ms = ?, last_error = NULL WHERE transition_id = ? AND status = 'pending'",
           )
           .bind(now(), payload.transitionId),
         db
           .prepare(
-            "DELETE FROM game_session_transition_resources WHERE transition_id = ?",
+            "DELETE FROM game_session_transition_resources_canonical WHERE transition_id = ?",
           )
           .bind(payload.transitionId),
       ];
@@ -391,7 +384,7 @@ export function createGameSessionTransitions({
       try {
         await db
           .prepare(
-            "UPDATE game_session_transitions SET updated_at_ms = ?, attempt_count = attempt_count + 1, last_error = ? WHERE transition_id = ? AND status = 'pending'",
+            "UPDATE game_session_transitions_canonical SET updated_at_ms = ?, attempt_count = attempt_count + 1, last_error = ? WHERE transition_id = ? AND status = 'pending'",
           )
           .bind(
             now(),
@@ -488,10 +481,10 @@ export function createGameSessionTransitions({
       );
       if (
         inviteMutations.length !== 1 ||
-        inviteMutations[0].current.inviteId !== split.inviteId
+        inviteMutations[0]!.current.inviteId !== split.inviteId
       )
         fail("invalid-invite-source-mutation");
-      const currentInvite = inviteMutations[0].current.value;
+      const currentInvite = inviteMutations[0]!.current.value;
       if (
         isEventOwnedInviteSource(currentInvite) ||
         isEventOwnedInviteSource(split.inviteUpdates) ||
@@ -514,7 +507,7 @@ export function createGameSessionTransitions({
       const inviteUpdates = Object.fromEntries(
         Object.entries(split.inviteUpdates).map(([field, value]) => [
           field,
-          resolveValue(value, readField(currentInvite, field), createdAtMs),
+          structuredClone(value),
         ]),
       );
       const expectedFields = Object.fromEntries(
@@ -550,11 +543,11 @@ export function createGameSessionTransitions({
       const payload: GameSessionIntentWrite = {
         inviteId: split.inviteId,
         transitionId,
-        digest: contentDigest,
+        operationDigest: contentDigest,
         resources,
         mutations,
         creations,
-        version: 2,
+        version: 3,
         inviteSourceEpoch: operation.control.epoch,
         inviteMutations,
         createdAtMs,
@@ -583,7 +576,7 @@ export function createGameSessionTransitions({
         ...inviteStore.buildRevisionGuardStatements(inviteMutations),
         db
           .prepare(
-            "INSERT INTO game_session_transitions (transition_id, invite_id, payload_json, status, created_at_ms, updated_at_ms) VALUES (?, ?, ?, 'pending', ?, ?)",
+            "INSERT INTO game_session_transitions_canonical (transition_id, invite_id, payload_json, status, created_at_ms, updated_at_ms) VALUES (?, ?, ?, 'pending', ?, ?)",
           )
           .bind(
             transitionId,
@@ -595,7 +588,7 @@ export function createGameSessionTransitions({
         ...resources.map((key) =>
           db
             .prepare(
-              "INSERT INTO game_session_transition_resources (resource_key, transition_id) VALUES (?, ?)",
+              "INSERT INTO game_session_transition_resources_canonical (resource_key, transition_id) VALUES (?, ?)",
             )
             .bind(key, transitionId),
         ),
@@ -637,7 +630,7 @@ export function createGameSessionTransitions({
     const rows = await db
       .withSession("first-primary")
       .prepare(
-        "SELECT transition_id, invite_id, payload_json, status FROM game_session_transitions WHERE status = 'pending' ORDER BY updated_at_ms, transition_id LIMIT ?",
+        "SELECT transition_id, invite_id, payload_json, status FROM game_session_transitions_canonical WHERE status = 'pending' ORDER BY updated_at_ms, transition_id LIMIT ?",
       )
       .bind(limit)
       .all<TransitionRow>();
@@ -656,11 +649,11 @@ export function createGameSessionTransitions({
       ...inviteGuards(operation),
       db
         .prepare(
-          `DELETE FROM game_session_transitions WHERE transition_id IN (
-        SELECT t.transition_id FROM game_session_transitions t
+          `DELETE FROM game_session_transitions_canonical WHERE transition_id IN (
+        SELECT t.transition_id FROM game_session_transitions_canonical t
         WHERE t.status = 'completed' AND t.updated_at_ms < ?
           AND NOT EXISTS (
-            SELECT 1 FROM game_session_transition_resources r
+            SELECT 1 FROM game_session_transition_resources_canonical r
             WHERE r.transition_id = t.transition_id
           )
         ORDER BY t.updated_at_ms, t.transition_id LIMIT ?

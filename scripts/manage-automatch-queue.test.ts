@@ -1,3 +1,7 @@
+import { activateStrictLocalSchemaFixture } from "./test-fixtures/strict-local-schema.ts";
+import { parseAutomatchRecord } from "../cloud/runtime/automatchRecords.js";
+import { inviteDocumentFixture } from "../cloud/workers/api/test/inviteDocumentFixture.ts";
+import { serializeGameSessionIntent } from "../cloud/workers/api/src/gameSessionIntentRecords.ts";
 import assert from "node:assert/strict";
 import { readFileSync, readdirSync } from "node:fs";
 import { resolve } from "node:path";
@@ -15,7 +19,9 @@ const directory = resolve(
   import.meta.dirname,
   "../cloud/workers/api/migrations",
 );
-const migrationName = "0025_automatch_fifo_queue.sql";
+const migrationName = readdirSync(directory).find((name) =>
+  name.startsWith("0031_"),
+)!;
 const version = "00000000-0000-4000-8000-000000000025";
 
 function fixture(queueSchema = true) {
@@ -24,6 +30,12 @@ function fixture(queueSchema = true) {
     .filter((name) => name.endsWith(".sql"))
     .sort()) {
     if (name === migrationName && !queueSchema) continue;
+    if (name.endsWith("_retire_canonical_source_tables.sql"))
+      db.exec(
+        "UPDATE application_data_control SET generation = 3, data_epoch = 1",
+      );
+    if (name === "0039_retire_canonical_timer_starts.sql")
+      activateStrictLocalSchemaFixture(db);
     db.exec(readFileSync(resolve(directory, name), "utf8"));
   }
   db.exec(
@@ -45,13 +57,41 @@ function fixture(queueSchema = true) {
   };
 }
 
-function seed(db: DatabaseSync, key = "ticket", timestamp: unknown = 10) {
-  db.prepare(
-    "INSERT INTO automatch_entries (record_key,payload_json,revision,updated_at_ms) VALUES (?,?,1,10)",
-  ).run(key, JSON.stringify({ uid: key, timestamp, profileId: "profile" }));
+function automatchEntry(fields: Record<string, unknown>) {
+  return parseAutomatchRecord("automatch", {
+    schemaVersion: 1,
+    uid: "host",
+    profileId: null,
+    timestamp: 10,
+    rating: 1500,
+    hostColor: "white",
+    password: "fixture-password",
+    gameVariant: "Classic",
+    telegramDeliveryVersion: null,
+    username: "",
+    ethAddress: "",
+    solAddress: "",
+    emojiId: 1,
+    ...fields,
+  });
 }
 
-test("queue inspection and activation use Wrangler OAuth without an environment token", () => {
+function seed(db: DatabaseSync, key = "ticket", timestamp: unknown = 10) {
+  db.prepare(
+    "INSERT INTO automatch_entries_canonical (record_key,payload_json,revision,updated_at_ms) VALUES (?,?,1,10)",
+  ).run(
+    key,
+    JSON.stringify(
+      automatchEntry({
+        uid: key,
+        timestamp,
+        profileId: "profile",
+      }),
+    ),
+  );
+}
+
+test("queue inspection and guarded activation use Wrangler OAuth without an environment token", () => {
   const child = spawnSync(
     process.execPath,
     [
@@ -64,6 +104,8 @@ test("queue inspection and activation use Wrangler OAuth without an environment 
       import childProcess from "node:child_process";
       import { syncBuiltinESMExports } from "node:module";
       import { readFileSync, readdirSync } from "node:fs";
+      import { activateStrictLocalSchemaFixture } from "./scripts/test-fixtures/strict-local-schema.ts";
+      import { applicationWriteFenceSql } from "./cloud/runtime/application-fence.js";
       import { DatabaseSync } from "node:sqlite";
       let authCalls = 0;
       childProcess.spawnSync = (_command, args) => {
@@ -74,24 +116,63 @@ test("queue inspection and activation use Wrangler OAuth without an environment 
       syncBuiltinESMExports();
       const db = new DatabaseSync(":memory:");
       const directory = process.argv[1];
-      for (const name of readdirSync(directory).filter(name => name.endsWith(".sql")).sort())
+      for (const name of readdirSync(directory).filter(name => name.endsWith(".sql")).sort()) {
+        if (name.endsWith("_retire_canonical_source_tables.sql")) db.exec("UPDATE application_data_control SET generation = 3, data_epoch = 1");
+        if (name === "0039_retire_canonical_timer_starts.sql") activateStrictLocalSchemaFixture(db);
         db.exec(readFileSync(directory + "/" + name, "utf8"));
+      }
       db.exec("UPDATE automatch_runtime_control SET backend = 'd1'");
+      db.exec(applicationWriteFenceSql("automatch_runtime_control"));
       let parameterizedReads = 0;
       let writes = 0;
+      let disposed = 0;
       globalThis.fetch = async (_url, init) => {
         assert.equal(init.headers.Authorization, "Bearer test-oauth-token");
         const { sql, params } = JSON.parse(init.body);
+        assert.ok(sql.startsWith("SELECT"), "REST transport must remain read-only");
         if (params.length && sql.startsWith("SELECT")) parameterizedReads++;
-        if (sql.startsWith("UPDATE")) writes++;
         return Response.json({ success: true, result: [{ success: true, results: db.prepare(sql).all(...params) }] });
       };
+      const { createGuardedOperatorRunner } = await import("./scripts/operator/guardedSql.ts");
+      const createRunner = (options) => createGuardedOperatorRunner({
+        ...options,
+        openSession: async (binding) => {
+          assert.equal(binding, "PROFILE_GAMES_DB");
+          return {
+            transport: {
+              async readControl() {
+                return db.prepare("SELECT singleton, generation, data_epoch, phase, migration_id FROM application_data_control WHERE singleton=1").all();
+              },
+              async atomicBatch(target, statements) {
+                assert.equal(target, "PROFILE_GAMES_DB");
+                db.exec("BEGIN");
+                try {
+                  const result = statements.map(({ sql, bindings }) => {
+                    if (sql.startsWith("UPDATE automatch_runtime_control")) writes++;
+                    const rows = db.prepare(sql).all(...bindings);
+                    return { success: true, results: rows, meta: { changes: Number(db.prepare("SELECT changes() AS count").get().count) } };
+                  });
+                  db.exec("COMMIT");
+                  return result;
+                } catch (error) {
+                  db.exec("ROLLBACK");
+                  throw error;
+                }
+              },
+            },
+            async dispose() { disposed++; },
+          };
+        },
+      });
       const { execute } = await import(${JSON.stringify(new URL("./manage-automatch-queue.ts", import.meta.url).href)});
-      await execute(["--inspect"]);
-      await execute(["--activate", "--candidate-version-id", ${JSON.stringify(version)}]);
+      await execute(["--inspect"], createRunner);
+      await execute(["--activate", "--candidate-version-id", ${JSON.stringify(version)}], createRunner);
       assert.equal(authCalls, 2);
       assert.equal(parameterizedReads, 2);
       assert.equal(writes, 1);
+      assert.equal(disposed, 1);
+      assert.equal(db.prepare("SELECT COUNT(*) AS count FROM application_write_context").get().count, 0);
+      assert.equal(db.prepare("SELECT COUNT(*) AS count FROM application_data_admissions").get().count, 0);
       assert.equal(JSON.parse(db.prepare("SELECT metadata_json FROM automatch_runtime_control").get().metadata_json).queueSelection, "fifo");
       db.close();
     `,
@@ -123,12 +204,12 @@ test("queue operator rejects invalid arguments before provider access", async ()
   }
 });
 
-test("bridge inspection works before queue schema exists and activation fails closed", async () => {
+test("inspection reports missing canonical queue schema and activation fails closed", async () => {
   const { db, logs, dependencies } = fixture(false);
   try {
     await manageAutomatchQueue({ operation: "inspect" }, dependencies);
-    assert.equal(logs[0].mode, "legacy");
-    assert.ok(Array.isArray(logs[0].missingSchemaObjects));
+    assert.equal(logs[0]!.mode, "legacy");
+    assert.ok(Array.isArray(logs[0]!.missingSchemaObjects));
     await assert.rejects(
       manageAutomatchQueue(
         { operation: "activate", candidateVersionId: version },
@@ -141,53 +222,22 @@ test("bridge inspection works before queue schema exists and activation fails cl
   }
 });
 
-test("migration backfills live source and pending v2 intents without changing journal payloads", async () => {
-  const { db, dependencies, logs } = fixture(false);
+test("canonical queue inspection succeeds after source entries and journals are retired", async () => {
+  const { db, dependencies, logs } = fixture();
   try {
-    seed(db);
-    const payload = JSON.stringify({
-      version: 2,
-      mutations: [
-        {
-          current: {
-            root: "automatch",
-            key: "pending-invite",
-            value: null,
-            revision: 0,
-          },
-          value: { uid: "pending-uid", timestamp: 20 },
-        },
-      ],
-    });
-    db.prepare(
-      "INSERT INTO game_session_transitions (transition_id,invite_id,payload_json,status,created_at_ms,updated_at_ms) VALUES ('pending','pending-invite',?,'pending',20,20)",
-    ).run(payload);
-    db.exec(
-      "INSERT INTO game_session_transition_resources (resource_key, transition_id) VALUES ('pending-invite', 'pending')",
-    );
-    db.exec(readFileSync(resolve(directory, migrationName), "utf8"));
-    await manageAutomatchQueue({ operation: "inspect" }, dependencies);
-    assert.equal(logs[0].valid, true);
-    assert.equal((logs[0].audit as Record<string, unknown>).live_tickets, 1);
-    assert.equal(
-      (logs[0].audit as Record<string, unknown>).pending_enqueues,
-      1,
-    );
-    assert.equal(
+    assert.deepEqual(
       db
         .prepare(
-          "SELECT payload_json FROM game_session_transitions WHERE transition_id = 'pending'",
+          "SELECT name FROM sqlite_schema WHERE name IN ('automatch_entries', 'game_session_transitions')",
         )
-        .get()?.payload_json,
-      payload,
+        .all(),
+      [],
     );
-    db.exec(
-      "UPDATE game_session_transitions SET status = 'completed' WHERE transition_id = 'pending'",
-    );
+    await manageAutomatchQueue({ operation: "inspect" }, dependencies);
+    assert.equal(logs[0]!.valid, true);
+    assert.equal((logs[0]!.audit as Record<string, unknown>).live_tickets, 0);
     assert.equal(
-      db
-        .prepare("SELECT COUNT(*) AS count FROM automatch_pending_enqueues")
-        .get()?.count,
+      (logs[0]!.audit as Record<string, unknown>).pending_enqueues,
       0,
     );
   } finally {
@@ -215,20 +265,19 @@ test("activation preserves metadata and sets FIFO only after a valid live audit"
       queueSelectionCandidateVersionId: version,
       queueSelectionActivatedAtMs: 1234,
     });
-    assert.equal(logs[0].mode, "fifo");
+    assert.equal(logs[0]!.mode, "fifo");
     await manageAutomatchQueue({ operation: "inspect" }, dependencies);
-    assert.equal(logs[1].valid, true);
+    assert.equal(logs[1]!.valid, true);
   } finally {
     db.close();
   }
 });
 
-test("malformed timestamps, missing projection rows, and frozen control block activation", async () => {
+test("missing canonical projection rows and frozen control block activation", async () => {
   for (const mutate of [
-    (db: DatabaseSync) => seed(db, "malformed", "10"),
     (db: DatabaseSync) => {
       seed(db);
-      db.exec("DELETE FROM automatch_live_tickets");
+      db.exec("DELETE FROM automatch_live_tickets_canonical");
     },
     (db: DatabaseSync) =>
       db.exec("UPDATE automatch_runtime_control SET state = 'frozen'"),
@@ -261,8 +310,10 @@ test("activation rechecks integrity in the update when a source changes after in
   const { db, dependencies } = fixture();
   try {
     const run: SqlRunner = async (sql, database, bindings) => {
-      if (sql.startsWith("UPDATE automatch_runtime_control"))
-        seed(db, "late-malformed", null);
+      if (sql.startsWith("UPDATE automatch_runtime_control")) {
+        seed(db, "late-ticket", 10);
+        db.exec("DELETE FROM automatch_live_tickets_canonical");
+      }
       return dependencies.run(sql, database, bindings);
     };
     await assert.rejects(
@@ -285,48 +336,72 @@ test("activation rechecks integrity in the update when a source changes after in
   }
 });
 
-test("activation rejects malformed or unrecoverable pending enqueue journals", async () => {
-  for (const malformed of [false, true]) {
-    const { db, dependencies } = fixture();
-    try {
-      const payload = JSON.stringify({
-        version: 2,
-        mutations: [
-          {
-            current: {
-              root: "automatch",
-              key: "pending-invite",
-              value: null,
-              revision: 0,
-            },
-            value: { uid: "pending-uid", timestamp: malformed ? null : 20 },
+test("activation rejects an unrecoverable canonical pending enqueue", async () => {
+  const { db, dependencies } = fixture();
+  try {
+    const value = automatchEntry({
+      uid: "pending-uid",
+      timestamp: 20,
+    });
+    const payload = serializeGameSessionIntent({
+      version: 3,
+      inviteId: "pending-invite",
+      inviteSourceEpoch: 1,
+      transitionId: "pending",
+      operationDigest: "a".repeat(64),
+      resources: ["pending-invite"],
+      createdAtMs: 20,
+      creations: [],
+      inviteMutations: [
+        {
+          current: { inviteId: "pending-invite", revision: 0, value: null },
+          value: inviteDocumentFixture({ hostId: "pending-uid" }),
+        },
+      ],
+      mutations: [
+        {
+          current: {
+            root: "automatch",
+            key: "pending-invite",
+            value: null,
+            revision: 0,
           },
-        ],
-      });
-      db.prepare(
-        "INSERT INTO game_session_transitions (transition_id,invite_id,payload_json,status,created_at_ms,updated_at_ms) VALUES ('pending','pending-invite',?,'pending',20,20)",
-      ).run(payload);
-      if (malformed)
-        db.exec(
-          "INSERT INTO game_session_transition_resources (resource_key,transition_id) VALUES ('pending-invite','pending')",
-        );
-      await assert.rejects(
-        manageAutomatchQueue(
-          { operation: "activate", candidateVersionId: version },
-          dependencies,
-        ),
-        /active with a valid projection/,
-      );
-      assert.equal(
+          value,
+        },
+      ],
+    });
+    db.prepare(
+      "INSERT INTO game_session_transitions_canonical (transition_id,invite_id,payload_json,status,created_at_ms,updated_at_ms) VALUES ('pending','pending-invite',?,'pending',20,20)",
+    ).run(payload);
+    await assert.rejects(
+      manageAutomatchQueue(
+        { operation: "activate", candidateVersionId: version },
+        dependencies,
+      ),
+      /active with a valid projection/,
+    );
+  } finally {
+    db.close();
+  }
+});
+
+test("canonical queue storage rejects malformed timestamps before activation", () => {
+  const { db } = fixture();
+  try {
+    const value = automatchEntry({
+      uid: "malformed",
+      timestamp: 10,
+    });
+    assert.throws(
+      () =>
         db
           .prepare(
-            "SELECT json_extract(metadata_json, '$.queueSelection') AS mode FROM automatch_runtime_control",
+            "INSERT INTO automatch_entries_canonical (record_key,payload_json,revision,updated_at_ms) VALUES ('malformed',?,1,10)",
           )
-          .get()?.mode,
-        null,
-      );
-    } finally {
-      db.close();
-    }
+          .run(JSON.stringify({ ...value, timestamp: "10" })),
+      /constraint/i,
+    );
+  } finally {
+    db.close();
   }
 });

@@ -1,10 +1,10 @@
+import { createGuardedOperatorRunner } from "./operator/guardedSql.ts";
 import { existsSync, readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { isAbsolute, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import {
   canonicalJson,
-  createWranglerRunner,
   digest,
   privateDirectory,
   readPrivateJson,
@@ -32,12 +32,12 @@ const ROOTS = [
 ] as const;
 
 const TABLES = [
-  "automatch_entries",
-  "automatch_telegram_sources",
-  "automatch_telegram_projection_outbox",
-  "game_session_projection_outbox",
-  "game_session_mutation_receipts",
-  "game_session_mutation_receipts",
+  "automatch_entries_canonical",
+  "automatch_telegram_sources_canonical",
+  "automatch_telegram_projection_outbox_canonical",
+  "game_session_projection_outbox_canonical",
+  "game_session_mutation_receipts_canonical",
+  "game_session_mutation_receipts_canonical",
 ] as const;
 
 type Root = (typeof ROOTS)[number];
@@ -140,7 +140,7 @@ function parseArgs(argv: string[]): Arguments {
     );
   const options = new Map<string, string>();
   for (let index = 1; index < argv.length; index += 2) {
-    const name = argv[index],
+    const name = argv[index]!,
       value = argv[index + 1];
     if (
       !["--directory", "--evidence", "--candidate-version-id"].includes(name) ||
@@ -177,9 +177,9 @@ function parseArgs(argv: string[]): Arguments {
     );
   return {
     operation,
-    directory,
-    evidence,
-    candidateVersionId,
+    ...(directory ? { directory } : {}),
+    ...(evidence ? { evidence } : {}),
+    ...(candidateVersionId ? { candidateVersionId } : {}),
   };
 }
 
@@ -551,7 +551,7 @@ function createSqlDependencies(
     const rows = await query(sql, bindings);
     if (rows.length !== 1)
       throw new Error("automatch control or record changed; inspect status");
-    return rows[0];
+    return rows[0]!;
   };
   const status = async (): Promise<Status> => {
     const row = (
@@ -749,7 +749,7 @@ function createRemoteDependencies(
 async function execute(argv = process.argv.slice(2)): Promise<void> {
   const args = parseArgs(argv);
   const dependencies = createSqlDependencies(
-    createWranglerRunner(),
+    createGuardedOperatorRunner(),
     createRemoteDependencies(),
   );
   await manageAutomatchState(args, dependencies);

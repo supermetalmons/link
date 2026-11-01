@@ -35,7 +35,7 @@ test("aggregate first-row failures retain profile, merge, recovery precedence be
 test("aggregate decoding keeps lazy child access and its original failure order", () => {
   const firstReads = ["read:profile", "read:merge", "read:recovery"];
   for (const [table, field, precedingReads] of [
-    ["profile", "payload_json", []],
+    ["profile", "schema_version", []],
     ["owners", "login_uid", ["read:owners"]],
     ["auth", "method", ["read:owners", "read:auth"]],
     [

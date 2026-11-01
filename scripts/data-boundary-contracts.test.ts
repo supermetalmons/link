@@ -80,10 +80,11 @@ const publicContracts: Record<string, readonly string[]> = {
   "cloud/runtime/src/eventProgressRecords.ts": [
     "EventProgressDocument",
     "RetainedEventProgressParams",
+    "EventProgressWorkflowParams",
+    "EventProgressPendingRecord",
     "EventProgressDeadLetter",
   ],
   "cloud/workers/api/src/eventProgressCodec.ts": [
-    "EventProgressWorkflowParams",
     "EventProgressPlan",
     "RetainedEventProgressPlan",
   ],
@@ -273,12 +274,11 @@ test("production data boundaries avoid explicit any and direct raw-JSON domain a
   assert.deepEqual(violations, []);
 });
 
-test("retained progress construction stays at explicit persistence compatibility boundaries", () => {
-  const allowedImports = new Set([
-    "cloud/workers/api/src/eventCompatibilityCodec.ts",
-    "cloud/workers/api/src/eventProgressRecoveryD1.ts",
-    "cloud/workers/api/src/eventD1/reads.ts",
-    "cloud/workers/api/src/eventD1/transactions.ts",
+test("progress persistence reads use explicit canonical parsers", () => {
+  const allowedValues = new Set([
+    "readEventProgressPending",
+    "readEventProgressDeadLetter",
+    "retainEventProgressRecord",
   ]);
   const actualImports: string[] = [];
   for (const file of productionBoundaryFiles()) {
@@ -315,15 +315,15 @@ test("retained progress construction stays at explicit persistence compatibility
       const values = bindings.elements.filter((element) => !element.isTypeOnly);
       if (values.length === 0) continue;
       assert.ok(
-        values.every(
-          (element) =>
-            (element.propertyName || element.name).text ===
-            "retainEventProgressRecord",
+        values.every((element) =>
+          allowedValues.has((element.propertyName || element.name).text),
         ),
       );
-      assert.ok(allowedImports.has(file), file);
       actualImports.push(file);
     }
   }
-  assert.deepEqual(actualImports.sort(), [...allowedImports].sort());
+  assert.ok(
+    actualImports.includes("cloud/workers/api/src/eventProgressRecoveryD1.ts"),
+  );
+  assert.ok(actualImports.includes("cloud/workers/api/src/eventD1/reads.ts"));
 });

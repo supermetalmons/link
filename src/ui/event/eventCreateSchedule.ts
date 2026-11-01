@@ -58,7 +58,9 @@ export const validateEventCreateSchedule = (
       scheduledDate: fields.scheduledDate,
       scheduledTime: fields.scheduledTime,
       scheduledTimezone: fields.scheduledTimezone,
-      ...(fields.scheduledTimezone === "local" ? { localTimezoneIana } : {}),
+      ...(fields.scheduledTimezone === "local" && localTimezoneIana
+        ? { localTimezoneIana }
+        : {}),
     },
   };
 };

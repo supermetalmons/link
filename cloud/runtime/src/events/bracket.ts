@@ -15,7 +15,6 @@ import {
   createEventParticipantsDocument,
   copyEventParticipant,
   copyEventParticipants,
-  readEventDocument,
 } from "./documents.js";
 import type { EventRuntimeStore, EventCommitPlan } from "../eventCommands.js";
 import type { WithdrawalDocument } from "../eventPrizes/records.js";
@@ -167,7 +166,7 @@ const createEventBracketRuntime = (
     );
     const canonicalPlacements = placementEntries.map((placement, index) => ({
       ...placement,
-      profileId: canonicalPlacementProfileIds[index],
+      profileId: canonicalPlacementProfileIds[index]!,
     }));
     const placementProfileIdSet = new Set(placementProfileIds);
     const participantEntries = eventParticipantEntries(participantsById);
@@ -214,11 +213,11 @@ const createEventBracketRuntime = (
       ),
     );
     const canonicalSelections = canonicalizeEventPrizeSelections(
-      readEventDocument({
+      {
         participants: createEventParticipantsDocument(
           Object.fromEntries(placementParticipantEntries),
         ),
-      })!,
+      },
       placementSelections,
       ownershipSnapshot,
     ).selectionsByProfileId;
@@ -448,9 +447,12 @@ const createEventBracketRuntime = (
   }: EventPrizePlacementsInput): EventPlacement[] => {
     const sortedRoundIndexes = getSortedRoundIndexes(rounds);
     const finalRoundIndex = sortedRoundIndexes[sortedRoundIndexes.length - 1];
+    if (finalRoundIndex === undefined) return [];
     const finalRound = eventRoundAt(rounds, String(finalRoundIndex));
     const finalMatches = eventPlacementMatches(finalRound);
-    const finalMatchEntry = finalMatches[getSortedMatchKeys(finalMatches)[0]];
+    const finalMatchKey = getSortedMatchKeys(finalMatches)[0];
+    if (finalMatchKey === undefined) return [];
+    const finalMatchEntry = finalMatches[finalMatchKey];
     if (!finalMatchEntry?.present) return [];
     const finalMatch = finalMatchEntry.match;
 
@@ -528,8 +530,8 @@ const createEventBracketRuntime = (
           return rightRound - leftRound;
         }
         const joinedDifference =
-          eventParticipantJoinedOrder(left, 0) -
-          eventParticipantJoinedOrder(right, 0);
+          eventParticipantJoinedOrder(left) -
+          eventParticipantJoinedOrder(right);
         if (joinedDifference !== 0) {
           return joinedDifference;
         }
@@ -742,7 +744,7 @@ const createEventBracketRuntime = (
       event,
       rounds,
       participantsById,
-      thirdPlaceMatch,
+      ...(thirdPlaceMatch === undefined ? {} : { thirdPlaceMatch }),
     });
     const storedAssignments = eventPrizeAssignments(event, eventId);
     if (
@@ -895,7 +897,7 @@ const createEventBracketRuntime = (
         throw new Error("event-match-batch-invalid");
       }
       reads.forEach(({ index }, offset) =>
-        pairsByIndex.set(index, pairs[offset]),
+        pairsByIndex.set(index, pairs[offset]!),
       );
     }
 
@@ -917,7 +919,7 @@ const createEventBracketRuntime = (
         if (index >= entries.length) {
           return;
         }
-        const [matchKey, matchRecord] = entries[index];
+        const [matchKey, matchRecord] = entries[index]!;
         const resolved = await resolveRoundMatchState(
           matchRecord,
           pairsByIndex.get(index),

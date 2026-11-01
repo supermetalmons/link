@@ -35,7 +35,7 @@ function observeReservationRuntime(intercept?: WagerD1Interceptor) {
 async function seedBalance(playerUid: string, dust: number, revision: number) {
   await db
     .prepare(
-      `INSERT INTO wager_frozen_balances
+      `INSERT INTO wager_frozen_balances_canonical
        (player_uid, frozen_json, revision, updated_at_ms) VALUES (?, ?, ?, 0)`,
     )
     .bind(playerUid, JSON.stringify(materials(dust)), revision)
@@ -70,8 +70,8 @@ describe("D1 wager reservation runtime", () => {
 
   beforeEach(async () => {
     await db.batch([
-      db.prepare("DELETE FROM wager_frozen_operations"),
-      db.prepare("DELETE FROM wager_frozen_balances"),
+      db.prepare("DELETE FROM wager_frozen_operations_canonical"),
+      db.prepare("DELETE FROM wager_frozen_balances_canonical"),
       db.prepare("DELETE FROM wager_reservation_write_admissions"),
       db.prepare(
         "UPDATE wager_reservation_runtime_control SET storage_mode = 'd1' WHERE singleton = 1",
@@ -235,7 +235,7 @@ describe("D1 wager reservation runtime", () => {
       revision: 0,
     });
     for (const table of [
-      "wager_frozen_operations",
+      "wager_frozen_operations_canonical",
       "wager_reservation_write_admissions",
     ]) {
       expect(
@@ -368,7 +368,7 @@ describe("D1 wager reservation runtime", () => {
         observed.queries.every(
           (query) =>
             query.includes("wager_reservation_runtime_control") &&
-            query.includes("wager_frozen_balances"),
+            query.includes("wager_frozen_balances_canonical"),
         ),
       ).toBe(true);
     },
@@ -459,7 +459,7 @@ describe("D1 wager reservation runtime", () => {
         await freezeReservations();
         await db
           .prepare(
-            "UPDATE wager_frozen_balances SET frozen_json = ?, revision = 8 WHERE player_uid = 'host'",
+            "UPDATE wager_frozen_balances_canonical SET frozen_json = ?, revision = 8 WHERE player_uid = 'host'",
           )
           .bind(JSON.stringify(materials(9)))
           .run();

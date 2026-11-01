@@ -1,8 +1,29 @@
 {
+  "application-fence.js": ["applicationWriteFenceSql"],
   "automatchRecords.js": [
     "decodeAutomatchEntries",
     "decodeAutomatchEntry",
-    "emptyAutomatchEntryFields"
+    "isAutomatchEntryRecord",
+    "isAutomatchProfileOutboxRecord",
+    "isAutomatchReceiptRecord",
+    "isAutomatchTelegramOutboxRecord",
+    "isAutomatchTelegramSourceRecord",
+    "isGameSessionMutationReceiptRecord",
+    "isGameplayEffectsState",
+    "isHistoricalMatchDescriptorWrite",
+    "isMutationReceiptExpirationRecord",
+    "parseAutomatchRecord"
+  ],
+  "eventCommandCodec.js": [
+    "eventCommandRecord",
+    "parseEventEffect",
+    "parseEventEffects",
+    "parseEventInvite",
+    "parseEventMatchCreation",
+    "parseEventMutation",
+    "parseEventMutations",
+    "parseEventProgressCommandRecord",
+    "parseEventTimerClaim"
   ],
   "eventCommands.js": [
     "eventCommandIdentity",
@@ -26,6 +47,23 @@
     "isCompletedEventPrizeWithdrawal",
     "isMatchingProfileEventPrizeAssignment",
     "isWithdrawalRecordForPrize"
+  ],
+  "eventPrizeWithdrawalState.js": [
+    "EVENT_PRIZE_ADMIN_WALLET",
+    "WITHDRAWAL_LEASE_MS",
+    "buildWithdrawalCompletion",
+    "decideWithdrawalClaim",
+    "decodeAdminSecretKey",
+    "filterProjectableEventPrizeAssignments",
+    "getCompletedEventPrizeProjectionCleanupRequest",
+    "getEventPrizeAssetAddress",
+    "getEventPrizeAssetStandard",
+    "getWithdrawalProjectionProfileIds",
+    "isCompletedEventPrizeWithdrawal",
+    "isMatchingProfileEventPrizeAssignment",
+    "isWithdrawalRecordForPrize",
+    "isWithdrawalRecordOwnedByRequest",
+    "normalizeSolanaAddress"
   ],
   "eventPrizes/assets.js": [
     "buildCompressedTransferBuilder",
@@ -105,35 +143,25 @@
     "persistSubmittedTransaction",
     "releaseProcessingClaim"
   ],
-  "eventPrizeWithdrawalState.js": [
-    "EVENT_PRIZE_ADMIN_WALLET",
-    "WITHDRAWAL_LEASE_MS",
-    "buildWithdrawalCompletion",
-    "decideWithdrawalClaim",
-    "decodeAdminSecretKey",
-    "filterProjectableEventPrizeAssignments",
-    "getCompletedEventPrizeProjectionCleanupRequest",
-    "getEventPrizeAssetAddress",
-    "getEventPrizeAssetStandard",
-    "getWithdrawalProjectionProfileIds",
-    "isCompletedEventPrizeWithdrawal",
-    "isMatchingProfileEventPrizeAssignment",
-    "isWithdrawalRecordForPrize",
-    "isWithdrawalRecordOwnedByRequest",
-    "normalizeSolanaAddress"
-  ],
   "eventProfileGameProjectionCore.js": [
     "READ_RETRY_ATTEMPTS",
     "READ_RETRY_DELAY_MS",
     "createEventProfileGameProjectionCore"
   ],
-  "eventProgressRecords.js": ["retainEventProgressRecord"],
+  "eventProgressRecords.js": [
+    "readEventProgressDeadLetter",
+    "readEventProgressPending",
+    "retainEventProgressRecord"
+  ],
   "eventProjectionOutboxRecords.js": [
     "createEventProfileGameProjectionRequest",
     "createEventTelegramProjectionRequest",
+    "isEventProjectionOutbox",
+    "isEventProjectionPending",
     "retainEventProjectionOutbox"
   ],
   "eventReads.js": [],
+  "eventTransitionRecords.js": [],
   "events.js": ["EventRuntimeError", "createEventRuntime"],
   "events/bracket.js": [
     "addEventPrizeAssignmentUpdates",
@@ -314,12 +342,12 @@
     "buildActiveEventSyncPlan",
     "buildEndedEventSyncPlan"
   ],
+  "gameSessionChanges.js": [],
+  "gameVariants.js": ["buildGameSeedForStoredVariant", "buildRandomGameSeed"],
   "gameplay/matchReconstruction.js": [
     "buildOrderedMatchSubmissions",
     "buildOrderedMoveHistory"
   ],
-  "gameSessionChanges.js": [],
-  "gameVariants.js": ["buildGameSeedForStoredVariant", "buildRandomGameSeed"],
   "matchOutcome.js": ["resolveMatchWinner"],
   "monsRules.js": ["loadMonsRules", "movesFromFlatString"],
   "profileGameProjectionRecords.js": [
@@ -327,6 +355,8 @@
     "createEventProjection",
     "createGameProjection",
     "createProjectionProfile",
+    "isProfileGameProjectionRecord",
+    "parseProfileGameProjectionRecord",
     "projectionFreshness",
     "projectionLastFingerprint",
     "projectionMergeFreshness",
@@ -360,12 +390,39 @@
     "orderProfileMergeCleanupIds",
     "resolveProfileMergeTargetPath"
   ],
+  "shared/api-contracts.js": [],
+  "shared/api-errors.js": ["isApiErrorDetails", "parseApiErrorDetails"],
+  "shared/appearance.js": [
+    "CARD_BACKGROUND_IDS",
+    "CARD_SUBTITLE_IDS",
+    "INVENTORY_EMOJI_END",
+    "INVENTORY_EMOJI_START",
+    "MON_SELECTION_CATALOG",
+    "PROFILE_FALLBACK_EMOJI_COUNT",
+    "PROFILE_STICKER_CATALOG",
+    "createDefaultProfileAppearance",
+    "getProfileFallbackEmojiId",
+    "isAura",
+    "isCardBackgroundId",
+    "isCardSubtitleId",
+    "isEmojiAppearance",
+    "isEmojiId",
+    "isMonSelectionIndex",
+    "isProfileCounter",
+    "isSelectedMons",
+    "isStickerMap",
+    "isStickerName",
+    "isStickerSlot",
+    "withMonSelection",
+    "withStickerSelection"
+  ],
   "shared/auth.js": [
     "AUTH_COOLDOWN_REASONS",
     "AUTH_METHODS",
     "AUTH_METHOD_FIELD_BY_TYPE",
     "AUTH_METHOD_LABELS",
     "AUTH_METHOD_REUSE_COOLDOWN_MS",
+    "createAuthPresentation",
     "getAuthCooldownScope",
     "getLinkedAuthMethodsFromProfile",
     "isAppleAuthVerificationRequest",
@@ -379,8 +436,18 @@
     "isXAuthCompletionRequest",
     "normalizeAuthCooldownReason",
     "normalizeAuthMethod",
-    "normalizeAuthPresentation",
     "resolveAuthCooldownRetryAtMs"
+  ],
+  "shared/data-contract.js": [
+    "APPLICATION_DATA_EPOCH",
+    "APPLICATION_DATA_HEADER",
+    "APPLICATION_DATA_SOCKET_PROTOCOL",
+    "APPLICATION_DATA_STATUS_HEADER",
+    "APPLICATION_RELEASE_PATH",
+    "applicationDataHeaders",
+    "hasApplicationDataEpoch",
+    "hasApplicationSocketEpoch",
+    "isApplicationReleaseStatus"
   ],
   "shared/event-prizes.js": [
     "AAHNGEEZ_PRIZES_EVENT_ID",
@@ -433,7 +500,17 @@
     "decodeEventPrizeAssignmentsView",
     "decodeEventRoundView",
     "decodeEventView",
-    "normalizeEventPrizeId"
+    "isEventAnnouncements",
+    "isEventMatchRecord",
+    "isEventMatches",
+    "isEventParticipantRecord",
+    "isEventParticipants",
+    "isEventPrizeAssignments",
+    "isEventRecord",
+    "isEventRoundRecord",
+    "isEventRounds",
+    "normalizeEventPrizeId",
+    "parseEventRecord"
   ],
   "shared/events.js": [
     "EVENT_BOOKMARK_HEADER",
@@ -467,8 +544,17 @@
     "isCreateEventResponse",
     "isDisqualifyEventMatchWinnersRequest",
     "isDisqualifyEventMatchWinnersResponse",
+    "isEventAnnouncements",
+    "isEventMatchRecord",
+    "isEventMatches",
     "isEventOwnedInvite",
+    "isEventParticipantRecord",
     "isEventParticipantSnapshot",
+    "isEventParticipants",
+    "isEventPrizeAssignments",
+    "isEventRecord",
+    "isEventRoundRecord",
+    "isEventRounds",
     "isEventSnapshotResponse",
     "isEventSnapshotSeed",
     "isJoinEventRequest",
@@ -484,6 +570,7 @@
     "isSyncEventStateResponse",
     "normalizeEventPrizeId",
     "parseEventMatchKey",
+    "parseEventRecord",
     "resolveEventTelegramAnnouncements"
   ],
   "shared/game-bootstrap.js": [
@@ -569,12 +656,14 @@
     "inviteOpponent",
     "inviteProjectionState",
     "inviteRatingEvent",
-    "inviteRatingWager",
     "inviteRematchState",
     "inviteSourceEventState",
     "inviteTelegramFingerprint",
     "inviteTimerEventId",
     "inviteTrimmedParticipants",
+    "isInviteAutomatchMessage",
+    "isInviteDocument",
+    "isInviteTransitionEvidence",
     "mergeInviteAutomatchOperation",
     "presentationInviteView",
     "readCanonicalInviteParticipants",
@@ -638,6 +727,7 @@
     "createDropsForMiningEvent",
     "createDropsFromRandom",
     "createEmptyMaterials",
+    "createEmptyMiningSnapshot",
     "createFirstRockDrops",
     "createMiningSeededRandom",
     "formatMiningDateLocal",
@@ -647,9 +737,8 @@
     "isMineRockResponse",
     "isMiningMaterials",
     "isMiningSnapshot",
-    "normalizeCount",
-    "normalizeMaterials",
-    "normalizeMiningSnapshot",
+    "parseMiningMaterials",
+    "parseMiningSnapshot",
     "pickWeightedMaterial",
     "sumMaterials"
   ],
@@ -681,6 +770,13 @@
     "isExactNftApiResponse",
     "isNftApiResponse"
   ],
+  "shared/profile-game-projections.js": [
+    "PROJECTION_SORT_BUCKETS",
+    "isEventProjectionRecord",
+    "isGameProjectionRecord",
+    "isProfileGameProjectionRecord",
+    "parseProfileGameProjectionRecord"
+  ],
   "shared/profiles.js": [
     "LEADERBOARD_READ_TYPES",
     "PROFILE_FALLBACK_EMOJI_COUNT",
@@ -696,8 +792,7 @@
     "isProfileLookupRequest",
     "isProfileLookupResponse",
     "isResolveProfileIdRequest",
-    "isResolveProfileIdResponse",
-    "normalizeProfileEmojiId"
+    "isResolveProfileIdResponse"
   ],
   "shared/ratings.js": [
     "GLICKO_SETTINGS",
@@ -720,6 +815,7 @@
     "isInviteReaction",
     "isInviteReactionForInvite",
     "isInviteRoomMessage",
+    "isReaction",
     "isReactionSocketToken",
     "isSendInviteReactionResponse"
   ],
@@ -730,6 +826,7 @@
     "getLatestApprovedRematchIndex",
     "getLatestRematchIndex",
     "inviteMatchesPlayers",
+    "isRematchSeries",
     "parseInviteMatchIndex",
     "parseRematchIndices",
     "rematchSeriesEnded",
@@ -770,8 +867,12 @@
     "formatMatchTimer",
     "isClaimMatchVictoryByTimerRequest",
     "isClaimMatchVictoryByTimerResponse",
+    "isMatchTimer",
+    "isRunningMatchTimer",
     "isStartMatchTimerRequest",
     "isStartMatchTimerResponse",
+    "isTimerClaim",
+    "matchTimersEqual",
     "parseMatchTimer",
     "parseStrictMatchTimer"
   ],
@@ -909,6 +1010,7 @@
     "buildApiGateOwner",
     "buildPendingDeleteId",
     "deliveryDocument",
+    "documentFields",
     "ensureCommitted",
     "hashValue",
     "normalizeString",
@@ -973,10 +1075,15 @@
   ],
   "telegram/eventProjectionRecords.js": [
     "copyStartedMatchLines",
+    "createEmptyEventTelegramProjectionDocument",
     "createEventTelegramProjectionDocument",
     "deferEventTelegramProjectionTexts",
     "eventTelegramProjectionGeneration",
     "eventTelegramProjectionNeedsResults",
+    "isEventTelegramEndedResults",
+    "isEventTelegramProjectionDocument",
+    "isEventTelegramProjectionGuard",
+    "isStartedMatchLines",
     "readEventTelegramProjectionDocument",
     "retainEventTelegramEndedResults",
     "retainStartedMatchLines",
@@ -1007,6 +1114,19 @@
     "TELEGRAM_COMMAND_BRIDGE_URL",
     "sendTelegramCommand",
     "signTelegramBridgeRequest"
+  ],
+  "telegram/recordCodec.js": [
+    "readTelegramApplied",
+    "readTelegramCleanup",
+    "readTelegramControlDocument",
+    "readTelegramDelivery",
+    "readTelegramDesired",
+    "readTelegramMessageDocument",
+    "readTelegramRetryProof",
+    "readTelegramSendEvidence",
+    "requireTelegramMessageDocument",
+    "requireTelegramOrphanedDelete",
+    "requireTelegramTransaction"
   ],
   "telegram/records.js": [
     "AppliedMessageSnapshot",
@@ -1066,7 +1186,8 @@
   "telegram/taskIdentity.js": [
     "buildTelegramDeliveryTaskId",
     "normalizeOptionalTimestamp",
-    "normalizeTaskPayload"
+    "normalizeTaskPayload",
+    "parseTelegramTaskPayload"
   ],
   "telegram/taskKinds.js": [
     "TELEGRAM_DESIRED_TASK_KIND",
@@ -1083,6 +1204,5 @@
     "resolveTelegramEmojiId"
   ],
   "telegramEmojiData.js": ["customTelegramEmojis"],
-  "transactions.js": [],
-  "shared/api-contracts.js": []
+  "transactions.js": []
 }

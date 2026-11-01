@@ -1,3 +1,12 @@
+import { requireValue } from "./browserAssertions";
+import {
+  parseEventRecord,
+  decodeEventMatchView,
+  decodeEventRoundView,
+  type EventRecordFields,
+  type EventRoundFields,
+  type EventMatchFields,
+} from "@mons/shared/events";
 import React, { act, useLayoutEffect, useState } from "react";
 import { createRoot } from "react-dom/client";
 import type {
@@ -26,7 +35,7 @@ import {
 } from "@mons/shared/event-prizes";
 import { environment, connection } from "./eventModalEnvironment";
 
-(globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
+Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
 let now = 1_000_000;
 Date.now = () => now;
 let nextTimer = 0;
@@ -34,16 +43,20 @@ const timers = new Map<
   number,
   { callback: () => void; at: number; delay: number; interval: boolean }
 >();
-window.setTimeout = ((callback: () => void, delay = 0) => {
-  const id = ++nextTimer;
-  timers.set(id, { callback, at: now + delay, delay, interval: false });
-  return id;
-}) as typeof window.setTimeout;
-window.setInterval = ((callback: () => void, delay = 0) => {
-  const id = ++nextTimer;
-  timers.set(id, { callback, at: now + delay, delay, interval: true });
-  return id;
-}) as typeof window.setInterval;
+Object.defineProperty(window, "setTimeout", {
+  value: (callback: () => void, delay = 0) => {
+    const id = ++nextTimer;
+    timers.set(id, { callback, at: now + delay, delay, interval: false });
+    return id;
+  },
+});
+Object.defineProperty(window, "setInterval", {
+  value: (callback: () => void, delay = 0) => {
+    const id = ++nextTimer;
+    timers.set(id, { callback, at: now + delay, delay, interval: true });
+    return id;
+  },
+});
 window.clearTimeout = window.clearInterval = (id?: unknown) => {
   if (typeof id === "number") timers.delete(id);
 };
@@ -68,45 +81,163 @@ const participant = (
   username: profileId,
   displayName: profileId.toUpperCase(),
   emojiId: 1,
-  aura: "",
+  aura: "none",
   joinedAtMs: 1,
   state: "active",
   eliminatedRoundIndex: null,
   eliminatedByProfileId: null,
 });
-const eventRecord = (
-  id: string,
-  patch: Partial<EventRecord> = {},
-): EventRecord => ({
-  schemaVersion: 2,
-  isSundayMons: false,
-  eventId: id,
-  status: "scheduled",
-  createdAtMs: 1,
-  updatedAtMs: 1,
-  startAtMs: now + 100_000,
-  startedAtMs: null,
-  endedAtMs: null,
-  createdByProfileId: "p1",
-  createdByLoginUid: "p1-login",
-  createdByUsername: "p1",
-  winnerProfileId: null,
-  winnerDisplayName: null,
-  currentRoundIndex: null,
-  bracketSize: 0,
-  roundCount: 0,
-  participants: { p1: participant("p1"), p2: participant("p2") },
-  rounds: {},
-  ...patch,
-});
-const root = createRoot(document.getElementById("root")!);
+type MatchPatch = Partial<EventMatchFields>;
+type RoundPatch = Partial<Omit<EventRoundFields, "matches">> & {
+  matches?: Record<string, MatchPatch>;
+};
+export type EventPatch = Partial<
+  Omit<EventRecordFields, "rounds" | "thirdPlaceMatch">
+> & {
+  rounds?: Record<string, RoundPatch>;
+  thirdPlaceMatch?: MatchPatch | null;
+};
+export type ActionsPatch = Omit<
+  Partial<EventModalActionsOptions>,
+  "eventRecord"
+> & { eventRecord?: EventPatch | null };
+function matchRecord(key: string, patch: MatchPatch = {}) {
+  const status = patch.status ?? "upcoming";
+  const host =
+    patch.hostProfileId ??
+    (status !== "upcoming" || patch.hostDisplayName ? "p1" : null);
+  const guest =
+    patch.guestProfileId ??
+    (status !== "upcoming" || patch.guestDisplayName ? "p2" : null);
+  return decodeEventMatchView(
+    {
+      matchKey: key,
+      status,
+      inviteId: status === "pending" ? "fixture-match" : null,
+      resolvedAtMs:
+        status === "host" || status === "guest" || status === "bye" ? 1 : null,
+      winnerDisqualified: false,
+      winnerProfileId:
+        status === "host" ? host : status === "guest" ? guest : null,
+      loserProfileId:
+        status === "host" ? guest : status === "guest" ? host : null,
+      hostSlotBlocked: false,
+      guestSlotBlocked: false,
+      hostProfileId: host,
+      hostLoginUid: host ? `${host}-login` : null,
+      hostDisplayName: host,
+      hostEmojiId: host ? 1 : null,
+      hostAura: host ? "none" : null,
+      guestProfileId: guest,
+      guestLoginUid: guest ? `${guest}-login` : null,
+      guestDisplayName: guest,
+      guestEmojiId: guest ? 1 : null,
+      guestAura: guest ? "none" : null,
+      ...patch,
+    },
+    key,
+  );
+}
+const eventRecord = (id: string, patch: EventPatch = {}): EventRecord => {
+  const status = patch.status ?? "scheduled";
+  const started = status === "active" || status === "ended";
+  const roundCount =
+    patch.roundCount ??
+    (started ? Math.max(1, Object.keys(patch.rounds ?? {}).length) : 0);
+  const bracketSize = patch.bracketSize ?? (started ? 2 ** roundCount : 0);
+  const rounds = Object.fromEntries(
+    Array.from({ length: roundCount }, (_, index) => {
+      const source = patch.rounds?.[index] ?? {};
+      const roundStatus =
+        source.status ??
+        (status === "ended"
+          ? "completed"
+          : index === 0
+            ? "active"
+            : "upcoming");
+      const matchPatches =
+        source.matches ??
+        Object.fromEntries(
+          Array.from(
+            { length: bracketSize / 2 ** (index + 1) },
+            (_, matchIndex) => [`${index}_${matchIndex}`, {}],
+          ),
+        );
+      return [
+        String(index),
+        decodeEventRoundView(
+          {
+            roundIndex: index,
+            status: roundStatus,
+            createdAtMs: 1,
+            completedAtMs: roundStatus === "completed" ? 2 : null,
+            ...source,
+            matches: Object.fromEntries(
+              Object.entries(matchPatches).map(([key, value]) => [
+                key,
+                matchRecord(key, value),
+              ]),
+            ),
+          },
+          index,
+        ),
+      ];
+    }),
+  );
+  return parseEventRecord({
+    schemaVersion: 3,
+    isSundayMons: false,
+    eventId: id,
+    status,
+    createdAtMs: 1,
+    updatedAtMs: 1,
+    startAtMs: now + 100_000,
+    startedAtMs: started ? 1 : null,
+    endedAtMs: status === "ended" || status === "dismissed" ? 2 : null,
+    createdByProfileId: "p1",
+    createdByLoginUid: "p1-login",
+    createdByUsername: "p1",
+    winnerProfileId: null,
+    winnerDisplayName: null,
+    currentRoundIndex: started ? 0 : null,
+    bracketFormat: "fixed",
+    roundByes: {},
+    bracketSize,
+    roundCount,
+    telegramAnnouncements: { invite: false, matches: false, results: false },
+    telegramDeliveryVersion: 2,
+    supportsThirdPlaceMatch: false,
+    thirdPlaceMatch: null,
+    prizeSelectionsLockedAtMs: null,
+    prizeAssignments: {},
+    participants: { p1: participant("p1"), p2: participant("p2") },
+    ...patch,
+    rounds,
+    ...(patch.thirdPlaceMatch
+      ? { thirdPlaceMatch: matchRecord("third_place", patch.thirdPlaceMatch) }
+      : {}),
+  });
+};
+const root = createRoot(requireValue(document.getElementById("root")));
 let controller: EventModalController;
 let actionResult: ReturnType<typeof useEventModalActions>;
 let updateActions: React.Dispatch<
   React.SetStateAction<EventModalActionsOptions>
 >;
 let mode = "controller";
-let saved: Record<string, (...args: any[]) => unknown> = {};
+type ActionGroup = ReturnType<typeof useEventModalActions>["administration"] &
+  ReturnType<typeof useEventModalActions>["participation"] &
+  ReturnType<typeof useEventModalActions>["navigation"] & {
+    participant: EventModalController["participants"]["openParticipant"];
+  };
+type ActionName = {
+  [Key in keyof ActionGroup]: ActionGroup[Key] extends (
+    ...args: never[]
+  ) => unknown
+    ? Key
+    : never;
+}[keyof ActionGroup];
+let saved: Record<string, ActionGroup[ActionName] | undefined> = {};
 const shared: ShareData[] = [];
 let rejectShare: ((error: Error) => void) | undefined;
 
@@ -126,11 +257,8 @@ function ActionsHarness({ initial }: { initial: EventModalActionsOptions }) {
   });
   return null;
 }
-function actions() {
-  if (mode === "view")
-    return {} as ReturnType<typeof useEventModalActions>["administration"] &
-      ReturnType<typeof useEventModalActions>["participation"] &
-      ReturnType<typeof useEventModalActions>["navigation"];
+function actions(): Partial<ActionGroup> {
+  if (mode === "view") return {};
   const source = mode === "actions" ? actionResult : controller;
   return {
     ...source.participation,
@@ -165,7 +293,7 @@ async function advance(ms: number) {
   now = target;
 }
 
-const harness = {
+export const harness = {
   prizeEventId: LEGACY_CORE_PRIZES_EVENT_ID,
   async mount(
     options: {
@@ -177,7 +305,7 @@ const harness = {
       fresh?: boolean;
       strict?: boolean;
       deferredCanonicalIds?: boolean;
-      overrides?: Partial<EventModalActionsOptions>;
+      overrides?: ActionsPatch;
     } = {},
   ) {
     await settle(() => root.render(null));
@@ -211,9 +339,16 @@ const harness = {
     const id = options.eventId ?? "event-a";
     openEventModal(id);
     mode = options.mode ?? "controller";
+    const { eventRecord: recordOverride, ...overrides } =
+      options.overrides ?? {};
     const initial: EventModalActionsOptions = {
       modalState: getEventModalState(),
-      eventRecord: eventRecord(id),
+      eventRecord:
+        recordOverride === undefined
+          ? eventRecord(id)
+          : recordOverride === null
+            ? null
+            : eventRecord(id, recordOverride),
       isEventFresh: true,
       isLoading: false,
       nowMs: now,
@@ -228,7 +363,7 @@ const harness = {
       },
       canManageDisqualifications: true,
       removableScheduledParticipants: [participant("p2")],
-      ...options.overrides,
+      ...overrides,
     };
     const element =
       mode === "view" ? (
@@ -261,7 +396,7 @@ const harness = {
   async unmount() {
     await settle(() => root.render(null));
   },
-  async receive(id: string, patch: Partial<EventRecord> = {}) {
+  async receive(id: string, patch: EventPatch = {}) {
     await settle(() =>
       environment.events
         .filter((entry) => entry.active && entry.eventId === id)
@@ -286,20 +421,38 @@ const harness = {
     storage.setProfileId(profileId);
     storage.setLoginId(loginUid);
   },
-  async override(patch: Partial<EventModalActionsOptions>) {
-    await settle(() => updateActions((current) => ({ ...current, ...patch })));
+  async override(patch: ActionsPatch) {
+    const { eventRecord: recordPatch, ...fields } = patch;
+    await settle(() =>
+      updateActions((current) => ({
+        ...current,
+        ...fields,
+        eventRecord:
+          recordPatch === undefined
+            ? current.eventRecord
+            : recordPatch === null
+              ? null
+              : eventRecord(
+                  recordPatch.eventId ??
+                    current.eventRecord?.eventId ??
+                    "event-a",
+                  recordPatch,
+                ),
+      })),
+    );
   },
-  async invoke(name: string, ...args: unknown[]) {
+  async invoke(name: ActionName, ...args: unknown[]) {
     await settle(() => {
-      void (actions() as any)[name](...args);
+      const action = requireValue(actions()[name]);
+      void Reflect.apply(action, undefined, args);
     });
   },
-  capture(name: string, key = name) {
-    saved[key] = (actions() as any)[name];
+  capture(name: ActionName, key: string = name) {
+    saved[key] = requireValue(actions()[name]);
   },
   async invokeSaved(key: string, ...args: unknown[]) {
     await settle(() => {
-      void saved[key](...args);
+      void Reflect.apply(requireValue(saved[key]), undefined, args);
     });
   },
   async complete(
@@ -325,7 +478,7 @@ const harness = {
     now = value;
   },
   participant,
-  stash(id: string, profile: any) {
+  stash(id: string, profile: unknown) {
     environment.stashedProfiles[id] = profile;
   },
   responses(prompts: (string | null)[], confirmations: boolean[]) {
@@ -429,4 +582,4 @@ const harness = {
     };
   },
 };
-(window as any).eventHarness = harness;
+window.eventHarness = harness;

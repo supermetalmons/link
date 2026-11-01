@@ -1,0 +1,16 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "allowJs": true,
+    "checkJs": true,
+    "types": ["node", "vite/client"],
+    "paths": {
+      "/src/*": ["./src/*"]
+    }
+  },
+  "include": ["test/**/*", "src/glicko2.d.ts", "src/vite-env.d.ts"],
+  "exclude": [
+    "test/moveDeliveryIntegration.test.mjs",
+    "test/eventDataCompatibility.test.mjs"
+  ]
+}

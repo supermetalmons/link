@@ -1,9 +1,25 @@
+import type {
+  AutomatchRecordMap,
+  AutomatchRecordRoot,
+} from "../../../runtime/automatchRecords.js";
+import type {
+  TransactionDecision,
+  TransactionResult,
+} from "../src/repositoryContracts.ts";
+import { validateTelegramTransactionDecision } from "../src/telegramTransaction.ts";
+import { publicMatchFixture } from "./matchRecordFixture.ts";
 import {
+  canonicalAutomatchFixture,
+  automatchCommandFixture,
   retainedAutomatchReadFixture,
   retainedAutomatchRecordsFixture,
   retainedAutomatchPageFixture,
 } from "./automatchRecordFixture.ts";
-import { retainedInviteSourceFixture } from "./inviteDocumentFixture.ts";
+import {
+  retainedInviteSourceFixture,
+  inviteDocumentFixture,
+  rematchSeriesFixture,
+} from "./inviteDocumentFixture.ts";
 import { matchCreationWireValue } from "../src/matchRecordCodec.ts";
 import type {
   GameSessionPort,
@@ -21,27 +37,32 @@ import {
 } from "../src/profileGameProjectionOutbox.ts";
 import { parseAutomatchTelegramProjectionOutbox } from "../src/telegramProjectionOutbox.ts";
 import { recoveryRecordPageFixture } from "./recoveryScanPageFixture.ts";
+import { sessionValueOperationFixture } from "./sessionValueOperationFixture.ts";
 
 export function legacySessionChanges(
   updates: Record<string, unknown>,
 ): GameSessionChange[] {
   const changes: GameSessionChange[] = [];
-  for (const [path, value] of Object.entries(updates)) {
+  for (const [path, original] of Object.entries(updates)) {
+    const value = sessionValueOperationFixture(original);
     const [root, id, field, key, nestedKey] = path.split("/");
     if (root === "gameplayMutationReceiptExpirations") continue;
     if (root === "gameplayMutationReceipts")
       changes.push({
         kind: "mutation-receipt",
         operationId: id,
-        value,
-        expiration: updates[`gameplayMutationReceiptExpirations/${id}`] || {},
+        value: automatchCommandFixture("gameplayMutationReceipts", value),
+        expiration: automatchCommandFixture(
+          "gameplayMutationReceiptExpirations",
+          updates[`gameplayMutationReceiptExpirations/${id}`] || {},
+        ),
       } as GameSessionChange);
     else if (root === "players")
       changes.push({
         kind: "match-create",
         playerId: id,
         matchId: key,
-        value,
+        value: publicMatchFixture(Object(value)),
       } as GameSessionChange);
     else if (root === "invites") {
       if (field === "automatchOperationIds" && key)
@@ -56,31 +77,38 @@ export function legacySessionChanges(
           kind: "invite-rematches",
           inviteId: id,
           role: field === "hostRematches" ? "host" : "guest",
-          value,
+          value: rematchSeriesFixture(value),
         } as GameSessionChange);
       else
         changes.push({
           kind: field ? "invite-fields" : "invite-merge",
           inviteId: id,
-          value: field ? { [field]: value } : value,
+          value: field
+            ? { [field]: value }
+            : inviteDocumentFixture(Object(value)),
         } as GameSessionChange);
     } else if (root === "automatch")
       changes.push({
         kind: "automatch-entry",
         inviteId: id,
-        value,
+        value: automatchCommandFixture("automatch", value),
       } as GameSessionChange);
     else if (root === "telegramAutomatches")
       changes.push({
         kind: field ? "telegram-source-merge" : "telegram-source",
         inviteId: id,
-        value: field ? { [field]: value } : value,
+        value: field
+          ? { [field]: value }
+          : automatchCommandFixture("telegramAutomatches", value),
       } as GameSessionChange);
     else if (root === "telegramProjectionOutbox" && id === "automatch")
       changes.push({
         kind: "telegram-outbox",
         inviteId: field,
-        value,
+        value: automatchCommandFixture(
+          "telegramProjectionOutbox/automatch",
+          value,
+        ),
       } as GameSessionChange);
     else if (
       root === "profileGameProjectionOutbox" &&
@@ -91,18 +119,40 @@ export function legacySessionChanges(
       changes.push({
         kind: "profile-outbox-merge",
         inviteId: field,
-        value: {},
-        historicalMatches: { [nestedKey]: value },
+        value: automatchCommandFixture(
+          "profileGameProjectionOutbox/automatch",
+          {},
+        ),
+        historicalMatches: {
+          [nestedKey]: { retryNotBeforeMs: null, ...Object(value) },
+        },
       } as GameSessionChange);
     else if (root === "profileGameProjectionOutbox" && id === "automatch")
       changes.push({
         kind: key ? "profile-outbox-merge" : "profile-outbox",
         inviteId: field,
-        value: key ? { [key]: value } : value,
+        value: automatchCommandFixture(
+          "profileGameProjectionOutbox/automatch",
+          key ? { [key]: value } : value,
+        ),
       } as GameSessionChange);
     else throw new Error("game-session-transition-unsupported-effect");
   }
-  return changes;
+  const grouped: GameSessionChange[] = [];
+  for (const change of changes) {
+    if (change.kind === "invite-fields") {
+      const previous = grouped.find(
+        (entry) =>
+          entry.kind === "invite-fields" && entry.inviteId === change.inviteId,
+      );
+      if (previous?.kind === "invite-fields") {
+        previous.value = { ...previous.value, ...change.value };
+        continue;
+      }
+    }
+    grouped.push(change);
+  }
+  return grouped;
 }
 
 export function matchTestPort(
@@ -177,6 +227,25 @@ export function matchTestPort(
 export function rawGameplayTestPort(
   state: StateRepository,
 ): RawGameSessionPort & MatchStatePort {
+  async function transact<Root extends AutomatchRecordRoot>(
+    root: Root,
+    id: string,
+    update: (
+      value: AutomatchRecordMap[Root] | null,
+    ) => TransactionDecision<AutomatchRecordMap[Root]>,
+    signal?: AbortSignal,
+  ): Promise<TransactionResult<AutomatchRecordMap[Root]>> {
+    const result = await state.transactPath(
+      `${root}/${id}`,
+      (value) => update(canonicalAutomatchFixture(root, value)),
+      signal,
+    );
+    return {
+      committed: result.committed,
+      ...(result.decision === undefined ? {} : { decision: result.decision }),
+      value: canonicalAutomatchFixture(root, result.value),
+    };
+  }
   return {
     ...matchTestPort(state),
     readInviteMetadata: async (id, signal) =>
@@ -225,7 +294,7 @@ export function rawGameplayTestPort(
         state.getPath(`telegramAutomatches/${id}`, undefined, signal),
       ),
     transactAutomatchTelegramSource: (id, update, signal) =>
-      state.transactPath(`telegramAutomatches/${id}`, update, signal),
+      transact("telegramAutomatches", id, update, signal),
     readAutomatchTelegramOutbox: (id, signal) =>
       retainedAutomatchReadFixture(
         "telegramProjectionOutbox/automatch",
@@ -236,11 +305,7 @@ export function rawGameplayTestPort(
         ),
       ),
     transactAutomatchTelegramOutbox: (id, update, signal) =>
-      state.transactPath(
-        `telegramProjectionOutbox/automatch/${id}`,
-        update,
-        signal,
-      ),
+      transact("telegramProjectionOutbox/automatch", id, update, signal),
     async claimAutomatchTelegramOutbox(
       id,
       requestId,
@@ -335,11 +400,7 @@ export function rawGameplayTestPort(
         ),
       ),
     transactAutomatchProfileOutbox: (id, update, signal) =>
-      state.transactPath(
-        `profileGameProjectionOutbox/automatch/${id}`,
-        update,
-        signal,
-      ),
+      transact("profileGameProjectionOutbox/automatch", id, update, signal),
     async claimAutomatchProfileOutbox(
       id,
       requestId,
@@ -502,6 +563,7 @@ export function legacySessionClient(port: RawGameSessionPort): StateRepository {
               signal,
             )
           : port.readFirstAutomatchEntry(signal);
+      if (!id) throw new Error("retired-source-path");
       if (root === "invites") {
         value = await port.readInviteMetadata(id, signal);
         fields = field ? [field, ...nested] : [];
@@ -532,20 +594,40 @@ export function legacySessionClient(port: RawGameSessionPort): StateRepository {
       port.commitSessionChanges(legacySessionChanges(updates), signal),
     transactPath(path, update, signal) {
       const [root, id, field] = path.split("/");
-      const method =
-        root === "telegramAutomatches"
-          ? port.transactAutomatchTelegramSource
-          : root === "telegramProjectionOutbox"
-            ? port.transactAutomatchTelegramOutbox
-            : root === "profileGameProjectionOutbox"
-              ? port.transactAutomatchProfileOutbox
-              : null;
-      if (!method) throw new Error("retired-source-path");
-      return method(
-        root === "telegramAutomatches" ? id : field,
-        update as Parameters<typeof method>[1],
-        signal,
-      );
+      function decision<Root extends AutomatchRecordRoot>(
+        root: Root,
+        current: AutomatchRecordMap[Root] | null,
+      ): TransactionDecision<AutomatchRecordMap[Root]> {
+        const result = validateTelegramTransactionDecision(update(current));
+        return result.commit === false
+          ? result
+          : {
+              value: canonicalAutomatchFixture(root, result.value),
+              ...(result.decision === undefined
+                ? {}
+                : { decision: result.decision }),
+            };
+      }
+      if (root === "telegramAutomatches" && id)
+        return port.transactAutomatchTelegramSource(
+          id,
+          (current) => decision("telegramAutomatches", current),
+          signal,
+        );
+      if (root === "telegramProjectionOutbox" && field)
+        return port.transactAutomatchTelegramOutbox(
+          field,
+          (current) => decision("telegramProjectionOutbox/automatch", current),
+          signal,
+        );
+      if (root === "profileGameProjectionOutbox" && field)
+        return port.transactAutomatchProfileOutbox(
+          field,
+          (current) =>
+            decision("profileGameProjectionOutbox/automatch", current),
+          signal,
+        );
+      throw new Error("retired-source-path");
     },
   };
 }
@@ -569,7 +651,7 @@ export function attachGameplayTestPorts<
   const port = gameplayTestPort({
     getPath: (path, query, signal) =>
       /^invites\/[^/]+$/.test(path)
-        ? source.readInviteMetadata(path.split("/")[1], signal)
+        ? source.readInviteMetadata(path.split("/")[1]!, signal)
         : source.getStatePath(path, query, signal),
     patchRoot: (updates, signal) => source.patchStateRoot(updates, signal),
     transactPath: (path, updater, signal) =>

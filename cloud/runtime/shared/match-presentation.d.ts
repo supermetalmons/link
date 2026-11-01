@@ -1,9 +1,10 @@
 // Generated from src/shared/match-presentation.ts. Run npm run generate:runtime.
+import { type Aura, type EmojiId } from "./appearance.js";
 export type MatchPresentation = {
   matchId: string;
   actorUid: string;
-  emojiId: number;
-  aura: string;
+  emojiId: EmojiId;
+  aura: Aura;
   revision: number;
 };
 export type MatchPresentationSnapshot = {
@@ -13,8 +14,8 @@ export type MatchPresentationSnapshot = {
 export type UpdateMatchPresentationRequest = {
   operationId: string;
   expectedRevision: number;
-  emojiId: number;
-  aura: string;
+  emojiId: EmojiId;
+  aura: Aura;
 };
 export type ReadMatchPresentationResponse = {
   ok: true;

@@ -1,3 +1,4 @@
+import { runGuardedOperatorSqlSync } from "./operator/guardedSql.ts";
 import {
   DEFAULT_API_CONFIG,
   resolveD1Binding,
@@ -6,9 +7,11 @@ import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
+import { readStoredWithdrawalDocument } from "../cloud/runtime/eventPrizes/records.js";
 
 type JsonRecord = Record<string, unknown>;
 type ManagementOperation = "freeze" | "resume" | "status";
+type DataEpoch = 1;
 type WithdrawalSnapshot = Record<string, Record<string, JsonRecord>>;
 
 type StorageControl = {
@@ -136,6 +139,28 @@ function parseArgs(argv: string[]): ManagementOperation {
   throw new TypeError("choose exactly one of --status, --freeze, or --resume");
 }
 
+function parseManagementArgs(argv: string[]): {
+  operation: ManagementOperation;
+  dataEpoch: DataEpoch;
+} {
+  if (argv.length === 1) return { operation: parseArgs(argv), dataEpoch: 1 };
+  if (argv.length !== 3 || argv[1] !== "--data-epoch" || argv[2] !== "1")
+    throw new TypeError(
+      "choose --status, --freeze, or --resume and optional --data-epoch 1",
+    );
+  return {
+    operation: parseArgs(argv.slice(0, 1)),
+    dataEpoch: 1,
+  };
+}
+
+function withdrawalManagementTable(
+  dataEpoch: DataEpoch,
+): "event_prize_withdrawals_canonical" {
+  if (dataEpoch !== 1) throw new TypeError("invalid-withdrawal-data-epoch");
+  return "event_prize_withdrawals_canonical";
+}
+
 function sameControl(left: StorageControl, right: StorageControl): boolean {
   return (
     left.storageMode === right.storageMode &&
@@ -146,6 +171,7 @@ function sameControl(left: StorageControl, right: StorageControl): boolean {
 function manageEventPrizeWithdrawals(
   operation: ManagementOperation,
   dependencies: ManagementDependencies,
+  dataEpoch: DataEpoch = 1,
 ): void {
   const current = dependencies.readControl();
   if (operation === "freeze") {
@@ -187,7 +213,9 @@ function manageEventPrizeWithdrawals(
   }
   const control = dependencies.readControl();
   const summary = summarize(dependencies.readSnapshot(), dependencies.now());
-  dependencies.log(JSON.stringify({ operation, ...control, ...summary }));
+  dependencies.log(
+    JSON.stringify({ operation, dataEpoch, ...control, ...summary }),
+  );
 }
 
 function runWrangler(args: string[]): JsonRecord[] {
@@ -245,15 +273,20 @@ function readRemoteControl(): StorageControl {
   throw new Error("invalid event prize withdrawal storage mode");
 }
 
-function readRemoteSnapshot(): WithdrawalSnapshot {
+function readRemoteSnapshot(
+  dataEpoch: DataEpoch,
+  executeSql: typeof runWrangler = runWrangler,
+): WithdrawalSnapshot {
   const snapshot: WithdrawalSnapshot = {};
-  for (const row of runWrangler([
+  for (const row of executeSql([
     "--command",
-    "SELECT event_id, prize_id, record_json FROM event_prize_withdrawals ORDER BY event_id, prize_id",
+    `SELECT event_id, prize_id, record_json FROM ${withdrawalManagementTable(dataEpoch)} ORDER BY event_id, prize_id`,
   ])) {
     const eventId = String(row.event_id);
     const prizeId = String(row.prize_id);
     const withdrawal = JSON.parse(String(row.record_json)) as unknown;
+    if (!readStoredWithdrawalDocument(withdrawal))
+      throw new Error("invalid canonical withdrawal record");
     snapshot[eventId] ||= {};
     snapshot[eventId][prizeId] = record(withdrawal) || {};
   }
@@ -273,10 +306,10 @@ function updateRemoteMode({
   next: StorageControl;
   updatedAtMs: number;
 }): void {
-  runWrangler([
-    "--command",
+  runGuardedOperatorSqlSync(
     `UPDATE event_prize_withdrawal_runtime_control SET storage_mode = '${next.storageMode}', previous_storage_mode = ${sqlValue(next.previousStorageMode)}, updated_at_ms = ${updatedAtMs} WHERE singleton = 1 AND storage_mode = '${expected.storageMode}' AND previous_storage_mode IS ${sqlValue(expected.previousStorageMode)}`,
-  ]);
+    DATABASE,
+  );
   const actual = readRemoteControl();
   if (!sameControl(actual, next)) {
     throw new Error("event prize withdrawal storage transition failed");
@@ -284,13 +317,37 @@ function updateRemoteMode({
 }
 
 function execute(argv = process.argv.slice(2)): void {
-  manageEventPrizeWithdrawals(parseArgs(argv), {
-    log: console.log,
-    now: Date.now,
-    readControl: readRemoteControl,
-    readSnapshot: readRemoteSnapshot,
-    updateMode: updateRemoteMode,
-  });
+  const { operation, dataEpoch } = parseManagementArgs(argv);
+  const table = withdrawalManagementTable(dataEpoch);
+  const tables = runWrangler([
+    "--command",
+    `SELECT name FROM sqlite_schema WHERE type = 'table' AND name IN ('application_data_control', '${table}')`,
+  ]);
+  if (!tables.some((row) => row.name === table))
+    throw new Error("selected withdrawal generation is unavailable");
+  if (
+    operation !== "status" &&
+    tables.some((row) => row.name === "application_data_control")
+  ) {
+    const control = runWrangler([
+      "--command",
+      "SELECT data_epoch FROM application_data_control WHERE singleton = 1",
+    ])[0];
+    if (control?.data_epoch !== dataEpoch)
+      throw new Error("withdrawal management generation mismatch");
+  } else if (operation !== "status")
+    throw new Error("canonical withdrawal control is unavailable");
+  manageEventPrizeWithdrawals(
+    operation,
+    {
+      log: console.log,
+      now: Date.now,
+      readControl: readRemoteControl,
+      readSnapshot: () => readRemoteSnapshot(dataEpoch),
+      updateMode: updateRemoteMode,
+    },
+    dataEpoch,
+  );
 }
 
 if (
@@ -311,6 +368,9 @@ export {
   manageEventPrizeWithdrawals,
   normalizeSnapshot,
   parseArgs,
+  parseManagementArgs,
+  withdrawalManagementTable,
+  readRemoteSnapshot,
   snapshotDigest,
   summarize,
   type ManagementDependencies,

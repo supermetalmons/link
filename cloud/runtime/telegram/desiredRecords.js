@@ -3,73 +3,83 @@
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.acquiredDesiredView = acquiredDesiredView;
 const records_js_1 = require("./records.js");
-const fields = (value) =>
-  value && typeof value === "object" && !Array.isArray(value) ? value : {};
-const normalizedString = (value) =>
-  typeof value === "string" && value.trim() !== "" ? value.trim() : "";
 class AcquiredDesired {
   document;
   constructor(document) {
     this.document = document;
   }
   get revision() {
-    return fields(this.document).revision;
+    return this.document.revision;
   }
   get operation() {
-    return fields(this.document).operation;
+    return this.document.operation;
   }
   get ifMissing() {
-    return fields(this.document).ifMissing;
+    return this.document.operation === "edit"
+      ? this.document.ifMissing
+      : undefined;
   }
   get instanceKey() {
-    return fields(this.document).instanceKey;
+    if (this.document.operation === "delete")
+      throw new TypeError("telegram-desired-text-required");
+    return this.document.instanceKey;
   }
   get text() {
-    return fields(this.document).text;
+    if (this.document.operation === "delete")
+      throw new TypeError("telegram-desired-text-required");
+    return this.document.text;
   }
   get destinationDescription() {
-    return `${fields(this.document).destination}`;
+    return `${this.document.destination}`;
   }
   resolveDestination(resolve) {
-    return Reflect.apply(resolve, undefined, [
-      fields(this.document).destination,
-    ]);
+    return resolve(this.document.destination);
   }
   matchesAppliedContent(applied) {
-    return fields(applied).contentHash === fields(this.document).contentHash;
+    return (
+      this.document.operation !== "delete" &&
+      applied.contentHash === this.document.contentHash
+    );
   }
   appliedTargetMismatch(applied, chatId) {
-    const current = fields(applied);
-    const desired = fields(this.document);
+    const current = applied;
+    const desired = this.document;
+    if (desired.operation === "delete")
+      throw new TypeError("telegram-desired-text-required");
     return (
-      normalizedString(current.instanceKey) !== desired.instanceKey ||
-      normalizedString(current.destination) !== desired.destination ||
-      (normalizedString(current.chatId) &&
-        normalizedString(current.chatId) !== chatId)
+      current.instanceKey !== desired.instanceKey ||
+      current.destination !== desired.destination ||
+      (current.chatId && current.chatId !== chatId)
     );
   }
   sendInput(chatId) {
-    const desired = fields(this.document);
+    const desired = this.document;
+    if (desired.operation === "delete")
+      throw new TypeError("telegram-desired-text-required");
     return {
       chatId,
       text: desired.text,
       parseMode: desired.parseMode || null,
       silent: desired.silent === true,
-      disableWebPagePreview: desired.disableWebPagePreview !== false,
+      disableWebPagePreview: desired.disableWebPagePreview,
     };
   }
   editInput(chatId, messageId) {
-    const desired = fields(this.document);
+    const desired = this.document;
+    if (desired.operation === "delete")
+      throw new TypeError("telegram-desired-text-required");
     return {
       chatId,
       messageId,
       text: desired.text,
       parseMode: desired.parseMode || null,
-      disableWebPagePreview: desired.disableWebPagePreview !== false,
+      disableWebPagePreview: desired.disableWebPagePreview,
     };
   }
   createSendMarker(attemptId, chatId, nowMs) {
-    const desired = fields(this.document);
+    const desired = this.document;
+    if (desired.operation === "delete")
+      throw new TypeError("telegram-desired-text-required");
     const marker = {
       attemptId,
       revision: desired.revision,
@@ -83,7 +93,9 @@ class AcquiredDesired {
     return marker;
   }
   createAppliedReceipt(chatId, messageId, nowMs) {
-    const desired = fields(this.document);
+    const desired = this.document;
+    if (desired.operation === "delete")
+      throw new TypeError("telegram-desired-text-required");
     const receipt = {
       destination: desired.destination,
       chatId,
@@ -96,9 +108,11 @@ class AcquiredDesired {
     return receipt;
   }
   refreshAppliedReceipt(applied, chatId, nowMs) {
-    const desired = fields(this.document);
+    const desired = this.document;
+    if (desired.operation === "delete")
+      throw new TypeError("telegram-desired-text-required");
     const receipt = {
-      ...fields(applied),
+      ...applied,
       destination: desired.destination,
       chatId,
       instanceKey: desired.instanceKey,
@@ -110,8 +124,7 @@ class AcquiredDesired {
   }
 }
 function acquiredDesiredView(message) {
-  const value = new AcquiredDesired(
-    (0, records_js_1.messageDesiredDocument)(message),
-  );
-  return value;
+  const desired = (0, records_js_1.messageDesiredDocument)(message);
+  if (!desired) throw new TypeError("telegram-desired-missing");
+  return new AcquiredDesired(desired);
 }

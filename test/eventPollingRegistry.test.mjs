@@ -1,3 +1,6 @@
+import { required } from "./fixtures/canonicalData.mjs";
+import { canonicalEvent } from "./fixtures/canonicalData.mjs";
+import { createTimerHandle } from "./fixtures/timerHandle.mjs";
 import assert from "node:assert/strict";
 import test from "node:test";
 import { eventSnapshotEtag } from "@mons/shared/events";
@@ -11,14 +14,16 @@ import {
 } from "../src/connection/eventPollingRegistry.ts";
 import { createPollingAuthTokenProvider } from "../src/connection/pollingAuthTokenProvider.ts";
 
+/** @returns {import("@mons/shared/events").EventSnapshotResponse} */
 const eventResponse = (revision = 1, eventId = "event-1") => ({
   ok: true,
   eventId,
   revision,
-  event: { eventId, status: "scheduled", revision },
+  event: canonicalEvent({ eventId, updatedAtMs: revision }),
   prizeSelections: { "profile-1": "1092" },
 });
 
+/** @returns {import("@mons/shared/event-prizes").ProfileEventPrizesResponse} */
 const profileResponse = (revision = 1) => ({
   ok: true,
   profileId: "profile-1",
@@ -28,56 +33,75 @@ const profileResponse = (revision = 1) => ({
 
 const epoch = "12345678-1234-1234-1234-123456789abc";
 const nextEpoch = "87654321-1234-1234-1234-123456789abc";
-const bookmark = (revision, bookmarkEpoch = epoch) =>
+const bookmark = (/** @type {number} */ revision, bookmarkEpoch = epoch) =>
   `mons-d1-v1:${bookmarkEpoch}:bookmark-${revision}`;
 
+/** @returns {import("@mons/shared/events").EventSnapshotSeed} */
 const seed = (revision = 1, eventId = "event-1", bookmarkEpoch = epoch) => ({
   snapshot: eventResponse(revision, eventId),
   etag: eventSnapshotEtag(eventId, revision),
   bookmark: bookmark(revision, bookmarkEpoch),
 });
 
+/**
+ * @template {import("@mons/shared/events").EventSnapshotResponse | import("@mons/shared/event-prizes").ProfileEventPrizesResponse} T
+ * @param {T} value
+ * @returns {Extract<import("../src/services/gameplayTransport.ts").ConditionalRead<T>, {kind: "modified"}>}
+ */
 const modified = (value, revision = 1) => ({
   kind: "modified",
   value,
-  etag: value.eventId
-    ? eventSnapshotEtag(value.eventId, value.revision)
-    : `etag-${revision}`,
-  bookmark: value.eventId ? bookmark(revision) : `bookmark-${revision}`,
+  etag:
+    "eventId" in value && value.eventId
+      ? eventSnapshotEtag(value.eventId, value.revision)
+      : `etag-${revision}`,
+  bookmark:
+    "eventId" in value && value.eventId
+      ? bookmark(revision)
+      : `bookmark-${revision}`,
 });
 
+/** @returns {Extract<import("../src/services/gameplayTransport.ts").ConditionalRead<never>, {kind: "not-modified"}>} */
 const eventNotModified = (revision = 1) => ({
   kind: "not-modified",
   etag: eventSnapshotEtag("event-1", revision),
   bookmark: bookmark(revision),
 });
 
+/** @returns {Extract<import("../src/services/gameplayTransport.ts").ConditionalRead<never>, {kind: "not-modified"}>} */
 const notModified = (revision = 1) => ({
   kind: "not-modified",
   etag: `etag-${revision}`,
   bookmark: `bookmark-${revision}`,
 });
 
+/**
+ * @template [T=void]
+ * @returns {Pick<PromiseWithResolvers<T>, "promise" | "resolve">}
+ */
 function deferred() {
-  let resolve;
-  const promise = new Promise((resolvePromise) => {
-    resolve = resolvePromise;
-  });
+  /** @type {PromiseWithResolvers<T>} */
+  const { promise, resolve } = Promise.withResolvers();
   return { promise, resolve };
 }
 
+/** @param {Partial<Pick<ConstructorParameters<typeof EventPollingRegistry>[0], "loadEvent" | "loadProfilePrizes" | "onEventIdle">>} [options] */
 function harness({
   loadEvent = async () => modified(eventResponse()),
   loadProfilePrizes = async () => modified(profileResponse()),
   onEventIdle = () => undefined,
 } = {}) {
   let nowMs = 0;
-  let nextTimerId = 1;
   let visible = true;
+  /** @type {() => void} */
   let visibilityListener = () => undefined;
   let visibilityListenersAdded = 0;
   let visibilityListenersRemoved = 0;
+  /**
+   * @type {string[]}
+   */
   const idleEventIds = [];
+  /** @type {Map<ReturnType<typeof createTimerHandle>, { callback: () => void; delayMs: number }>} */
   const timers = new Map();
   const registry = new EventPollingRegistry({
     addVisibilityListener(listener) {
@@ -100,7 +124,7 @@ function harness({
       onEventIdle(eventId);
     },
     setTimer(callback, delayMs) {
-      const timer = nextTimerId++;
+      const timer = createTimerHandle();
       timers.set(timer, { callback, delayMs });
       return timer;
     },
@@ -109,13 +133,16 @@ function harness({
     registry,
     timers,
     idleEventIds,
-    advanceTime: (milliseconds) => {
+    advanceTime: (/** @type {number} */ milliseconds) => {
       nowMs += milliseconds;
     },
     visibilityCounts: () => ({
       added: visibilityListenersAdded,
       removed: visibilityListenersRemoved,
     }),
+    /**
+     * @param {boolean} value
+     */
     setVisible(value) {
       visible = value;
       visibilityListener();
@@ -133,6 +160,7 @@ function harness({
 
 test("mutation guards follow only their event and are released when requests finish", async () => {
   const { registry } = harness();
+  /** @type {(() => boolean) | undefined} */
   let isCurrent;
   await registry.withEventMutation("event-1", async (current) => {
     isCurrent = current;
@@ -140,7 +168,7 @@ test("mutation guards follow only their event and are released when requests fin
     assert.equal(current(), true);
   });
   registry.invalidateEvent("event-1");
-  assert.equal(isCurrent(), true);
+  assert.equal(required(isCurrent)(), true);
   await assert.rejects(
     registry.withEventMutation("event-1", async (current) => {
       isCurrent = current;
@@ -149,7 +177,7 @@ test("mutation guards follow only their event and are released when requests fin
     /mutation-failed/,
   );
   registry.invalidateEvent("event-1");
-  assert.equal(isCurrent(), true);
+  assert.equal(required(isCurrent)(), true);
 });
 
 test("reset and an old completion cannot remove a new mutation guard", async () => {
@@ -203,6 +231,7 @@ test("polling authentication reuses one current-user-bound provider", async () =
   let authenticationCalls = 0;
   let providerCalls = 0;
   let assertionCalls = 0;
+  /** @type {boolean[]} */
   const forceRefreshValues = [];
   const provider = createPollingAuthTokenProvider({
     ensureAuthenticated: async () => {
@@ -211,7 +240,7 @@ test("polling authentication reuses one current-user-bound provider", async () =
     getUserBoundProvider: () => {
       providerCalls += 1;
       return Object.assign(
-        async (forceRefresh) => {
+        async (/** @type {boolean} */ forceRefresh) => {
           forceRefreshValues.push(forceRefresh);
           return "token";
         },
@@ -240,15 +269,18 @@ test("polling authentication reuses one current-user-bound provider", async () =
 });
 
 test("shares one event poll across event and selection subscribers", async () => {
+  /** @type {Array<{ eventId: string; options: import("../src/services/gameplayTransport.ts").ConditionalReadOptions; }>} */
   const loads = [];
   const responses = [modified(eventResponse(1), 1), eventNotModified(1)];
   const polling = harness({
     loadEvent: async (eventId, options) => {
       loads.push({ eventId, options });
-      return responses.shift();
+      return required(responses.shift());
     },
   });
+  /** @type {Array<import("@mons/shared/events").EventRecord | null>} */
   const events = [];
+  /** @type {Array<Record<string, string>>} */
   const selections = [];
   const unsubscribeEvent = polling.registry.subscribeToEvent(
     "event-1",
@@ -264,8 +296,12 @@ test("shares one event poll across event and selection subscribers", async () =>
   assert.equal(loads.length, 1);
   assert.deepEqual(events, [eventResponse(1).event]);
   assert.deepEqual(selections, [eventResponse(1).prizeSelections]);
-  assert.equal([...polling.timers.values()][0].delayMs, EVENT_POLL_INTERVAL_MS);
+  assert.equal(
+    required([...polling.timers.values()][0]).delayMs,
+    EVENT_POLL_INTERVAL_MS,
+  );
 
+  /** @type {Array<import("@mons/shared/events").EventRecord | null>} */
   const cachedEvents = [];
   const unsubscribeCached = polling.registry.subscribeToEvent(
     "event-1",
@@ -275,8 +311,11 @@ test("shares one event poll across event and selection subscribers", async () =>
   assert.equal(polling.timers.size, 1);
   await polling.runNext();
   assert.equal(loads.length, 2);
-  assert.equal(loads[1].options.etag, eventSnapshotEtag("event-1", 1));
-  assert.equal(loads[1].options.bookmark, bookmark(1));
+  assert.equal(
+    required(loads[1]).options.etag,
+    eventSnapshotEtag("event-1", 1),
+  );
+  assert.equal(required(loads[1]).options.bookmark, bookmark(1));
   assert.equal(events.length, 1);
   assert.equal(selections.length, 1);
 
@@ -291,15 +330,17 @@ test("shares one event poll across event and selection subscribers", async () =>
 });
 
 test("polls one canonical profile-prize resource and resets its bookmark on invalidation", async () => {
+  /** @type {Array<{ profileId: string; options: import("../src/services/gameplayTransport.ts").ConditionalReadOptions; }>} */
   const loads = [];
   const responses = [modified(profileResponse(1), 1), notModified(2)];
   const polling = harness({
     loadProfilePrizes: async (profileId, options) => {
       loads.push({ profileId, options });
-      return responses.shift();
+      return required(responses.shift());
     },
   });
   const firstUpdates = [];
+  /** @type {Array<import("@mons/shared/event-prizes").ProfileEventPrizesResponse>} */
   const secondUpdates = [];
   const unsubscribeFirst = polling.registry.subscribeToProfileEventPrizes(
     "profile-1",
@@ -314,11 +355,11 @@ test("polls one canonical profile-prize resource and resets its bookmark on inva
   assert.equal(polling.timers.size, 1);
 
   polling.registry.invalidateProfileEventPrizes();
-  assert.equal([...polling.timers.values()][0].delayMs, 0);
+  assert.equal(required([...polling.timers.values()][0]).delayMs, 0);
   await polling.runNext();
-  assert.equal(loads[1].profileId, "profile-1");
-  assert.equal(loads[1].options.etag, "etag-1");
-  assert.equal(loads[1].options.bookmark, null);
+  assert.equal(required(loads[1]).profileId, "profile-1");
+  assert.equal(required(loads[1]).options.etag, "etag-1");
+  assert.equal(required(loads[1]).options.bookmark, null);
   assert.equal(firstUpdates.length, 1);
   assert.equal(secondUpdates.length, 1);
 
@@ -328,6 +369,7 @@ test("polls one canonical profile-prize resource and resets its bookmark on inva
 });
 
 test("rejects a mismatched profile before caching its read metadata", async () => {
+  /** @type {Array<{ profileId: string; options: import("../src/services/gameplayTransport.ts").ConditionalReadOptions; }>} */
   const loads = [];
   const responses = [
     modified({ ...profileResponse(1), profileId: "profile-2" }, 1),
@@ -336,25 +378,30 @@ test("rejects a mismatched profile before caching its read metadata", async () =
   const polling = harness({
     loadProfilePrizes: async (profileId, options) => {
       loads.push({ profileId, options });
-      return responses.shift();
+      return required(responses.shift());
     },
   });
+  /** @type {Array<string>} */
   const errors = [];
+  /** @type {Array<import("@mons/shared/event-prizes").ProfileEventPrizesResponse>} */
   const updates = [];
   polling.registry.subscribeToProfileEventPrizes(
     "profile-1",
     (value) => updates.push(value),
-    (error) => errors.push(error.message),
+    (error) => {
+      assert.ok(error instanceof Error);
+      errors.push(error.message);
+    },
   );
 
   await polling.runNext();
   assert.deepEqual(errors, ["profile-event-prizes-owner-mismatch"]);
   assert.deepEqual(updates, []);
-  assert.equal(loads[0].profileId, "profile-1");
+  assert.equal(required(loads[0]).profileId, "profile-1");
 
   await polling.runNext();
-  assert.equal(loads[1].options.etag, null);
-  assert.equal(loads[1].options.bookmark, null);
+  assert.equal(required(loads[1]).options.etag, null);
+  assert.equal(required(loads[1]).options.bookmark, null);
   assert.deepEqual(updates, []);
 });
 
@@ -372,26 +419,36 @@ test("uses capped backoff and reports one error per failure streak", async () =>
       throw new Error("new-streak");
     },
   });
+  /** @type {Array<string>} */
   const errors = [];
   const updates = [];
   polling.registry.subscribeToEvent(
     "event-1",
     (value) => updates.push(value),
-    (error) => errors.push(error.message),
+    (error) => {
+      assert.ok(error instanceof Error);
+      errors.push(error.message);
+    },
   );
 
   for (const expectedDelay of EVENT_POLL_BACKOFF_MS) {
     await polling.runNext();
-    assert.equal([...polling.timers.values()][0].delayMs, expectedDelay);
+    assert.equal(
+      required([...polling.timers.values()][0]).delayMs,
+      expectedDelay,
+    );
   }
   assert.equal(errors.length, 1);
   await polling.runNext();
   assert.equal(updates.length, 1);
-  assert.equal([...polling.timers.values()][0].delayMs, EVENT_POLL_INTERVAL_MS);
+  assert.equal(
+    required([...polling.timers.values()][0]).delayMs,
+    EVENT_POLL_INTERVAL_MS,
+  );
   await polling.runNext();
   assert.deepEqual(errors, ["failure-1", "new-streak"]);
   assert.equal(
-    [...polling.timers.values()][0].delayMs,
+    required([...polling.timers.values()][0]).delayMs,
     EVENT_POLL_BACKOFF_MS[0],
   );
 });
@@ -404,12 +461,17 @@ test("delivers the current failure to a late subscriber without cached data", as
       throw new Error(`failure-${attempts}`);
     },
   });
+  /** @type {Array<string>} */
   const firstErrors = [];
+  /** @type {Array<string>} */
   const lateErrors = [];
   const unsubscribeFirst = polling.registry.subscribeToEvent(
     "event-1",
     () => undefined,
-    (error) => firstErrors.push(error.message),
+    (error) => {
+      assert.ok(error instanceof Error);
+      firstErrors.push(error.message);
+    },
   );
 
   await polling.runNext();
@@ -417,7 +479,10 @@ test("delivers the current failure to a late subscriber without cached data", as
   const unsubscribeLate = polling.registry.subscribeToEvent(
     "event-1",
     () => undefined,
-    (error) => lateErrors.push(error.message),
+    (error) => {
+      assert.ok(error instanceof Error);
+      lateErrors.push(error.message);
+    },
   );
   assert.deepEqual(lateErrors, ["failure-1"]);
 
@@ -437,22 +502,31 @@ test("delivers cached data instead of an active failure to a late subscriber", a
       throw new Error("temporary-failure");
     },
   });
+  /** @type {Array<string>} */
   const firstErrors = [];
   const unsubscribeFirst = polling.registry.subscribeToEvent(
     "event-1",
     () => undefined,
-    (error) => firstErrors.push(error.message),
+    (error) => {
+      assert.ok(error instanceof Error);
+      firstErrors.push(error.message);
+    },
   );
   await polling.runNext();
   await polling.runNext();
   assert.deepEqual(firstErrors, ["temporary-failure"]);
 
+  /** @type {Array<import("@mons/shared/events").EventRecord | null>} */
   const cachedUpdates = [];
+  /** @type {Array<string>} */
   const lateErrors = [];
   const unsubscribeLate = polling.registry.subscribeToEvent(
     "event-1",
     (value) => cachedUpdates.push(value),
-    (error) => lateErrors.push(error.message),
+    (error) => {
+      assert.ok(error instanceof Error);
+      lateErrors.push(error.message);
+    },
   );
   assert.deepEqual(cachedUpdates, [eventResponse(1).event]);
   assert.deepEqual(lateErrors, []);
@@ -462,8 +536,10 @@ test("delivers cached data instead of an active failure to a late subscriber", a
 });
 
 test("never overlaps and fences an invalidated in-flight event read", async () => {
+  /** @type {Pick<PromiseWithResolvers<import("../src/services/gameplayTransport.ts").ConditionalRead<import("@mons/shared/events").EventSnapshotResponse>>, "promise" | "resolve">} */
   const first = deferred();
   let calls = 0;
+  /** @type {AbortSignal | undefined} */
   let firstSignal;
   const polling = harness({
     loadEvent: async (_eventId, options) => {
@@ -475,18 +551,19 @@ test("never overlaps and fences an invalidated in-flight event read", async () =
       return modified(eventResponse(2), 2);
     },
   });
+  /** @type {Array<import("@mons/shared/events").EventRecord | null>} */
   const updates = [];
   polling.registry.subscribeToEvent("event-1", (value) => updates.push(value));
   await polling.runNext();
   assert.equal(calls, 1);
   polling.registry.invalidateEvent("event-1");
-  assert.equal(firstSignal.aborted, true);
+  assert.equal(required(firstSignal).aborted, true);
   assert.equal(calls, 1);
 
   first.resolve(modified(eventResponse(1), 1));
   await new Promise((resolve) => setImmediate(resolve));
   assert.deepEqual(updates, []);
-  assert.equal([...polling.timers.values()][0].delayMs, 0);
+  assert.equal(required([...polling.timers.values()][0]).delayMs, 0);
   await polling.runNext();
   assert.equal(calls, 2);
   assert.deepEqual(updates, [eventResponse(2).event]);
@@ -494,6 +571,7 @@ test("never overlaps and fences an invalidated in-flight event read", async () =
 
 test("isolates subscriber callback failures", async () => {
   const polling = harness();
+  /** @type {Array<Record<string, string>>} */
   const selections = [];
   let callbackErrors = 0;
   polling.registry.subscribeToEvent(
@@ -514,11 +592,16 @@ test("isolates subscriber callback failures", async () => {
 
   assert.equal(callbackErrors, 1);
   assert.deepEqual(selections, [eventResponse().prizeSelections]);
-  assert.equal([...polling.timers.values()][0].delayMs, EVENT_POLL_INTERVAL_MS);
+  assert.equal(
+    required([...polling.timers.values()][0]).delayMs,
+    EVENT_POLL_INTERVAL_MS,
+  );
 });
 
 test("reset preserves mounted subscribers and starts fresh reads", async () => {
+  /** @type {Array<import("../src/services/gameplayTransport.ts").ConditionalReadOptions>} */
   const eventLoads = [];
+  /** @type {Array<import("../src/services/gameplayTransport.ts").ConditionalReadOptions>} */
   const profileLoads = [];
   const polling = harness({
     loadEvent: async (_eventId, options) => {
@@ -533,7 +616,9 @@ test("reset preserves mounted subscribers and starts fresh reads", async () => {
       );
     },
   });
+  /** @type {Array<import("@mons/shared/events").EventRecord | null>} */
   const events = [];
+  /** @type {Array<import("@mons/shared/event-prizes").ProfileEventPrizesResponse>} */
   const prizes = [];
   polling.registry.subscribeToEvent("event-1", (value) => events.push(value));
   polling.registry.subscribeToProfileEventPrizes("profile-1", (value) =>
@@ -560,10 +645,10 @@ test("reset preserves mounted subscribers and starts fresh reads", async () => {
 
   assert.equal(eventLoads.length, 2);
   assert.equal(profileLoads.length, 2);
-  assert.equal(eventLoads[1].etag, null);
-  assert.equal(eventLoads[1].bookmark, null);
-  assert.equal(profileLoads[1].etag, null);
-  assert.equal(profileLoads[1].bookmark, null);
+  assert.equal(required(eventLoads[1]).etag, null);
+  assert.equal(required(eventLoads[1]).bookmark, null);
+  assert.equal(required(profileLoads[1]).etag, null);
+  assert.equal(required(profileLoads[1]).bookmark, null);
   assert.deepEqual(events, [
     eventResponse(1).event,
     null,
@@ -577,8 +662,11 @@ test("reset preserves mounted subscribers and starts fresh reads", async () => {
 });
 
 test("aborts while hidden and resumes immediately", async () => {
+  /** @type {Pick<PromiseWithResolvers<import("../src/services/gameplayTransport.ts").ConditionalRead<import("@mons/shared/events").EventSnapshotResponse>>, "promise" | "resolve">} */
   const first = deferred();
+  /** @type {Pick<PromiseWithResolvers<import("../src/services/gameplayTransport.ts").ConditionalRead<import("@mons/shared/events").EventSnapshotResponse>>, "promise" | "resolve">} */
   const second = deferred();
+  /** @type {Array<AbortSignal | undefined>} */
   const signals = [];
   let calls = 0;
   const polling = harness({
@@ -588,31 +676,36 @@ test("aborts while hidden and resumes immediately", async () => {
       return calls === 1 ? first.promise : second.promise;
     },
   });
+  /** @type {Array<import("@mons/shared/events").EventRecord | null>} */
   const updates = [];
   const unsubscribe = polling.registry.subscribeToEvent("event-1", (value) =>
     updates.push(value),
   );
   await polling.runNext();
   polling.setVisible(false);
-  assert.equal(signals[0].aborted, true);
+  assert.equal(required(signals[0]).aborted, true);
   first.resolve(modified(eventResponse(1), 1));
   await new Promise((resolve) => setImmediate(resolve));
   assert.equal(polling.timers.size, 0);
   assert.deepEqual(updates, []);
 
   polling.setVisible(true);
-  assert.equal([...polling.timers.values()][0].delayMs, 0);
+  assert.equal(required([...polling.timers.values()][0]).delayMs, 0);
   await polling.runNext();
   second.resolve(modified(eventResponse(2), 2));
   await new Promise((resolve) => setImmediate(resolve));
   assert.deepEqual(updates, [eventResponse(2).event]);
-  assert.equal([...polling.timers.values()][0].delayMs, EVENT_POLL_INTERVAL_MS);
+  assert.equal(
+    required([...polling.timers.values()][0]).delayMs,
+    EVENT_POLL_INTERVAL_MS,
+  );
 
   unsubscribe();
   assert.equal(polling.timers.size, 0);
 });
 
 test("notifies idle once and fences a stale entry lifecycle", async () => {
+  /** @type {Pick<PromiseWithResolvers<import("../src/services/gameplayTransport.ts").ConditionalRead<import("@mons/shared/events").EventSnapshotResponse>>, "promise" | "resolve">} */
   const first = deferred();
   let calls = 0;
   const latestEvents = new Map([["event-1", eventResponse(1).event]]);
@@ -623,12 +716,13 @@ test("notifies idle once and fences a stale entry lifecycle", async () => {
       calls += 1;
       return calls === 1 ? first.promise : modified(eventResponse(2), 2);
     },
-    onEventIdle: (eventId) => {
+    onEventIdle: (/** @type {string} */ eventId) => {
       latestEvents.delete(eventId);
       cooldowns.delete(eventId);
       inFlight.delete(eventId);
     },
   });
+  /** @type {Array<import("@mons/shared/events").EventRecord | null>} */
   const staleUpdates = [];
   const unsubscribeStale = polling.registry.subscribeToEvent(
     "event-1",
@@ -647,6 +741,7 @@ test("notifies idle once and fences a stale entry lifecycle", async () => {
     false,
   );
 
+  /** @type {Array<import("@mons/shared/events").EventRecord | null>} */
   const freshUpdates = [];
   const unsubscribeFresh = polling.registry.subscribeToEvent(
     "event-1",
@@ -655,7 +750,10 @@ test("notifies idle once and fences a stale entry lifecycle", async () => {
   const freshToken = polling.registry.getEventSubscriptionToken("event-1");
   assert.notEqual(freshToken, staleToken);
   const retainedResponses = new Map();
-  const retain = (token, value) => {
+  const retain = (
+    /** @type {object | null} */ token,
+    /** @type {string} */ value,
+  ) => {
     if (polling.registry.isEventSubscriptionTokenCurrent("event-1", token)) {
       retainedResponses.set("event-1", value);
     }
@@ -675,6 +773,7 @@ test("notifies idle once and fences a stale entry lifecycle", async () => {
 });
 
 test("reopens retained snapshots synchronously and revalidates before marking them fresh", async () => {
+  /** @type {Array<import("../src/services/gameplayTransport.ts").ConditionalReadOptions>} */
   const loads = [];
   const polling = harness({
     loadEvent: async (_eventId, options) => {
@@ -684,6 +783,7 @@ test("reopens retained snapshots synchronously and revalidates before marking th
         : eventNotModified(1);
     },
   });
+  /** @type {Array<boolean>} */
   const freshness = [];
   const unsubscribeFreshness = polling.registry.subscribeToEventFreshness(
     "event-1",
@@ -696,16 +796,17 @@ test("reopens retained snapshots synchronously and revalidates before marking th
   assert.equal(polling.timers.size, 0);
   assert.deepEqual(polling.visibilityCounts(), { added: 1, removed: 1 });
 
+  /** @type {Array<import("@mons/shared/events").EventRecord | null>} */
   const updates = [];
   const second = polling.registry.subscribeToEvent("event-1", (value) =>
     updates.push(value),
   );
   assert.deepEqual(updates, [eventResponse(1).event]);
   assert.equal(loads.length, 1);
-  assert.equal([...polling.timers.values()][0].delayMs, 0);
+  assert.equal(required([...polling.timers.values()][0]).delayMs, 0);
   await polling.runNext();
-  assert.equal(loads[1].etag, eventSnapshotEtag("event-1", 1));
-  assert.equal(loads[1].bookmark, bookmark(1));
+  assert.equal(required(loads[1]).etag, eventSnapshotEtag("event-1", 1));
+  assert.equal(required(loads[1]).bookmark, bookmark(1));
   assert.deepEqual(freshness, [false, true, false, true]);
   assert.equal(updates.length, 1);
   second();
@@ -743,7 +844,9 @@ test("expires inactive snapshots after five minutes without expiring active subs
   const active = polling.registry.subscribeToEvent("event-1", () => undefined);
   polling.registry.adoptEventSnapshot("event-2", seed(1, "event-2"));
   polling.advanceTime(EVENT_SNAPSHOT_CACHE_TTL_MS);
+  /** @type {Array<import("@mons/shared/events").EventRecord | null>} */
   const expired = [];
+  /** @type {Array<import("@mons/shared/events").EventRecord | null>} */
   const stillActive = [];
   const closeExpired = polling.registry.subscribeToEvent("event-2", (value) =>
     expired.push(value),
@@ -768,10 +871,12 @@ test("fresh seeds render before subscription and skip only the redundant initial
   });
   assert.equal(polling.registry.adoptEventSnapshot("event-1", seed(3)), true);
   assert.equal(polling.timers.size, 0);
+  /** @type {Array<boolean>} */
   const freshness = [];
   polling.registry.subscribeToEventFreshness("event-1", (value) =>
     freshness.push(value),
   );
+  /** @type {Array<import("@mons/shared/events").EventRecord | null>} */
   const updates = [];
   const close = polling.registry.subscribeToEvent("event-1", (value) =>
     updates.push(value),
@@ -779,13 +884,17 @@ test("fresh seeds render before subscription and skip only the redundant initial
   assert.deepEqual(updates, [eventResponse(3).event]);
   assert.deepEqual(freshness, [false, true]);
   assert.equal(calls, 0);
-  assert.equal([...polling.timers.values()][0].delayMs, EVENT_POLL_INTERVAL_MS);
+  assert.equal(
+    required([...polling.timers.values()][0]).delayMs,
+    EVENT_POLL_INTERVAL_MS,
+  );
   await polling.runNext();
   assert.equal(calls, 1);
   close();
 
   polling.registry.adoptEventSnapshot("event-2", seed(1, "event-2"));
   polling.advanceTime(EVENT_POLL_INTERVAL_MS);
+  /** @type {Array<boolean>} */
   const staleFreshness = [];
   polling.registry.subscribeToEventFreshness("event-2", (value) =>
     staleFreshness.push(value),
@@ -794,7 +903,7 @@ test("fresh seeds render before subscription and skip only the redundant initial
     "event-2",
     () => undefined,
   );
-  assert.equal([...polling.timers.values()][0].delayMs, 0);
+  assert.equal(required([...polling.timers.values()][0]).delayMs, 0);
   assert.deepEqual(staleFreshness, [false]);
   closeStale();
 });
@@ -804,7 +913,9 @@ for (const staleResult of [
   eventNotModified(1),
 ]) {
   test(`adoption fences an older in-flight ${staleResult.kind} response and its validators`, async () => {
+    /** @type {Pick<PromiseWithResolvers<import("../src/services/gameplayTransport.ts").ConditionalRead<import("@mons/shared/events").EventSnapshotResponse>>, "promise" | "resolve">} */
     const oldRead = deferred();
+    /** @type {Array<import("../src/services/gameplayTransport.ts").ConditionalReadOptions>} */
     const loads = [];
     const polling = harness({
       loadEvent: async (_eventId, options) => {
@@ -814,6 +925,7 @@ for (const staleResult of [
         return eventNotModified(3);
       },
     });
+    /** @type {Array<import("@mons/shared/events").EventRecord | null>} */
     const updates = [];
     const close = polling.registry.subscribeToEvent("event-1", (value) =>
       updates.push(value),
@@ -821,17 +933,17 @@ for (const staleResult of [
     await polling.runNext();
     await polling.runNext();
     polling.registry.adoptEventSnapshot("event-1", seed(3));
-    assert.equal(loads[1].signal.aborted, true);
+    assert.equal(required(required(loads[1]).signal).aborted, true);
     assert.deepEqual(updates, [eventResponse(1).event, eventResponse(3).event]);
     oldRead.resolve(staleResult);
     await new Promise((resolve) => setImmediate(resolve));
     assert.equal(
-      [...polling.timers.values()][0].delayMs,
+      required([...polling.timers.values()][0]).delayMs,
       EVENT_POLL_INTERVAL_MS,
     );
     await polling.runNext();
-    assert.equal(loads[2].etag, eventSnapshotEtag("event-1", 3));
-    assert.equal(loads[2].bookmark, bookmark(3));
+    assert.equal(required(loads[2]).etag, eventSnapshotEtag("event-1", 3));
+    assert.equal(required(loads[2]).bookmark, bookmark(3));
     assert.equal(updates.length, 2);
     close();
   });
@@ -845,6 +957,7 @@ test("snapshot revisions stay monotonic within an epoch and retired epochs canno
     polling.registry.adoptEventSnapshot("event-1", seed(6), generation),
     true,
   );
+  /** @type {Array<import("@mons/shared/events").EventRecord | null>} */
   const updates = [];
   const close = polling.registry.subscribeToEvent("event-1", (value) =>
     updates.push(value),
@@ -862,6 +975,7 @@ test("snapshot revisions stay monotonic within an epoch and retired epochs canno
   assert.deepEqual(updates, [eventResponse(7).event, eventResponse(1).event]);
   close();
   polling.registry.adoptEventSnapshot("event-1", seed(9));
+  /** @type {Array<import("@mons/shared/events").EventRecord | null>} */
   const reopened = [];
   polling.registry.subscribeToEvent("event-1", (value) =>
     reopened.push(value),
@@ -870,6 +984,7 @@ test("snapshot revisions stay monotonic within an epoch and retired epochs canno
 });
 
 test("authoritative missing responses clear displayed data and are never retained", async () => {
+  /** @type {import("@mons/shared/events").EventSnapshotResponse} */
   const absent = {
     ok: true,
     eventId: "event-1",
@@ -879,7 +994,9 @@ test("authoritative missing responses clear displayed data and are never retaine
   };
   const polling = harness({ loadEvent: async () => modified(absent, 0) });
   polling.registry.adoptEventSnapshot("event-1", seed(4));
+  /** @type {Array<import("@mons/shared/events").EventRecord | null>} */
   const events = [];
+  /** @type {Array<Record<string, string>>} */
   const selections = [];
   const closeEvent = polling.registry.subscribeToEvent("event-1", (value) =>
     events.push(value),
@@ -893,6 +1010,7 @@ test("authoritative missing responses clear displayed data and are never retaine
   assert.deepEqual(selections, [eventResponse(4).prizeSelections, {}]);
   closeEvent();
   closeSelections();
+  /** @type {Array<import("@mons/shared/events").EventRecord | null>} */
   const reopened = [];
   polling.registry.subscribeToEvent("event-1", (value) =>
     reopened.push(value),
@@ -904,11 +1022,13 @@ test("invalidation evicts inactive snapshots and marks active snapshots stale", 
   const polling = harness();
   polling.registry.adoptEventSnapshot("event-1", seed());
   polling.registry.invalidateEvent("event-1");
+  /** @type {Array<import("@mons/shared/events").EventRecord | null>} */
   const updates = [];
   const close = polling.registry.subscribeToEvent("event-1", (value) =>
     updates.push(value),
   );
   assert.deepEqual(updates, []);
+  /** @type {Array<boolean>} */
   const freshness = [];
   polling.registry.subscribeToEventFreshness("event-1", (value) =>
     freshness.push(value),
@@ -917,6 +1037,7 @@ test("invalidation evicts inactive snapshots and marks active snapshots stale", 
   polling.registry.invalidateEvent("event-1");
   assert.deepEqual(freshness, [false, true, false]);
   close();
+  /** @type {Array<import("@mons/shared/events").EventRecord | null>} */
   const reopened = [];
   polling.registry.subscribeToEvent("event-1", (value) =>
     reopened.push(value),
@@ -925,17 +1046,21 @@ test("invalidation evicts inactive snapshots and marks active snapshots stale", 
 });
 
 test("reset clears cached and displayed snapshots and rejects previous-generation work", async () => {
+  /** @type {Pick<PromiseWithResolvers<import("../src/services/gameplayTransport.ts").ConditionalRead<import("@mons/shared/events").EventSnapshotResponse>>, "promise" | "resolve">} */
   const oldRead = deferred();
   const polling = harness({ loadEvent: async () => oldRead.promise });
   const previousGeneration = polling.registry.getGeneration();
   polling.registry.adoptEventSnapshot("event-1", seed());
   polling.registry.adoptEventSnapshot("event-2", seed(1, "event-2"));
+  /** @type {Array<import("@mons/shared/events").EventRecord | null>} */
   const updates = [];
+  /** @type {Array<Record<string, string>>} */
   const selections = [];
   polling.registry.subscribeToEvent("event-1", (value) => updates.push(value));
   polling.registry.subscribeToEventPrizeSelections("event-1", (value) =>
     selections.push(value),
   );
+  /** @type {Array<boolean>} */
   const freshness = [];
   polling.registry.subscribeToEventFreshness("event-1", (value) =>
     freshness.push(value),
@@ -952,6 +1077,7 @@ test("reset clears cached and displayed snapshots and rejects previous-generatio
   oldRead.resolve(modified(eventResponse(8), 8));
   await new Promise((resolve) => setImmediate(resolve));
   assert.deepEqual(updates, [eventResponse().event, null]);
+  /** @type {Array<import("@mons/shared/events").EventRecord | null>} */
   const inactive = [];
   polling.registry.subscribeToEvent("event-2", (value) =>
     inactive.push(value),
@@ -972,6 +1098,7 @@ test("rejects invalid or mismatched seeds without disturbing the current snapsho
       false,
     );
   }
+  /** @type {Array<import("@mons/shared/events").EventRecord | null>} */
   const updates = [];
   polling.registry.subscribeToEvent("event-1", (value) =>
     updates.push(value),
@@ -980,6 +1107,7 @@ test("rejects invalid or mismatched seeds without disturbing the current snapsho
 });
 
 test("an epoch-changing 304 forces a full read before cached data becomes fresh", async () => {
+  /** @type {Array<import("../src/services/gameplayTransport.ts").ConditionalReadOptions>} */
   const loads = [];
   const polling = harness({
     loadEvent: async (_eventId, options) => {
@@ -991,7 +1119,9 @@ test("an epoch-changing 304 forces a full read before cached data becomes fresh"
   });
   polling.registry.adoptEventSnapshot("event-1", seed(4));
   polling.advanceTime(EVENT_POLL_INTERVAL_MS);
+  /** @type {Array<import("@mons/shared/events").EventRecord | null>} */
   const updates = [];
+  /** @type {Array<boolean>} */
   const freshness = [];
   polling.registry.subscribeToEventFreshness("event-1", (value) =>
     freshness.push(value),
@@ -999,25 +1129,30 @@ test("an epoch-changing 304 forces a full read before cached data becomes fresh"
   polling.registry.subscribeToEvent("event-1", (value) => updates.push(value));
   await polling.runNext();
   assert.deepEqual(freshness, [false]);
-  assert.equal([...polling.timers.values()][0].delayMs, 0);
+  assert.equal(required([...polling.timers.values()][0]).delayMs, 0);
   await polling.runNext();
-  assert.equal(loads[1].etag, null);
-  assert.equal(loads[1].bookmark, null);
+  assert.equal(required(loads[1]).etag, null);
+  assert.equal(required(loads[1]).bookmark, null);
   assert.deepEqual(updates, [eventResponse(4).event, eventResponse(1).event]);
   assert.deepEqual(freshness, [false, true]);
 });
 
 test("opening and closing without validation cannot extend the snapshot age", async () => {
   const polling = harness();
+  /**
+   * @type {() => void}
+   */
   let close;
   close = polling.registry.subscribeToEvent("event-1", () => close());
   await polling.runNext();
   polling.advanceTime(EVENT_SNAPSHOT_CACHE_TTL_MS - 1);
+  /** @type {Array<import("@mons/shared/events").EventRecord | null>} */
   const cached = [];
   polling.registry.subscribeToEvent("event-1", (value) => cached.push(value))();
   assert.deepEqual(cached, [eventResponse().event]);
   polling.advanceTime(1);
   assert.equal(polling.registry.getEventSnapshot("event-1"), null);
+  /** @type {Array<import("@mons/shared/events").EventRecord | null>} */
   const expired = [];
   polling.registry.subscribeToEvent("event-1", (value) =>
     expired.push(value),
@@ -1028,9 +1163,10 @@ test("opening and closing without validation cannot extend the snapshot age", as
 test("a reentrant adoption cannot deliver the older outer snapshot to later subscribers", async () => {
   const polling = harness();
   polling.registry.subscribeToEvent("event-1", (value) => {
-    if (value?.revision === 1)
+    if (value?.updatedAtMs === 1)
       polling.registry.adoptEventSnapshot("event-1", seed(2));
   });
+  /** @type {Array<import("@mons/shared/events").EventRecord | null>} */
   const laterUpdates = [];
   polling.registry.subscribeToEvent("event-1", (value) =>
     laterUpdates.push(value),
@@ -1048,6 +1184,7 @@ test("a reentrant reset prevents later subscribers from receiving the previous o
   polling.registry.subscribeToEvent("event-1", (value) => {
     if (value) polling.registry.reset();
   });
+  /** @type {Array<import("@mons/shared/events").EventRecord | null>} */
   const laterUpdates = [];
   polling.registry.subscribeToEvent("event-1", (value) =>
     laterUpdates.push(value),

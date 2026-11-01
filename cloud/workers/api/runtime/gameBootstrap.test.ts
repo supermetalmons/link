@@ -1,8 +1,23 @@
-import { retainedInviteSourceFixture } from "../test/inviteDocumentFixture.ts";
-import { unwrapMatchStateWireFixture } from "../test/matchRecordFixture.ts";
-import { env, exports } from "cloudflare:workers";
-import { runInDurableObject } from "cloudflare:test";
-import { afterEach, describe, expect, it } from "vitest";
+import {
+  APPLICATION_DATA_HEADER,
+  APPLICATION_DATA_EPOCH,
+} from "@mons/shared/data-contract";
+import { activateCanonicalApplicationFixture } from "./applicationRoomFixture.ts";
+import {
+  canonicalMatchEnvironment,
+  runInCanonicalMatchRoom,
+} from "./canonicalMatchTestFixture.ts";
+import {
+  retainedInviteSourceFixture,
+  inviteDocumentFixture,
+} from "../test/inviteDocumentFixture.ts";
+import {
+  unwrapMatchStateWireFixture,
+  publicMatchFixture,
+  matchDocumentFixture,
+} from "../test/matchRecordFixture.ts";
+import { env as rawEnv, exports } from "cloudflare:workers";
+import { afterEach, beforeAll, describe, expect, it } from "vitest";
 import {
   isReadGameBootstrapResponse,
   type ReadGameBootstrapResponse,
@@ -13,38 +28,40 @@ import type { InviteReactions } from "../src/inviteReactions.ts";
 import { getMatchStateRpc } from "../src/matchStateRpc.ts";
 import { socketTestIdentity } from "../test/socketTestSession.ts";
 
+const env = canonicalMatchEnvironment(rawEnv);
+beforeAll(activateCanonicalApplicationFixture);
+
 const rooms: DurableObjectStub<InviteReactions>[] = [];
 const ctx = { waitUntil: (_promise: Promise<unknown>) => undefined };
-const match = {
+const match = publicMatchFixture({
   version: 2,
   color: "white",
   emojiId: 1,
-  aura: "",
+  aura: "none",
   gameVariant: "standard",
   fen: "initial",
-  status: "",
+  status: "active",
   flatMovesString: "",
-  timer: "",
-};
+  timer: { state: "idle" },
+});
 
-async function fixture({ rematch = false, guest = true } = {}) {
+async function fixture({
+  rematch = false,
+  guest = true,
+  protectedInvite = false,
+} = {}) {
   const inviteId = `bootstrap-room-${crypto.randomUUID()}`;
   const room = env.INVITE_REACTIONS.getByName(inviteId);
   rooms.push(room);
-  const invite: {
-    hostId: string;
-    guestId: string | null;
-    hostColor: string;
-    hostRematches?: string;
-    guestRematches?: string;
-    password?: boolean;
-  } = {
+  const invite = inviteDocumentFixture({
     hostId: "host-login",
     guestId: "guest-login",
     hostColor: "white",
-    ...(rematch ? { hostRematches: "1", guestRematches: "1" } : {}),
-  };
-  await runInDurableObject(room, (instance) => {
+    ...(protectedInvite ? { kind: "automatch", password: "secret" } : {}),
+    hostRematches: { state: "open", indices: rematch ? [1] : [] },
+    guestRematches: { state: "open", indices: rematch ? [1] : [] },
+  });
+  await runInCanonicalMatchRoom(room, (instance) => {
     Reflect.set(instance, "inviteReader", async () => structuredClone(invite));
   });
   const matchId = rematch ? `${inviteId}1` : inviteId;
@@ -57,7 +74,7 @@ async function fixture({ rematch = false, guest = true } = {}) {
           matchId,
           playerId: "host-login",
           marker: "host-created",
-          value: match,
+          value: matchDocumentFixture(match),
         },
         ...(guest
           ? [
@@ -65,7 +82,7 @@ async function fixture({ rematch = false, guest = true } = {}) {
                 matchId,
                 playerId: "guest-login",
                 marker: "guest-created",
-                value: { ...match, color: "black" },
+                value: matchDocumentFixture({ ...match, color: "black" }),
               },
             ]
           : []),
@@ -97,7 +114,11 @@ async function bootstrap(
 ) {
   const response = await handleGameBootstrapRoute(
     new Request(`https://api.mons.link/invites/${state.inviteId}/bootstrap`, {
-      headers: { Origin: "https://mons.link", Authorization: "Bearer fixture" },
+      headers: {
+        [APPLICATION_DATA_HEADER]: String(APPLICATION_DATA_EPOCH),
+        Origin: "https://mons.link",
+        Authorization: "Bearer fixture",
+      },
     }),
     env,
     ctx,
@@ -120,7 +141,7 @@ afterEach(async () => {
     rooms
       .splice(0)
       .map((room) =>
-        runInDurableObject(room, (_instance, state) =>
+        runInCanonicalMatchRoom(room, (_instance, state) =>
           state.storage.deleteAlarm(),
         ),
       ),
@@ -133,12 +154,20 @@ describe("game bootstrap Worker and canonical room", () => {
     const preflight = await exports.default.fetch(
       new Request(url, {
         method: "OPTIONS",
-        headers: { Origin: "https://mons.link" },
+        headers: {
+          [APPLICATION_DATA_HEADER]: String(APPLICATION_DATA_EPOCH),
+          Origin: "https://mons.link",
+        },
       }),
     );
     expect(preflight.status).toBe(204);
     const anonymous = await exports.default.fetch(
-      new Request(url, { headers: { Origin: "https://mons.link" } }),
+      new Request(url, {
+        headers: {
+          [APPLICATION_DATA_HEADER]: String(APPLICATION_DATA_EPOCH),
+          Origin: "https://mons.link",
+        },
+      }),
     );
     expect(anonymous.status).toBe(401);
   });
@@ -157,8 +186,14 @@ describe("game bootstrap Worker and canonical room", () => {
     const state = await fixture({ rematch: true });
     const body = await bootstrap(state);
     expect(body.match.matchId).toBe(state.matchId);
-    expect(body.metadata.hostRematches).toBe("1");
-    expect(body.metadata.guestRematches).toBe("1");
+    expect(body.metadata.hostRematches).toEqual({
+      state: "open",
+      indices: [1],
+    });
+    expect(body.metadata.guestRematches).toEqual({
+      state: "open",
+      indices: [1],
+    });
     expect(body.hasPendingProposal).toBe(false);
     expect(body.match.hostMatch).toEqual(match);
   });
@@ -174,9 +209,8 @@ describe("game bootstrap Worker and canonical room", () => {
   it.each([false, true])(
     "refreshes both room caches when a guest joins a protected=%s invite",
     async (protectedInvite) => {
-      const state = await fixture();
+      const state = await fixture({ protectedInvite });
       state.invite.guestId = null;
-      if (protectedInvite) state.invite.password = true;
       const cached = await state.room.readMatches(
         state.inviteId,
         state.matchId,
@@ -203,27 +237,33 @@ describe("game bootstrap Worker and canonical room", () => {
     const state = await fixture({ rematch: true });
     const cached = await state.room.readMatches(state.inviteId, state.matchId);
     expect(cached.status).toBe("ok");
-    state.invite.hostRematches = "1x";
+    state.invite.hostRematches = { state: "ended", indices: [1] };
     state.repository.readInviteMetadata = async () =>
       retainedInviteSourceFixture(structuredClone(state.invite));
     const body = await bootstrap(state);
     expect(body.match.matchId).toBe(state.matchId);
-    expect(body.metadata.hostRematches).toBe("1x");
+    expect(body.metadata.hostRematches).toEqual({
+      state: "ended",
+      indices: [1],
+    });
     expect(body.hasPendingProposal).toBe(false);
   });
 
   it("refreshes an accepted pending rematch before resolving the guest selection", async () => {
     const state = await fixture({ rematch: true });
-    state.invite.guestRematches = "";
+    state.invite.guestRematches = { state: "open", indices: [] };
     const cached = await state.room.readMatches(state.inviteId, state.matchId);
     expect(cached.status).toBe("ok");
-    state.invite.guestRematches = "1";
+    state.invite.guestRematches = { state: "open", indices: [1] };
     state.repository.readInviteMetadata = async () =>
       retainedInviteSourceFixture(structuredClone(state.invite));
     const body = await bootstrap(state, "guest-login");
     expect(body.viewer.role).toBe("guest");
     expect(body.match.matchId).toBe(state.matchId);
-    expect(body.metadata.guestRematches).toBe("1");
+    expect(body.metadata.guestRematches).toEqual({
+      state: "open",
+      indices: [1],
+    });
     expect(body.hasPendingProposal).toBe(false);
   });
 });

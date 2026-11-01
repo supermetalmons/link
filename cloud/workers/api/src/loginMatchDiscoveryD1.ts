@@ -43,7 +43,7 @@ function prepareResolvedDiscoveryRead(
 ): D1PreparedStatement {
   return session
     .prepare(
-      "SELECT invite_id, resolution FROM login_match_discovery WHERE login_uid = ? AND match_id = ?",
+      "SELECT invite_id, resolution FROM login_match_discovery_canonical WHERE login_uid = ? AND match_id = ?",
     )
     .bind(loginUid, matchId);
 }
@@ -90,7 +90,7 @@ export function buildLoginMatchDiscoveryStatements(
         .prepare(
           `INSERT INTO login_match_discovery_guards (singleton)
            SELECT 0 WHERE EXISTS (
-             SELECT 1 FROM login_match_discovery
+             SELECT 1 FROM login_match_discovery_canonical
              WHERE login_uid = ? AND match_id = ? AND NOT (
                (resolution = ? AND invite_id IS ?)
                OR (? = 'capture' AND resolution != 'resolved')
@@ -109,19 +109,19 @@ export function buildLoginMatchDiscoveryStatements(
         ),
       db
         .prepare(
-          `INSERT INTO login_match_discovery (
+          `INSERT INTO login_match_discovery_canonical (
              login_uid, match_id, match_sort_key, invite_id,
              resolution, provenance, indexed_at_ms
            ) VALUES (?, ?, ?, ?, ?, ?, ?)
            ON CONFLICT (login_uid, match_id) DO UPDATE SET
-             invite_id = CASE WHEN login_match_discovery.resolution = 'resolved'
-               THEN login_match_discovery.invite_id ELSE excluded.invite_id END,
-             resolution = CASE WHEN login_match_discovery.resolution = 'resolved'
-               THEN login_match_discovery.resolution ELSE excluded.resolution END,
+             invite_id = CASE WHEN login_match_discovery_canonical.resolution = 'resolved'
+               THEN login_match_discovery_canonical.invite_id ELSE excluded.invite_id END,
+             resolution = CASE WHEN login_match_discovery_canonical.resolution = 'resolved'
+               THEN login_match_discovery_canonical.resolution ELSE excluded.resolution END,
              provenance = CASE WHEN excluded.provenance = 'capture'
-               THEN 'capture' ELSE login_match_discovery.provenance END
-           WHERE (excluded.resolution = 'resolved' AND login_match_discovery.resolution != 'resolved')
-             OR (excluded.provenance = 'capture' AND login_match_discovery.provenance != 'capture')`,
+               THEN 'capture' ELSE login_match_discovery_canonical.provenance END
+           WHERE (excluded.resolution = 'resolved' AND login_match_discovery_canonical.resolution != 'resolved')
+             OR (excluded.provenance = 'capture' AND login_match_discovery_canonical.provenance != 'capture')`,
         )
         .bind(
           row.loginUid,
@@ -211,7 +211,7 @@ export async function readResolvedLoginMatchInviteIds(
     )
       throw new Error("login-match-discovery-unavailable");
     if (result.results.length === 0) return null;
-    return resolvedDiscoveryInviteId(inputs[index], result.results[0]);
+    return resolvedDiscoveryInviteId(inputs[index]!, result.results[0]!);
   });
 }
 
@@ -234,7 +234,7 @@ export async function listLoginMatchDiscoveryPage(
     .withSession("first-primary")
     .prepare(
       `SELECT match_id, match_sort_key, invite_id, resolution
-       FROM login_match_discovery
+       FROM login_match_discovery_canonical
        WHERE login_uid = ? AND match_sort_key > ?
        ORDER BY match_sort_key LIMIT ?`,
     )

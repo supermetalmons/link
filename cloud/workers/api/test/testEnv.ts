@@ -79,18 +79,22 @@ const profileGamesDb = {
   dump: async () => new ArrayBuffer(0),
   exec: async () => ({ count: 0, duration: 0 }),
   prepare: (query: string): D1PreparedStatement =>
-    query.includes("match_state_control") ||
-    query.includes("match_state_write_admissions")
-      ? matchStateStatement(query)
-      : query.includes("invite_source_control") ||
-          query.includes("invite_source_write_admissions")
-        ? inviteSourceStatement(query)
-        : query.includes("automatch_runtime_control") ||
-            query.includes("automatch_write_admissions")
-          ? automatchStatement(query)
-          : query.includes("match_presentation_control")
-            ? presentationControlStatement
-            : d1Statement,
+    query.includes("application_data_admissions")
+      ? applicationAdmissionStatement
+      : query.includes("application_data_control")
+        ? applicationControlStatement
+        : query.includes("match_state_control") ||
+            query.includes("match_state_write_admissions")
+          ? matchStateStatement(query)
+          : query.includes("invite_source_control") ||
+              query.includes("invite_source_write_admissions")
+            ? inviteSourceStatement(query)
+            : query.includes("automatch_runtime_control") ||
+                query.includes("automatch_write_admissions")
+              ? automatchStatement(query)
+              : query.includes("match_presentation_control")
+                ? presentationControlStatement
+                : d1Statement,
   withSession: (): D1DatabaseSession => ({
     prepare: (query: string): D1PreparedStatement =>
       profileGamesDb.prepare(query),
@@ -98,6 +102,38 @@ const profileGamesDb = {
     getBookmark: () => null,
   }),
 } satisfies D1Database;
+
+const applicationControlStatement: D1PreparedStatement = {
+  bind: () => applicationControlStatement,
+  first: d1Statement.first,
+  run: d1Statement.run,
+  raw: d1Statement.raw,
+  all: async <T>() => ({
+    success: true,
+    results: [
+      {
+        singleton: 1,
+        generation: 1,
+        data_epoch: 1,
+        phase: "active",
+        migration_id: null,
+      } as T,
+    ],
+    meta: d1Meta,
+  }),
+};
+
+const applicationAdmissionStatement: D1PreparedStatement = {
+  bind: () => applicationAdmissionStatement,
+  first: d1Statement.first,
+  all: d1Statement.all,
+  raw: d1Statement.raw,
+  run: async () => ({
+    success: true,
+    results: [],
+    meta: { ...d1Meta, changes: 1 },
+  }),
+};
 
 function matchStateStatement(query: string): D1PreparedStatement {
   const row = {
@@ -199,10 +235,7 @@ function automatchStatement(
         source_digest: "a".repeat(64),
         import_digest: "a".repeat(64),
         activated_at_ms: 3,
-        metadata_json: JSON.stringify({
-          verifiedAtMs: 2,
-          activationCandidateVersionId: "00000000-0000-4000-8000-000000000001",
-        }),
+        metadata_json: null,
       };
   return {
     all: async <T>() => ({ success: true, results: [row as T], meta: d1Meta }),
@@ -357,7 +390,6 @@ export const TELEGRAM_TEST_ENV = {
   }),
   APPLE_AUDIENCES: "link.mons",
   AUTH_MUTATIONS_DISABLED: "false",
-  NEW_MATCH_TIMER_STORAGE: "d1" as Env["NEW_MATCH_TIMER_STORAGE"],
   EVENT_DB_BOOKMARK_EPOCH:
     "11111111-1111-4111-8111-111111111111" as Env["EVENT_DB_BOOKMARK_EPOCH"],
   AUTH_RECOVERY_QUEUE: queue,
@@ -481,4 +513,22 @@ export function withInviteSourceReads(
     },
   };
   return { ...environment, PROFILE_GAMES_DB: database };
+}
+export function applicationRequest(
+  input: RequestInfo | URL,
+  init?: RequestInit,
+): Request {
+  const headers = new Headers(
+    init?.headers ?? (input instanceof Request ? input.headers : undefined),
+  );
+  headers.set("X-Mons-Data-Epoch", "1");
+  if (headers.get("Upgrade")?.toLowerCase() === "websocket") {
+    const protocols = headers.get("Sec-WebSocket-Protocol");
+    if (
+      protocols &&
+      !protocols.split(",").some((value) => value.trim() === "mons-data-v1")
+    )
+      headers.set("Sec-WebSocket-Protocol", `${protocols}, mons-data-v1`);
+  }
+  return new Request(input, { ...init, headers });
 }

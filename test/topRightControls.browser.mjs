@@ -1,3 +1,5 @@
+import { required } from "./fixtures/canonicalData.mjs";
+import { browserServerOrigin } from "./browserViteServer.mjs";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { createRequire } from "node:module";
@@ -7,6 +9,7 @@ import test, { after, before } from "node:test";
 import { createServer } from "vite";
 
 const require = createRequire(import.meta.url);
+/** @type {typeof import("playwright")} */
 const { chromium, devices } = require(
   process.env.MONS_PLAYWRIGHT_PATH || "playwright",
 );
@@ -22,7 +25,7 @@ export const environment = {
   calls: [],
   owner: { authStatus: 'authenticated', profileId: 'profile-a', solAddress: '11111111111111111111111111111111', ethAddress: '' },
   selection: { avatarId: null, specialIds: new Set() },
-  aura: '',
+  aura: 'none',
   playing: false,
   musicListeners: new Set(),
   subscriptionStarts: 0,
@@ -146,7 +149,8 @@ const render = (patch = {}) => {
 };
 document.getElementById('prevented').addEventListener(defaultEarlyInputEventName, event => event.preventDefault());
 if (isMobile) document.addEventListener('touchstart', preventTouchstartIfNeeded, { passive: false });
-window.harness = {
+window.topRightHarness = {
+  required(value) { if (value === null || value === undefined) throw new Error("top-right-fixture-value-missing"); return value; },
   environment, render, getState, isMobile,
   clearCalls() { environment.calls.length = 0; },
   invoke(name) { flushSync(() => (menu[name] || session[name])()); return getState(); },
@@ -169,6 +173,7 @@ window.harness = {
 render();
 `;
 
+/** @param {string} value */
 const normalizedSource = (value) => value.replace(/\.(ts|tsx|js|jsx)$/, "");
 const stubSources = new Map([
   ["services/nftService", environmentSource],
@@ -198,8 +203,11 @@ const resolvedStubs = new Map(
     source,
   ]),
 );
+/** @type {import("vite").ViteDevServer | undefined} */
 let server;
+/** @type {import("playwright").Browser | undefined} */
 let browser;
+/** @type {string} */
 let origin;
 
 before(async () => {
@@ -260,7 +268,7 @@ before(async () => {
     ],
   });
   await server.listen();
-  origin = `http://127.0.0.1:${server.httpServer.address().port}`;
+  origin = browserServerOrigin(server);
   browser = await chromium.launch({
     headless: true,
     ...(process.env.MONS_BROWSER_EXECUTABLE
@@ -274,8 +282,9 @@ after(async () => {
   await server?.close();
 });
 
+/** @param {(page: import("playwright").Page, activate: (locator: import("playwright").Locator) => Promise<void>) => Promise<void>} run @param {{mobile?: boolean, mainMenu?: boolean}} [options] */
 async function fixture(run, { mobile = false, mainMenu = false } = {}) {
-  const context = await browser.newContext({
+  const context = await required(browser).newContext({
     ...(mobile
       ? devices["iPhone 13"]
       : { viewport: { width: 1000, height: 800 } }),
@@ -299,12 +308,16 @@ async function fixture(run, { mobile = false, mainMenu = false } = {}) {
     return route.abort();
   });
   const page = await context.newPage();
+  /** @type {string[]} */
   const errors = [];
   page.on("pageerror", (error) => errors.push(error.message));
   try {
     await page.goto(`${origin}/__top-right`);
     await page.locator("#top-right-more-button").waitFor();
-    assert.equal(await page.evaluate(() => window.harness.isMobile), mobile);
+    assert.equal(
+      await page.evaluate(() => window.topRightHarness.isMobile),
+      mobile,
+    );
     await run(page, async (locator) =>
       mobile ? locator.tap() : locator.click(),
     );
@@ -317,15 +330,22 @@ async function fixture(run, { mobile = false, mainMenu = false } = {}) {
   }
 }
 
-const state = (page) => page.evaluate(() => window.harness.getState());
-const calls = (page) => page.evaluate(() => window.harness.environment.calls);
+/** @param {import("playwright").Page} page */
+const state = (page) => page.evaluate(() => window.topRightHarness.getState());
+/** @param {import("playwright").Page} page */
+const calls = (page) =>
+  page.evaluate(() => window.topRightHarness.environment.calls);
+/** @param {import("playwright").Page} page @param {string} name */
 const trigger = (page, name) => page.locator(`#top-right-${name}-button`);
+/** @param {import("playwright").Page} page @param {string} name */
 const popover = (page, name) => page.locator(`#top-right-${name}-popover`);
+/** @param {import("playwright").Page} page @param {string} selector */
 const focusIs = (page, selector) =>
   page.waitForFunction(
     (selector) => document.activeElement === document.querySelector(selector),
     selector,
   );
+/** @param {import("playwright").Page} page */
 const frames = (page) =>
   page.evaluate(
     () =>
@@ -333,9 +353,13 @@ const frames = (page) =>
         requestAnimationFrame(() => requestAnimationFrame(resolve)),
       ),
   );
-const clearCalls = (page) => page.evaluate(() => window.harness.clearCalls());
+/** @param {import("playwright").Page} page */
+const clearCalls = (page) =>
+  page.evaluate(() => window.topRightHarness.clearCalls());
+/** @param {import("playwright").Page} page @param {string} name */
 const invoke = (page, name) =>
-  page.evaluate((name) => window.harness.invoke(name), name);
+  page.evaluate((name) => window.topRightHarness.invoke(name), name);
+/** @param {import("playwright").Page} page @param {string} name @param {(locator: import("playwright").Locator) => Promise<void>} [activate] */
 const open = async (page, name, activate = (locator) => locator.click()) => {
   await activate(trigger(page, name));
   await focusIs(
@@ -351,11 +375,11 @@ test(
   { timeout: 60000 },
   async () => {
     await fixture(async (page) => {
-      for (const [name, label, controlled] of [
+      for (const [name, label, controlled] of /** @type {const} */ ([
         ["more", "More", "more"],
         ["music", "Music", "music"],
         ["gem", "Collectibles", "inventory"],
-      ]) {
+      ])) {
         assert.equal(
           await trigger(page, name).getAttribute("aria-label"),
           label,
@@ -397,7 +421,9 @@ test(
       assert.deepEqual((await state(page)).expanded, [
         "top-right-music-button",
       ]);
-      await page.evaluate(() => window.harness.render({ callbackVersion: 2 }));
+      await page.evaluate(() =>
+        window.topRightHarness.render({ callbackVersion: 2 }),
+      );
       await open(page, "more");
       await page.getByRole("button", { name: "Settings", exact: true }).click();
       assert.deepEqual((await calls(page)).at(-1), [
@@ -423,14 +449,14 @@ test(
   { timeout: 60000 },
   async () => {
     await fixture(async (page) => {
-      for (const name of ["more", "music", "gem"]) {
+      for (const name of /** @type {const} */ (["more", "music", "gem"])) {
         await open(page, name);
         await page.keyboard.press("Escape");
         await focusIs(page, `#top-right-${name}-button`);
         assert.equal((await state(page)).visible, false);
       }
       await page.evaluate(() =>
-        window.harness.setIdentity({ authStatus: "unauthenticated" }),
+        window.topRightHarness.setIdentity({ authStatus: "unauthenticated" }),
       );
       assert.equal(
         await trigger(page, "info").getAttribute("aria-label"),
@@ -459,7 +485,10 @@ test(
       await page.locator("#outside").click();
       await focusIs(page, "#top-right-more-button");
       assert.equal((await state(page)).outsideDismissed, true);
-      for (const id of ["outside-button", "outside-input"]) {
+      for (const id of /** @type {const} */ ([
+        "outside-button",
+        "outside-input",
+      ])) {
         await open(page, "music");
         await page.locator(`#${id}`).click();
         await frames(page);
@@ -471,7 +500,7 @@ test(
       await focusIs(page, "#top-right-more-button");
       await open(page, "more");
       await page.locator("#outside-input").focus();
-      const outsideBox = await page.locator("#outside").boundingBox();
+      const outsideBox = required(await page.locator("#outside").boundingBox());
       await page.mouse.move(outsideBox.x + 5, outsideBox.y + 5);
       await page.mouse.down();
       await page.mouse.up();
@@ -484,11 +513,15 @@ test(
       await focusIs(page, "#outside-button");
       await open(page, "more");
       await page.evaluate(() => {
-        document
-          .getElementById("outside")
-          .addEventListener("mousedown", () => window.harness.unmount(), {
-            once: true,
-          });
+        window.topRightHarness
+          .required(document.getElementById("outside"))
+          .addEventListener(
+            "mousedown",
+            () => window.topRightHarness.unmount(),
+            {
+              once: true,
+            },
+          );
       });
       await page.locator("#outside").click();
       await frames(page);
@@ -498,7 +531,7 @@ test(
   },
 );
 
-for (const mobile of [false, true]) {
+for (const mobile of /** @type {const} */ ([false, true])) {
   test(
     `inventory portal keeps its parent open and supports two-stage Escape (${mobile ? "touch" : "mouse"})`,
     { timeout: 60000 },
@@ -575,34 +608,42 @@ test(
     await fixture(async (page) => {
       await open(page, "more");
       await page.evaluate(() =>
-        window.harness.setIdentity({ authStatus: "unauthenticated" }),
+        window.topRightHarness.setIdentity({ authStatus: "unauthenticated" }),
       );
       assert.equal((await state(page)).visible, false);
       await open(page, "info");
       await page.evaluate(() =>
-        window.harness.setIdentity({ authStatus: "authenticated" }),
+        window.topRightHarness.setIdentity({ authStatus: "authenticated" }),
       );
       assert.equal((await state(page)).visible, false);
       await open(page, "music");
       await page.evaluate(() =>
-        window.harness.setIdentity({ authStatus: "unauthenticated" }),
+        window.topRightHarness.setIdentity({ authStatus: "unauthenticated" }),
       );
       assert.deepEqual((await state(page)).expanded, [
         "top-right-music-button",
       ]);
-      await page.evaluate(() => window.harness.render({ isVisible: false }));
+      await page.evaluate(() =>
+        window.topRightHarness.render({ isVisible: false }),
+      );
       assert.equal((await state(page)).visible, false);
       assert.equal(await page.locator(".small-top-control-buttons").count(), 0);
-      await page.evaluate(() => window.harness.render({ isVisible: true }));
+      await page.evaluate(() =>
+        window.topRightHarness.render({ isVisible: true }),
+      );
       assert.equal((await state(page)).visible, false);
       await open(page, "gem");
       await page.evaluate(() =>
-        window.harness.setIdentity({ authStatus: "authenticated" }),
+        window.topRightHarness.setIdentity({ authStatus: "authenticated" }),
       );
       assert.deepEqual((await state(page)).expanded, ["top-right-gem-button"]);
-      await page.evaluate(() => window.harness.render({ isVisible: false }));
+      await page.evaluate(() =>
+        window.topRightHarness.render({ isVisible: false }),
+      );
       assert.equal(await popover(page, "inventory").count(), 0);
-      await page.evaluate(() => window.harness.render({ isVisible: true }));
+      await page.evaluate(() =>
+        window.topRightHarness.render({ isVisible: true }),
+      );
       assert.equal((await state(page)).visible, false);
     });
   },
@@ -625,16 +666,18 @@ test(
         await preview.waitFor();
       };
       await openPreview();
-      await page.evaluate(() => window.harness.render({ callbackVersion: 2 }));
+      await page.evaluate(() =>
+        window.topRightHarness.render({ callbackVersion: 2 }),
+      );
       assert.equal(await preview.isVisible(), true);
-      for (const patch of [
+      for (const patch of /** @type {const} */ ([
         { profileId: "profile-b" },
         { solAddress: "22222222222222222222222222222222" },
         { ethAddress: "0x1234" },
         { authStatus: "unauthenticated" },
-      ]) {
+      ])) {
         await page.evaluate(
-          (patch) => window.harness.setIdentity(patch),
+          (patch) => window.topRightHarness.setIdentity(patch),
           patch,
         );
         await preview.waitFor({ state: "hidden" });
@@ -652,27 +695,31 @@ test(
   async () => {
     await fixture(async (page) => {
       await page.evaluate(() => {
-        window.harness.environment.deferNfts = true;
+        window.topRightHarness.environment.deferNfts = true;
       });
       await open(page, "gem");
       await page.waitForFunction(() =>
-        window.harness.environment.pendingNfts.some(
+        window.topRightHarness.environment.pendingNfts.some(
           (request) => request.identity.profileId === "profile-a",
         ),
       );
       await page.evaluate(() =>
-        window.harness.setIdentity({ profileId: "profile-b" }),
+        window.topRightHarness.setIdentity({ profileId: "profile-b" }),
       );
       await page.waitForFunction(() =>
-        window.harness.environment.pendingNfts.some(
+        window.topRightHarness.environment.pendingNfts.some(
           (request) => request.identity.profileId === "profile-b",
         ),
       );
-      await page.evaluate(() => window.harness.resolveNfts("profile-b", 11));
+      await page.evaluate(() =>
+        window.topRightHarness.resolveNfts("profile-b", 11),
+      );
       await page
         .getByRole("button", { name: "View avatar 1011", exact: true })
         .waitFor();
-      await page.evaluate(() => window.harness.resolveNfts("profile-a", 9));
+      await page.evaluate(() =>
+        window.topRightHarness.resolveNfts("profile-a", 9),
+      );
       await frames(page);
       assert.equal(
         await page
@@ -696,10 +743,13 @@ test(
   async () => {
     await fixture(async (page) => {
       assert.equal((await state(page)).activeMusicSubscriptions, 1);
-      const initialCounts = await page.evaluate(() => [
-        window.harness.environment.subscriptionStarts,
-        window.harness.environment.subscriptionStops,
-      ]);
+      const initialCounts = await page.evaluate(
+        () =>
+          /** @type {const} */ ([
+            window.topRightHarness.environment.subscriptionStarts,
+            window.topRightHarness.environment.subscriptionStops,
+          ]),
+      );
       assert.ok(initialCounts[0] >= 2);
       assert.equal(initialCounts[0] - initialCounts[1], 1);
       await open(page, "music");
@@ -722,11 +772,11 @@ test(
         ["play"],
         ["stop"],
       ]);
-      await page.evaluate(() => window.harness.setPlaying(true));
+      await page.evaluate(() => window.topRightHarness.setPlaying(true));
       await page
         .getByRole("button", { name: "Stop music", exact: true })
         .waitFor();
-      await page.evaluate(() => window.harness.setPlaying(false));
+      await page.evaluate(() => window.topRightHarness.setPlaying(false));
       await page
         .getByRole("button", { name: "Play music", exact: true })
         .waitFor();
@@ -745,7 +795,7 @@ test(
         "true",
       );
       await page.evaluate(() =>
-        window.harness.render({ isMuted: false, callbackVersion: 3 }),
+        window.topRightHarness.render({ isMuted: false, callbackVersion: 3 }),
       );
       assert.equal(
         await page
@@ -753,12 +803,12 @@ test(
           .getAttribute("aria-pressed"),
         "false",
       );
-      await page.evaluate(() => window.harness.unmount());
+      await page.evaluate(() => window.topRightHarness.unmount());
       assert.equal((await state(page)).activeMusicSubscriptions, 0);
       assert.equal((await state(page)).visible, false);
       await page.evaluate(() => {
-        window.harness.setPlaying(true);
-        window.harness.render();
+        window.topRightHarness.setPlaying(true);
+        window.topRightHarness.render();
       });
       assert.equal((await state(page)).activeMusicSubscriptions, 1);
       assert.equal((await state(page)).visible, false);
@@ -776,11 +826,11 @@ test(
   async () => {
     await fixture(
       async (page) => {
-        for (const command of [
+        for (const command of /** @type {const} */ ([
           "closeMenuAndInfoIfAny",
           "closeAllKindsOfPopups",
           "closeTransientUi",
-        ]) {
+        ])) {
           await open(page, "music");
           await clearCalls(page);
           const result = await invoke(page, command);
@@ -802,7 +852,7 @@ test(
         }
         await open(page, "more");
         const unchanged = await page.evaluate(() =>
-          window.harness.conditionalClose("outside"),
+          window.topRightHarness.conditionalClose("outside"),
         );
         assert.equal(unchanged.visible, true);
         const rock = page
@@ -810,33 +860,35 @@ test(
           .filter({ has: page.locator('img[alt=""]') });
         await rock.hover();
         await page.waitForFunction(
-          () => document.getElementById("leaderboard").dataset.open === "true",
+          () => document.getElementById("leaderboard")?.dataset.open === "true",
         );
         assert.deepEqual((await state(page)).expanded, []);
         assert.equal((await state(page)).visible, true);
         await page.evaluate(() =>
-          window.harness.conditionalClose("leaderboard"),
+          window.topRightHarness.conditionalClose("leaderboard"),
         );
         assert.equal((await state(page)).visible, true);
-        await page.evaluate(() => window.harness.conditionalClose("outside"));
+        await page.evaluate(() =>
+          window.topRightHarness.conditionalClose("outside"),
+        );
         assert.equal((await state(page)).visible, false);
         await open(page, "gem");
-        await page.evaluate(() => window.harness.unmount());
+        await page.evaluate(() => window.topRightHarness.unmount());
         assert.equal((await state(page)).visible, false);
         assert.equal((await state(page)).activePrizeSubscriptions, 0);
-        for (const command of [
+        for (const command of /** @type {const} */ ([
           "closeMenuAndInfoIfAny",
           "closeAllKindsOfPopups",
           "closeTransientUi",
-        ])
+        ]))
           await invoke(page, command);
-        await page.evaluate(() => window.harness.render());
+        await page.evaluate(() => window.topRightHarness.render());
         assert.equal((await state(page)).visible, false);
         await open(page, "more");
         await invoke(page, "closeTransientUi");
         assert.equal((await state(page)).visible, false);
         await open(page, "music");
-        await page.evaluate(() => window.harness.setMainMenu(false));
+        await page.evaluate(() => window.topRightHarness.setMainMenu(false));
         assert.equal((await state(page)).visible, true);
         await invoke(page, "closeMenuAndInfoIfAny");
         assert.equal((await state(page)).visible, false);

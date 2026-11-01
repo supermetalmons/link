@@ -1,4 +1,5 @@
 import { env } from "cloudflare:workers";
+import { eventDocumentFixture } from "../test/eventCompatibilityFixture.ts";
 import type { D1Migration } from "cloudflare:test";
 import { beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { EVENT_PRIZE_CONFIGS } from "@mons/shared/event-prizes";
@@ -27,7 +28,7 @@ async function seedEvents(
   entries: Array<{
     eventId: string;
     startAtMs: number;
-    isSundayMons?: unknown;
+    isSundayMons?: boolean;
   }>,
 ) {
   for (let index = 0; index < entries.length; index += 100) {
@@ -35,14 +36,20 @@ async function seedEvents(
       entries.slice(index, index + 100).map((entry) =>
         db
           .prepare(
-            `INSERT INTO event_records (
+            `INSERT INTO event_records_canonical (
                event_id, status, start_at_ms, updated_at_ms, revision, record_json
              ) VALUES (?, 'scheduled', ?, 1, 1, ?)`,
           )
           .bind(
             entry.eventId,
             entry.startAtMs,
-            JSON.stringify({ ...entry, status: "scheduled" }),
+            JSON.stringify(
+              eventDocumentFixture({
+                ...entry,
+                status: "scheduled",
+                isSundayMons: entry.isSundayMons === true,
+              }),
+            ),
           ),
       ),
     );
@@ -73,7 +80,7 @@ async function seedAnnouncementOutboxes(
       plans.slice(index, index + 100).map((plan) =>
         db
           .prepare(
-            `INSERT INTO event_progress_outboxes (
+            `INSERT INTO event_progress_outboxes_canonical (
                status, outbox_id, event_id, run_at_ms, last_queued_at_ms,
                record_json, next_reconcile_at_ms
              ) VALUES ('pending', ?, ?, ?, 0, ?, ?)`,
@@ -152,7 +159,7 @@ describe("scheduled event recovery D1 cursor", () => {
   beforeEach(async () => {
     await db.batch([
       db.prepare("DELETE FROM event_write_admissions"),
-      db.prepare("DELETE FROM event_records"),
+      db.prepare("DELETE FROM event_records_canonical"),
       db.prepare(
         "UPDATE event_runtime_control SET storage_mode = 'd1' WHERE singleton = 1",
       ),
@@ -175,8 +182,8 @@ describe("scheduled event recovery D1 cursor", () => {
     expect(await store.listUrgent(99)).toHaveLength(0);
     const urgent = await store.listUrgent(100);
     expect(urgent).toHaveLength(800);
-    expect(urgent[0].cursor.eventId).toBe("event-0000");
-    expect(urgent[799].cursor.eventId).toBe("event-0799");
+    expect(urgent[0]!.cursor.eventId).toBe("event-0000");
+    expect(urgent[799]!.cursor.eventId).toBe("event-0799");
     const visited: string[] = [];
     for (let pageNumber = 0; pageNumber < 11; pageNumber += 1) {
       const snapshot = await store.readCursor();
@@ -187,7 +194,7 @@ describe("scheduled event recovery D1 cursor", () => {
       expect(
         await store.checkpoint(
           snapshot.revision,
-          rows.length > 100 ? page[99].cursor : null,
+          rows.length > 100 ? page[99]!.cursor : null,
           1,
         ),
       ).toBe(true);
@@ -212,7 +219,7 @@ describe("scheduled event recovery D1 cursor", () => {
     ] as const) {
       const page = await store.listPage(cursor);
       expect(page).toHaveLength(SCHEDULED_EVENT_RECOVERY_PAGE_SIZE + 1);
-      expect(page[0].cursor.eventId).toBe(firstEventId);
+      expect(page[0]!.cursor.eventId).toBe(firstEventId);
     }
     expect(rowsRead).toHaveLength(3);
     for (const count of rowsRead) {
@@ -250,8 +257,15 @@ describe("scheduled event recovery D1 cursor", () => {
     await seedEvents([
       { eventId: "before-maximum", startAtMs: Number.MAX_SAFE_INTEGER - 1 },
       { eventId: "at-maximum", startAtMs: Number.MAX_SAFE_INTEGER },
-      { eventId: "beyond-maximum", startAtMs: Number.MAX_SAFE_INTEGER + 1 },
     ]);
+    await expect(
+      db
+        .prepare(
+          "UPDATE event_records_canonical SET start_at_ms = ?, record_json = json_set(record_json, '$.startAtMs', ?) WHERE event_id = 'at-maximum'",
+        )
+        .bind(Number.MAX_SAFE_INTEGER + 1, Number.MAX_SAFE_INTEGER + 1)
+        .run(),
+    ).rejects.toThrow();
     const { store, reads } = await observedRecoveryStore();
     expect(
       (await store.listUrgent(Number.MAX_SAFE_INTEGER - 1)).map(
@@ -273,7 +287,7 @@ describe("scheduled event recovery D1 cursor", () => {
       ).map((row) => row.cursor.eventId),
     ).toEqual(["before-maximum", "at-maximum"]);
     expect(reads).toHaveLength(1);
-    expect(reads[0].values.every(Number.isSafeInteger)).toBe(true);
+    expect(reads[0]!.values.every(Number.isSafeInteger)).toBe(true);
   });
 
   it.each([
@@ -335,14 +349,14 @@ describe("scheduled event recovery D1 cursor", () => {
           ]);
         }
         const reminderQuery = read.sql.includes(
-          "INDEXED BY idx_event_records_scheduled_sunday_start",
+          "INDEXED BY idx_event_records_canonical_scheduled_sunday_start",
         );
         expect(details).toContain(
           prizeQuery
             ? "USING PRIMARY KEY (event_id=?)"
             : reminderQuery
-              ? "USING INDEX idx_event_records_scheduled_sunday_start"
-              : "USING INDEX idx_event_records_status_start",
+              ? "USING INDEX idx_event_records_canonical_scheduled_sunday_start"
+              : "USING INDEX idx_event_records_canonical_status_start",
         );
         expect(details).not.toContain("TEMP B-TREE");
         expect(read.rowsRead).toBeLessThanOrEqual(
@@ -380,7 +394,7 @@ describe("scheduled event recovery D1 cursor", () => {
     const { store, reads } = await observedRecoveryStore();
     const rows = await store.listUrgent(startAtMs, nowMs);
     expect(rows).toHaveLength(SCHEDULED_EVENT_RECOVERY_URGENT_LIMIT);
-    expect(rows[0].cursor.eventId).toBe("zz-missing");
+    expect(rows[0]!.cursor.eventId).toBe("zz-missing");
     expect(
       rows.slice(1).every((row) => row.cursor.eventId.startsWith("covered-")),
     ).toBe(true);
@@ -396,9 +410,11 @@ describe("scheduled event recovery D1 cursor", () => {
       .all<{ detail: string }>();
     const details = plan.results.map(({ detail }) => detail).join("\n");
     expect(details).toContain(
-      "USING INDEX idx_event_records_scheduled_sunday_start",
+      "USING INDEX idx_event_records_canonical_scheduled_sunday_start",
     );
-    expect(details).toContain("USING INDEX idx_event_progress_outboxes_event");
+    expect(details).toContain(
+      "USING INDEX idx_event_progress_outboxes_canonical_event",
+    );
     expect(details).not.toContain("TEMP B-TREE");
   });
 
@@ -431,18 +447,21 @@ describe("scheduled event recovery D1 cursor", () => {
     await db.batch([
       db
         .prepare(
-          `UPDATE event_progress_outboxes
-           SET record_json = replace(json_set(record_json, '$.runAtMs', ?),
-             '"schemaVersion":1,', '"schemaVersion":1.0,'), run_at_ms = ?
+          `UPDATE event_progress_outboxes_canonical
+           SET record_json = json_set(record_json, '$.runAtMs', CAST(? AS INTEGER)), run_at_ms = ?
            WHERE status = 'pending' AND outbox_id = ?`,
         )
-        .bind(startAtMs - 10_800_000, startAtMs - 10_800_000, covered.outboxId),
+        .bind(
+          startAtMs - 10_800_000,
+          startAtMs - 10_800_000,
+          covered!.outboxId,
+        ),
       db
         .prepare(
-          `UPDATE event_progress_outboxes SET next_reconcile_at_ms = ?
+          `UPDATE event_progress_outboxes_canonical SET next_reconcile_at_ms = ?
            WHERE status = 'pending' AND outbox_id = ?`,
         )
-        .bind(nowMs + 60_000, covered.outboxId),
+        .bind(nowMs + 60_000, covered!.outboxId),
     ]);
     await seedAnnouncementOutboxes(reminderEvents.slice(1, 2), "reminder", 0);
     await seedAnnouncementOutboxes(
@@ -457,18 +476,18 @@ describe("scheduled event recovery D1 cursor", () => {
     );
     await db
       .prepare(
-        `UPDATE event_progress_outboxes
-       SET record_json = json_set(record_json, '$.firstQueuedAtMs', 'invalid')
+        `UPDATE event_progress_outboxes_canonical
+       SET record_json = json_set(record_json, '$.lastQueuedAtMs', 1), last_queued_at_ms = 1
        WHERE status = 'pending' AND outbox_id = ?`,
       )
-      .bind(changed.outboxId)
+      .bind(changed!.outboxId)
       .run();
     expect(
       await db
         .prepare(
-          "SELECT next_reconcile_at_ms FROM event_progress_outboxes WHERE status = 'pending' AND outbox_id = ?",
+          "SELECT next_reconcile_at_ms FROM event_progress_outboxes_canonical WHERE status = 'pending' AND outbox_id = ?",
         )
-        .bind(changed.outboxId)
+        .bind(changed!.outboxId)
         .first<number>("next_reconcile_at_ms"),
     ).toBe(0);
     await seedAnnouncementOutboxes(
@@ -544,27 +563,17 @@ describe("scheduled event recovery D1 cursor", () => {
       {
         eventId: "reminder-numeric-flag",
         startAtMs: reminderStart,
-        isSundayMons: 1,
+        isSundayMons: false,
       },
-      { eventId: "VOxalSrexcA", startAtMs: prizeStart, isSundayMons: 1 },
+      { eventId: "VOxalSrexcA", startAtMs: prizeStart, isSundayMons: false },
       { eventId: "prize-no-config", startAtMs: prizeStart, isSundayMons: true },
-      { eventId: "mismatch", startAtMs: reminderStart, isSundayMons: true },
       { eventId: "Q7uRdLXyVKF", startAtMs: prizeStart, isSundayMons: true },
-      { eventId: "wjFa2d03Ciu", startAtMs: prizeStart, isSundayMons: true },
     ]);
     await db.batch([
       db.prepare(
-        `UPDATE event_records SET record_json = json_set(record_json, '$.status', 'active')
-         WHERE event_id = 'mismatch'`,
-      ),
-      db.prepare(
-        `UPDATE event_records SET status = 'active',
+        `UPDATE event_records_canonical SET status = 'active',
          record_json = json_set(record_json, '$.status', 'active')
          WHERE event_id = 'Q7uRdLXyVKF'`,
-      ),
-      db.prepare(
-        `UPDATE event_records SET start_at_ms = 'invalid'
-         WHERE event_id = 'wjFa2d03Ciu'`,
       ),
     ]);
     const { store } = await recoveryStore();
@@ -617,9 +626,11 @@ describe("scheduled event recovery D1 cursor", () => {
     const cursor = { eventId: "second", startAtMs: 200 };
     await store.checkpoint(0, cursor, 1);
     await db.batch([
-      db.prepare("DELETE FROM event_records WHERE event_id = 'second'"),
       db.prepare(
-        `UPDATE event_records SET start_at_ms = 50,
+        "DELETE FROM event_records_canonical WHERE event_id = 'second'",
+      ),
+      db.prepare(
+        `UPDATE event_records_canonical SET start_at_ms = 50,
          record_json = json_set(record_json, '$.startAtMs', 50)
          WHERE event_id = 'third'`,
       ),
@@ -688,34 +699,26 @@ describe("scheduled event recovery D1 cursor", () => {
     expect(await store.readCursor()).toEqual({ cursor: null, revision: 0 });
   });
 
-  it("isolates malformed snapshots and distinguishes JSON booleans from numeric flags", async () => {
+  it("rejects malformed snapshots and numeric flags before recovery discovery", async () => {
     await seedEvents([
-      { eventId: "fraction", startAtMs: 1.5 },
-      { eventId: "mismatch", startAtMs: 2 },
-      { eventId: "numeric-flag", startAtMs: 3, isSundayMons: 1 },
+      { eventId: "ordinary", startAtMs: 3, isSundayMons: false },
       { eventId: "valid", startAtMs: 4, isSundayMons: true },
-      { eventId: "bad-ordering-key", startAtMs: 5 },
     ]);
-    await db
-      .prepare(
-        `UPDATE event_records SET record_json = json_set(record_json, '$.startAtMs', 'bad')
-         WHERE event_id = 'mismatch'`,
-      )
-      .run();
-    await db
-      .prepare(
-        "UPDATE event_records SET start_at_ms = 'invalid' WHERE event_id = 'bad-ordering-key'",
-      )
-      .run();
+    for (const statement of [
+      "UPDATE event_records_canonical SET start_at_ms = 1.5, record_json = json_set(record_json, '$.startAtMs', 1.5) WHERE event_id = 'valid'",
+      "UPDATE event_records_canonical SET record_json = json_set(record_json, '$.startAtMs', 'bad') WHERE event_id = 'valid'",
+      "UPDATE event_records_canonical SET start_at_ms = 'invalid' WHERE event_id = 'valid'",
+      "UPDATE event_records_canonical SET record_json = json_set(record_json, '$.isSundayMons', 1) WHERE event_id = 'valid'",
+    ]) {
+      await expect(db.prepare(statement).run()).rejects.toThrow();
+    }
     const { store } = await recoveryStore();
     const rows = await store.listPage(null);
     expect(rows.map((row) => row.event?.isSundayMons ?? null)).toEqual([
-      null,
-      null,
       false,
       true,
     ]);
-    expect(await store.checkpoint(0, rows[0].cursor, 1)).toBe(true);
-    expect(await store.listPage(rows[0].cursor)).toHaveLength(3);
+    expect(await store.checkpoint(0, rows[0]!.cursor, 1)).toBe(true);
+    expect(await store.listPage(rows[0]!.cursor)).toHaveLength(1);
   });
 });

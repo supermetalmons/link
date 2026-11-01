@@ -20,14 +20,12 @@ test("appearance status preserves authority and both registration and source-exc
       queries.push(sql);
       assert.equal(database, "mons-link-profile-games");
       assert.match(sql, /^SELECT /);
-      if (sql.includes("sqlite_master"))
-        return [{ name: "match_presentation_source_exceptions" }];
       if (sql.includes("GROUP BY disposition")) return exceptions;
       return sql.includes("GROUP BY provenance") ? counts : [control];
     },
     log: (value) => logs.push(value),
   });
-  assert.equal(queries.length, 4);
+  assert.equal(queries.length, 3);
   assert.deepEqual(logs, [
     { operation: "status", control, counts, sourceExceptions: exceptions },
   ]);

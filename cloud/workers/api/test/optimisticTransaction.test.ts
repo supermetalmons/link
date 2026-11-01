@@ -157,7 +157,7 @@ test("retries retain the complete fresh snapshot and independently typed proposa
   let reads = 0;
   const result = await runOptimisticTransaction({
     maxAttempts: 2,
-    read: async () => snapshots[reads++],
+    read: async () => snapshots[reads++]!,
     getValue: (snapshot) => snapshot.value,
     decide: (value) => ({ value: String(value.count + 1) }),
     write: async (snapshot, proposed) => {

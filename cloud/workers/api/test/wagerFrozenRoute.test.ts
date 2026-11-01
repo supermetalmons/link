@@ -66,7 +66,7 @@ function fixture(owners: Record<string, string | null> = {}) {
             revision: 1,
             profile: {
               profileId: id,
-              aura: "",
+              aura: "none",
               emoji: 1,
               eth: "",
               rating: 0,

@@ -51,7 +51,6 @@ export type ProfileLinkProjectionJobs = Pick<
 >;
 
 export type ProfileGameProjectionDependencies = {
-  forwardEventTasks?: boolean;
   createLocks?: (env: Env) => ProfileGameProjectionLockStore;
   createProfileLinkJobs?: (env: Env) => ProfileLinkProjectionJobs;
   createEventRuntime?: (env: Env) => EventProfileGameProjectionRuntime;
@@ -105,7 +104,6 @@ export type ProfileLinkRecoveryJobs = Pick<
 
 export type ProfileGameProjectionQueueDependencies = Pick<
   ProfileGameProjectionDependencies,
-  | "forwardEventTasks"
   | "createLocks"
   | "createEventRuntime"
   | "createRating"

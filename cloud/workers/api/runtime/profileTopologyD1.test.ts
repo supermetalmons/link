@@ -1,5 +1,5 @@
 import { legacyAuthStartFixture } from "../test/profileDataBoundaryFixture.ts";
-import { materializeProfileCompatibility as materializeCanonicalProfile } from "../test/profileDataBoundaryFixture.ts";
+import { materializeProfileFixture as materializeCanonicalProfile } from "../test/profileDataBoundaryFixture.ts";
 import { env } from "cloudflare:workers";
 import type { D1Migration } from "cloudflare:test";
 import { beforeAll, describe, expect, it } from "vitest";
@@ -82,7 +82,7 @@ async function fixture(relations: Relation[] = []): Promise<Fixture> {
       completedProblemIds: [],
       isTutorialCompleted: false,
       mining: {
-        lastRockDate: "",
+        lastRockDate: null,
         materials: { dust: 0, slime: 0, gum: 0, metal: 0, ice: 0 },
       },
     },
@@ -175,7 +175,6 @@ function retirementPlan(source: Fixture, target: Fixture): CanonicalCommitPlan {
           targetProfileId,
           mergedAtMs: 2_000,
           opId: null,
-          sourceLegacyFields: source.profile.legacyFields,
         },
       },
     ],
@@ -207,7 +206,7 @@ function updatePlan(profile: CanonicalProfileSnapshot): CanonicalCommitPlan {
 async function corruptRetirement(source: Fixture, target: Fixture) {
   await db
     .prepare(
-      `UPDATE profile_records SET state = 'retiring',
+      `UPDATE profile_records_canonical SET state = 'retiring',
        merged_into_profile_id = ?, merged_at_ms = 2000 WHERE profile_id = ?`,
     )
     .bind(target.profile.profileId, source.profile.profileId)
@@ -217,7 +216,7 @@ async function corruptRetirement(source: Fixture, target: Fixture) {
 async function restoreActive(source: Fixture) {
   await db
     .prepare(
-      `UPDATE profile_records SET state = 'active',
+      `UPDATE profile_records_canonical SET state = 'active',
        merged_into_profile_id = NULL, merged_at_ms = NULL WHERE profile_id = ?`,
     )
     .bind(source.profile.profileId)
@@ -280,7 +279,7 @@ describe("scoped canonical profile topology", () => {
   it("moves all relationships before retirement and retains redirects after source deletion", async () => {
     const source = await fixture(["owner", "auth", "recovery"]);
     const target = await fixture();
-    const method = source.authMethods[0];
+    const method = source.authMethods[0]!;
     const plan = retirementPlan(source, target);
     plan.expectations = [
       ...plan.expectations,
@@ -328,7 +327,7 @@ describe("scoped canonical profile topology", () => {
       target.profile.profileId,
     );
     expect(moved.loginOwners).toMatchObject([
-      { loginUid: source.loginOwners[0].loginUid, revision: 2 },
+      { loginUid: source.loginOwners[0]!.loginUid, revision: 2 },
     ]);
     expect(moved.authMethods).toMatchObject([
       { normalizedValue: method.normalizedValue, revision: 2 },
@@ -405,8 +404,8 @@ describe("scoped canonical profile topology", () => {
   ] as const)("checks the previous profile during %s", async (kind) => {
     const source = await fixture(["owner", "auth", "recovery"]);
     const target = await fixture();
-    const owner = source.loginOwners[0];
-    const method = source.authMethods[0];
+    const owner = source.loginOwners[0]!;
+    const method = source.authMethods[0]!;
     const plan: CanonicalCommitPlan = kind.includes("login")
       ? {
           expectations: [{ kind: "login-owner-revision", ...owner }],
@@ -487,7 +486,13 @@ describe("scoped canonical profile topology", () => {
               method: "x",
               loginUid: "operation-only-login",
               status: "started",
-              meta: null,
+              meta: {
+                methodValue: "fixture",
+                methodValueHash: "a".repeat(64),
+                intentId: null,
+              },
+              cancelledAtMs: null,
+              cancellationReason: null,
               result: null,
               errorCode: null,
               errorMessage: null,
@@ -500,7 +505,7 @@ describe("scoped canonical profile topology", () => {
       const recorded = recordBatches();
       await commitCanonicalPlan(recorded.database, plan);
       expect(recorded.batches).toHaveLength(1);
-      expect(recorded.batches[0].count).toBe(4);
+      expect(recorded.batches[0]!.count).toBe(4);
     } finally {
       await restoreActive(source);
     }
@@ -514,17 +519,17 @@ describe("scoped canonical profile topology", () => {
     const trigger = await db
       .prepare(
         `SELECT sql FROM sqlite_master WHERE type = 'trigger'
-         AND name = 'profile_records_require_matching_merge_target_update'`,
+         AND name = 'profile_records_require_matching_merge_target_update_canonical'`,
       )
       .first<{ sql: string }>();
     if (!trigger) throw new Error("missing-profile-topology-trigger");
     await db.batch([
       db.prepare(
-        "DROP TRIGGER profile_records_require_matching_merge_target_update",
+        "DROP TRIGGER profile_records_require_matching_merge_target_update_canonical",
       ),
       db
         .prepare(
-          `UPDATE profile_records SET state = 'active',
+          `UPDATE profile_records_canonical SET state = 'active',
            merged_into_profile_id = NULL WHERE profile_id = ?`,
         )
         .bind(source.profile.profileId),
@@ -547,12 +552,12 @@ describe("scoped canonical profile topology", () => {
     const healthy = await fixture(["owner", "auth", "recovery"]);
     const recorded = recordBatches();
     await commitCanonicalPlan(recorded.database, updatePlan(healthy.profile));
-    const before = recorded.batches[0].results.at(-1)!.meta.rows_read;
+    const before = recorded.batches[0]!.results.at(-1)!.meta.rows_read;
     const auditBefore = await db
       .prepare(CANONICAL_PROFILE_TOPOLOGY_AUDIT_SQL)
       .all();
     const columns = await db
-      .prepare("PRAGMA table_info(profile_records)")
+      .prepare("PRAGMA table_info(profile_records_canonical)")
       .all<{ name: string }>();
     const id = "template.profile_id || '-bulk-' || seed.value";
     const values = columns.results.map(({ name }) => {
@@ -568,8 +573,8 @@ describe("scoped canonical profile topology", () => {
     await db.batch([
       db
         .prepare(
-          `INSERT INTO profile_records (${columns.results.map(({ name }) => name).join(", ")})
-           SELECT ${values.join(", ")} FROM profile_records AS template
+          `INSERT INTO profile_records_canonical (${columns.results.map(({ name }) => name).join(", ")})
+           SELECT ${values.join(", ")} FROM profile_records_canonical AS template
            CROSS JOIN json_each(?) AS seed WHERE template.profile_id = ?`,
         )
         .bind(
@@ -578,34 +583,34 @@ describe("scoped canonical profile topology", () => {
         ),
       db
         .prepare(
-          `INSERT INTO profile_login_owners
+          `INSERT INTO profile_login_owners_canonical
            (login_uid, profile_id, revision, created_at_ms, updated_at_ms)
            SELECT 'login-' || profile_id, profile_id, 1, 1000, 1000
-           FROM profile_records WHERE profile_id >= ? AND profile_id < ?`,
+           FROM profile_records_canonical WHERE profile_id >= ? AND profile_id < ?`,
         )
         .bind(prefix, prefixEnd),
       db
         .prepare(
-          `INSERT INTO profile_auth_methods
+          `INSERT INTO profile_auth_methods_canonical
            (method, normalized_value, profile_id, raw_value, revision, created_at_ms, updated_at_ms)
            SELECT 'x', 'x-' || profile_id, profile_id, 'x-' || profile_id, 1, 1000, 1000
-           FROM profile_records WHERE profile_id >= ? AND profile_id < ?`,
+           FROM profile_records_canonical WHERE profile_id >= ? AND profile_id < ?`,
         )
         .bind(prefix, prefixEnd),
       db
         .prepare(
-          `INSERT INTO profile_auth_recovery_jobs
+          `INSERT INTO profile_auth_recovery_jobs_canonical
            (profile_id, login_uids_json, source_profile_ids_json, source_phase,
             phase_started_at_ms, last_enqueued_at_ms, created_at_ms, updated_at_ms)
            SELECT profile_id, '[]', '[]', 'prizes', 1000, 0, 1000, 1000
-           FROM profile_records WHERE profile_id >= ? AND profile_id < ?`,
+           FROM profile_records_canonical WHERE profile_id >= ? AND profile_id < ?`,
         )
         .bind(prefix, prefixEnd),
     ]);
     const current = await readCanonicalProfile(db, healthy.profile.profileId);
     if (!current) throw new Error("missing-healthy-profile");
     await commitCanonicalPlan(recorded.database, updatePlan(current));
-    const after = recorded.batches[1].results.at(-1)!.meta.rows_read;
+    const after = recorded.batches[1]!.results.at(-1)!.meta.rows_read;
     expect(before).toBeGreaterThan(0);
     expect(after).toBeLessThanOrEqual(before + 10);
     expect(after).toBeLessThan(100);
@@ -625,7 +630,7 @@ describe("scoped canonical profile topology", () => {
     const details = plan.results.map((row) => row.detail).join("\n");
     expect(details).toMatch(/USING (?:COVERING )?(?:PRIMARY KEY|INDEX)/);
     expect(details).not.toMatch(
-      /\bSCAN (?:profile|mapping|owner|method|recovery|profile_records|profile_merge_targets|profile_login_owners|profile_auth_methods|profile_auth_recovery_jobs)\b/,
+      /\bSCAN (?:profile|mapping|owner|method|recovery|profile_records_canonical|profile_merge_targets_canonical|profile_login_owners_canonical|profile_auth_methods_canonical|profile_auth_recovery_jobs_canonical)\b/,
     );
   });
 });

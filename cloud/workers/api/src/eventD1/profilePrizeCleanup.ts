@@ -30,7 +30,7 @@ export async function removeMatchingProfileEventPrizeAssignment(
 ): Promise<boolean> {
   const result = await runOptimisticTransaction({
     maxAttempts: MAX_EVENT_TRANSACTION_ATTEMPTS,
-    signal: options.signal,
+    ...(options.signal ? { signal: options.signal } : {}),
     read: () => readProfilePrizeAssignmentSnapshot(db, profileId, eventId),
     getValue: (snapshot) => cloneJson(snapshot.assignment),
     decide(current) {

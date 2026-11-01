@@ -1,6 +1,9 @@
+import { applyCanonicalTestMigrations } from "./canonicalTestMigrations.ts";
+import { xFlowFixture } from "../test/authStateFixture.ts";
+import type { XFlowUpdate, XRedirectFlow } from "../src/authStateRecords.ts";
 import { beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { env } from "cloudflare:workers";
-import { applyD1Migrations, type D1Migration } from "cloudflare:test";
+import type { D1Migration } from "cloudflare:test";
 import {
   AUTH_STATE_NONTERMINAL_RETENTION_MS,
   AUTH_STATE_TERMINAL_RETENTION_MS,
@@ -80,6 +83,28 @@ function xFlow(
   };
 }
 
+function transition(
+  status: XRedirectFlow["status"],
+  updatedAtMs: number,
+): XFlowUpdate {
+  const value = xFlowFixture({
+    status,
+    updatedAtMs,
+    ...(status === "processing" ? { processingStartedAtMs: updatedAtMs } : {}),
+    ...(status === "completed" ? { completedAtMs: updatedAtMs } : {}),
+  });
+  return {
+    status: value.status,
+    updatedAtMs,
+    completedAtMs: value.completedAtMs,
+    errorCode: value.errorCode,
+    processingStartedAtMs: value.processingStartedAtMs,
+    result: value.result,
+    xUserId: value.xUserId,
+    xUsername: value.xUsername,
+  };
+}
+
 type CleanupCounter = keyof Awaited<ReturnType<typeof sweepExpiredAuthState>>;
 
 async function seedCleanupBacklog(counter: CleanupCounter, nowMs: number) {
@@ -90,7 +115,7 @@ async function seedCleanupBacklog(counter: CleanupCounter, nowMs: number) {
         `WITH RECURSIVE items(n) AS (
            SELECT 1 UNION ALL SELECT n + 1 FROM items WHERE n < 1003
          )
-         INSERT INTO auth_intents (
+         INSERT INTO auth_intents_canonical (
            intent_id, uid, method, nonce, state, created_at_ms,
            expires_at_ms, consumed_at_ms, consumed_by_op_id
          )
@@ -111,11 +136,11 @@ async function seedCleanupBacklog(counter: CleanupCounter, nowMs: number) {
     statements.push(
       db
         .prepare(
-          `INSERT INTO x_redirect_flows (
+          `INSERT INTO x_redirect_flows_canonical (
              flow_id, intent_id, uid, method, callback_uri, code_challenge,
              code_verifier, consent_source, return_url, status,
              result_profile_id, result_op_id, created_at_ms, expires_at_ms,
-             updated_at_ms, revision
+             updated_at_ms, revision, x_user_id, completed_at_ms
            )
            SELECT intent_id, intent_id, uid, 'x',
                   'https://api.mons.link/auth/x/callback',
@@ -123,11 +148,12 @@ async function seedCleanupBacklog(counter: CleanupCounter, nowMs: number) {
                        THEN 'retired' ELSE 'challenge' END,
                   CASE WHEN ? OR CAST(substr(intent_id, -4) AS INTEGER) % 2 = 1
                        THEN 'retired' ELSE 'verifier' END,
-                  'signin', 'https://mons.link/', ?, 'profile-1', 'operation-1',
+                  'signin', 'https://mons.link/', ?,
+                  ${counter === "flowsDeleted" ? "NULL, NULL" : "'profile-1', 'operation-1'"},
                   created_at_ms, expires_at_ms,
                   ? - CASE WHEN intent_id = 'cleanup-1003' THEN 2 ELSE 1 END,
-                  4
-           FROM auth_intents`,
+                  4, ${counter === "flowsDeleted" ? "NULL, NULL" : "'2244994945', created_at_ms"}
+           FROM auth_intents_canonical`,
         )
         .bind(
           counter === "intentsCompacted" ? 1 : 0,
@@ -144,7 +170,7 @@ async function seedCleanupBacklog(counter: CleanupCounter, nowMs: number) {
 
 describe("auth state D1 repository", () => {
   beforeAll(async () => {
-    await applyD1Migrations(
+    await applyCanonicalTestMigrations(
       testEnv.AUTH_STATE_DB,
       testEnv.TEST_AUTH_STATE_D1_MIGRATIONS,
     );
@@ -152,8 +178,8 @@ describe("auth state D1 repository", () => {
 
   beforeEach(async () => {
     await testEnv.AUTH_STATE_DB.batch([
-      testEnv.AUTH_STATE_DB.prepare("DELETE FROM x_redirect_flows"),
-      testEnv.AUTH_STATE_DB.prepare("DELETE FROM auth_intents"),
+      testEnv.AUTH_STATE_DB.prepare("DELETE FROM x_redirect_flows_canonical"),
+      testEnv.AUTH_STATE_DB.prepare("DELETE FROM auth_intents_canonical"),
     ]);
   });
 
@@ -162,16 +188,16 @@ describe("auth state D1 repository", () => {
       `SELECT name FROM sqlite_schema
        WHERE type = 'index'
          AND name IN (
-           'idx_auth_intents_uncompacted_expires',
-           'idx_x_redirect_flows_terminal_updated',
-           'idx_x_redirect_flows_uncompacted_expires'
+           'idx_auth_intents_canonical_uncompacted_expires',
+           'idx_x_redirect_flows_canonical_terminal_updated',
+           'idx_x_redirect_flows_canonical_uncompacted_expires'
          )
        ORDER BY name`,
     ).all<{ name: string }>();
     expect(indexes.results.map(({ name }) => name)).toEqual([
-      "idx_auth_intents_uncompacted_expires",
-      "idx_x_redirect_flows_terminal_updated",
-      "idx_x_redirect_flows_uncompacted_expires",
+      "idx_auth_intents_canonical_uncompacted_expires",
+      "idx_x_redirect_flows_canonical_terminal_updated",
+      "idx_x_redirect_flows_canonical_uncompacted_expires",
     ]);
   });
 
@@ -184,8 +210,11 @@ describe("auth state D1 repository", () => {
     await expect(repository.createAuthIntent(document)).resolves.toBe("exists");
     await expect(repository.getAuthIntent(document.intentId)).resolves.toEqual({
       ...document,
-      consumedAtMs: 0,
-      consumedByOpId: "",
+      dataEpoch: 1,
+      status: "created",
+      consumedAtMs: null,
+      consumedByOpId: null,
+      cancelledAtMs: null,
     });
     await expect(
       repository.getAuthIntent("missing-intent"),
@@ -216,6 +245,42 @@ describe("auth state D1 repository", () => {
     ).resolves.toBe(false);
   });
 
+  it("cannot consume cancelled intents or reopen cancelled callbacks", async () => {
+    const repository = createAuthStateRepository(testEnv.AUTH_STATE_DB);
+    const intent = authIntent();
+    const flow = xFlow();
+    await repository.createAuthIntent(intent);
+    await repository.createXFlow(flow);
+    await testEnv.AUTH_STATE_DB.batch([
+      testEnv.AUTH_STATE_DB.prepare(
+        "UPDATE auth_intents_canonical SET cancelled_at_ms = 1100000 WHERE intent_id = ?",
+      ).bind(intent.intentId),
+      testEnv.AUTH_STATE_DB.prepare(
+        "UPDATE x_redirect_flows_canonical SET status = 'cancelled', error_code = 'application-data-reset', updated_at_ms = 1100000 WHERE flow_id = ?",
+      ).bind(flow.flowId),
+    ]);
+    await expect(
+      repository.consumeAuthIntent({
+        consumedAtMs: 1_200_000,
+        consumedByOpId: "new-operation",
+        intentId: intent.intentId,
+        method: "x",
+        uid: intent.uid,
+      }),
+    ).resolves.toBe(false);
+    await expect(
+      repository.updateXFlow(
+        flow.flowId,
+        { status: "created", errorCode: null, updatedAtMs: 1_200_000 },
+        1,
+      ),
+    ).rejects.toBeInstanceOf(AuthStateFailure);
+    expect((await repository.getAuthIntent(intent.intentId))?.status).toBe(
+      "cancelled",
+    );
+    expect((await repository.getXFlow(flow.flowId))?.status).toBe("cancelled");
+  });
+
   it("creates X flows and applies revision-fenced state transitions", async () => {
     const repository = createAuthStateRepository(testEnv.AUTH_STATE_DB);
     await repository.createAuthIntent(authIntent());
@@ -225,13 +290,13 @@ describe("auth state D1 repository", () => {
     const created = await repository.getXFlow(document.flowId);
     expect(created).toMatchObject({
       ...document,
-      completedAtMs: 0,
-      errorCode: "",
-      processingStartedAtMs: 0,
+      completedAtMs: null,
+      errorCode: null,
+      processingStartedAtMs: null,
       result: null,
       revision: 1,
-      xUserId: "",
-      xUsername: "",
+      xUserId: null,
+      xUsername: null,
     });
 
     await expect(
@@ -279,7 +344,7 @@ describe("auth state D1 repository", () => {
     ).resolves.toBe(4);
     await expect(repository.getXFlow(document.flowId)).resolves.toMatchObject({
       completedAtMs: 1_030_000,
-      processingStartedAtMs: 0,
+      processingStartedAtMs: null,
       result: { profileId: "profile-1", opId: "operation-1" },
       revision: 4,
       status: "completed",
@@ -396,6 +461,7 @@ describe("auth state D1 repository", () => {
     await repository.updateXFlow(
       "terminal-flow-1234567890",
       {
+        xUserId: "2244994945",
         completedAtMs: 1_200_000,
         result: { profileId: "profile-1", opId: "operation-1" },
         status: "completed",
@@ -473,25 +539,25 @@ describe("auth state D1 repository", () => {
   it.each([
     [
       "flowsDeleted",
-      "SELECT flow_id AS id FROM x_redirect_flows ORDER BY flow_id",
+      "SELECT flow_id AS id FROM x_redirect_flows_canonical ORDER BY flow_id",
     ],
     [
       "terminalFlowsDeleted",
-      "SELECT flow_id AS id FROM x_redirect_flows ORDER BY flow_id",
+      "SELECT flow_id AS id FROM x_redirect_flows_canonical ORDER BY flow_id",
     ],
     [
       "intentsDeleted",
-      "SELECT intent_id AS id FROM auth_intents ORDER BY intent_id",
+      "SELECT intent_id AS id FROM auth_intents_canonical ORDER BY intent_id",
     ],
     [
       "flowsCompacted",
-      `SELECT flow_id AS id FROM x_redirect_flows
+      `SELECT flow_id AS id FROM x_redirect_flows_canonical
        WHERE code_challenge <> 'retired' OR code_verifier <> 'retired'
        ORDER BY flow_id`,
     ],
     [
       "intentsCompacted",
-      `SELECT intent_id AS id FROM auth_intents
+      `SELECT intent_id AS id FROM auth_intents_canonical
        WHERE nonce <> 'retired' OR state <> 'retired'
        ORDER BY intent_id`,
     ],
@@ -566,7 +632,7 @@ describe("auth state D1 repository", () => {
         await repository.createXFlow(
           xFlow({ flowId: status, intentId: status, expiresAtMs }),
         );
-        await repository.updateXFlow(status, { status, updatedAtMs: nowMs }, 1);
+        await repository.updateXFlow(status, transition(status, nowMs), 1);
       }
       await repository.createAuthIntent(
         authIntent({ intentId: "orphan", expiresAtMs }),
@@ -602,7 +668,7 @@ describe("auth state D1 repository", () => {
           deleted
             ? null
             : {
-                ...before[index].flow,
+                ...before[index]!.flow,
                 ...(offsetMs < 0
                   ? { codeChallenge: "retired", codeVerifier: "retired" }
                   : {}),
@@ -612,7 +678,7 @@ describe("auth state D1 repository", () => {
           deleted
             ? null
             : {
-                ...before[index].intent,
+                ...before[index]!.intent,
                 ...(offsetMs < 0 ? { nonce: "retired", state: "retired" } : {}),
               },
         );
@@ -647,10 +713,10 @@ describe("auth state D1 repository", () => {
         );
         await repository.updateXFlow(
           status,
-          {
+          transition(
             status,
-            updatedAtMs: nowMs - AUTH_STATE_TERMINAL_RETENTION_MS + offsetMs,
-          },
+            nowMs - AUTH_STATE_TERMINAL_RETENTION_MS + offsetMs,
+          ),
           1,
         );
       }
@@ -663,12 +729,12 @@ describe("auth state D1 repository", () => {
       });
       expect(
         await db
-          .prepare("SELECT COUNT(*) AS count FROM x_redirect_flows")
+          .prepare("SELECT COUNT(*) AS count FROM x_redirect_flows_canonical")
           .first("count"),
       ).toBe(offsetMs < 0 ? 0 : 3);
       expect(
         await db
-          .prepare("SELECT COUNT(*) AS count FROM auth_intents")
+          .prepare("SELECT COUNT(*) AS count FROM auth_intents_canonical")
           .first("count"),
       ).toBe(3);
       expect(

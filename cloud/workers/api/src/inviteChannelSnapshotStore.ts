@@ -14,13 +14,13 @@ export function createInviteChannelSnapshotStore(
     readMetadata(): StoredMetadataSnapshot {
       return sql
         .exec<StoredMetadataSnapshot>(
-          "SELECT * FROM invite_metadata WHERE singleton = 1",
+          "SELECT * FROM invite_metadata_canonical WHERE singleton = 1",
         )
         .one();
     },
     writeMetadata(snapshotJson: string, revision: number): void {
       sql.exec(
-        "UPDATE invite_metadata SET snapshot_json = ?, revision = ? WHERE singleton = 1",
+        "UPDATE invite_metadata_canonical SET snapshot_json = ?, revision = ? WHERE singleton = 1",
         snapshotJson,
         revision,
       );
@@ -28,7 +28,7 @@ export function createInviteChannelSnapshotStore(
     readWagers(): StoredWagerSnapshot {
       return sql
         .exec<StoredWagerSnapshot>(
-          "SELECT * FROM invite_wagers WHERE singleton = 1",
+          "SELECT * FROM invite_wagers_canonical WHERE singleton = 1",
         )
         .one();
     },
@@ -38,7 +38,7 @@ export function createInviteChannelSnapshotStore(
       fingerprint: string,
     ): void {
       sql.exec(
-        "UPDATE invite_wagers SET snapshot_json = ?, revision = ?, source_fingerprint = ? WHERE singleton = 1",
+        "UPDATE invite_wagers_canonical SET snapshot_json = ?, revision = ?, source_fingerprint = ? WHERE singleton = 1",
         snapshotJson,
         revision,
         fingerprint,

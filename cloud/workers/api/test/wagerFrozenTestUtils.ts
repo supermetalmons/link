@@ -3,7 +3,10 @@ import {
   createMemoryWagerState,
   type WagerTestState,
 } from "./wagerStateTestUtils.ts";
-import { normalizeMaterials } from "@mons/shared/mining";
+import {
+  createEmptyMaterials,
+  parseMiningMaterials,
+} from "@mons/shared/mining";
 import { createAutomatchPersistenceStub } from "./automatchPersistenceTestUtils.ts";
 import type { WagerReservationRuntime } from "../src/wagerReservationRuntime.ts";
 import type {
@@ -41,11 +44,20 @@ function record(value: unknown): Record<string, unknown> {
     : {};
 }
 
+function frozenMaterialsFixture(value: unknown) {
+  const materials = parseMiningMaterials({
+    ...createEmptyMaterials(),
+    ...record(value),
+  });
+  if (!materials) throw new TypeError("invalid-frozen-materials-fixture");
+  return materials;
+}
+
 function snapshot(value: unknown, operationId: string): WagerFrozenSnapshot {
   const row = record(value);
   const operations = record(row.operations);
   return {
-    frozen: normalizeMaterials(row.frozen),
+    frozen: frozenMaterialsFixture(row.frozen),
     operation:
       value !== null &&
       value !== undefined &&
@@ -77,11 +89,17 @@ export function createMemoryWagerFrozenStore(
         value?: unknown;
       };
       if (result.commit === false)
-        return { committed: false, decision: result.decision, value: current };
+        return {
+          committed: false,
+          ...(result.decision === undefined
+            ? {}
+            : { decision: result.decision }),
+          value: current,
+        };
       rows.set(playerUid, structuredClone(result.value));
       return {
         committed: true,
-        decision: result.decision,
+        ...(result.decision === undefined ? {} : { decision: result.decision }),
         value: result.value,
       };
     },
@@ -90,7 +108,9 @@ export function createMemoryWagerFrozenStore(
     async readBalance(playerUid) {
       assertWagerFrozenKey(playerUid);
       return {
-        frozen: normalizeMaterials(record(await memory.read(playerUid)).frozen),
+        frozen: frozenMaterialsFixture(
+          record(await memory.read(playerUid)).frozen,
+        ),
         revision: revisions.get(playerUid) || 0,
       };
     },
@@ -115,7 +135,9 @@ export function createMemoryWagerFrozenStore(
           if (operation) operations[operationId] = operation;
           else delete operations[operationId];
           return {
-            decision: decision.decision,
+            ...(decision.decision === undefined
+              ? {}
+              : { decision: decision.decision }),
             value: { ...row, frozen: decision.value.frozen, operations },
           };
         },

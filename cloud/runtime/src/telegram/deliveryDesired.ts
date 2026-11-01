@@ -189,7 +189,7 @@ export function createTelegramDesiredDelivery({
   }: DesiredContext & {
     result: TelegramRetryFailure;
     safeRejectedAttemptId?: string;
-    currentDelivery: TelegramDeliveryDocument | DeliverySnapshot;
+    currentDelivery: Partial<TelegramDeliveryDocument> | DeliverySnapshot;
     apiGateOwner?: string;
     proofTaskKind?: "desired" | "pending-delete";
     pendingDeleteId?: string;
@@ -259,7 +259,7 @@ export function createTelegramDesiredDelivery({
     desired,
     currentDelivery,
   }: DesiredContext & {
-    currentDelivery: TelegramDeliveryDocument | DeliverySnapshot;
+    currentDelivery: Partial<TelegramDeliveryDocument> | DeliverySnapshot;
   }) => {
     const deadlineAtMs = resolveRetryDeadlineAtMs(currentDelivery);
     const checkedAtMs = now();
@@ -335,7 +335,7 @@ export function createTelegramDesiredDelivery({
     chatId: string;
     messageId: number;
     nowMs: number;
-    currentDelivery: TelegramDeliveryDocument | DeliverySnapshot;
+    currentDelivery: Partial<TelegramDeliveryDocument> | DeliverySnapshot;
     requestedGeneration?: string;
     apiGateReclaimOwner?: string;
   }) => {
@@ -352,8 +352,8 @@ export function createTelegramDesiredDelivery({
       messageKey,
       ownerToken,
       revision: desired.revision,
-      requestedGeneration,
-      apiGateReclaimOwner,
+      ...(requestedGeneration === undefined ? {} : { requestedGeneration }),
+      ...(apiGateReclaimOwner === undefined ? {} : { apiGateReclaimOwner }),
     });
     const apiGateOwner = gateIdentity.owner;
     const gateResult = await acquireApiGate({
@@ -830,8 +830,8 @@ export function createTelegramDesiredDelivery({
       messageKey: normalizedMessageKey,
       ownerToken,
       revision: desired.revision,
-      requestedGeneration,
-      apiGateReclaimOwner,
+      ...(requestedGeneration === undefined ? {} : { requestedGeneration }),
+      ...(apiGateReclaimOwner === undefined ? {} : { apiGateReclaimOwner }),
     });
     const apiGateOwner = gateIdentity.owner;
     const gateResult = await acquireApiGate({

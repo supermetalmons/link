@@ -1,3 +1,5 @@
+import { requiredFixture } from "./requiredFixture.ts";
+import { canonicalQueuePayloadFixture } from "./canonicalQueueFixture.ts";
 import {
   projectionRecoveryEntryIdentity,
   projectionRecoveryPage,
@@ -60,7 +62,11 @@ function recoveryHarness(
       if (failure === "inspect" || failure === "quarantine") {
         assert.ok(logs.some((entry) => entry.phase === failure));
       }
-      sent.push(...Array.from(messages, ({ body }) => body));
+      sent.push(
+        ...Array.from(messages, ({ body }) =>
+          canonicalQueuePayloadFixture(body),
+        ),
+      );
       if (failSend) throw queueFailure;
       return { metadata: { metrics: { backlogCount: 0, backlogBytes: 0 } } };
     },
@@ -259,9 +265,9 @@ for (const lane of ["profile-link", "profile-game", "telegram"] as const) {
           );
           assert.equal(quarantined.length, failure === "quarantine" ? 0 : 1);
           if (quarantined.length) {
-            assert.equal(quarantined[0].revisionHex, "31");
+            assert.equal(requiredFixture(quarantined[0]).revisionHex, "31");
             assert.equal(
-              quarantined[0][
+              requiredFixture(quarantined[0])[
                 lane === "profile-link" ? "loginUidHex" : "operationIdHex"
               ],
               "ff",
@@ -360,7 +366,11 @@ test("profile-link recovery keeps claims sequential and retains scanned task ide
         ...TELEGRAM_TEST_ENV.PROFILE_GAME_PROJECTION_QUEUE,
         async sendBatch(messages) {
           assert.equal(active, 0);
-          sent.push(...Array.from(messages, ({ body }) => body));
+          sent.push(
+            ...Array.from(messages, ({ body }) =>
+              canonicalQueuePayloadFixture(body),
+            ),
+          );
           return {
             metadata: { metrics: { backlogCount: 0, backlogBytes: 0 } },
           };
@@ -381,7 +391,7 @@ test("profile-link recovery keeps claims sequential and retains scanned task ide
         quarantineInvalidEntry: async () =>
           assert.fail("unexpected-quarantine"),
         async claimDispatch(loginUid, requestId, lastQueuedAtMs, timestamp) {
-          const job = jobs[claims.length];
+          const job = requiredFixture(jobs[claims.length]);
           assert.equal(loginUid, job.loginUid);
           assert.equal(requestId, job.requestId);
           assert.equal(lastQueuedAtMs, job.lastQueuedAtMs);

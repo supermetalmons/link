@@ -14,7 +14,6 @@ import {
 import { parseInviteMatchIndex } from "@mons/shared/rematches";
 import { TELEGRAM_AUTOMATCH_VERSION } from "../../../runtime/telegram/automatchSource.js";
 import { AuthApiFailure } from "./authErrors.ts";
-import type { MatchTimerStartStore } from "./gameplayCoordinationD1.ts";
 import { buildHistoricalMatchPair } from "./historicalMatches.ts";
 import type { RequestIdentity } from "./requestIdentity.ts";
 import type {
@@ -57,7 +56,6 @@ export type RatingUpdateDependencies = {
   ) => void;
   logProjectionFailure?: (task: RatingTelegramProjectionTask) => void;
   now?: () => number;
-  timerStarts: MatchTimerStartStore;
 };
 
 function failedPrecondition(message: string): AuthApiFailure {
@@ -122,7 +120,6 @@ async function repairRatingSideEffects(
   request: RatingUpdateRequest,
   data: RatingRepairData | null,
   repository: RatingRepository,
-  timerStarts: MatchTimerStartStore,
   assertMutationAllowed: (() => Promise<void>) | undefined,
   eventId: string | null,
   nowMs: number,
@@ -141,17 +138,12 @@ async function repairRatingSideEffects(
     await assertMutationAllowed?.();
     await repository.putEventProgressOutbox(progress.outboxId, progress.outbox);
   }
-  await assertMutationAllowed?.();
-  await timerStarts.deletePair(
-    request.playerId,
-    request.opponentId,
-    request.matchId,
-  );
   if (
     data?.shouldUpdateFebruaryChallenge &&
     data.playerProfileId &&
     data.opponentProfileId
   ) {
+    await assertMutationAllowed?.();
     await repository.applyFebruaryChallengeReplay(
       data.playerProfileId,
       data.opponentProfileId,
@@ -201,7 +193,6 @@ async function finishRatingUpdate(
     request,
     completion.data,
     repository,
-    dependencies.timerStarts,
     dependencies.assertMutationAllowed,
     eventId,
     nowMs,
@@ -259,6 +250,12 @@ export async function updateRatings(
       : null;
   const now = dependencies.now || Date.now;
   const existing = await repository.readRatingUpdate(operationId);
+  if (existing?.status === "blocked")
+    throw new AuthApiFailure(
+      409,
+      "failed-precondition",
+      "rating-operation-blocked",
+    );
   if (
     existing &&
     (existing.inviteId !== request.inviteId ||
@@ -332,9 +329,19 @@ export async function updateRatings(
       now(),
     );
   }
+  if (lease.status === "blocked")
+    throw new AuthApiFailure(
+      409,
+      "failed-precondition",
+      "rating-operation-blocked",
+    );
   if (lease.status !== "acquired") {
     return { ok: true, skipped: true };
   }
+  const wager = await repository.readWagerAgreement(
+    request.inviteId,
+    request.matchId,
+  );
   const finalized = await repository.finalizeRatingUpdate(
     {
       inviteId: request.inviteId,
@@ -348,6 +355,7 @@ export async function updateRatings(
       return buildRatingPlan({
         historicalMatchPair,
         invite,
+        wager,
         matchId: request.matchId,
         nowMs: now(),
         opponent,

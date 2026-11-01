@@ -141,9 +141,11 @@ export async function collectProjectionRepairs<Entry, Task = never>(
   removedCount: number;
   failures: Error[];
 }> {
-  const { successes, failures } = await collectRecoveryItems(entries, repair, {
-    onFailure,
-  });
+  const { successes, failures } = await collectRecoveryItems(
+    entries,
+    repair,
+    onFailure === undefined ? {} : { onFailure },
+  );
   return {
     repairedTasks: successes.flatMap(({ value }) =>
       value?.kind === "repaired" ? [value.task] : [],
@@ -165,7 +167,7 @@ export async function collectSuccessfulClaims<T>(
   const { successes, failures: itemFailures } = await collectRecoveryItems(
     items,
     claim,
-    { onFailure },
+    onFailure === undefined ? {} : { onFailure },
   );
   const failures = itemFailures.map(({ error }) =>
     error instanceof Error ? error : new Error(fallbackErrorMessage),

@@ -75,6 +75,8 @@ test("inspection dispatch preserves each domain report and performs only reads",
           return [{ discovery_backend: "d1", capture_enforced: 1 }];
         if (sql.includes("match_presentation_control"))
           return [{ phase: "durable" }];
+        if (sql.includes("match_presentation_source_exceptions_canonical"))
+          return [];
         if (sql.includes("GROUP BY"))
           return [{ provenance: "capture", count: 2 }];
         if (sql.includes("wager_state_activation")) return [activation];
@@ -93,7 +95,6 @@ test("inspection dispatch preserves each domain report and performs only reads",
               row_count: 2,
               wager_count: 1,
               marker_count: 1,
-              non_initial_revisions: 1,
             },
           ];
         if (sql.includes("event_runtime_control"))
@@ -122,16 +123,16 @@ test("inspection dispatch preserves each domain report and performs only reads",
       },
     });
     assert.equal(logs.length, 1);
-    assert.equal(logs[0].operation, "status");
+    assert.equal(logs[0]!.operation, "status");
     assert.ok(queries.length >= 2);
     assert.equal(providerReads, domain === "event-receipts" ? 2 : 0);
-    if (domain === "match-discovery") assert.ok(logs[0].control);
+    if (domain === "match-discovery") assert.ok(logs[0]!.control);
     if (domain === "match-presentations")
-      assert.deepEqual(logs[0].sourceExceptions, []);
-    if (domain === "wagers") assert.ok(logs[0].activation);
+      assert.deepEqual(logs[0]!.sourceExceptions, []);
+    if (domain === "wagers") assert.ok(logs[0]!.activation);
     if (domain === "event-receipts") {
-      assert.equal(logs[0].state, "absent");
-      assert.equal(logs[0].operatorLock, null);
+      assert.equal(logs[0]!.state, "absent");
+      assert.equal(logs[0]!.operatorLock, null);
     }
   }
 });

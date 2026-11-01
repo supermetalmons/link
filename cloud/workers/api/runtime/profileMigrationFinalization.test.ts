@@ -1,10 +1,16 @@
+import {
+  applyPreCleanupTestMigrations,
+  preCleanupTestMigrations,
+} from "./canonicalTestMigrations.ts";
 import { env } from "cloudflare:workers";
-import { applyD1Migrations, type D1Migration } from "cloudflare:test";
+import type { D1Migration } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 import { applyRetiredProfileMigrations } from "./profileTestMigrations.ts";
 
-const migrations = (env as Env & { TEST_PROFILE_D1_MIGRATIONS: D1Migration[] })
-  .TEST_PROFILE_D1_MIGRATIONS;
+const migrations = preCleanupTestMigrations(
+  (env as Env & { TEST_PROFILE_D1_MIGRATIONS: D1Migration[] })
+    .TEST_PROFILE_D1_MIGRATIONS,
+);
 const finalizationIndex = migrations.findIndex(
   ({ name }) => name === "0015_finalize_profile_migrations.sql",
 );
@@ -17,7 +23,7 @@ async function count(db: D1Database, table: string): Promise<number> {
 }
 
 describe("profile migration finalization", () => {
-  it("preserves imported completions and produces the current schema from the complete migration chain", async () => {
+  it("preserves imported completions at the historical profile-finalization boundary", async () => {
     await applyRetiredProfileMigrations(
       env.PROFILE_DB,
       migrations,
@@ -91,7 +97,7 @@ describe("profile migration finalization", () => {
       },
     );
     await expect(
-      applyD1Migrations(db, migrations.slice(finalizationIndex)),
+      applyPreCleanupTestMigrations(db, migrations.slice(finalizationIndex)),
     ).rejects.toThrow();
     await db.batch([
       db.prepare(
@@ -105,7 +111,7 @@ describe("profile migration finalization", () => {
       ),
     ]);
     await expect(
-      applyD1Migrations(db, migrations.slice(finalizationIndex)),
+      applyPreCleanupTestMigrations(db, migrations.slice(finalizationIndex)),
     ).rejects.toThrow();
     expect(await count(db, "legacy_rating_completions")).toBe(1);
     await db
@@ -113,7 +119,10 @@ describe("profile migration finalization", () => {
         "UPDATE profile_link_catchup_import SET activated_at_ms = 1 WHERE singleton = 1",
       )
       .run();
-    await applyD1Migrations(db, migrations.slice(finalizationIndex));
+    await applyPreCleanupTestMigrations(
+      db,
+      migrations.slice(finalizationIndex),
+    );
     expect(await count(db, "legacy_rating_completions")).toBe(1);
     expect(
       await db

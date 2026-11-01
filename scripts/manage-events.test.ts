@@ -241,7 +241,7 @@ test("stale admission recovery is named, expired, and leaves other fences", () =
     ["ewa_active-two"],
   );
   assert.throws(() => manageEvents("freeze", state.value), /write admissions/);
-  const output = JSON.parse(state.logs[0]);
+  const output = JSON.parse(state.logs[0]!);
   assert.equal(output.operation, "recover-stale-admission");
   assert.equal(output.recoveredAdmissionId, "ewa_expired-one");
   assert.equal(output.writeAdmissions, 1);
@@ -394,7 +394,7 @@ test("a row changed after evidence comparison is rejected by the pinned full-row
           readRecoveryEvidence: reviewedRecoveryEvidence,
           recoverStaleAdmission: (expected, nowMs) => {
             assert.deepEqual(expected, reviewedAdmission);
-            state.admissions[0].freezeGeneration = 2;
+            state.admissions[0]!.freezeGeneration = 2;
             return state.value.recoverStaleAdmission(expected, nowMs);
           },
         },
@@ -402,7 +402,7 @@ test("a row changed after evidence comparison is rejected by the pinned full-row
     /recovery conflicted/,
   );
   assert.equal(state.admissions.length, 1);
-  assert.equal(state.admissions[0].freezeGeneration, 2);
+  assert.equal(state.admissions[0]!.freezeGeneration, 2);
 });
 
 test("recovery evidence is loaded only from an owned private regular file at an absolute path", () => {
@@ -490,7 +490,7 @@ test("status is read-only and does not expose event payloads", () => {
   });
   manageEvents("status", state.value);
   assert.equal(state.updates, 0);
-  const output = JSON.parse(state.logs[0]);
+  const output = JSON.parse(state.logs[0]!);
   assert.equal(output.operation, "status");
   assert.equal(output.freezeGeneration, 1);
   assert.equal(output.writeAdmissions, 1);

@@ -1,3 +1,4 @@
+import { browserServerOrigin } from "./browserViteServer.mjs";
 import assert from "node:assert/strict";
 import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
@@ -5,9 +6,11 @@ import test from "node:test";
 import { createBrowserViteServer } from "./browserViteServer.mjs";
 
 const require = createRequire(import.meta.url);
+/** @type {typeof import("playwright")} */
 const { chromium } = require(process.env.MONS_PLAYWRIGHT_PATH || "playwright");
 const repository = fileURLToPath(new URL("../", import.meta.url));
 
+/** @param {(fixture: {open: () => Promise<import("playwright").Page>}) => Promise<void>} run */
 async function fixture(run) {
   const server = await createBrowserViteServer({
     root: repository,
@@ -20,10 +23,11 @@ async function fixture(run) {
     },
     logLevel: "error",
   });
+  /** @type {import("playwright").Browser | undefined} */
   let browser;
   try {
     await server.listen();
-    const origin = `http://127.0.0.1:${server.httpServer.address().port}`;
+    const origin = browserServerOrigin(server);
     browser = await chromium.launch({
       headless: true,
       ...(process.env.MONS_BROWSER_EXECUTABLE
@@ -42,18 +46,25 @@ async function fixture(run) {
           await import("/src/session/sessionStore.ts");
         globalThis.storageCounts = { opens: 0, writes: 0, transactions: 0 };
         const put = IDBObjectStore.prototype.put;
-        IDBObjectStore.prototype.put = function (...args) {
+        /** @this {IDBObjectStore} @param {Parameters<IDBObjectStore["put"]>} args */
+        function countedPut(...args) {
           if (this.transaction.db.name === SESSION_DATABASE_NAME)
             globalThis.storageCounts.writes++;
           return put.apply(this, args);
-        };
+        }
+        IDBObjectStore.prototype.put = countedPut;
         const transaction = IDBDatabase.prototype.transaction;
-        IDBDatabase.prototype.transaction = function (...args) {
+        /** @this {IDBDatabase} @param {Parameters<IDBDatabase["transaction"]>} args */
+        function countedTransaction(...args) {
           if (this.name === SESSION_DATABASE_NAME)
             globalThis.storageCounts.transactions++;
           return transaction.apply(this, args);
-        };
+        }
+        IDBDatabase.prototype.transaction = countedTransaction;
         globalThis.sessionStore = createIndexedDbSessionStore(() => ({
+          cmp: indexedDB.cmp.bind(indexedDB),
+          databases: indexedDB.databases.bind(indexedDB),
+          deleteDatabase: indexedDB.deleteDatabase.bind(indexedDB),
           open: (...args) => {
             globalThis.storageCounts.opens++;
             return indexedDB.open(...args);
@@ -157,12 +168,17 @@ test(
       }
       await first.evaluate(
         () =>
-          new Promise((resolve, reject) => {
-            const request = indexedDB.deleteDatabase("mons-link-sessions-v1");
-            request.onsuccess = () => resolve();
-            request.onerror = () => reject(request.error);
-            request.onblocked = () => reject(new Error("deletion-blocked"));
-          }),
+          new Promise(
+            /** @param {(value?: void) => void} resolve */ (
+              resolve,
+              reject,
+            ) => {
+              const request = indexedDB.deleteDatabase("mons-link-sessions-v1");
+              request.onsuccess = () => resolve();
+              request.onerror = () => reject(request.error);
+              request.onblocked = () => reject(new Error("deletion-blocked"));
+            },
+          ),
       );
       const replacement = await first.evaluate(() =>
         globalThis.sessionStore.update((state) => state),

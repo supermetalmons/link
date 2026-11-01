@@ -14,7 +14,7 @@ export function preventTouchstartIfNeeded(
   if (
     target instanceof Element &&
     target.closest(
-      ".small-top-control-buttons, [data-top-right-popover='true']",
+      ".small-top-control-buttons, [data-top-right-popover='true'], [data-inventory-item-preview='true']",
     )
   ) {
     return;

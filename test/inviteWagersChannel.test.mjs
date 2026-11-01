@@ -1,3 +1,5 @@
+import { createTimerHandle } from "./fixtures/timerHandle.mjs";
+import { required } from "./fixtures/canonicalData.mjs";
 import assert from "node:assert/strict";
 import { registerHooks } from "node:module";
 import test from "node:test";
@@ -20,41 +22,57 @@ const { InviteWagersChannel } =
   await import("../src/connection/inviteWagersChannel.ts");
 const { InviteWagersApiError } =
   await import("../src/services/inviteWagersApi.ts");
+/** @type {import("@mons/shared/invite-wagers").InviteWagersSnapshot["wagers"][string]} */
 const wager = {
-  proposals: { host: { material: "dust", count: 3 } },
+  schemaVersion: 1,
+  state: "proposed",
+  agreed: null,
+  resolved: null,
+  blocked: null,
+  proposals: { host: { material: "dust", count: 3, createdAt: 1 } },
   proposedBy: { host: true },
 };
+/** @param {number} [revision] @param {Partial<import("@mons/shared/invite-wagers").InviteWagersSnapshot>} [changes] @returns {import("@mons/shared/invite-wagers").InviteWagersSnapshot} */
 const snapshot = (revision = 1, changes = {}) => ({
   inviteId: "invite",
   revision,
   wagers: { invite: wager },
   ...changes,
 });
+/** @param {number} [revision] @param {Partial<import("@mons/shared/invite-wagers").InviteWagersSnapshot>} [changes] @returns {import("@mons/shared/invite-wagers").ReadInviteWagersResponse} */
 const response = (revision = 1, changes = {}) => ({
   ok: true,
   snapshot: snapshot(revision, changes),
 });
+/** @param {number} [revision] @param {Record<string, unknown>} [changes] */
 const frame = (revision = 1, changes = {}) => ({
   schemaVersion: 1,
   type: "snapshot",
-  snapshot: snapshot(revision, changes),
+  snapshot: { ...snapshot(revision), ...changes },
 });
 const flush = () => new Promise((resolve) => setImmediate(resolve));
+/** @template [T=void] @returns {PromiseWithResolvers<T>} */
 const deferred = () => {
-  let resolve;
-  let reject;
-  const promise = new Promise((yes, no) => {
-    resolve = yes;
-    reject = no;
-  });
-  return { promise, resolve, reject };
+  /** @type {PromiseWithResolvers<T>} */
+  const pending = Promise.withResolvers();
+  return {
+    promise: pending.promise,
+    resolve: pending.resolve,
+    reject: pending.reject,
+  };
 };
 
+/**
+ * @typedef {ConstructorParameters<typeof InviteWagersChannel>[0]} ChannelDependencies
+ * @typedef {Omit<ReturnType<ChannelDependencies["createSocket"]>, "readyState"> & {readyState: WebSocket["readyState"], url: string, protocols: string[] | undefined, closes: number, sent: Parameters<WebSocket["send"]>[0][], receive: (value: unknown) => void, fail: () => void}} TestSocket
+ * @param {Partial<Pick<ChannelDependencies, "getProtocols" | "captureGeneration" | "needsHttpRefresh" | "readWagers" | "onSnapshot">> & {rawRead?: (signal: AbortSignal) => Promise<{ok: true, snapshot: Omit<import("@mons/shared/invite-wagers").InviteWagersSnapshot, "wagers"> & {wagers: Record<string, unknown>}}>, createError?: boolean, online?: boolean, visible?: boolean}} [options]
+ */
 function harness({
   getProtocols,
   captureGeneration,
   needsHttpRefresh,
   readWagers = async () => response(),
+  rawRead,
   createError = false,
   onSnapshot,
   online = true,
@@ -62,17 +80,26 @@ function harness({
 } = {}) {
   let now = 0;
   let active = true;
-  let nextTimer = 1;
+  /**
+   * @type {(() => void) | null}
+   */
   let wake;
+  /** @type {Map<ReturnType<typeof createTimerHandle>, {callback: () => void, at: number}>} */
   const timers = new Map();
+  /** @type {TestSocket[]} */
   const sockets = [];
+  /** @type {({ snapshot: import("@mons/shared/invite-wagers").InviteWagersSnapshot; delivery: import("../src/connection/snapshotChannel.ts").SnapshotDelivery; })[]} */
   const snapshots = [];
+  /** @type {unknown[]} */
   const errors = [];
+  /** @type {({ now: number; signal: AbortSignal; })[]} */
   const reads = [];
-  const channel = new InviteWagersChannel({
+  /** @type {ChannelDependencies} */
+  const dependencies = {
     inviteId: "invite",
     createSocket(url, protocols) {
       if (createError) throw new Error("secret-token-in-error");
+      /** @type {TestSocket} */
       const socket = {
         url,
         protocols,
@@ -92,21 +119,24 @@ function harness({
         },
         receive(value) {
           this.readyState = 1;
-          this.onmessage?.({
-            data: typeof value === "string" ? value : JSON.stringify(value),
-          });
+          if (this.onmessage)
+            Reflect.apply(this.onmessage, this, [
+              {
+                data: typeof value === "string" ? value : JSON.stringify(value),
+              },
+            ]);
         },
         fail() {
           this.readyState = 3;
-          this.onclose?.();
+          if (this.onclose) Reflect.apply(this.onclose, this, []);
         },
       };
       sockets.push(socket);
       return socket;
     },
-    getProtocols,
-    captureGeneration,
-    needsHttpRefresh,
+    ...(getProtocols ? { getProtocols } : {}),
+    ...(captureGeneration ? { captureGeneration } : {}),
+    ...(needsHttpRefresh ? { needsHttpRefresh } : {}),
     readWagers(signal) {
       reads.push({ now, signal });
       return readWagers(signal);
@@ -126,14 +156,24 @@ function harness({
     },
     onError: (error) => errors.push(error),
     setTimer(callback, delayMs) {
-      const id = nextTimer++;
+      const id = createTimerHandle();
       timers.set(id, { callback, at: now + delayMs });
       return id;
     },
     clearTimer: (timer) => timers.delete(timer),
     random: () => 1,
     now: () => now,
-  });
+  };
+  if (rawRead)
+    Reflect.set(
+      dependencies,
+      "readWagers",
+      (/** @type {AbortSignal} */ signal) => {
+        reads.push({ now, signal });
+        return rawRead(signal);
+      },
+    );
+  const channel = new InviteWagersChannel(dependencies);
   return {
     channel,
     timers,
@@ -143,16 +183,16 @@ function harness({
     reads,
     wake: () => wake?.(),
     listenerCount: () => (wake ? 1 : 0),
-    setActive: (value) => {
+    setActive: (/** @type {boolean} */ value) => {
       active = value;
     },
-    setOnline: (value) => {
+    setOnline: (/** @type {boolean} */ value) => {
       online = value;
     },
-    setVisible: (value) => {
+    setVisible: (/** @type {boolean} */ value) => {
       visible = value;
     },
-    elapseWithoutTimers: (ms) => {
+    elapseWithoutTimers: (/** @type {number} */ ms) => {
       now += ms;
     },
     async tick(ms = 0) {
@@ -176,21 +216,27 @@ function harness({
 
 test("uses an isolated wager socket and hydrates the full rematch map", async () => {
   const wagers = { invite: wager, invite1: {}, invite2: wager };
-  const h = harness({ readWagers: async () => response(1, { wagers }) });
+  const h = harness({
+    rawRead: async () => ({ ok: true, snapshot: { ...snapshot(), wagers } }),
+  });
   assert.equal(h.reads.length, 0);
   await h.tick();
   assert.equal(
-    h.sockets[0].url,
+    required(h.sockets[0]).url,
     "wss://api.mons.link/invites/invite/wagers/socket",
   );
-  assert.deepEqual(h.sockets[0].protocols, ["mons-invite-wagers-v1"]);
-  assert.deepEqual(h.snapshots[0].snapshot.wagers, wagers);
-  h.sockets[0].receive(frame(2, { wagers: {} }));
-  assert.deepEqual(h.snapshots.at(-1).snapshot.wagers, {});
+  assert.deepEqual(required(h.sockets[0]).protocols, [
+    "mons-invite-wagers-v1",
+    "mons-data-v1",
+  ]);
+  assert.deepEqual(required(h.snapshots[0]).snapshot.wagers, wagers);
+  required(h.sockets[0]).receive(frame(2, { wagers: {} }));
+  assert.deepEqual(required(h.snapshots.at(-1)).snapshot.wagers, {});
   h.channel.stop();
 });
 
 test("drops older snapshots but delivers same-revision HTTP reconciliation", async () => {
+  /** @type {PromiseWithResolvers<import("@mons/shared/invite-wagers").ReadInviteWagersResponse>} */
   const read = deferred();
   let calls = 0;
   const h = harness({
@@ -198,9 +244,9 @@ test("drops older snapshots but delivers same-revision HTTP reconciliation", asy
       ++calls === 1 ? read.promise : Promise.resolve(response(3)),
   });
   await h.tick();
-  h.sockets[0].receive(frame(3));
-  h.sockets[0].receive(frame(3));
-  read.resolve(response(2));
+  required(h.sockets[0]).receive(frame(3));
+  required(h.sockets[0]).receive(frame(3));
+  required(read.resolve)(response(2));
   await flush();
   assert.equal(h.snapshots.length, 1);
   h.channel.requestRefresh();
@@ -214,6 +260,7 @@ test("drops older snapshots but delivers same-revision HTTP reconciliation", asy
 });
 
 test("captures HTTP generations before reads and socket generations at delivery", async () => {
+  /** @type {PromiseWithResolvers<import("@mons/shared/invite-wagers").ReadInviteWagersResponse>} */
   const read = deferred();
   let generation = 1;
   let calls = 0;
@@ -224,8 +271,8 @@ test("captures HTTP generations before reads and socket generations at delivery"
   });
   await h.tick();
   generation = 2;
-  h.sockets[0].receive(frame());
-  read.resolve(response());
+  required(h.sockets[0]).receive(frame());
+  required(read.resolve)(response());
   await flush();
   generation = 3;
   h.channel.requestRefresh();
@@ -256,12 +303,12 @@ test("retries requested HTTP reconciliation while sockets remain healthy", async
     },
   });
   await h.tick();
-  h.sockets[0].receive(frame());
+  required(h.sockets[0]).receive(frame());
   needsRefresh = true;
   h.channel.requestRefresh();
   await flush();
   assert.equal(calls, 2);
-  h.sockets[0].receive(frame(2));
+  required(h.sockets[0]).receive(frame(2));
   await h.tick(9_999);
   assert.equal(calls, 2);
   await h.tick(1);
@@ -273,20 +320,25 @@ test("retries requested HTTP reconciliation while sockets remain healthy", async
 });
 
 test("recovers through HTTP and refreshed socket authentication after a disconnect", async () => {
+  /** @type {boolean[]} */
   const refreshes = [];
   const h = harness({
     getProtocols: async (force) => {
       refreshes.push(force);
-      return ["mons-invite-wagers-v1", "bearer.header.payload.signature"];
+      return [
+        "mons-invite-wagers-v1",
+        "bearer.header.payload.signature",
+        "mons-data-v1",
+      ];
     },
   });
   await h.tick();
-  h.sockets[0].receive(frame());
-  h.sockets[0].fail();
+  required(h.sockets[0]).receive(frame());
+  required(h.sockets[0]).fail();
   await h.tick(500);
   assert.deepEqual(refreshes, [false, true]);
   assert.equal(h.reads.length, 2);
-  h.sockets[1].receive(frame());
+  required(h.sockets[1]).receive(frame());
   await h.tick(5_000);
   assert.equal(h.reads.length, 2);
   h.channel.stop();
@@ -305,31 +357,36 @@ test("rejects metadata frames, private wager fields, foreign and oversized messa
   ]) {
     const h = harness({ readWagers: () => new Promise(() => {}) });
     await h.tick();
-    h.sockets[0].receive(invalid);
+    required(h.sockets[0]).receive(invalid);
     assert.equal(h.snapshots.length, 0);
-    assert.equal(h.sockets[0].closes, 1);
-    assert.equal(h.errors[0].code, "wagers-channel-unavailable");
+    assert.equal(required(h.sockets[0]).closes, 1);
+    const error = required(h.errors[0]);
+    assert.ok(error instanceof InviteWagersApiError);
+    assert.equal(error.code, "wagers-channel-unavailable");
     h.channel.stop();
   }
 });
 
 test("stopping an obsolete context aborts reads and releases every channel resource", async () => {
+  /** @type {PromiseWithResolvers<import("@mons/shared/invite-wagers").ReadInviteWagersResponse>} */
   const read = deferred();
   const h = harness({ readWagers: () => read.promise });
   await h.tick();
-  const lateMessage = h.sockets[0].onmessage;
-  const lateClose = h.sockets[0].onclose;
+  const lateMessage = required(h.sockets[0]).onmessage;
+  const lateClose = required(h.sockets[0]).onclose;
   h.setActive(false);
   h.channel.stop();
   h.channel.stop();
-  read.resolve(response());
-  lateMessage({ data: JSON.stringify(frame()) });
-  lateClose();
+  required(read.resolve)(response());
+  Reflect.apply(required(lateMessage), h.sockets[0], [
+    { data: JSON.stringify(frame()) },
+  ]);
+  Reflect.apply(required(lateClose), h.sockets[0], []);
   await flush();
   assert.equal(h.snapshots.length, 0);
   assert.equal(h.errors.length, 0);
-  assert.equal(h.reads[0].signal.aborted, true);
+  assert.equal(required(h.reads[0]).signal.aborted, true);
   assert.equal(h.timers.size, 0);
   assert.equal(h.listenerCount(), 0);
-  assert.equal(h.sockets[0].closes, 1);
+  assert.equal(required(h.sockets[0]).closes, 1);
 });

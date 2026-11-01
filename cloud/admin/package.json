@@ -1,7 +1,7 @@
 {
   "name": "mons-admin-tools",
   "private": true,
-  "type": "commonjs",
+  "type": "module",
   "engines": {
     "node": "^22.13.0 || >=24.0.0"
   },
@@ -9,8 +9,9 @@
     "jsonc-parser": "^3.3.1"
   },
   "scripts": {
-    "recover:telegram": "node recoverTelegramDelivery.js",
-    "start": "node listAddresses.js",
-    "shooting:alert": "node shootingStarAlert.js"
+    "recover:telegram": "node --experimental-strip-types recoverTelegramDelivery.ts",
+    "start": "node --experimental-strip-types listAddresses.ts",
+    "shooting:alert": "node --experimental-strip-types shootingStarAlert.ts",
+    "typecheck": "tsc --noEmit -p tsconfig.json"
   }
 }

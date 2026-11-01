@@ -14,7 +14,7 @@ exports.resolveAuthCooldownRetryAtMs =
   exports.getAuthCooldownScope =
   exports.normalizeAuthCooldownReason =
   exports.normalizeAuthMethod =
-  exports.normalizeAuthPresentation =
+  exports.createAuthPresentation =
   exports.getLinkedAuthMethodsFromProfile =
   exports.AUTH_COOLDOWN_REASONS =
   exports.AUTH_METHOD_REUSE_COOLDOWN_MS =
@@ -23,7 +23,7 @@ exports.resolveAuthCooldownRetryAtMs =
   exports.AUTH_METHODS =
     void 0;
 const mining_js_1 = require("./mining.js");
-const profiles_js_1 = require("./profiles.js");
+const appearance_js_1 = require("./appearance.js");
 const AUTH_METHODS = Object.freeze(["eth", "sol", "apple", "x"]);
 exports.AUTH_METHODS = AUTH_METHODS;
 const AUTH_METHOD_FIELD_BY_TYPE = Object.freeze({
@@ -42,8 +42,6 @@ const AUTH_METHOD_LABELS = Object.freeze({
 exports.AUTH_METHOD_LABELS = AUTH_METHOD_LABELS;
 const AUTH_METHOD_REUSE_COOLDOWN_MS = 24 * 60 * 60 * 1000;
 exports.AUTH_METHOD_REUSE_COOLDOWN_MS = AUTH_METHOD_REUSE_COOLDOWN_MS;
-const AUTH_SWAG_EMOJI_MIN = 1000;
-const AUTH_SWAG_EMOJI_MAX = 1466;
 const AUTH_COOLDOWN_REASONS = Object.freeze({
   method: "method-reuse-cooldown",
   profileMethod: "profile-method-cooldown",
@@ -72,10 +70,15 @@ const AUTH_PROFILE_RESPONSE_REQUIRED_KEYS = Object.freeze([
   "linkedMethods",
   "appleLinked",
   "opId",
+  "aura",
+  "cardBackgroundId",
+  "cardStickers",
+  "cardSubtitleId",
+  "profileCounter",
+  "profileMons",
 ]);
 const AUTH_PROFILE_RESPONSE_KEYS = Object.freeze([
   ...AUTH_PROFILE_RESPONSE_REQUIRED_KEYS,
-  "address",
   "eth",
   "sol",
   "aura",
@@ -113,26 +116,18 @@ const isOptionalNullableFiniteNumber = (value) =>
   value === undefined ||
   value === null ||
   (typeof value === "number" && Number.isFinite(value));
-const isAuthEmoji = (value) =>
-  Number.isSafeInteger(value) &&
-  ((value >= 1 && value <= profiles_js_1.PROFILE_FALLBACK_EMOJI_COUNT) ||
-    (value >= AUTH_SWAG_EMOJI_MIN && value <= AUTH_SWAG_EMOJI_MAX));
-const normalizeAuthPresentation = (emoji, aura) => {
-  const numericEmoji =
-    typeof emoji === "number" ||
-    (typeof emoji === "string" && emoji.trim() !== "")
-      ? Number(emoji)
-      : NaN;
-  return {
-    emoji: isAuthEmoji(numericEmoji) ? numericEmoji : 1,
-    aura: typeof aura === "string" && aura.length <= 32 ? aura : null,
-  };
+const createAuthPresentation = (emoji, aura) => {
+  const presentation = { emoji, aura };
+  if (!(0, appearance_js_1.isEmojiAppearance)(presentation))
+    throw new Error("invalid-auth-presentation");
+  return presentation;
 };
-exports.normalizeAuthPresentation = normalizeAuthPresentation;
-const isEmojiAndAura = (value) => {
-  const normalized = normalizeAuthPresentation(value.emoji, value.aura);
-  return normalized.emoji === value.emoji && normalized.aura === value.aura;
-};
+exports.createAuthPresentation = createAuthPresentation;
+const isEmojiAndAura = (value) =>
+  (0, appearance_js_1.isEmojiAppearance)({
+    emoji: value.emoji,
+    aura: value.aura,
+  });
 const isAuthToken = (value) =>
   typeof value === "string" &&
   value === value.trim() &&
@@ -223,23 +218,22 @@ const isAuthProfileResponse = (value) =>
   cleanString(value.uid) !== "" &&
   cleanString(value.profileId) !== "" &&
   isNullableString(value.username) &&
-  typeof value.emoji === "number" &&
-  Number.isFinite(value.emoji) &&
+  (0, appearance_js_1.isEmojiId)(value.emoji) &&
   isLinkedAuthMethods(value.linkedMethods) &&
   value.appleLinked === value.linkedMethods.apple &&
   cleanString(value.opId) !== "" &&
-  isOptionalNullableString(value.address) &&
   isOptionalNullableString(value.eth) &&
   isOptionalNullableString(value.sol) &&
-  isOptionalNullableString(value.aura) &&
+  (0, appearance_js_1.isAura)(value.aura) &&
   isOptionalNullableFiniteNumber(value.rating) &&
   isOptionalNullableFiniteNumber(value.nonce) &&
   isOptionalNullableFiniteNumber(value.totalManaPoints) &&
-  isOptionalNullableFiniteNumber(value.cardBackgroundId) &&
-  isOptionalNullableFiniteNumber(value.cardSubtitleId) &&
-  isOptionalNullableString(value.profileCounter) &&
-  isOptionalNullableString(value.cardStickers) &&
-  isOptionalNullableString(value.profileMons) &&
+  (0, appearance_js_1.isCardBackgroundId)(value.cardBackgroundId) &&
+  (0, appearance_js_1.isCardSubtitleId)(value.cardSubtitleId) &&
+  (0, appearance_js_1.isProfileCounter)(value.profileCounter) &&
+  (0, appearance_js_1.isStickerMap)(value.cardStickers) &&
+  (value.profileMons === null ||
+    (0, appearance_js_1.isSelectedMons)(value.profileMons)) &&
   (value.completedProblems === undefined ||
     value.completedProblems === null ||
     (Array.isArray(value.completedProblems) &&

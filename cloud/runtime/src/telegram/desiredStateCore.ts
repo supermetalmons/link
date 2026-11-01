@@ -1,3 +1,4 @@
+import type { EventTelegramProjectionGuard } from "./eventProjectionRecords.js";
 import * as crypto from "node:crypto";
 type DesiredInputEvidence = {
   destination?: unknown;
@@ -29,6 +30,9 @@ export type TelegramDesiredInput =
   | TelegramDeleteDesiredInput;
 
 type DesiredIdentity = {
+  eventTelegramProjectionGuard?: EventTelegramProjectionGuard & {
+    messageKey: string;
+  };
   schemaVersion: 2;
   destination: "community" | "events";
   revision: string;

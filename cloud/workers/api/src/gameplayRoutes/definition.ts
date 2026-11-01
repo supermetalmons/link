@@ -77,7 +77,9 @@ export function defineGameplayRoute<
   return {
     path: definition.path,
     readOnly: definition.readOnly,
-    observePost: definition.observePost,
+    ...(definition.observePost === undefined
+      ? {}
+      : { observePost: definition.observePost }),
     bindRequest(context) {
       let preparedRequest: GameplayRequestRuntime<Runtime>;
       if (definition.prepareRequest) {
@@ -87,8 +89,12 @@ export function defineGameplayRoute<
         preparedRequest = { runtime: () => runtime(context) };
       }
       return {
-        maxBodyBytes: definition.maxBodyBytes,
-        beforeBody: preparedRequest.beforeBody,
+        ...(definition.maxBodyBytes === undefined
+          ? {}
+          : { maxBodyBytes: definition.maxBodyBytes }),
+        ...(preparedRequest.beforeBody === undefined
+          ? {}
+          : { beforeBody: preparedRequest.beforeBody }),
         prepare(value) {
           const body = definition.parse(value);
           return {

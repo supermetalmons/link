@@ -1,3 +1,5 @@
+import { required } from "./fixtures/canonicalData.mjs";
+import { browserServerOrigin } from "./browserViteServer.mjs";
 import assert from "node:assert/strict";
 import { EventEmitter, once } from "node:events";
 import { readFileSync } from "node:fs";
@@ -7,6 +9,7 @@ import test from "node:test";
 import { createServer } from "vite";
 
 const require = createRequire(import.meta.url);
+/** @type {typeof import("playwright")} */
 const { chromium } = require(process.env.MONS_PLAYWRIGHT_PATH || "playwright");
 const repository = fileURLToPath(new URL("../", import.meta.url));
 const sharedManifest = JSON.parse(
@@ -40,7 +43,7 @@ HTMLImageElement.prototype.decode = function() {
     decodeRequests.push({ image, resolve, reject });
   });
 };
-window.harness = {
+window.imageLoadingHarness = {
   decodeRequests,
   loadResults,
   render(visible = true) {
@@ -82,6 +85,10 @@ window.harness = {
 };
 `;
 
+/**
+ * @param {import("node:test").TestContext} t
+ * @param {(context: {page: import("playwright").Page, requests: import("playwright").Route[], nextRequest: () => Promise<import("playwright").Route>}) => Promise<void>} run
+ */
 async function fixture(t, run) {
   const server = await createServer({
     root: repository,
@@ -133,6 +140,7 @@ async function fixture(t, run) {
       },
     ],
   });
+  /** @type {import("playwright").Browser | undefined} */
   let browser;
   const cleanup = async () => {
     try {
@@ -144,7 +152,7 @@ async function fixture(t, run) {
   t.after(cleanup);
   try {
     await server.listen();
-    const origin = `http://127.0.0.1:${server.httpServer.address().port}`;
+    const origin = browserServerOrigin(server);
     browser = await chromium.launch({
       headless: true,
       ...(process.env.MONS_BROWSER_EXECUTABLE
@@ -155,9 +163,12 @@ async function fixture(t, run) {
       viewport: { width: 1000, height: 700 },
     });
     context.setDefaultTimeout(15000);
+    /** @type {import("playwright").Route[]} */
     const requests = [];
     const requestEvents = new EventEmitter();
+    /** @type {import("playwright").Route[]} */
     const pendingRequests = [];
+    /** @type {string[]} */
     const unexpectedRequests = [];
     await context.route("**/*", (route) => {
       const url = route.request().url();
@@ -171,10 +182,11 @@ async function fixture(t, run) {
       requestEvents.emit("preview");
     });
     const page = await context.newPage();
+    /** @type {string[]} */
     const errors = [];
     page.on("pageerror", (error) => errors.push(error.message));
     await page.goto(`${origin}/__images`);
-    await page.waitForFunction(() => !!window.harness);
+    await page.waitForFunction(() => !!window.imageLoadingHarness);
     await run({
       page,
       requests,
@@ -193,7 +205,7 @@ async function fixture(t, run) {
             );
           }
         }
-        return pendingRequests.shift();
+        return required(pendingRequests.shift());
       },
     });
     assert.deepEqual(errors, []);
@@ -203,6 +215,7 @@ async function fixture(t, run) {
   }
 }
 
+/** @param {import("playwright").Route} request */
 const fulfillImage = (request, status = 200) =>
   request.fulfill({
     status,
@@ -211,9 +224,10 @@ const fulfillImage = (request, status = 200) =>
     body: status === 200 ? previewImage : "unavailable",
   });
 
+/** @param {import("playwright").Page} page */
 const waitForDecodedPreview = (page) =>
   page.waitForFunction(() => {
-    const state = window.harness.snapshot();
+    const state = window.imageLoadingHarness.snapshot();
     return !state.placeholder && state.complete && state.naturalWidth === 4;
   });
 
@@ -223,31 +237,36 @@ test(
   async (t) => {
     await fixture(t, async ({ page, requests, nextRequest }) => {
       await page.evaluate(() => {
-        window.harness.render();
+        window.imageLoadingHarness.render();
       });
       const request = await nextRequest();
       assert.equal(requests.length, 1);
-      assert.deepEqual(await page.evaluate(() => window.harness.snapshot()), {
-        placeholder: true,
-        imageUrl: null,
-        complete: false,
-        naturalWidth: 0,
-      });
+      assert.deepEqual(
+        await page.evaluate(() => window.imageLoadingHarness.snapshot()),
+        {
+          placeholder: true,
+          imageUrl: null,
+          complete: false,
+          naturalWidth: 0,
+        },
+      );
 
       await fulfillImage(request);
       await page.waitForFunction(
         () =>
-          window.harness.decodeRequests.length === 1 &&
-          !!window.harness.snapshot().imageUrl,
+          window.imageLoadingHarness.decodeRequests.length === 1 &&
+          !!window.imageLoadingHarness.snapshot().imageUrl,
       );
-      const loading = await page.evaluate(() => window.harness.snapshot());
+      const loading = await page.evaluate(() =>
+        window.imageLoadingHarness.snapshot(),
+      );
       assert.equal(loading.placeholder, true);
-      assert.match(loading.imageUrl, /^blob:/);
+      assert.match(required(loading.imageUrl), /^blob:/);
 
-      await page.evaluate(() => window.harness.resolveDecode(0));
+      await page.evaluate(() => window.imageLoadingHarness.resolveDecode(0));
       await waitForDecodedPreview(page);
       const reopened = await page.evaluate(() => {
-        const h = window.harness;
+        const h = window.imageLoadingHarness;
         h.render(false);
         h.render();
         return { state: h.snapshot(), decodes: h.decodeRequests.length };
@@ -266,28 +285,33 @@ test(
   async (t) => {
     await fixture(t, async ({ page, requests, nextRequest }) => {
       await page.evaluate(() => {
-        window.harness.render();
-        window.harness.observeLoad();
+        window.imageLoadingHarness.render();
+        window.imageLoadingHarness.observeLoad();
       });
       await fulfillImage(await nextRequest(), 503);
-      await page.waitForFunction(() => window.harness.loadResults.length === 1);
-      assert.deepEqual(await page.evaluate(() => window.harness.loadResults), [
-        null,
-      ]);
+      await page.waitForFunction(
+        () => window.imageLoadingHarness.loadResults.length === 1,
+      );
+      assert.deepEqual(
+        await page.evaluate(() => window.imageLoadingHarness.loadResults),
+        [null],
+      );
       assert.equal(
-        await page.evaluate(() => window.harness.snapshot().placeholder),
+        await page.evaluate(
+          () => window.imageLoadingHarness.snapshot().placeholder,
+        ),
         true,
       );
 
       await page.evaluate(() => {
-        window.harness.render(false);
-        window.harness.render();
+        window.imageLoadingHarness.render(false);
+        window.imageLoadingHarness.render();
       });
       await fulfillImage(await nextRequest());
       await page.waitForFunction(
-        () => window.harness.decodeRequests.length === 1,
+        () => window.imageLoadingHarness.decodeRequests.length === 1,
       );
-      await page.evaluate(() => window.harness.resolveDecode(0));
+      await page.evaluate(() => window.imageLoadingHarness.resolveDecode(0));
       await waitForDecodedPreview(page);
       assert.equal(requests.length, 2);
     });
@@ -300,35 +324,41 @@ test(
   async (t) => {
     await fixture(t, async ({ page, requests, nextRequest }) => {
       await page.evaluate(() => {
-        window.harness.render();
+        window.imageLoadingHarness.render();
       });
       await fulfillImage(await nextRequest());
       await page.waitForFunction(
         () =>
-          window.harness.decodeRequests.length === 1 &&
-          !!window.harness.snapshot().imageUrl,
+          window.imageLoadingHarness.decodeRequests.length === 1 &&
+          !!window.imageLoadingHarness.snapshot().imageUrl,
       );
-      const cachedUrl = await page.evaluate(() => window.harness.cachedUrl());
-      await page.evaluate(() => window.harness.rejectDecode(0));
+      const cachedUrl = await page.evaluate(() =>
+        window.imageLoadingHarness.cachedUrl(),
+      );
+      await page.evaluate(() => window.imageLoadingHarness.rejectDecode(0));
       await page.waitForFunction(
-        () => window.harness.snapshot().imageUrl === null,
+        () => window.imageLoadingHarness.snapshot().imageUrl === null,
       );
       assert.equal(
-        await page.evaluate(() => window.harness.snapshot().placeholder),
+        await page.evaluate(
+          () => window.imageLoadingHarness.snapshot().placeholder,
+        ),
         true,
       );
 
       await page.evaluate(() => {
-        window.harness.render(false);
-        window.harness.render();
+        window.imageLoadingHarness.render(false);
+        window.imageLoadingHarness.render();
       });
       await page.waitForFunction(
-        () => window.harness.decodeRequests.length === 2,
+        () => window.imageLoadingHarness.decodeRequests.length === 2,
       );
-      await page.evaluate(() => window.harness.resolveDecode(1));
+      await page.evaluate(() => window.imageLoadingHarness.resolveDecode(1));
       await waitForDecodedPreview(page);
       assert.equal(
-        await page.evaluate(() => window.harness.snapshot().imageUrl),
+        await page.evaluate(
+          () => window.imageLoadingHarness.snapshot().imageUrl,
+        ),
         cachedUrl,
       );
       assert.equal(requests.length, 1);
@@ -342,17 +372,19 @@ test(
   async (t) => {
     await fixture(t, async ({ page, requests, nextRequest }) => {
       await page.evaluate(() => {
-        window.harness.useOnloadFallback();
-        window.harness.render();
+        window.imageLoadingHarness.useOnloadFallback();
+        window.imageLoadingHarness.render();
       });
       await fulfillImage(await nextRequest());
       await waitForDecodedPreview(page);
       assert.equal(
-        await page.evaluate(() => window.harness.fallbackLoads()),
+        await page.evaluate(() => window.imageLoadingHarness.fallbackLoads()),
         1,
       );
       assert.equal(
-        await page.evaluate(() => window.harness.decodeRequests.length),
+        await page.evaluate(
+          () => window.imageLoadingHarness.decodeRequests.length,
+        ),
         0,
       );
       assert.equal(requests.length, 1);

@@ -1,5 +1,5 @@
 import { readMatchCreationInput } from "./matchRecordCodec.ts";
-import { readRetainedTimerClaim } from "./matchClaimCodec.ts";
+import { readInviteDocument } from "@mons/shared/invite-records";
 import {
   record,
   canonical,
@@ -12,9 +12,9 @@ import {
 } from "./eventTransitionCodec.ts";
 import { normalizeHistoricalMatchRecord } from "@mons/shared/game-sessions";
 import type {
-  EventInviteSourceMutation,
+  EventTransitionDraftInput,
   EventTransitionIntent,
-} from "./eventD1.ts";
+} from "../../../runtime/eventTransitionRecords.js";
 import type { MatchStatePort } from "./repositoryContracts.ts";
 import { requireActiveDurableMatchState } from "./matchStateAuthority.ts";
 import type { MatchStateEventEffectsRequest } from "./matchStateTypes.ts";
@@ -33,6 +33,7 @@ import {
   inviteSourceControlGuardStatements,
   readInviteSourceControl,
   releaseInviteSourceAdmission,
+  type InviteSourceMutation,
 } from "./inviteSourceD1.ts";
 import {
   buildLoginMatchDiscoveryStatements,
@@ -44,7 +45,6 @@ import {
   type PrepareMatchPresentations,
 } from "./matchPresentationRegistry.ts";
 
-type V2Intent = Extract<EventTransitionIntent, { schemaVersion: 2 }>;
 type EventEffectReceipt = {
   event_id: string;
   payload_digest: string;
@@ -53,7 +53,7 @@ type EventEffectReceipt = {
 async function applyTypedMatchEffects(
   db: D1Database,
   raw: MatchStatePort,
-  intent: V2Intent,
+  intent: EventTransitionIntent,
   creations: ReturnType<typeof effectLayout>["creations"],
   otherEffects: ReturnType<typeof effectLayout>["otherEffects"],
   signal?: AbortSignal,
@@ -66,6 +66,7 @@ async function applyTypedMatchEffects(
     let value = groups.get(inviteId);
     if (!value) {
       value = {
+        schemaVersion: 1,
         inviteId,
         operationId: intent.transitionId,
         creations: [],
@@ -77,13 +78,13 @@ async function applyTypedMatchEffects(
     return value;
   };
   for (const { markerPath: path, value, playerId, matchId } of creations) {
-    group(matchId).creations!.push({
+    group(matchId).creations.push({
       playerId,
       matchId,
       value: readMatchCreationInput(value),
       marker: await digest({
         transitionId: intent.transitionId,
-        payloadDigest: intent.payloadDigest,
+        payloadDigest: intent.operationDigest,
         path,
       }),
     });
@@ -98,11 +99,11 @@ async function applyTypedMatchEffects(
       !isCanonicalLoginUid(value.opponentId)
     )
       throw new Error("event-match-claim-invalid");
-    group(value.inviteId).claims!.push({
+    group(value.inviteId).claims.push({
       matchId: effect.matchId,
       playerId: value.playerId,
       opponentId: value.opponentId,
-      claim: readRetainedTimerClaim(value),
+      claim: value,
     });
   }
   for (const effect of otherEffects) {
@@ -119,38 +120,24 @@ async function applyTypedMatchEffects(
         ? claim.inviteId
         : await readResolvedLoginMatchInviteId(db, playerId, matchId);
     if (!inviteId) throw new Error("event-match-route-unavailable");
-    group(inviteId).terminalTimers!.push({ matchId, playerId });
+    group(inviteId).terminalTimers.push({ matchId, playerId });
   }
   for (const input of groups.values()) {
     signal?.throwIfAborted();
     await raw.applyMatchEventEffects(input, signal);
   }
-  const cleanup = otherEffects.filter(
-    (effect) => effect.kind === "match-timer-start-cleanup",
-  );
-  if (cleanup.length) {
-    await db.batch(
-      cleanup.map(({ matchId, playerId }) => {
-        return db
-          .prepare(
-            "DELETE FROM match_timer_starts WHERE match_id = ? AND player_id = ?",
-          )
-          .bind(matchId, playerId);
-      }),
-    );
-  }
 }
 
 export async function prepareInviteEventIntent(
   db: D1Database,
-  intent: Extract<EventTransitionIntent, { schemaVersion: 1 }>,
+  intent: EventTransitionDraftInput,
   signal?: AbortSignal,
-): Promise<V2Intent> {
+): Promise<EventTransitionIntent> {
   const control = await readInviteSourceControl(db);
   if (control.backend !== "d1" || control.state !== "active") {
     throw new Error("event-invite-source-unavailable");
   }
-  const inviteMutations: EventInviteSourceMutation[] =
+  const inviteMutations: InviteSourceMutation[] =
     await createInviteSourceD1Store(db).prepareChanges(
       eventIntentInviteChanges(intent),
       intent.createdAtMs,
@@ -169,7 +156,7 @@ export async function prepareInviteEventIntent(
 
 async function readEffectReceipt(
   db: D1Database,
-  intent: V2Intent,
+  intent: EventTransitionIntent,
 ): Promise<boolean> {
   const receipt = await db
     .withSession("first-primary")
@@ -181,7 +168,7 @@ async function readEffectReceipt(
   if (!receipt) return false;
   if (
     receipt.event_id !== intent.eventId ||
-    receipt.payload_digest !== intent.payloadDigest
+    receipt.payload_digest !== intent.operationDigest
   ) {
     throw new Error("event-invite-effect-receipt-conflict");
   }
@@ -191,7 +178,7 @@ async function readEffectReceipt(
 export async function applyInviteEventEffects(
   db: D1Database,
   raw: MatchStatePort,
-  intent: V2Intent,
+  intent: EventTransitionIntent,
   signal?: AbortSignal,
   prepareMatchPresentations?: PrepareMatchPresentations,
 ): Promise<void> {
@@ -208,7 +195,7 @@ export async function applyInviteEventEffects(
 async function applyAdmittedInviteEventEffects(
   db: D1Database,
   raw: MatchStatePort,
-  intent: V2Intent,
+  intent: EventTransitionIntent,
   signal?: AbortSignal,
   prepareMatchPresentations?: PrepareMatchPresentations,
 ): Promise<void> {
@@ -229,7 +216,7 @@ async function applyAdmittedInviteEventEffects(
     transitionId: intent.transitionId,
     eventId: intent.eventId,
     expectedRevision: intent.expectedRevision,
-    payloadDigest: intent.payloadDigest,
+    payloadDigest: intent.operationDigest,
   };
   const admission = await acquireInviteSourceAdmission(
     db,
@@ -270,7 +257,7 @@ async function applyAdmittedInviteEventEffects(
                   aura: match.aura,
                   sourceId: await digest({
                     transitionId: intent.transitionId,
-                    payloadDigest: intent.payloadDigest,
+                    payloadDigest: intent.operationDigest,
                     path,
                   }),
                 };
@@ -303,10 +290,26 @@ async function applyAdmittedInviteEventEffects(
     await assertWritable();
     if (await hasCommittedEffects()) return;
     const store = createInviteSourceD1Store(db);
+    const inviteMutations = intent.inviteMutations.map(
+      (mutation): InviteSourceMutation => {
+        const value = readInviteDocument(mutation.value);
+        const currentValue =
+          mutation.current.value === null
+            ? null
+            : readInviteDocument(mutation.current.value);
+        if (
+          !value ||
+          (mutation.current.value !== null && currentValue === null)
+        ) {
+          throw new Error("event-transition-invalid-invite-source");
+        }
+        return { current: { ...mutation.current, value: currentValue }, value };
+      },
+    );
     try {
       await db.batch([
         ...guards(),
-        ...store.buildRetainedRevisionGuardStatements(intent.inviteMutations),
+        ...store.buildRevisionGuardStatements(inviteMutations),
       ]);
     } catch (error) {
       if (await hasCommittedEffects()) return;
@@ -331,7 +334,7 @@ async function applyAdmittedInviteEventEffects(
       await ensureEventTransitionReceipt(db, expectedReceipt, {
         recordedAtMs: Date.now(),
         guards,
-        signal,
+        ...(signal ? { signal } : {}),
       });
     }
     const registrations = await preparePresentations();
@@ -340,7 +343,7 @@ async function applyAdmittedInviteEventEffects(
       await db.batch([
         ...guards(),
         ...eventTransitionReceiptGuardStatements(db, expectedReceipt),
-        ...store.buildRetainedRevisionGuardStatements(intent.inviteMutations),
+        ...store.buildRevisionGuardStatements(inviteMutations),
         ...buildMatchPresentationRegistrationStatements(
           db,
           registrations,
@@ -355,13 +358,10 @@ async function applyAdmittedInviteEventEffects(
           .bind(
             intent.transitionId,
             intent.eventId,
-            intent.payloadDigest,
+            intent.operationDigest,
             intent.createdAtMs,
           ),
-        ...store.buildRetainedCommitStatements(
-          intent.inviteMutations,
-          intent.createdAtMs,
-        ),
+        ...store.buildCommitStatements(inviteMutations, intent.createdAtMs),
         ...buildLoginMatchDiscoveryStatements(
           db,
           discovery,

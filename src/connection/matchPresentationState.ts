@@ -1,3 +1,4 @@
+import type { Aura } from "@mons/shared/appearance";
 import {
   isMatchPresentation,
   isMatchPresentationSnapshot,
@@ -10,7 +11,7 @@ import {
 type PresentationIntent = {
   operationId: string;
   emojiId: number;
-  aura: string;
+  aura: Aura;
 };
 
 type MatchPresentationStateDependencies = {
@@ -117,7 +118,7 @@ export class MatchPresentationState {
     }
   }
 
-  update(emojiId: number, aura: string): void {
+  update(emojiId: number, aura: Aura): void {
     if (!this.isActive() || !this.dependencies.actorUid) return;
     const intent: PresentationIntent = {
       operationId: (

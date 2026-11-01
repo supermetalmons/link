@@ -39,7 +39,7 @@ function loginOwnerSetJson(
     const rightBytes = UTF8_ENCODER.encode(right.loginUid);
     const length = Math.min(leftBytes.length, rightBytes.length);
     for (let index = 0; index < length; index += 1) {
-      const difference = leftBytes[index] - rightBytes[index];
+      const difference = leftBytes[index]! - rightBytes[index]!;
       if (difference !== 0) return difference;
     }
     return leftBytes.length - rightBytes.length;
@@ -80,14 +80,14 @@ export function buildCanonicalGuardStatements(
       case "profile-absent":
         return guardStatement(
           db,
-          "EXISTS (SELECT 1 FROM profile_records WHERE profile_id = ?)",
+          "EXISTS (SELECT 1 FROM profile_records_canonical WHERE profile_id = ?)",
           [expectation.profileId],
         );
       case "profile-revision":
         return guardStatement(
           db,
           `NOT EXISTS (
-             SELECT 1 FROM profile_records
+             SELECT 1 FROM profile_records_canonical
              WHERE profile_id = ? AND revision = ?
            )`,
           [expectation.profileId, validateRevision(expectation.revision)],
@@ -95,14 +95,14 @@ export function buildCanonicalGuardStatements(
       case "username-absent":
         return guardStatement(
           db,
-          "EXISTS (SELECT 1 FROM profile_records WHERE username_key = ?)",
+          "EXISTS (SELECT 1 FROM profile_records_canonical WHERE username_key = ?)",
           [expectation.usernameKey],
         );
       case "username-owner":
         return guardStatement(
           db,
           `NOT EXISTS (
-             SELECT 1 FROM profile_records
+             SELECT 1 FROM profile_records_canonical
              WHERE username_key = ? AND profile_id = ? AND revision = ?
            )`,
           [
@@ -114,14 +114,14 @@ export function buildCanonicalGuardStatements(
       case "login-owner-absent":
         return guardStatement(
           db,
-          "EXISTS (SELECT 1 FROM profile_login_owners WHERE login_uid = ?)",
+          "EXISTS (SELECT 1 FROM profile_login_owners_canonical WHERE login_uid = ?)",
           [expectation.loginUid],
         );
       case "login-owner-revision":
         return guardStatement(
           db,
           `NOT EXISTS (
-             SELECT 1 FROM profile_login_owners
+             SELECT 1 FROM profile_login_owners_canonical
              WHERE login_uid = ? AND profile_id = ? AND revision = ?
            )`,
           [
@@ -142,7 +142,7 @@ export function buildCanonicalGuardStatements(
              FROM (
                SELECT login_uid, profile_id, revision, created_at_ms,
                       updated_at_ms
-               FROM profile_login_owners
+               FROM profile_login_owners_canonical
                WHERE profile_id = ?
                ORDER BY login_uid ASC
              )
@@ -156,7 +156,7 @@ export function buildCanonicalGuardStatements(
         return guardStatement(
           db,
           `EXISTS (
-             SELECT 1 FROM profile_auth_methods
+             SELECT 1 FROM profile_auth_methods_canonical
              WHERE method = ? AND normalized_value = ?
            )`,
           [expectation.method, expectation.normalizedValue],
@@ -165,7 +165,7 @@ export function buildCanonicalGuardStatements(
         return guardStatement(
           db,
           `NOT EXISTS (
-             SELECT 1 FROM profile_auth_methods
+             SELECT 1 FROM profile_auth_methods_canonical
              WHERE method = ? AND normalized_value = ?
                AND profile_id = ? AND revision = ?
            )`,
@@ -180,7 +180,7 @@ export function buildCanonicalGuardStatements(
         return guardStatement(
           db,
           `EXISTS (
-             SELECT 1 FROM profile_merge_targets
+             SELECT 1 FROM profile_merge_targets_canonical
              WHERE source_profile_id = ?
            )`,
           [expectation.sourceProfileId],
@@ -189,7 +189,7 @@ export function buildCanonicalGuardStatements(
         return guardStatement(
           db,
           `NOT EXISTS (
-             SELECT 1 FROM profile_merge_targets
+             SELECT 1 FROM profile_merge_targets_canonical
              WHERE source_profile_id = ? AND target_profile_id = ?
            )`,
           [expectation.sourceProfileId, expectation.targetProfileId],
@@ -198,7 +198,7 @@ export function buildCanonicalGuardStatements(
         return guardStatement(
           db,
           `EXISTS (
-             SELECT 1 FROM profile_february_opponents
+             SELECT 1 FROM profile_february_opponents_canonical
              WHERE profile_id = ? AND opponent_profile_id = ?
            )`,
           [expectation.profileId, expectation.opponentProfileId],
@@ -209,18 +209,18 @@ export function buildCanonicalGuardStatements(
           `EXISTS (
              WITH RECURSIVE opponent_chain(current_profile_id, depth) AS (
                SELECT opponent_profile_id, 0
-               FROM profile_february_opponents
+               FROM profile_february_opponents_canonical
                WHERE profile_id = ?
                UNION ALL
                SELECT mapping.target_profile_id, opponent_chain.depth + 1
                FROM opponent_chain
-               JOIN profile_merge_targets AS mapping
+               JOIN profile_merge_targets_canonical AS mapping
                  ON mapping.source_profile_id = opponent_chain.current_profile_id
                WHERE opponent_chain.depth <= ?
              )
              SELECT 1
              FROM opponent_chain
-             LEFT JOIN profile_merge_targets AS mapping
+             LEFT JOIN profile_merge_targets_canonical AS mapping
                ON mapping.source_profile_id = opponent_chain.current_profile_id
              WHERE opponent_chain.depth > ?
                 OR (
@@ -239,7 +239,7 @@ export function buildCanonicalGuardStatements(
         return guardStatement(
           db,
           `NOT EXISTS (
-             SELECT 1 FROM profile_february_opponents
+             SELECT 1 FROM profile_february_opponents_canonical
              WHERE profile_id = ? AND opponent_profile_id = ?
            )`,
           [expectation.profileId, expectation.opponentProfileId],
@@ -248,7 +248,7 @@ export function buildCanonicalGuardStatements(
         return guardStatement(
           db,
           `EXISTS (
-             SELECT 1 FROM profile_auth_operations WHERE operation_id = ?
+             SELECT 1 FROM profile_auth_operations_canonical WHERE operation_id = ?
            )`,
           [expectation.operationId],
         );
@@ -256,7 +256,7 @@ export function buildCanonicalGuardStatements(
         return guardStatement(
           db,
           `NOT EXISTS (
-             SELECT 1 FROM profile_auth_operations
+             SELECT 1 FROM profile_auth_operations_canonical
              WHERE operation_id = ? AND revision = ?
            )`,
           [expectation.operationId, validateRevision(expectation.revision)],
@@ -309,7 +309,7 @@ export function buildCanonicalGuardStatements(
         return guardStatement(
           db,
           `EXISTS (
-             SELECT 1 FROM profile_auth_recovery_jobs WHERE profile_id = ?
+             SELECT 1 FROM profile_auth_recovery_jobs_canonical WHERE profile_id = ?
            )`,
           [expectation.profileId],
         );
@@ -317,7 +317,7 @@ export function buildCanonicalGuardStatements(
         return guardStatement(
           db,
           `NOT EXISTS (
-             SELECT 1 FROM profile_auth_recovery_jobs
+             SELECT 1 FROM profile_auth_recovery_jobs_canonical
              WHERE profile_id = ? AND revision = ?
            )`,
           [expectation.profileId, validateRevision(expectation.revision)],
@@ -325,14 +325,14 @@ export function buildCanonicalGuardStatements(
       case "rating-update-absent":
         return guardStatement(
           db,
-          "EXISTS (SELECT 1 FROM rating_updates WHERE operation_id = ?)",
+          "EXISTS (SELECT 1 FROM rating_updates_canonical WHERE operation_id = ?)",
           [expectation.operationId],
         );
       case "rating-update-revision":
         return guardStatement(
           db,
           `NOT EXISTS (
-             SELECT 1 FROM rating_updates
+             SELECT 1 FROM rating_updates_canonical
              WHERE operation_id = ? AND revision = ?
            )`,
           [expectation.operationId, validateRevision(expectation.revision)],
@@ -340,14 +340,14 @@ export function buildCanonicalGuardStatements(
       case "wager-settlement-absent":
         return guardStatement(
           db,
-          "EXISTS (SELECT 1 FROM wager_settlements WHERE operation_id = ?)",
+          "EXISTS (SELECT 1 FROM wager_settlements_canonical WHERE operation_id = ?)",
           [expectation.operationId],
         );
       case "wager-settlement":
         return guardStatement(
           db,
           `NOT EXISTS (
-             SELECT 1 FROM wager_settlements
+             SELECT 1 FROM wager_settlements_canonical
              WHERE operation_id = ? AND fingerprint = ?
            )`,
           [expectation.operationId, expectation.fingerprint],

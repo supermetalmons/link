@@ -1,5 +1,6 @@
+import { applyCanonicalTestMigrations } from "./canonicalTestMigrations.ts";
 import { env } from "cloudflare:workers";
-import { applyD1Migrations, type D1Migration } from "cloudflare:test";
+import type { D1Migration } from "cloudflare:test";
 import { beforeAll, beforeEach, describe, expect, it } from "vitest";
 import {
   buildLoginMatchDiscoveryStatements,
@@ -30,14 +31,14 @@ function resolved(
 
 describe("login match discovery D1", () => {
   beforeAll(async () => {
-    await applyD1Migrations(db, testEnv.TEST_D1_MIGRATIONS);
+    await applyCanonicalTestMigrations(db, testEnv.TEST_D1_MIGRATIONS);
   });
 
   beforeEach(async () => {
     await db.batch([
-      db.prepare("DELETE FROM login_match_discovery"),
-      db.prepare("DELETE FROM game_session_transition_resources"),
-      db.prepare("DELETE FROM game_session_transitions"),
+      db.prepare("DELETE FROM login_match_discovery_canonical"),
+      db.prepare("DELETE FROM game_session_transition_resources_canonical"),
+      db.prepare("DELETE FROM game_session_transitions_canonical"),
       db.prepare(
         "UPDATE login_match_discovery_control SET discovery_backend = 'rtdb', capture_enforced = 0, capture_version_id = NULL, capture_started_at_ms = NULL, verified_at_ms = NULL, activated_at_ms = NULL WHERE singleton = 1",
       ),
@@ -148,7 +149,10 @@ describe("login match discovery D1", () => {
     expect(
       await readResolvedLoginMatchInviteIds(
         db,
-        Array.from({ length: 40 }, (_, index) => inputs[index % inputs.length]),
+        Array.from(
+          { length: 40 },
+          (_, index) => inputs[index % inputs.length]!,
+        ),
       ),
     ).toEqual(
       Array.from(
@@ -171,7 +175,9 @@ describe("login match discovery D1", () => {
     ];
     await captureLoginMatchDiscovery(db, capture, 2);
     await captureLoginMatchDiscovery(db, capture, 3);
-    const row = await db.prepare("SELECT * FROM login_match_discovery").first();
+    const row = await db
+      .prepare("SELECT * FROM login_match_discovery_canonical")
+      .first();
     expect(row).toMatchObject({
       login_uid: LOGIN,
       match_id: "invite2",
@@ -188,10 +194,10 @@ describe("login match discovery D1", () => {
       ),
     );
     await expect(
-      captureLoginMatchDiscovery(db, [{ ...capture[0], inviteId: "other" }]),
+      captureLoginMatchDiscovery(db, [{ ...capture[0]!, inviteId: "other" }]),
     ).rejects.toThrow();
     expect(
-      await db.prepare("SELECT * FROM login_match_discovery").first(),
+      await db.prepare("SELECT * FROM login_match_discovery_canonical").first(),
     ).toEqual(row);
   });
 
@@ -217,7 +223,9 @@ describe("login match discovery D1", () => {
       { loginUid: LOGIN, matchId: "invite", inviteId: "invite" },
     ]);
     await db
-      .prepare("UPDATE login_match_discovery SET match_sort_key = 'ffff'")
+      .prepare(
+        "UPDATE login_match_discovery_canonical SET match_sort_key = 'ffff'",
+      )
       .run();
     await expect(
       listLoginMatchDiscoveryPage(db, LOGIN, null, 20),
@@ -250,11 +258,20 @@ describe("login match discovery D1", () => {
     "requires capture before completing for UID %s",
     async (loginUid) => {
       const payload = {
+        version: 3,
+        inviteId: "invite",
+        inviteSourceEpoch: 1,
+        inviteMutations: [],
+        transitionId: "legacy",
+        operationDigest: "a".repeat(64),
+        resources: ["invite"],
+        mutations: [],
+        createdAtMs: 1,
         creations: [{ path: `players/${loginUid}/matches/invite2` }],
       };
       await db
         .prepare(
-          `INSERT INTO game_session_transitions
+          `INSERT INTO game_session_transitions_canonical
       (transition_id, invite_id, payload_json, status, created_at_ms, updated_at_ms)
       VALUES ('legacy', 'invite', ?, 'pending', 1, 1)`,
         )
@@ -268,7 +285,7 @@ describe("login match discovery D1", () => {
       await expect(
         db
           .prepare(
-            "UPDATE game_session_transitions SET status = 'completed' WHERE transition_id = 'legacy'",
+            "UPDATE game_session_transitions_canonical SET status = 'completed' WHERE transition_id = 'legacy'",
           )
           .run(),
       ).rejects.toThrow("capture-required");
@@ -277,13 +294,13 @@ describe("login match discovery D1", () => {
       ]);
       await db
         .prepare(
-          "UPDATE game_session_transitions SET status = 'completed' WHERE transition_id = 'legacy'",
+          "UPDATE game_session_transitions_canonical SET status = 'completed' WHERE transition_id = 'legacy'",
         )
         .run();
       expect(
         await db
           .prepare(
-            "SELECT status FROM game_session_transitions WHERE transition_id = 'legacy'",
+            "SELECT status FROM game_session_transitions_canonical WHERE transition_id = 'legacy'",
           )
           .first("status"),
       ).toBe("completed");

@@ -7,36 +7,47 @@ const {
   createProfileGamesProjectionCore,
 } = require("../runtime/profileGamesProjectionCore");
 
+const { invite, profile } = require("./fixtures/canonicalProfileGames");
+
 const inviteId = "presentation-invite";
 const guestMatchPath = `players/guest-login/matches/${inviteId}`;
 
+/**
+ * @typedef {import("../runtime/profileGamesProjectionCore").ProfileGamesProjectionRepository} Repository
+ * @typedef {import("../runtime/profileGamesProjectionCore").ProjectionRecord} ProjectionRecord
+ * @typedef {import("../runtime/profileGamesProjectionCore").ProjectionWrite} ProjectionWrite
+ */
+/** @param {string} matchId @param {Record<string, number>} emojis @returns {import("../runtime/shared/match-presentation").MatchPresentationSnapshot} */
 function matchPresentation(matchId, emojis) {
   return {
     matchId,
     players: Object.fromEntries(
       Object.entries(emojis).map(([actorUid, emojiId]) => [
         actorUid,
-        { matchId, actorUid, emojiId, aura: "", revision: 0 },
+        { matchId, actorUid, emojiId, aura: "none", revision: 0 },
       ]),
     ),
   };
 }
 
+/** @param {{readMatchPresentation: NonNullable<Repository["readMatchPresentation"]>, hostProfile?: Parameters<typeof profile>[0], guestProfile?: Parameters<typeof profile>[0] | null, rematches?: import("../runtime/shared/rematches").RematchSeries, beforeCommit?: Repository["commitProjectionWrites"]}} input */
 function fixture({
   readMatchPresentation,
   hostProfile = { username: "host", emoji: 2 },
   guestProfile = null,
-  rematches = "x",
+  rematches = { state: "ended", indices: [] },
   beforeCommit = async () => undefined,
 }) {
+  /** @type {ProjectionWrite[]} */
   const writes = [];
+  /** @type {string[]} */
   const reads = [];
+  /** @type {[string, string][]} */
   const presentationReads = [];
+  /** @type {Map<string, ProjectionRecord>} */
   const projections = new Map();
-  const profiles = new Map([
-    ["host-profile", hostProfile],
-    ...(guestProfile ? [["guest-profile", guestProfile]] : []),
-  ]);
+  const profiles = new Map([["host-profile", profile(hostProfile)]]);
+  if (guestProfile) profiles.set("guest-profile", profile(guestProfile));
   const core = createProfileGamesProjectionCore({
     logger: { error() {} },
     repository: {
@@ -69,25 +80,34 @@ function fixture({
         new Map(
           profileIds
             .filter((profileId) => projections.has(profileId))
-            .map((profileId) => [profileId, projections.get(profileId)]),
+            .map((profileId) => {
+              const current = projections.get(profileId);
+              assert.ok(current);
+              return /** @type {[string, ProjectionRecord]} */ ([
+                profileId,
+                current,
+              ]);
+            }),
         ),
       async readInviteMetadata(readInviteId) {
         assert.equal(readInviteId, inviteId);
-        return {
+        return invite({
           hostId: "host-login",
           guestId: "guest-login",
           hostRematches: rematches,
           guestRematches: rematches,
-        };
+        });
       },
       async readAutomatchEntry(inviteId) {
         const path = `automatch/${inviteId}`;
         reads.push(path);
         if (path === `automatch/${inviteId}`) return decodeAutomatchEntry(null);
         if (path === guestMatchPath)
-          return decodeAutomatchEntry({ emojiId: 1, aura: "" });
+          return decodeAutomatchEntry({ emojiId: 1, aura: "none" });
         throw new Error(`unexpected-state-read:${path}`);
       },
+      hasCompletedRatingUpdate: async () =>
+        assert.fail("unexpected-rating-completion-read"),
       async readMatchPresentation(...args) {
         presentationReads.push(args);
         return readMatchPresentation(...args);
@@ -106,12 +126,21 @@ function fixture({
     reads,
     presentationReads,
     writes,
+    /** @param {import("../runtime/profileGamesProjectionCore").RecomputeInviteProjectionOptions} [options] */
     recompute: (options = {}) =>
       core.recomputeInviteProjection(inviteId, "rating-completed", {
         eventTimestampMs: 100,
         ...options,
       }),
   };
+}
+
+/** @param {ProjectionWrite | undefined} write */
+function writtenGame(write) {
+  assert.ok(
+    write && write.type !== "delete" && write.data.entityType === "game",
+  );
+  return write.data;
 }
 
 test("recomputation replaces an anonymous opponent's seed emoji with live presentation", async () => {
@@ -125,14 +154,14 @@ test("recomputation replaces an anonymous opponent's seed emoji with live presen
   await state.recompute();
 
   assert.deepEqual(
-    state.writes.map((write) => write.data.opponentEmoji),
+    state.writes.map((write) => writtenGame(write).opponentEmoji),
     [1, 7],
   );
   assert.deepEqual(state.presentationReads, [
     [inviteId, inviteId],
     [inviteId, inviteId],
   ]);
-  assert.equal(state.writes[1].data.status, "ended");
+  assert.equal(writtenGame(state.writes[1]).status, "ended");
   assert.equal(state.reads.includes(guestMatchPath), false);
   assert.ok(
     state.writes.every(
@@ -153,6 +182,7 @@ test("catchup updates use the numeric version from their latest projection read"
     emoji += 1;
   }
 
+  assert.ok(state.writes[0]);
   assert.equal(state.writes[0].type, "create");
   assert.equal(Object.hasOwn(state.writes[0], "expectedVersion"), false);
   assert.deepEqual(
@@ -166,7 +196,10 @@ test("catchup updates use the numeric version from their latest projection read"
     ],
   );
   assert.deepEqual(
-    state.writes.map(({ data }) => [data.createdAt, data.listSortAt]),
+    state.writes.map((write) => [
+      writtenGame(write).createdAt,
+      writtenGame(write).listSortAt,
+    ]),
     [
       [100, 100],
       [100, 100],
@@ -185,8 +218,9 @@ test("canonical profile avatars retain precedence without reading match presenta
   await state.recompute();
 
   assert.equal(
-    state.writes.find((write) => write.profileId === "host-profile").data
-      .opponentEmoji,
+    writtenGame(
+      state.writes.find((write) => write.profileId === "host-profile"),
+    ).opponentEmoji,
     3,
   );
   assert.deepEqual(state.presentationReads, []);
@@ -242,7 +276,10 @@ test("both owner projections share one match appearance snapshot", async () => {
 
   assert.deepEqual(state.presentationReads, [[inviteId, inviteId]]);
   assert.deepEqual(
-    state.writes.map(({ profileId, data }) => [profileId, data.opponentEmoji]),
+    state.writes.map((write) => [
+      write.profileId,
+      writtenGame(write).opponentEmoji,
+    ]),
     [
       ["host-profile", 7],
       ["guest-profile", 4],
@@ -256,7 +293,7 @@ for (const latestActor of ["host-login", "guest-login"]) {
     const state = fixture({
       hostProfile: { username: "host" },
       guestProfile: { username: "guest" },
-      rematches: "1x",
+      rematches: { state: "ended", indices: [1] },
       readMatchPresentation: async (_inviteId, matchId) =>
         matchPresentation(
           matchId,
@@ -273,9 +310,9 @@ for (const latestActor of ["host-login", "guest-login"]) {
       [inviteId, inviteId],
     ]);
     assert.deepEqual(
-      state.writes.map(({ profileId, data }) => [
-        profileId,
-        data.opponentEmoji,
+      state.writes.map((write) => [
+        write.profileId,
+        writtenGame(write).opponentEmoji,
       ]),
       [
         ["host-profile", latestActor === "guest-login" ? 7 : 3],
@@ -318,7 +355,10 @@ test("a transient read failure retries the provider and shares the successful sn
     [inviteId, inviteId],
   ]);
   assert.deepEqual(
-    state.writes.map(({ profileId, data }) => [profileId, data.opponentEmoji]),
+    state.writes.map((write) => [
+      write.profileId,
+      writtenGame(write).opponentEmoji,
+    ]),
     [
       ["host-profile", 7],
       ["guest-profile", 4],
@@ -331,7 +371,7 @@ test("exhausted fallback reads discard all prepared projection writes", async ()
   const state = fixture({
     hostProfile: { username: "host" },
     guestProfile: { username: "guest" },
-    rematches: "1x",
+    rematches: { state: "ended", indices: [1] },
     readMatchPresentation: async (_inviteId, matchId) => {
       if (matchId === inviteId) throw new Error("presentation-unavailable");
       return matchPresentation(matchId, { "guest-login": 7 });
@@ -349,7 +389,9 @@ test("exhausted fallback reads discard all prepared projection writes", async ()
 });
 
 test("concurrent recomputations on the same runtime use independent appearance snapshots", async () => {
+  /** @type {PromiseWithResolvers<void>} */
   const firstCommitStarted = Promise.withResolvers();
+  /** @type {PromiseWithResolvers<void>} */
   const releaseFirstCommit = Promise.withResolvers();
   let commits = 0;
   let emoji = 3;
@@ -389,8 +431,8 @@ test("concurrent recomputations on the same runtime use independent appearance s
   ]) {
     assert.deepEqual(
       state.writes
-        .filter(({ data }) => data.lastEventAt === time)
-        .map(({ profileId, data }) => [profileId, data.opponentEmoji]),
+        .filter((write) => writtenGame(write).lastEventAt === time)
+        .map((write) => [write.profileId, writtenGame(write).opponentEmoji]),
       [
         ["host-profile", guestEmoji],
         ["guest-profile", hostEmoji],

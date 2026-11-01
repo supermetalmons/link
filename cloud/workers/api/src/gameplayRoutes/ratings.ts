@@ -8,7 +8,6 @@ import {
   updateRatings,
   type RatingUpdateDependencies,
 } from "../ratingUpdate.ts";
-import { createMatchTimerStartStore } from "../gameplayCoordinationD1.ts";
 import { ensureEventProgressWorkflow } from "../eventProgressDispatch.ts";
 import type { EventProgressPlan } from "../eventProgressCodec.ts";
 import {
@@ -49,9 +48,6 @@ function createRatingRuntime(context: GameplayRequestContext) {
     enqueueTelegramProjection:
       dependencies.rating?.enqueueTelegramProjection ||
       dispatch.defaultEnqueueTelegramProjection,
-    timerStarts:
-      dependencies.coordination?.timerStarts ||
-      createMatchTimerStartStore(env.PROFILE_GAMES_DB),
   };
   return { ...context, ratingDependencies };
 }

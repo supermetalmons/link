@@ -32,13 +32,12 @@ function pair(input: MatchStatePairRequest): MatchStatePair {
     ...input,
     revision: 1,
     playerMatch: matchDocumentFixture({
-      playerId: input.playerId,
-      epoch: input.epoch,
+      fen: `${input.playerId}:${input.epoch}`,
     }),
     opponentMatch:
       input.opponentId === null
         ? null
-        : matchDocumentFixture({ playerId: input.opponentId }),
+        : matchDocumentFixture({ fen: input.opponentId }),
     claim: null,
   };
 }
@@ -135,7 +134,7 @@ test("sixteen pairs use two authority reads and four ordered room readers", asyn
     stats.requests.map(({ epoch }) => epoch),
     Array(16).fill(1),
   );
-  const timing = JSON.parse(log.mock.calls[0].arguments[0]);
+  const timing = JSON.parse(log.mock.calls[0]!.arguments[0]!);
   assert.equal(timing.event, "match_state_batch_read");
   assert.equal(timing.count, 16);
   assert.equal(timing.attempts, 1);
@@ -373,13 +372,13 @@ test("single pairs match one-item batches and retain null opponents and duplicat
   t.mock.method(console, "info", () => {});
   const { source } = fixture();
   const inputs = requests(3);
-  const withoutOpponent = { ...inputs[1], opponentId: null };
-  for (const input of [inputs[0], withoutOpponent]) {
+  const withoutOpponent = { ...inputs[1]!, opponentId: null };
+  for (const input of [inputs[0]!, withoutOpponent]) {
     const single = await source.readMatchPair(input);
     assert.deepEqual(await source.readMatchPairs([input]), [single]);
     assert.deepEqual(single, pair({ ...input, epoch: 1 }));
   }
-  const targets = [inputs[2], withoutOpponent, inputs[0], withoutOpponent];
+  const targets = [inputs[2]!, withoutOpponent, inputs[0]!, withoutOpponent];
   assert.deepEqual(
     await source.readMatchPairs(targets),
     targets.map((input) => pair({ ...input, epoch: 1 })),
@@ -389,7 +388,7 @@ test("single pairs match one-item batches and retain null opponents and duplicat
 test("only nonempty public pair batches emit one timing event", async (t) => {
   const log = t.mock.method(console, "info", () => {});
   const { source } = fixture();
-  const [input] = requests(1);
+  const input = requests(1)[0]!;
   await source.readMatchPair(input);
   assert.deepEqual(await source.readMatchPairs([]), []);
   const controller = new AbortController();
@@ -399,8 +398,8 @@ test("only nonempty public pair batches emit one timing event", async (t) => {
   assert.equal(log.mock.callCount(), 0);
   await source.readMatchPairs([input]);
   assert.equal(log.mock.callCount(), 1);
-  assert.equal(JSON.parse(log.mock.calls[0].arguments[0]).count, 1);
-  assert.equal(JSON.parse(log.mock.calls[0].arguments[0]).outcome, "ok");
+  assert.equal(JSON.parse(log.mock.calls[0]!.arguments[0]!).count, 1);
+  assert.equal(JSON.parse(log.mock.calls[0]!.arguments[0]!).outcome, "ok");
   const failure = new Error("room-unavailable");
   const failed = fixture({
     read: async () => {
@@ -414,7 +413,7 @@ test("only nonempty public pair batches emit one timing event", async (t) => {
   assert.equal(log.mock.callCount(), 1);
   await assert.rejects(failed.source.readMatchPairs([input]));
   assert.equal(log.mock.callCount(), 2);
-  const timing = JSON.parse(log.mock.calls[1].arguments[0]);
+  const timing = JSON.parse(log.mock.calls[1]!.arguments[0]!);
   assert.equal(timing.count, 1);
   assert.equal(timing.outcome, "error");
 });
@@ -451,7 +450,7 @@ test("single and batch pairs promptly cancel stalled authority and room reads", 
       let outcome: { error?: unknown } | undefined;
       const observed = (
         mode === "single"
-          ? source.readMatchPair(inputs[0], controller.signal)
+          ? source.readMatchPair(inputs[0]!, controller.signal)
           : source.readMatchPairs(inputs, controller.signal)
       ).then(
         () => (outcome = {}),
@@ -473,7 +472,7 @@ test("single and batch pairs promptly cancel stalled authority and room reads", 
         );
         if (mode === "batch")
           assert.equal(
-            JSON.parse(log.mock.calls.at(-1)!.arguments[0]).outcome,
+            JSON.parse(log.mock.calls.at(-1)!.arguments[0]!).outcome,
             "aborted",
           );
         gate.resolve();
@@ -528,7 +527,7 @@ test("aborted pair timing includes elapsed authority and room time before reads 
       await setImmediate();
       assert.equal(log.mock.callCount(), logsBefore + 1);
       assert.equal(stats.active, active);
-      const timing = JSON.parse(log.mock.calls.at(-1)!.arguments[0]);
+      const timing = JSON.parse(log.mock.calls.at(-1)!.arguments[0]!);
       assert.equal(timing.outcome, "aborted");
       assert.equal(timing.roomReadsMs, blockedAt === "rooms" ? 37 : 0);
       assert.equal(timing.authorityMs, blockedAt === "rooms" ? 0 : 37);

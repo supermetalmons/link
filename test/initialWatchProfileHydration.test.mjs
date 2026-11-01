@@ -1,3 +1,4 @@
+import { canonicalProfile, required } from "./fixtures/canonicalData.mjs";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
@@ -17,28 +18,48 @@ const method = source.statements.find(
     ts.isFunctionDeclaration(node) && node.name?.text === "enterWatchOnlyMode",
 );
 const { outputText } = ts.transpileModule(
-  method.getText(source).replace(/^export /, ""),
+  required(method)
+    .getText(source)
+    .replace(/^export /, ""),
   { compilerOptions: { target: ts.ScriptTarget.ES2022 } },
 );
 const flush = () => new Promise(setImmediate);
-const profile = {
+const profile = canonicalProfile({
   id: "profile",
-  mining: { lastRockDate: null, materials: { dust: 2 } },
-};
+  mining: {
+    lastRockDate: null,
+    materials: { dust: 2, slime: 0, gum: 0, metal: 0, ice: 0 },
+  },
+});
+/** @typedef {import("../src/session/sessionAuth.ts").SessionUser} SessionUser */
+/** @typedef {{user: SessionUser; read(): import("@mons/shared/session-bootstrap").SessionIdentityBootstrap | null}} InitialReadProbe */
+/**
+ * @template [T=InitialReadProbe]
+ * @returns {Pick<PromiseWithResolvers<T>, "promise" | "resolve">}
+ */
 const deferred = () => {
-  let resolve;
-  const promise = new Promise((done) => {
-    resolve = done;
-  });
+  /** @type {PromiseWithResolvers<T>} */
+  const { promise, resolve } = Promise.withResolvers();
   return { promise, resolve };
 };
+/** @param {{pending?: Promise<InitialReadProbe> | null; consumed?: boolean}} [options] */
 function harness({ pending = null, consumed = false } = {}) {
-  const user = { uid: "login", sessionId: "session", generation: "generation" };
+  /** @type {SessionUser} */
+  const user = {
+    uid: "login",
+    sessionId: "session",
+    generation: "generation",
+    getIdToken: async () => "token",
+  };
   const state = { loginId: "login", profileId: "profile", epoch: 1 };
+  /** @type {{currentUser: SessionUser | null}} */
   const auth = { currentUser: user };
+  /** @type {string[]} */
   const reads = [];
+  /** @type {import("@mons/shared/profiles").PlayerProfile[]} */
   const applied = [];
   const dependencies = {
+    /** @template T @param {() => T} callback @returns {T} */
     batchGameControlsUpdates: (callback) => callback(),
     setWatchOnlyState: () => {},
     setWatchOnlyVisible: () => {},
@@ -51,26 +72,32 @@ function harness({ pending = null, consumed = false } = {}) {
       const epoch = state.epoch;
       return () => state.epoch === epoch;
     },
-    wasInitialIdentityConsumed: (owner) => {
+    wasInitialIdentityConsumed: (/** @type {SessionUser} */ owner) => {
       assert.equal(owner, user);
       return consumed;
     },
-    peekInitialIdentity: (owner) => {
+    peekInitialIdentity: (/** @type {SessionUser} */ owner) => {
       assert.equal(owner, user);
       return pending;
     },
-    syncOwnProfileMiningState: (value) => applied.push(value),
+    syncOwnProfileMiningState: (
+      /** @type {import("@mons/shared/profiles").PlayerProfile} */ value,
+    ) => applied.push(value),
     connection: {
-      getProfileByLoginId: async (uid) => {
+      getProfileByLoginId: async (/** @type {string} */ uid) => {
         reads.push(uid);
         return profile;
       },
     },
   };
-  const enter = new Function(
-    ...Object.keys(dependencies),
-    `${outputText}\nreturn enterWatchOnlyMode;`,
-  )(...Object.values(dependencies));
+  const load =
+    /** @type {(...values: unknown[]) => typeof import("../src/game/gameController.ts").enterWatchOnlyMode} */ (
+      new Function(
+        ...Object.keys(dependencies),
+        `${outputText}\nreturn enterWatchOnlyMode;`,
+      )
+    );
+  const enter = load(...Object.values(dependencies));
   return { enter, reads, applied, state, auth, user };
 }
 
@@ -101,7 +128,11 @@ test("initial spectator skips mining already applied by verified profile consump
 });
 
 test("missing, unavailable and invalidated identity fall back to fresh own-profile reads", async () => {
-  for (const value of [null, { ok: false, status: 503 }, "invalidated"]) {
+  for (const value of /** @type {const} */ ([
+    null,
+    { ok: false, status: 503 },
+    "invalidated",
+  ])) {
     const gate = deferred();
     const h = harness({ pending: value === null ? null : gate.promise });
     h.enter(true);
@@ -136,7 +167,7 @@ test("stored alias identities cannot reuse startup mining", async () => {
 });
 
 test("late spectator identity cannot hydrate after logout, same-UID replacement, route teardown or changed profile", async () => {
-  for (const change of [
+  for (const change of /** @satisfies {Array<(h: ReturnType<typeof harness>) => void>} */ ([
     (h) => {
       h.auth.currentUser = null;
     },
@@ -149,7 +180,7 @@ test("late spectator identity cannot hydrate after logout, same-UID replacement,
     (h) => {
       h.state.profileId = "replacement-profile";
     },
-  ]) {
+  ])) {
     const gate = deferred();
     const h = harness({ pending: gate.promise });
     h.enter(true);

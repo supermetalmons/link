@@ -1,3 +1,4 @@
+import { applicationRequest } from "./testEnv.ts";
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
@@ -27,7 +28,7 @@ function request(
   token?: string,
   origin = "https://mons.link",
 ) {
-  return new Request(`https://api.mons.link/auth/session/${path}`, {
+  return applicationRequest(`https://api.mons.link/auth/session/${path}`, {
     method: "POST",
     headers: {
       Origin: origin,
@@ -214,7 +215,7 @@ test("invalid requests, revoked sessions, unavailable D1 and disallowed origins 
 
 test("session endpoints preflight without D1 and rate limit before writes", async () => {
   const preflight = await handleSessionRoute(
-    new Request("https://api.mons.link/auth/session/anonymous", {
+    applicationRequest("https://api.mons.link/auth/session/anonymous", {
       method: "OPTIONS",
       headers: { Origin: "https://mons.link" },
     }),

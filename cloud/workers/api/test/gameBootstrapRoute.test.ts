@@ -1,3 +1,7 @@
+import { inviteDocumentFixture } from "./inviteDocumentFixture.ts";
+import { publicMatchFixture } from "./matchRecordFixture.ts";
+import { rematchSeriesFixture } from "./inviteDocumentFixture.ts";
+import { applicationRequest } from "./testEnv.ts";
 import { retainedInviteSourceFixture } from "./inviteDocumentFixture.ts";
 import assert from "node:assert/strict";
 import test from "node:test";
@@ -25,26 +29,29 @@ import { TELEGRAM_TEST_ENV } from "./testEnv.ts";
 const ctx = { waitUntil: (_promise: Promise<unknown>) => undefined };
 const inviteId = "bootstrap-invite";
 const operationId = "00000000-0000-4000-8000-000000000001";
-const match = {
+const match = publicMatchFixture({
   version: 2,
   color: "white",
   emojiId: 1,
-  aura: "",
+  aura: "none",
   gameVariant: "standard",
   fen: "initial",
-  status: "",
+  status: "active",
   flatMovesString: "",
-  timer: "",
-};
+  timer: { state: "idle" },
+});
 
 function metadata(value: Record<string, unknown> = {}): MatchSyncMetadata {
-  const normalized = normalizeInviteMetadata(inviteId, {
-    hostId: "host-login",
-    guestId: "guest-login",
-    hostColor: "white",
-    automatchOperationIds: { "host-login": operationId },
-    ...value,
-  });
+  const normalized = normalizeInviteMetadata(
+    inviteId,
+    inviteDocumentFixture({
+      hostId: "host-login",
+      guestId: "guest-login",
+      hostColor: "white",
+      ...value,
+      ...(value.password === true ? { password: "fixture-password" } : {}),
+    }),
+  );
   assert.equal(normalized.status, "ok");
   if (normalized.status !== "ok") throw new Error("invalid-fixture");
   return { ...normalized, snapshot: { ...normalized.snapshot, revision: 7 } };
@@ -61,14 +68,14 @@ function request({
   headers?: HeadersInit;
   signal?: AbortSignal;
 } = {}) {
-  return new Request(`https://api.mons.link${path}`, {
+  return applicationRequest(`https://api.mons.link${path}`, {
     method,
     headers: {
       Origin: "https://mons.link",
       Authorization: "Bearer token",
       ...headers,
     },
-    signal,
+    ...(signal === undefined ? {} : { signal }),
   });
 }
 
@@ -95,10 +102,17 @@ function setup(source = metadata(), caller = "host-login") {
   repository.readInviteMetadata = async (id) => {
     calls.admission++;
     assert.equal(id, inviteId);
+    const {
+      inviteId: _inviteId,
+      revision: _revision,
+      ...fields
+    } = source.snapshot;
     return retainedInviteSourceFixture({
-      ...source.snapshot,
-      ...(source.passwordProtected ? { password: true } : {}),
-      automatchOperationIds: source.automatchOperationIds,
+      ...fields,
+      ...(source.passwordProtected ? { password: "fixture-password" } : {}),
+      ...(Object.keys(source.automatchOperationIds).length
+        ? { automatchOperationIds: source.automatchOperationIds }
+        : {}),
     });
   };
   repository.readMatchRecord = async () => {
@@ -189,7 +203,7 @@ test("bootstrap accepts ownership-only injection without reading unrelated bindi
 
 test("default bootstrap ownership does not construct an invite metadata repository", async () => {
   const state = setup();
-  state.dependencies.repository = undefined;
+  delete state.dependencies.repository;
   for (const key of [
     "PROFILE_GAMES_DB",
     "INVITE_REACTIONS",
@@ -234,7 +248,11 @@ test("shared selection preserves actor proposals, approved prefixes and end over
     assert.deepEqual(
       selectInviteMatch(
         inviteId,
-        { ...base, hostRematches, guestRematches },
+        {
+          ...base,
+          hostRematches: rematchSeriesFixture(hostRematches),
+          guestRematches: rematchSeriesFixture(guestRematches),
+        },
         actor,
         { preferApproved },
       ),
@@ -261,7 +279,7 @@ test("bootstrap routes a single admission and pair read with coherent public dat
     viewer: {
       role: "host",
       actorUid: "host-login",
-      automatchOperationId: operationId,
+      automatchOperationId: null,
     },
     match: {
       ...createMatchSyncSnapshot(state.source, inviteId, match, {
@@ -328,11 +346,11 @@ test("bootstrap validates preflight, method, path, query and authentication befo
 test("unknown or invalid invites and failed admission never access a Durable Object", async () => {
   for (const [value, status] of [
     [null, 404],
-    [{ invalid: true }, 409],
+    [{ invalid: true }, 503],
     [new Error("secret"), 503],
   ] as const) {
     const state = setup();
-    state.dependencies.room = undefined;
+    delete state.dependencies.room;
     let accesses = 0;
     Object.defineProperty(state.env, "INVITE_REACTIONS", {
       value: {
@@ -371,10 +389,7 @@ test("bootstrap keeps guest, spectator, unjoined and protected invite access", a
       const body = (await response.json()) as ReadGameBootstrapResponse;
       assert.equal(body.viewer.role, role);
       assert.equal(body.match.guestPlayerId, guestId);
-      assert.equal(
-        body.viewer.automatchOperationId,
-        caller === "host-login" ? operationId : null,
-      );
+      assert.equal(body.viewer.automatchOperationId, null);
       assert.equal(state.calls.roles, caller === "outsider" ? 1 : 0);
     }
   }
@@ -422,7 +437,7 @@ test("bootstrap resolves linked host ownership once for its selected snapshot", 
             revision: 1,
             profile: {
               profileId: "profile-one",
-              aura: "",
+              aura: "none",
               emoji: 1,
               eth: "",
               sol: "",
@@ -483,7 +498,14 @@ test("bootstrap refreshes stale membership, rematch endings, protection and oper
       metadata({ guestId: null, password: true }),
       "host-login",
     ],
-    [metadata({ automatchOperationIds: {} }), metadata(), "host-login"],
+    [
+      metadata(),
+      metadata({
+        automatchOperationIds: { "host-login": operationId },
+        password: "fixture-password",
+      }),
+      "host-login",
+    ],
   ] as const) {
     const state = setup(current, caller);
     state.room.readMatches = async (_id, matchId, options) => {

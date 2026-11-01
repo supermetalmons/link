@@ -168,7 +168,7 @@ export function createTelegramCleanupDelivery({
         if (!finalization.committed) {
           const current = await repository.getMessage(messageKey);
           const currentPendingDelete = readPendingDelete(
-            readProperty(messageDeliveryDocument(current), "pendingDelete"),
+            messageDeliveryDocument(current).pendingDelete,
           );
           const proofAlreadyApplied =
             rateLimited &&
@@ -264,7 +264,7 @@ export function createTelegramCleanupDelivery({
     }
     if (decision === "deferred" || decision === "locked") {
       const pendingDelete = readPendingDelete(
-        readProperty(messageDeliveryDocument(acquired.value), "pendingDelete"),
+        messageDeliveryDocument(acquired.value).pendingDelete,
       );
       const lockedGateOwner = normalizeString(pendingDelete.apiGateOwner);
       const lockedGateGeneration = normalizeString(
@@ -310,7 +310,7 @@ export function createTelegramCleanupDelivery({
       return { status: "settled", cleanup: "missing" };
     }
     const pendingDelete = readPendingDelete(
-      readProperty(messageDeliveryDocument(acquired.value), "pendingDelete"),
+      messageDeliveryDocument(acquired.value).pendingDelete,
     );
     const pendingDeleteId = normalizeString(pendingDelete.pendingDeleteId);
     const callAtMs = now();

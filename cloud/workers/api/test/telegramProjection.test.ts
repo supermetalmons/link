@@ -1,3 +1,6 @@
+import { parseAutomatchValue } from "../src/automatchD1/codec.ts";
+import { canonicalQueuePayloadFixture } from "./canonicalQueueFixture.ts";
+import { canonicalAutomatchFixture } from "./automatchRecordFixture.ts";
 import {
   readTelegramMessageDocument,
   readTelegramControlDocument,
@@ -73,7 +76,9 @@ function memoryState(initial: Record<string, unknown>) {
       if ("commit" in output && output.commit === false) {
         return {
           committed: false,
-          decision: output.decision,
+          ...(output.decision === undefined
+            ? {}
+            : { decision: output.decision }),
           value: current,
         };
       }
@@ -83,7 +88,7 @@ function memoryState(initial: Record<string, unknown>) {
       state.set(path, output.value);
       return {
         committed: true,
-        decision: output.decision,
+        ...(output.decision === undefined ? {} : { decision: output.decision }),
         value: output.value,
       };
     },
@@ -116,6 +121,19 @@ function ratingUpdate(
   overrides: Partial<RatingUpdateData> = {},
 ): RatingUpdateData {
   return {
+    eventProgressReason: null,
+    eventProgressState: null,
+    eventProgressUpdatedAtMs: null,
+    eventProgressVersion: null,
+    historicalMatchPair: null,
+    historicalMatchArchiveVersion: null,
+    opponentManaPoints: null,
+    playerManaPoints: null,
+    profileGameProjectionReason: null,
+    profileGameProjectionState: null,
+    profileGameProjectionUpdatedAtMs: null,
+    profileGameProjectionVersion: null,
+    telegramProjectionReason: null,
     inviteId: "auto_example",
     leaseExpiresAtMs: 1,
     matchId: "auto_example",
@@ -145,6 +163,7 @@ function ratingRepository(
   marks: Array<{ state: string; reason?: string }>,
 ): RatingProjectionRepository {
   return {
+    readWagerAgreement: async () => null,
     applyFebruaryChallengeReplay: async () => undefined,
     claimRatingTelegramProjection: async () => true,
     finalizeRatingUpdate: async () => ({ status: "lost" }),
@@ -299,7 +318,7 @@ test("automatch projection persists desired state and clears its exact outbox", 
   };
   const store = memoryState({
     "telegramProjectionOutbox/automatch/auto_example": {
-      schemaVersion: 1,
+      schemaVersion: 2,
       status: "pending",
       requestId: "request-1",
       updatedAtMs: 100,
@@ -337,6 +356,8 @@ test("automatch projection persists desired state and clears its exact outbox", 
   const message = store.read(
     "telegramMessages/automatch:auto_example",
   ) as Record<string, Record<string, unknown>>;
+  assert.ok(message.desired);
+  assert.ok(message.automatchProjection);
   assert.equal(message.desired.operation, "send");
   assert.equal(message.automatchProjection.lifecycle, "matched");
   assert.deepEqual(enqueued, [
@@ -349,10 +370,10 @@ test("automatch projection persists desired state and clears its exact outbox", 
   ]);
 });
 
-test("automatch projection acknowledges stale work and dead-letters invalid sources", async () => {
+test("automatch projection acknowledges stale work and rejects invalid canonical sources", async () => {
   const stale = memoryState({
     "telegramProjectionOutbox/automatch/auto_example": {
-      schemaVersion: 1,
+      schemaVersion: 2,
       status: "pending",
       requestId: "newer-request",
       updatedAtMs: 100,
@@ -375,7 +396,7 @@ test("automatch projection acknowledges stale work and dead-letters invalid sour
 
   const invalid = memoryState({
     "telegramProjectionOutbox/automatch/auto_example": {
-      schemaVersion: 1,
+      schemaVersion: 2,
       status: "pending",
       requestId: "request-1",
       updatedAtMs: 100,
@@ -383,8 +404,8 @@ test("automatch projection acknowledges stale work and dead-letters invalid sour
     "telegramAutomatches/auto_example": { version: 1 },
     "invites/auto_example": {},
   });
-  assert.equal(
-    await processAutomatchTask(
+  await assert.rejects(
+    processAutomatchTask(
       {
         kind: "automatch-telegram-projection",
         inviteId: "auto_example",
@@ -395,17 +416,15 @@ test("automatch projection acknowledges stale work and dead-letters invalid sour
       () => 200,
       invalid.telegram,
     ),
-    "dead",
+    /invalid-canonical/,
   );
   assert.deepEqual(
     invalid.read("telegramProjectionOutbox/automatch/auto_example"),
     {
-      schemaVersion: 1,
-      status: "dead",
+      schemaVersion: 2,
+      status: "pending",
       requestId: "request-1",
-      updatedAtMs: null,
-      deadAtMs: 200,
-      reason: "invalid-source",
+      updatedAtMs: 100,
     },
   );
 });
@@ -473,7 +492,7 @@ test("projection dispatch failures preserve pending recovery markers", async () 
   };
   const store = memoryState({
     "telegramProjectionOutbox/automatch/auto_example": {
-      schemaVersion: 1,
+      schemaVersion: 2,
       status: "pending",
       requestId: "request-1",
       updatedAtMs: 100,
@@ -504,7 +523,7 @@ test("projection dispatch failures preserve pending recovery markers", async () 
   assert.deepEqual(
     store.read("telegramProjectionOutbox/automatch/auto_example"),
     {
-      schemaVersion: 1,
+      schemaVersion: 2,
       status: "pending",
       requestId: "request-1",
       updatedAtMs: 100,
@@ -837,7 +856,10 @@ test("scheduled recovery batches both pending outbox kinds", async () => {
     ...TELEGRAM_TEST_ENV.TELEGRAM_PROJECTION_QUEUE,
     sendBatch: async (messages: Iterable<MessageSendRequest<unknown>>) => {
       batches.push(
-        Array.from(messages).map(({ body }) => body as TelegramProjectionTask),
+        Array.from(messages).map(
+          ({ body }) =>
+            canonicalQueuePayloadFixture(body) as TelegramProjectionTask,
+        ),
       );
       return {
         metadata: { metrics: { backlogCount: 0, backlogBytes: 0 } },
@@ -849,7 +871,7 @@ test("scheduled recovery batches both pending outbox kinds", async () => {
     TELEGRAM_PROJECTION_QUEUE: queue,
   } satisfies Env;
   const marker = {
-    schemaVersion: 1,
+    schemaVersion: 2,
     status: "pending",
     requestId: "request-1",
     updatedAtMs: 100,
@@ -896,9 +918,14 @@ test("scheduled recovery batches both pending outbox kinds", async () => {
       },
     ],
   );
-  assert.equal(
-    automatchSweepTasks({ invalid: { status: "pending" } }).length,
-    0,
+  assert.equal(automatchSweepTasks({ invalid: null }).length, 0);
+  assert.throws(
+    () =>
+      canonicalAutomatchFixture("telegramProjectionOutbox/automatch", {
+        status: "pending",
+        unsupported: true,
+      }),
+    /invalid-canonical-telegramProjectionOutbox/,
   );
 });
 
@@ -911,7 +938,8 @@ test("recovery takes current records and reports scan failures", async () => {
       sendBatch: async (messages: Iterable<MessageSendRequest<unknown>>) => {
         batches.push(
           Array.from(messages).map(
-            ({ body }) => body as TelegramProjectionTask,
+            ({ body }) =>
+              canonicalQueuePayloadFixture(body) as TelegramProjectionTask,
           ),
         );
         return {
@@ -962,7 +990,7 @@ test("recovery takes current records and reports scan failures", async () => {
   batches.length = 0;
   const recentStore = memoryState({
     "telegramProjectionOutbox/automatch/auto_example": {
-      schemaVersion: 1,
+      schemaVersion: 2,
       status: "pending",
       requestId: "request-1",
       updatedAtMs: 599_999,
@@ -973,7 +1001,7 @@ test("recovery takes current records and reports scan failures", async () => {
     path === "telegramProjectionOutbox/automatch"
       ? {
           auto_example: {
-            schemaVersion: 1,
+            schemaVersion: 2,
             status: "pending",
             requestId: "request-1",
             updatedAtMs: 599_999,
@@ -1011,7 +1039,8 @@ test("recovery reports every failure and preserves dispatch and precedence when 
         sendBatch: async (messages: Iterable<MessageSendRequest<unknown>>) => {
           batches.push(
             Array.from(messages).map(
-              ({ body }) => body as TelegramProjectionTask,
+              ({ body }) =>
+                canonicalQueuePayloadFixture(body) as TelegramProjectionTask,
             ),
           );
           if (failSend) throw new Error("queue-failed");
@@ -1022,15 +1051,15 @@ test("recovery reports every failure and preserves dispatch and precedence when 
       },
     } satisfies Env;
     const marker = {
-      schemaVersion: 1,
+      schemaVersion: 2,
       status: "pending",
       requestId: "request-1",
       updatedAtMs: 100,
     };
     const records = {
-      auto_broken_repair: { ...marker, requestId: 1 },
+      auto_broken_repair: marker,
       auto_bad: marker,
-      auto_later_broken_repair: { ...marker, requestId: 1 },
+      auto_later_broken_repair: marker,
       auto_good: marker,
     };
     const store = memoryState(
@@ -1078,8 +1107,8 @@ test("recovery reports every failure and preserves dispatch and precedence when 
     );
     assert.deepEqual(visited, [
       "auto_broken_repair",
-      "auto_later_broken_repair",
       "auto_bad",
+      "auto_later_broken_repair",
       "auto_good",
     ]);
     assert.deepEqual(
@@ -1103,23 +1132,25 @@ test("recovery reports every failure and preserves dispatch and precedence when 
       (entry) => entry.event === "telegram_projection_recovery_record_failed",
     );
     assert.deepEqual(
-      items.map(({ inviteId, phase, itemIndex, error }) => ({
-        inviteId,
-        phase,
-        itemIndex,
-        message: error.message,
-      })),
+      items
+        .map(({ inviteId, phase, itemIndex, error }) => ({
+          inviteId,
+          phase,
+          itemIndex,
+          message: error.message,
+        }))
+        .sort((left, right) => left.itemIndex - right.itemIndex),
       [
         {
           inviteId: "auto_broken_repair",
-          phase: "repair",
+          phase: "claim",
           itemIndex: 0,
           message: "repair-failed",
         },
         {
           inviteId: "auto_later_broken_repair",
-          phase: "repair",
-          itemIndex: 1,
+          phase: "claim",
+          itemIndex: 2,
           message: "later-repair-failed",
         },
         ...(failClaim
@@ -1127,61 +1158,36 @@ test("recovery reports every failure and preserves dispatch and precedence when 
               {
                 inviteId: "auto_bad",
                 phase: "claim",
-                itemIndex: 0,
+                itemIndex: 1,
                 message: "claim-failed",
               },
             ]
           : []),
-      ],
+      ].sort((left, right) => left.itemIndex - right.itemIndex),
     );
     assert.equal(entries.length, items.length + 1);
     assert.equal(
       entries.at(-1).code,
-      failSend ? "queue-failed" : failClaim ? "claim-failed" : "repair-failed",
+      failSend ? "queue-failed" : "repair-failed",
     );
   }
 });
 
-test("recovery removes malformed markers from the timestamp index", async () => {
-  const records = Object.fromEntries(
-    Array.from({ length: 10 }, (_, index) => [
-      " ".repeat(index + 1),
-      {
-        schemaVersion: 1,
-        status: "pending",
-        requestId: "request-1",
-        updatedAtMs: 100,
-      },
-    ]),
-  );
-  const store = memoryState(
-    Object.fromEntries(
-      Object.entries(records).map(([inviteId, record]) => [
-        `telegramProjectionOutbox/automatch/${inviteId}`,
-        record,
-      ]),
-    ),
-  );
-  const getPath = store.client.getPath;
-  store.client.getPath = async (path, query) =>
-    path === "telegramProjectionOutbox/automatch"
-      ? records
-      : getPath(path, query);
-  const result = await sweepTelegramProjections(PROJECTION_TEST_ENV, {
-    createStateRepository: () => store.client,
-    createEventRecovery: () => telegramProjectionRecoveryFixture(store.client),
-    createRating: () => ratingRepository(null, []),
-    now: () => 600_000,
-  });
-  assert.deepEqual(result, { automatch: 0, event: 0, rating: 0 });
-  for (const inviteId of Object.keys(records)) {
-    const record = store.read(
-      `telegramProjectionOutbox/automatch/${inviteId}`,
-    ) as Record<string, unknown>;
-    assert.equal(record.status, "dead");
-    assert.equal(record.reason, "invalid-record");
-    assert.equal(record.updatedAtMs, null);
-    assert.equal(record.deadAtMs, 600_000);
+test("canonical recovery rejects malformed payloads before they can become claim candidates", () => {
+  for (const value of [
+    { schemaVersion: 1, status: "pending" },
+    { schemaVersion: 2, status: "pending", requestId: 1, updatedAtMs: 100 },
+    {
+      schemaVersion: 2,
+      status: "pending",
+      requestId: "request",
+      updatedAtMs: "100",
+    },
+  ]) {
+    assert.throws(
+      () => parseAutomatchValue("telegramProjectionOutbox/automatch", value),
+      /invalid-canonical/,
+    );
   }
 });
 

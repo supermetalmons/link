@@ -8,7 +8,8 @@ import { createRatingRepository } from "../src/ratingRepository.ts";
 import * as canonicalRating from "../src/ratingCanonicalRepository.ts";
 
 const outbox: EventProgressOutboxRecord = {
-  schemaVersion: 1,
+  schemaVersion: 2,
+  dataEpoch: 1,
   eventId: "event-1",
   sourceKey: "rating:invite-1:match-1",
   reason: "rating-completed",
@@ -62,6 +63,7 @@ test("canonical ratings preserve their exact facade without eager work", () => {
 
   assert.deepEqual(Object.keys(rating), [
     "readInviteMetadata",
+    "readWagerAgreement",
     "readMatchRecord",
     "readMatchPair",
     "readProfileOwnershipSnapshot",
@@ -110,9 +112,10 @@ test("ratings accept only gameplay reads and an explicit event outbox writer", a
   };
   const rating = createRatingRepository(db, gameplayReads, writer);
 
-  assert.deepEqual(await rating.readInviteMetadata("invite-1"), {
-    hostId: "player-1",
-  });
+  assert.deepEqual(
+    await rating.readInviteMetadata("invite-1"),
+    retainedInviteSourceFixture({ hostId: "player-1" }),
+  );
   assert.equal(
     await rating.readMatchRecord({ playerId: "player-1", matchId: "match-1" }),
     null,
@@ -143,7 +146,7 @@ test("ratings accept only gameplay reads and an explicit event outbox writer", a
   );
   await rating.putEventProgressOutbox("outbox-1", outbox);
   assert.deepEqual(calls, [["outbox-1", outbox]]);
-  assert.equal(calls[0][1], outbox);
+  assert.equal(calls[0]![1], outbox);
 });
 
 test("ratings propagate the injected outbox failure without changing its identity", async () => {

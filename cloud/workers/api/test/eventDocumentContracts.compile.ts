@@ -13,7 +13,7 @@ import type {
   EventFieldValues,
 } from "../../../runtime/eventCommands.js";
 import type {
-  EventCompatibilityRecord,
+  EventRecord,
   EventView,
   decodeEventView,
 } from "@mons/shared/events";
@@ -34,8 +34,14 @@ export type EventDocumentsHaveNoStringIndexer = Assert<
 export type ParticipantDocumentsHaveNoStringIndexer = Assert<
   string extends keyof EventParticipantDocument ? false : true
 >;
-export type WireCompatibilityHeadersHaveNoStringIndexer = Assert<
-  string extends keyof EventCompatibilityRecord ? false : true
+export type CanonicalWireRecordsHaveNoStringIndexer = Assert<
+  string extends keyof EventRecord ? false : true
+>;
+export type CanonicalWireMatchesDomainRecord = Assert<
+  Equal<EventRecord, EventDocument>
+>;
+export type ScheduledEventCannotHaveAStartTimestamp = Assert<
+  Equal<Extract<EventRecord, { status: "scheduled" }>["startedAtMs"], null>
 >;
 export type EventReadsReturnDocuments = Assert<
   Equal<Awaited<ReturnType<EventReads["readEvent"]>>, EventDocument | null>

@@ -1,3 +1,5 @@
+import { createTimerHandle } from "./fixtures/timerHandle.mjs";
+import { required } from "./fixtures/canonicalData.mjs";
 import assert from "node:assert/strict";
 import { registerHooks } from "node:module";
 import test from "node:test";
@@ -21,24 +23,36 @@ const { InviteReactionChannel } =
   await import("../src/connection/inviteReactionChannel.ts");
 const { socketSessionRefreshDelay } =
   await import("../src/connection/socketSession.ts");
-const protocols = (expiresAt) => [
+const protocols = (/** @type {number} */ expiresAt) => [
   "mons-reactions-v2",
   `bearer.header.${Buffer.from(JSON.stringify({ exp: expiresAt / 1_000 })).toString("base64url")}.signature`,
 ];
 const flush = () => new Promise((resolve) => setImmediate(resolve));
 
+/**
+ * @typedef {{url: string; wireProtocols: string[] | undefined; readyState: 0 | 1 | 2 | 3; closes: number; onopen: (() => void) | null; onmessage: ((event: {data: unknown}) => void) | null; onclose: (() => void) | null; onerror: (() => void) | null; close(): void; send(): void; receive(message: unknown): void}} HarnessSocket
+ * @typedef {import("../src/connection/snapshotChannel.ts").SnapshotChannelDependencies<unknown, {snapshot: {revision: number}}>} SnapshotDependencies
+ * @param {string} kind
+ */
 function harness(kind, authenticated = true) {
   let now = 1_000_000;
   let online = true;
-  let nextTimer = 1;
+  /** @type {(() => void) | null | undefined} */
   let wake;
+  /** @type {Map<ReturnType<typeof createTimerHandle>, {callback: () => void; at: number}>} */
   const timers = new Map();
+  /** @type {HarnessSocket[]} */
   const sockets = [];
+  /** @type {boolean[]} */
   const refreshes = [];
+  /** @type {unknown[]} */
   const errors = [];
+  /** @type {unknown[]} */
   const updates = [];
+  /** @satisfies {Pick<SnapshotDependencies, "createSocket" | "getProtocols" | "getTokenRemainingMs" | "isActive" | "isOnline" | "isVisible" | "addWakeListener" | "onError" | "setTimer" | "clearTimer" | "now" | "random"> & {canConnect(): boolean}} */
   const dependency = {
     createSocket(url, wireProtocols) {
+      /** @type {HarnessSocket} */
       const socket = {
         url,
         wireProtocols,
@@ -61,12 +75,14 @@ function harness(kind, authenticated = true) {
       sockets.push(socket);
       return socket;
     },
-    getProtocols: authenticated
-      ? async (force) => {
-          refreshes.push(force);
-          return protocols(now + 300_000);
+    ...(authenticated
+      ? {
+          getProtocols: async (/** @type {boolean} */ force) => {
+            refreshes.push(force);
+            return protocols(now + 300_000);
+          },
         }
-      : undefined,
+      : {}),
     getTokenRemainingMs: () => 300_000,
     isActive: () => true,
     isOnline: () => online,
@@ -80,7 +96,7 @@ function harness(kind, authenticated = true) {
     },
     onError: (error) => errors.push(error),
     setTimer(callback, delayMs) {
-      const id = nextTimer++;
+      const id = createTimerHandle();
       timers.set(id, { callback, at: now + delayMs });
       return id;
     },
@@ -110,7 +126,7 @@ function harness(kind, authenticated = true) {
           onInitialSnapshot: (value) => updates.push({ initial: value }),
           onReaction: (reaction) => updates.push({ recovered: reaction }),
         });
-  const receive = (socket) =>
+  const receive = (/** @type {HarnessSocket} */ socket) =>
     socket.receive(
       kind === "snapshot"
         ? { revision: 2 }
@@ -129,6 +145,9 @@ function harness(kind, authenticated = true) {
     errors,
     updates,
     receive,
+    /**
+     * @param {number} time
+     */
     async nextAt(time) {
       now = time;
       const entry = [...timers.entries()].find(
@@ -140,7 +159,7 @@ function harness(kind, authenticated = true) {
       await flush();
     },
     now: () => now,
-    jump: (time) => {
+    jump: (/** @type {number} */ time) => {
       now = time;
     },
     wake: () => wake?.(),
@@ -176,13 +195,13 @@ for (const kind of ["snapshot", "reaction"]) {
     try {
       Date.now = () => originalNow() + 600_000;
       await h.nextAt(1_000_000);
-      h.receive(h.sockets[0]);
+      h.receive(required(h.sockets[0]));
       Date.now = () => originalNow() - 600_000;
       h.jump(1_001_000);
       h.wake();
-      assert.equal(h.sockets[0].closes, 0);
+      assert.equal(required(h.sockets[0]).closes, 0);
       await h.nextAt(1_270_000);
-      assert.equal(h.sockets[0].closes, 1);
+      assert.equal(required(h.sockets[0]).closes, 1);
     } finally {
       Date.now = originalNow;
       h.channel.stop();
@@ -191,14 +210,14 @@ for (const kind of ["snapshot", "reaction"]) {
   test(`${kind} sockets reauthenticate before expiry without reporting an error or resetting channel state`, async () => {
     const h = harness(kind);
     await h.nextAt(1_000_000);
-    h.receive(h.sockets[0]);
+    h.receive(required(h.sockets[0]));
     const before = h.updates.length;
     await h.nextAt(1_270_000);
-    assert.equal(h.sockets[0].closes, 1);
+    assert.equal(required(h.sockets[0]).closes, 1);
     assert.equal(h.errors.length, 0);
     await h.nextAt(1_270_000);
     assert.deepEqual(h.refreshes, [false, true]);
-    h.receive(h.sockets[1]);
+    h.receive(required(h.sockets[1]));
     assert.equal(h.errors.length, 0);
     if (kind === "reaction") assert.equal(h.updates.length, before);
     else assert.ok(h.updates.length > before);
@@ -209,10 +228,10 @@ for (const kind of ["snapshot", "reaction"]) {
   test(`${kind} sockets reauthenticate on wake if the expiry timer was suspended`, async () => {
     const h = harness(kind);
     await h.nextAt(1_000_000);
-    h.receive(h.sockets[0]);
+    h.receive(required(h.sockets[0]));
     h.jump(1_400_000);
     h.wake();
-    assert.equal(h.sockets[0].closes, 1);
+    assert.equal(required(h.sockets[0]).closes, 1);
     await h.nextAt(1_400_000);
     assert.deepEqual(h.refreshes, [false, true]);
     h.channel.stop();
@@ -221,7 +240,7 @@ for (const kind of ["snapshot", "reaction"]) {
   test(`${kind} public spectator sockets have no token-expiry timer`, async () => {
     const h = harness(kind, false);
     await h.nextAt(1_000_000);
-    h.receive(h.sockets[0]);
+    h.receive(required(h.sockets[0]));
     assert.equal(
       [...h.timers.values()].some((timer) => timer.at === 1_270_000),
       false,

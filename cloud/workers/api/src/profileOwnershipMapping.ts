@@ -20,7 +20,7 @@ export function mapCanonicalOwnershipSnapshot(
         profileId,
         Object.freeze({
           profile: Object.freeze({
-            aura: value.profile.aura || "",
+            aura: value.profile.aura,
             emoji: value.gameplayEmoji,
             eth: value.profile.eth || "",
             profileId,

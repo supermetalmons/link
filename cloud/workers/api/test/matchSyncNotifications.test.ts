@@ -264,7 +264,7 @@ test("forty-one targets use two primary batches before any room notification", a
       notices.push([inviteId, matchIds]);
     },
   });
-  await notifyMatchSyncChanged(env, [...targets, targets[0]]);
+  await notifyMatchSyncChanged(env, [...targets, targets[0]!]);
   assert.equal(sessions, 2);
   assert.deepEqual(sizes, [40, 1]);
   assert.deepEqual(notices, [

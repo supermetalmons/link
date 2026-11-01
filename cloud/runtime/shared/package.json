@@ -4,6 +4,9 @@
   "private": true,
   "type": "commonjs",
   "exports": {
+    "./api-errors": "./api-errors.js",
+    "./appearance": "./appearance.js",
+    "./data-contract": "./data-contract.js",
     "./api-contracts": "./api-contracts.js",
     "./auth": "./auth.js",
     "./event-prizes": "./event-prizes.js",
@@ -31,6 +34,7 @@
     "./timers": "./timers.js",
     "./usernames": "./usernames.js",
     "./wagers": "./wagers.js",
-    "./x-redirect": "./x-redirect.js"
+    "./x-redirect": "./x-redirect.js",
+    "./profile-game-projections": "./profile-game-projections.js"
   }
 }

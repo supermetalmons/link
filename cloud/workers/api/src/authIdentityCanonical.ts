@@ -77,8 +77,8 @@ export function createCanonicalAuthIdentityService(
       const ceiling = Math.floor(0x1_0000_0000 / maximum) * maximum;
       const buffer = new Uint32Array(1);
       do crypto.getRandomValues(buffer);
-      while (buffer[0] >= ceiling);
-      return buffer[0] % maximum;
+      while (buffer[0]! >= ceiling);
+      return buffer[0]! % maximum;
     });
 
   const { profileByLogin, createInitial, attachMethod, mergeIdentityProfiles } =
@@ -105,12 +105,15 @@ export function createCanonicalAuthIdentityService(
     allowConsumed = false,
   ): AuthIntent => {
     if (!intent) authFailure(409, "failed-precondition", "intent-not-found");
+    if (intent.dataEpoch !== 1 || intent.status === "cancelled")
+      authFailure(409, "failed-precondition", "intent-cancelled");
     if (readStoredLoginUid(intent.uid) !== uid)
       authFailure(403, "permission-denied", "intent-user-mismatch");
     if (cleanString(intent.method) !== method)
       authFailure(409, "failed-precondition", "intent-method-mismatch");
-    const consumedAtMs = finiteNumber(intent.consumedAtMs, 0);
-    const consumedByOpId = cleanString(intent.consumedByOpId);
+    const consumedAtMs = intent.status === "consumed" ? intent.consumedAtMs : 0;
+    const consumedByOpId =
+      intent.status === "consumed" ? intent.consumedByOpId : null;
     if (
       finiteNumber(intent.expiresAtMs, 0) < now() &&
       !(allowConsumed && consumedAtMs > 0)
@@ -145,6 +148,7 @@ export function createCanonicalAuthIdentityService(
     const operation = await readCanonicalAuthOperation(db, opId);
     if (
       !operation ||
+      operation.status === "cancelled" ||
       operation.loginUid !== uid ||
       operation.kind !== "verify" ||
       operation.method !== method ||

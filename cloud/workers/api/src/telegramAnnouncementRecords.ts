@@ -1,29 +1,33 @@
 import type { EventAnnouncementKind } from "./eventAnnouncementKinds.ts";
 import { getSundayMonsReminderLeadMs } from "../../../runtime/telegram/sundayMonsReminder.js";
 
-declare const announcementPayload: unique symbol;
-declare const announcementAttempt: unique symbol;
-export type TelegramAnnouncementPayloadDocument = {
-  readonly [announcementPayload]: true;
-};
-export type RetainedTelegramAnnouncementAttempt = {
-  readonly [announcementAttempt]: true;
-};
+export type TelegramAnnouncementPayloadDocument = TelegramAnnouncementPayload;
 export type TelegramAnnouncementOutcomeStatus =
   "sent" | "retryable" | "terminal" | "uncertain";
-
+export type TelegramAnnouncementAttempt = {
+  eventId: string;
+  startAtMs: number;
+  runAtMs: number;
+  firstQueuedAtMs: number;
+  attemptId: string;
+  expectedAttemptId: string | null;
+} & (
+  | { kind: "prizes"; payload: TelegramAlbumPayload }
+  | { kind: "reminder"; payload: TelegramReminderPayload }
+);
+export type RetainedTelegramAnnouncementAttempt = TelegramAnnouncementAttempt;
+export function retainTelegramAnnouncementAttempt(
+  value: TelegramAnnouncementAttempt,
+): TelegramAnnouncementAttempt {
+  return value;
+}
 export function readTelegramAnnouncementPayloadDocument(
   value: unknown,
 ): TelegramAnnouncementPayloadDocument | null {
-  return value && typeof value === "object" && !Array.isArray(value)
-    ? (value as TelegramAnnouncementPayloadDocument)
-    : null;
-}
-
-export function retainTelegramAnnouncementAttempt(
-  value: unknown,
-): RetainedTelegramAnnouncementAttempt {
-  return value as RetainedTelegramAnnouncementAttempt;
+  return (
+    parseTelegramAnnouncementPayload(value, "prizes") ??
+    parseTelegramAnnouncementPayload(value, "reminder")
+  );
 }
 
 export type TelegramAlbumPayload = {
@@ -54,6 +58,21 @@ export function parseTelegramAnnouncementPayload(
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   const payload = value as Record<string, unknown>;
   if (
+    Object.keys(payload).some(
+      (key) =>
+        !(
+          kind === "prizes"
+            ? [
+                "chatId",
+                "imageUrls",
+                "text",
+                "parseMode",
+                "hasSpoiler",
+                "silent",
+              ]
+            : ["chatId", "text", "parseMode", "silent"]
+        ).includes(key),
+    ) ||
     typeof payload.chatId !== "string" ||
     !payload.chatId.trim() ||
     typeof payload.text !== "string" ||
@@ -107,16 +126,7 @@ export function confirmedTelegramReminderText(
   chatId: string,
   eventId: string,
 ): { text: string } | null {
-  const retained: unknown = value;
-  const payload = retained as
-    | {
-        chatId?: unknown;
-        parseMode?: unknown;
-        silent?: unknown;
-        text?: unknown;
-      }
-    | null
-    | undefined;
+  const payload = value;
   if (
     !payload ||
     payload.chatId !== chatId.trim() ||

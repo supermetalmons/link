@@ -1,22 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import type { DecodedWager } from "../src/wagerModel.ts";
+import { createEmptyWager, type DecodedWager } from "../src/wagerModel.ts";
 import { observeProposalWrite } from "../src/wagerProposalWrite.ts";
 
 function wagerFixture(label: string): DecodedWager {
-  const raw = { label };
-  const absent = { kind: "absent" as const, raw: undefined, value: null };
-  return {
-    raw,
-    record: raw,
-    proposals: absent,
-    proposedBy: absent,
-    agreed: absent,
-    agreementOperation: absent,
-    proposalRemovalOperations: absent,
-    settlement: absent,
-    resolved: absent,
-  };
+  return { ...createEmptyWager(), proposedBy: { [label]: true } };
 }
 
 for (const wager of [wagerFixture("command"), null]) {

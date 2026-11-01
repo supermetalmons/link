@@ -1,3 +1,4 @@
+import { runGuardedOperatorSqlSync } from "./operator/guardedSql.ts";
 import {
   DEFAULT_API_CONFIG,
   resolveD1Binding,
@@ -82,6 +83,7 @@ function parseArgs(argv: string[]): Operation {
   const operation = argv[0]?.replace(/^--/, "");
   if (
     argv.length !== 1 ||
+    !operation ||
     !["status", "freeze", "resume-d1"].includes(operation)
   ) {
     throw new Error("choose exactly one wager reservation control operation");
@@ -286,16 +288,18 @@ function activeGameplayLeases(nowMs: number): number {
 }
 
 function updateRemoteControl(expected: Control, next: Control): void {
-  const rows = d1Rows(
+  const rows = runGuardedOperatorSqlSync(
     `UPDATE wager_reservation_runtime_control SET storage_mode = '${next.storageMode}', freeze_generation = ${next.freezeGeneration}, updated_at_ms = ${next.updatedAtMs} WHERE singleton = 1 AND storage_mode = '${expected.storageMode}' AND freeze_generation = ${expected.freezeGeneration} AND updated_at_ms = ${expected.updatedAtMs} AND EXISTS (SELECT 1 FROM profile_canonical_control WHERE singleton = 1 AND state = 'frozen') RETURNING singleton`,
+    DATABASE,
   );
   if (rows.length !== 1)
     throw new Error("wager reservation control update conflicted");
 }
 
 function recoverRemoteAdmission(admission: Admission, nowMs: number): boolean {
-  const rows = d1Rows(
+  const rows = runGuardedOperatorSqlSync(
     `DELETE FROM wager_reservation_write_admissions WHERE admission_id = ${sqlText(admission.admissionId)} AND freeze_generation = ${admission.freezeGeneration} AND created_at_ms = ${admission.createdAtMs} AND expires_at_ms = ${admission.expiresAtMs} AND uncertain = ${Number(admission.uncertain)} AND expires_at_ms <= ${nowMs} AND EXISTS (SELECT 1 FROM wager_reservation_runtime_control WHERE singleton = 1 AND storage_mode = 'frozen') AND EXISTS (SELECT 1 FROM profile_canonical_control WHERE singleton = 1 AND state = 'frozen') RETURNING admission_id`,
+    DATABASE,
   );
   return rows.length === 1;
 }

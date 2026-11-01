@@ -12,6 +12,7 @@ import {
   type ProfileOwnershipReader,
 } from "./profileOwnership.ts";
 import type { MatchStatePort } from "./repositoryContracts.ts";
+import { eventOwnershipSnapshot } from "./eventOwnershipSnapshot.ts";
 
 type RuntimeDependencies = Parameters<typeof createEventRuntime>[0];
 
@@ -34,7 +35,7 @@ type WorkerEventRuntimeOptions = {
 function secureRandom(): number {
   const values = new Uint32Array(1);
   crypto.getRandomValues(values);
-  return values[0] / 0x1_0000_0000;
+  return values[0]! / 0x1_0000_0000;
 }
 
 export function createEventRuntimeStore(
@@ -87,10 +88,12 @@ export function createWorkerEventRuntime({
       readGameplayMatchPairs(repository, inputs, signal),
     enqueueEventProgressTask,
     eventLockManager: lockManager,
-    readProfileOwnershipSnapshot: (query) =>
-      requireProfileOwnershipSnapshot(repository, query),
+    readProfileOwnershipSnapshot: async (query) =>
+      eventOwnershipSnapshot(
+        await requireProfileOwnershipSnapshot(repository, query),
+      ),
     readEventPrizeWithdrawals: createD1EventPrizeWithdrawalReader(withdrawalDb),
-    now,
+    ...(now ? { now } : {}),
     random,
     sleep,
   });

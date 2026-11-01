@@ -1,3 +1,5 @@
+import { required } from "./fixtures/canonicalData.mjs";
+import { canonicalAppearance } from "./fixtures/canonicalData.mjs";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
@@ -13,17 +15,19 @@ const source = ts.createSourceFile(
   ts.ScriptTarget.Latest,
   true,
 );
-const connectionClass = source.statements.find(
-  (node) => ts.isClassDeclaration(node) && node.name?.text === "Connection",
-);
-const method = connectionClass.members.find(
+const connectionClass = source.statements
+  .filter(ts.isClassDeclaration)
+  .find((node) => node.name?.text === "Connection");
+const method = required(connectionClass).members.find(
   (node) => node.name?.getText(source) === "hydrateSameProfilePlayer",
 );
 const { outputText } = ts.transpileModule(
-  `class Connection { ${method.getText(source)} }`,
+  `class Connection { ${required(method).getText(source)} }`,
   { compilerOptions: { target: ts.ScriptTarget.ES2022 } },
 );
+/** @type {import("@mons/shared/profiles").CompletePlayerProfile} */
 const profile = {
+  ...canonicalAppearance(),
   id: "profile",
   username: "Verified",
   eth: null,
@@ -38,60 +42,88 @@ const profile = {
     materials: { dust: 0, slime: 0, gum: 0, metal: 0, ice: 0 },
   },
 };
-const flush = () => new Promise(setImmediate);
+const flush = () => new Promise((resolve) => setImmediate(resolve));
+/**
+ * @typedef {import("../src/services/initialIdentityBootstrap.ts").InitialIdentityRead} InitialRead
+ * @typedef {import("../src/session/sessionAuth.ts").SessionUser} SessionUser
+ * @typedef {typeof import("../src/connection/connection.ts").connection} ConnectionContract
+ * @typedef {{hydrateSameProfilePlayer: ConnectionContract["hydrateSameProfilePlayer"];
+ * auth: {currentUser: SessionUser | null}; sessionEpoch: number; sameProfilePlayerUid: string | null;
+ * sameProfileHydrationRequest: ConnectionContract["sameProfileHydrationRequest"]; activeContext: {inviteId: string};
+ * isSessionEpochActive: ConnectionContract["isSessionEpochActive"]; getLocalProfileId: ConnectionContract["getLocalProfileId"];
+ * getPlayerProfileWithRetry: ConnectionContract["getPlayerProfileWithRetry"]}} HydrationConnection
+ */
+/** @param {{pending?: Promise<InitialRead> | null; stashed?: unknown; consumed?: boolean; freshProfile?: import("@mons/shared/profiles").PlayerProfile | null}} [options] */
 function harness({
   pending = null,
   stashed,
   consumed = true,
   freshProfile = profile,
 } = {}) {
+  /** @type {string[]} */
   const reads = [];
+  /** @type {Array<{value: import("@mons/shared/profiles").PlayerProfile; uid: string}>} */
   const applied = [];
   const state = { consumed, profileId: "profile" };
+  /** @type {Record<string, unknown>} */
   const profiles = { login: stashed };
-  const user = { uid: "login", sessionId: "session", generation: "generation" };
+  /** @type {SessionUser} */
+  const user = {
+    uid: "login",
+    sessionId: "session",
+    generation: "generation",
+    getIdToken: async () => "token",
+  };
   const dependencies = {
     setupPlayerId: () => {},
-    peekInitialIdentity: (owner) => {
+    peekInitialIdentity: (/** @type {SessionUser} */ owner) => {
       assert.equal(owner, user);
       return pending;
     },
     wasInitialIdentityConsumed: () => state.consumed,
     profilesForUids: profiles,
     isPlayerProfile,
-    didGetPlayerProfile: (value, uid) => applied.push({ value, uid }),
+    didGetPlayerProfile: (
+      /** @type {import("@mons/shared/profiles").PlayerProfile} */ value,
+      /** @type {string} */ uid,
+    ) => applied.push({ value, uid }),
   };
-  const Constructor = new Function(
-    ...Object.keys(dependencies),
-    `${outputText}\nreturn Connection;`,
-  )(...Object.values(dependencies));
+  const load =
+    /** @type {(...values: unknown[]) => new () => HydrationConnection} */ (
+      new Function(
+        ...Object.keys(dependencies),
+        `${outputText}\nreturn Connection;`,
+      )
+    );
+  const Constructor = load(...Object.values(dependencies));
   const instance = new Constructor();
-  Object.assign(instance, {
-    auth: { currentUser: user },
-    sessionEpoch: 1,
-    sameProfilePlayerUid: "login",
-    sameProfileHydrationRequest: null,
-    activeContext: { inviteId: "invite" },
-    isSessionEpochActive: (epoch) => epoch === instance.sessionEpoch,
-    getLocalProfileId: () => state.profileId,
-    getPlayerProfileWithRetry: async (uid) => {
-      reads.push(uid);
-      return freshProfile;
-    },
-  });
+  Object.assign(
+    instance,
+    /** @satisfies {Partial<HydrationConnection>} */ ({
+      auth: { currentUser: user },
+      sessionEpoch: 1,
+      sameProfilePlayerUid: "login",
+      sameProfileHydrationRequest: null,
+      activeContext: { inviteId: "invite" },
+      isSessionEpochActive: (epoch) => epoch === instance.sessionEpoch,
+      getLocalProfileId: () => state.profileId,
+      getPlayerProfileWithRetry: async (uid) => {
+        reads.push(uid);
+        return freshProfile;
+      },
+    }),
+  );
   return { instance, user, reads, applied, state, profiles };
 }
 
 test("first initial own invite hydration joins identity; subsequent hydration reads fresh data", async () => {
-  let resolve;
-  const pending = new Promise((done) => {
-    resolve = done;
-  });
+  /** @type {PromiseWithResolvers<InitialRead>} */
+  const { promise: pending, resolve } = Promise.withResolvers();
   const h = harness({ pending });
   h.instance.hydrateSameProfilePlayer("login", true);
   await flush();
   assert.deepEqual(h.reads, []);
-  resolve({ user: h.user, read: () => ({ ok: true, profile }) });
+  required(resolve)({ user: h.user, read: () => ({ ok: true, profile }) });
   await flush();
   assert.deepEqual(h.applied, [{ value: profile, uid: "login" }]);
   assert.deepEqual(h.reads, []);
@@ -105,7 +137,7 @@ test("already-applied complete own startup profile avoids only the initial invit
   h.instance.hydrateSameProfilePlayer("login", true);
   await flush();
   assert.deepEqual(h.reads, []);
-  assert.equal(h.applied[0].value, profile);
+  assert.equal(required(h.applied[0]).value, profile);
   h.instance.hydrateSameProfilePlayer("login");
   await flush();
   assert.deepEqual(h.reads, ["login"]);
@@ -146,15 +178,12 @@ test("alias actors, invalidated identities and foreign stashes keep normal profi
 });
 
 test("a delayed startup hydration cannot apply after same-UID session replacement", async () => {
-  let resolve;
-  const h = harness({
-    pending: new Promise((done) => {
-      resolve = done;
-    }),
-  });
+  /** @type {PromiseWithResolvers<InitialRead>} */
+  const { promise, resolve } = Promise.withResolvers();
+  const h = harness({ pending: promise });
   h.instance.hydrateSameProfilePlayer("login", true);
   h.instance.auth.currentUser = { ...h.user, generation: "replacement" };
-  resolve({ user: h.user, read: () => ({ ok: true, profile }) });
+  required(resolve)({ user: h.user, read: () => ({ ok: true, profile }) });
   await flush();
   assert.deepEqual(h.applied, []);
   assert.deepEqual(h.reads, []);
@@ -170,9 +199,11 @@ const newerProfile = {
 };
 
 test("a mutation after reading the pending identity preserves newer name and mining data at commit", async () => {
+  /** @type {PromiseWithResolvers<InitialRead>} */
   const gate = Promise.withResolvers();
   const h = harness({ pending: gate.promise });
   let valid = true;
+  /** @type {InitialRead} */
   const result = {
     user: h.user,
     read: () => {

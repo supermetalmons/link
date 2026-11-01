@@ -15,7 +15,7 @@ type InviteProjectionInput = {
   automatchStateHint: string | null;
   latestMatchRatingCompleted?: boolean;
 };
-declare const PROJECTOR_SCHEMA_VERSION = 2;
+declare const PROJECTOR_SCHEMA_VERSION = 3;
 declare const normalizeString: (value: unknown) => string | null;
 declare const readTimestampMillis: (value: unknown) => number | null;
 declare const getProfileDisplayName: (

@@ -27,7 +27,7 @@ export type MatchStateControl = {
 export type MatchStateRoute = {
   actorUid: string;
   matchId: string;
-  kind: "durable" | "legacy";
+  kind: "durable" | "archive";
   inviteId: string | null;
   epoch: number;
 };
@@ -122,13 +122,13 @@ export function buildMatchStateRouteStatements(
     if (route.inviteId !== null) safeKey(route.inviteId);
     if (
       !safeInteger(route.epoch, 1) ||
-      !["durable", "legacy"].includes(route.kind) ||
+      !["durable", "archive"].includes(route.kind) ||
       (route.kind === "durable") !== (route.inviteId !== null)
     )
       throw new MatchStateD1Failure("invalid-route");
     return db
       .prepare(
-        `INSERT OR IGNORE INTO match_state_routes
+        `INSERT OR IGNORE INTO match_state_routes_canonical
          (actor_uid, match_id, kind, invite_id, epoch) VALUES (?, ?, ?, ?, ?)`,
       )
       .bind(
@@ -183,7 +183,7 @@ function prepareMatchStateRouteRead(
   return db
     .prepare(
       `SELECT actor_uid, match_id, kind, invite_id, epoch
-       FROM match_state_routes WHERE actor_uid = ? AND match_id = ?`,
+       FROM match_state_routes_canonical WHERE actor_uid = ? AND match_id = ?`,
     )
     .bind(actorUid, matchId);
 }
@@ -262,7 +262,7 @@ export async function readMatchStateRouteSnapshot(
   };
 }
 
-export async function readLegacyMatchStates(
+export async function readArchivedMatchStates(
   db: D1Database,
   inputs: readonly { playerId: string; matchId: string }[],
   signal?: AbortSignal,
@@ -278,29 +278,29 @@ export async function readLegacyMatchStates(
     inputs.map((input) =>
       session
         .prepare(
-          "SELECT record_json FROM match_state_legacy_records WHERE actor_uid = ? AND match_id = ?",
+          "SELECT record_json FROM match_state_records_canonical WHERE actor_uid = ? AND match_id = ?",
         )
         .bind(input.playerId, input.matchId),
     ),
   );
   signal?.throwIfAborted();
   if (results.length !== inputs.length)
-    throw new MatchStateD1Failure("legacy-record-unavailable");
+    throw new MatchStateD1Failure("archive-record-unavailable");
   const missing: { playerId: string; matchId: string }[] = [];
   const values = results.map((result, index): RetainedMatchValue => {
     const row = result.results[0];
     if (row)
       return storedMatchValue(
-        readStoredMatchJson({ value_json: row.record_json }, "legacy"),
+        readStoredMatchJson({ value_json: row.record_json }, "archive"),
       );
-    missing.push(inputs[index]);
+    missing.push(inputs[index]!);
     return null;
   });
   if (missing.length > 0) {
     const routes = await readMatchStateRoutes(db, missing);
     signal?.throwIfAborted();
-    if (routes.some((route) => route?.kind === "legacy"))
-      throw new MatchStateD1Failure("legacy-record-unavailable");
+    if (routes.some((route) => route?.kind === "archive"))
+      throw new MatchStateD1Failure("archive-record-unavailable");
   }
   return values;
 }

@@ -1,5 +1,7 @@
+import { isAura, isEmojiId, type Aura } from "@mons/shared/appearance";
 import {
   isMatchPresentationSnapshot,
+  isMatchPresentation,
   isUpdateMatchPresentationRequest,
   type MatchPresentation,
   type MatchPresentationSnapshot,
@@ -15,6 +17,7 @@ import {
 } from "./matchPresentationRegistry.ts";
 
 type StoredPresentation = {
+  schema_version: number;
   match_id: string;
   actor_uid: string;
   emoji_id: number;
@@ -25,6 +28,7 @@ type StoredPresentation = {
 };
 
 type StoredPresentationSeed = {
+  schema_version: number;
   invite_id: string;
   match_id: string;
   actor_uid: string;
@@ -35,20 +39,58 @@ type StoredPresentationSeed = {
   source_id: string;
 };
 
-type MatchPresentationSeeds = Record<string, { emojiId: number; aura: string }>;
+type MatchPresentationSeeds = Record<string, { emojiId: number; aura: Aura }>;
 export type MatchPresentationUpdateResult = {
   status: "updated" | "duplicate" | "conflict";
   presentation: MatchPresentation;
 };
 
-function presentationFromRow(row: StoredPresentation): MatchPresentation {
-  return {
+type FrozenPresentation = Omit<
+  StoredPresentation,
+  "operation_id" | "operation_json"
+>;
+
+function presentationFromRow(
+  row: StoredPresentation | FrozenPresentation,
+): MatchPresentation {
+  const value = {
     matchId: row.match_id,
     actorUid: row.actor_uid,
     emojiId: row.emoji_id,
     aura: row.aura,
     revision: row.revision,
   };
+  if (row.schema_version !== 1 || !isMatchPresentation(value))
+    throw new TypeError("invalid-stored-presentation");
+  if ("operation_id" in row) {
+    if ((row.operation_id === null) !== (row.operation_json === null))
+      throw new TypeError("invalid-stored-presentation-operation");
+    if (row.operation_json !== null) {
+      const operation: unknown = JSON.parse(row.operation_json);
+      if (
+        !isUpdateMatchPresentationRequest(operation) ||
+        operation.operationId !== row.operation_id ||
+        operation.emojiId !== value.emojiId ||
+        operation.aura !== value.aura ||
+        operation.expectedRevision + 1 !== value.revision
+      )
+        throw new TypeError("invalid-stored-presentation-operation");
+    }
+  }
+  return value;
+}
+
+function assertStoredPresentationSeed(row: StoredPresentationSeed): void {
+  if (row.schema_version !== 1 || !isEmojiId(row.emoji_id) || !isAura(row.aura))
+    throw new TypeError("invalid-stored-presentation-seed");
+  assertMatchPresentationRegistration({
+    inviteId: row.invite_id,
+    matchId: row.match_id,
+    actorUid: row.actor_uid,
+    seedDigest: row.seed_digest,
+    provenance: row.provenance,
+    sourceId: row.source_id,
+  });
 }
 
 export class MatchPresentationStore {
@@ -64,8 +106,8 @@ export class MatchPresentationStore {
     const rows = this.storage.sql
       .exec<StoredPresentation>(
         frozen
-          ? "SELECT match_id, actor_uid, emoji_id, aura, revision FROM frozen_match_presentations WHERE match_id = ? ORDER BY actor_uid"
-          : "SELECT * FROM match_presentations WHERE match_id = ? ORDER BY actor_uid",
+          ? "SELECT match_id, actor_uid, emoji_id, aura, revision, schema_version FROM frozen_match_presentations_canonical WHERE match_id = ? ORDER BY actor_uid"
+          : "SELECT * FROM match_presentations_canonical WHERE match_id = ? ORDER BY actor_uid",
         matchId,
       )
       .toArray();
@@ -113,7 +155,7 @@ export class MatchPresentationStore {
         !Object.hasOwn(current.players, actorUid) &&
         this.storage.sql
           .exec(
-            "SELECT 1 FROM match_presentation_seeds WHERE match_id = ? AND actor_uid = ?",
+            "SELECT 1 FROM match_presentation_seeds_canonical WHERE match_id = ? AND actor_uid = ?",
             matchId,
             actorUid,
           )
@@ -122,7 +164,7 @@ export class MatchPresentationStore {
         throw new Error("match-presentation-unavailable");
       }
       this.storage.sql.exec(
-        "INSERT OR IGNORE INTO match_presentations (match_id, actor_uid, emoji_id, aura, revision) VALUES (?, ?, ?, ?, 0)",
+        "INSERT OR IGNORE INTO match_presentations_canonical (match_id, actor_uid, emoji_id, aura, revision) VALUES (?, ?, ?, ?, 0)",
         matchId,
         actorUid,
         seed.emojiId,
@@ -141,7 +183,7 @@ export class MatchPresentationStore {
       actorUids.map((actorUid) => {
         if (!Object.hasOwn(snapshot.players, actorUid))
           throw new Error("match-presentation-unavailable");
-        return [actorUid, snapshot.players[actorUid]];
+        return [actorUid, snapshot.players[actorUid]!];
       }),
     );
     return { matchId, players };
@@ -154,16 +196,17 @@ export class MatchPresentationStore {
       throw new TypeError("invalid-presentation-match");
     const seeds = this.storage.sql
       .exec<StoredPresentationSeed>(
-        "SELECT * FROM match_presentation_seeds WHERE match_id = ? ORDER BY actor_uid",
+        "SELECT * FROM match_presentation_seeds_canonical WHERE match_id = ? ORDER BY actor_uid",
         matchId,
       )
       .toArray();
     const current = this.readPresentations(matchId);
     const players = Object.fromEntries(
       seeds.map((seed) => {
+        assertStoredPresentationSeed(seed);
         if (!Object.hasOwn(current.players, seed.actor_uid))
           throw new Error("match-presentation-unavailable");
-        return [seed.actor_uid, current.players[seed.actor_uid]];
+        return [seed.actor_uid, current.players[seed.actor_uid]!];
       }),
     );
     const seedDigests = Object.fromEntries(
@@ -194,11 +237,12 @@ export class MatchPresentationStore {
       return seeds.map((seed) => {
         const existing = this.storage.sql
           .exec<StoredPresentationSeed>(
-            "SELECT * FROM match_presentation_seeds WHERE match_id = ? AND actor_uid = ?",
+            "SELECT * FROM match_presentation_seeds_canonical WHERE match_id = ? AND actor_uid = ?",
             seed.matchId,
             seed.actorUid,
           )
           .toArray()[0];
+        if (existing) assertStoredPresentationSeed(existing);
         if (
           existing &&
           (existing.invite_id !== inviteId ||
@@ -221,7 +265,7 @@ export class MatchPresentationStore {
           [seed.actorUid]: { emojiId: seed.emojiId, aura: seed.aura },
         });
         this.storage.sql.exec(
-          "INSERT OR IGNORE INTO match_presentation_seeds (match_id, actor_uid, invite_id, seed_digest, emoji_id, aura, provenance, source_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+          "INSERT OR IGNORE INTO match_presentation_seeds_canonical (match_id, actor_uid, invite_id, seed_digest, emoji_id, aura, provenance, source_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
           seed.matchId,
           seed.actorUid,
           inviteId,
@@ -279,9 +323,9 @@ export class MatchPresentationStore {
           missing,
         );
         for (const actorUid of missing) {
-          const value = snapshot.players[actorUid];
+          const value = snapshot.players[actorUid]!;
           this.storage.sql.exec(
-            "INSERT OR IGNORE INTO frozen_match_presentations (match_id, actor_uid, emoji_id, aura, revision) VALUES (?, ?, ?, ?, ?)",
+            "INSERT OR IGNORE INTO frozen_match_presentations_canonical (match_id, actor_uid, emoji_id, aura, revision) VALUES (?, ?, ?, ?, ?)",
             matchId,
             actorUid,
             value.emojiId,
@@ -315,7 +359,7 @@ export class MatchPresentationStore {
       (): MatchPresentationUpdateResult => {
         const [row] = this.storage.sql
           .exec<StoredPresentation>(
-            "SELECT * FROM match_presentations WHERE match_id = ? AND actor_uid = ?",
+            "SELECT * FROM match_presentations_canonical WHERE match_id = ? AND actor_uid = ?",
             matchId,
             actorUid,
           )
@@ -342,7 +386,7 @@ export class MatchPresentationStore {
           revision: current.revision + 1,
         };
         this.storage.sql.exec(
-          "UPDATE match_presentations SET emoji_id = ?, aura = ?, revision = ?, operation_id = ?, operation_json = ? WHERE match_id = ? AND actor_uid = ?",
+          "UPDATE match_presentations_canonical SET emoji_id = ?, aura = ?, revision = ?, operation_id = ?, operation_json = ? WHERE match_id = ? AND actor_uid = ?",
           presentation.emojiId,
           presentation.aura,
           presentation.revision,

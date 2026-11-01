@@ -3,9 +3,9 @@ import type {
   EventProgressRecordKind,
 } from "../../../runtime/eventProgressRecords.js";
 import type { LegacyEventProjectionTransactions } from "./eventProjectionRecoveryFixture.ts";
-import { readEventTelegramProjectionDocument } from "../../../runtime/telegram/eventProjectionRecords.js";
+import { eventProjectionStateFixture as readEventTelegramProjectionDocument } from "./eventProjectionFixture.ts";
 import type { StateQuery } from "../test/stateRepositoryTestTypes.ts";
-import { encodeEventUpdates } from "../src/eventCompatibilityCodec.ts";
+import { encodeEventUpdates } from "./eventLegacyFixtureCodec.ts";
 import type { EventStore } from "../src/eventStoreContracts.ts";
 import type { MatchStatePort } from "../src/repositoryContracts.ts";
 import type { EventLeaseKey } from "../../../runtime/eventLeases.js";

@@ -1,7 +1,4 @@
-import {
-  emptyAutomatchEntryFields,
-  type AutomatchEntryRead,
-} from "../../../../runtime/automatchRecords.js";
+import { type AutomatchEntryRead } from "../../../../runtime/automatchRecords.js";
 import { getDisplayNameFromAddress } from "../../../../runtime/telegramDisplay.js";
 import { measureAutomatchPhase } from "../automatchTelemetry.ts";
 import type { AutomatchRepository } from "../gameplayContracts.ts";
@@ -55,12 +52,12 @@ export function getFirstQueuedAutomatch(
   if (!queue) {
     return null;
   }
-  const first = Object.entries(queue)[0];
+  const first = Object.entries(queue).find(([, value]) => value !== null);
   if (!first) {
     return null;
   }
   const [inviteId, data] = first;
-  return { inviteId, data: data.record || emptyAutomatchEntryFields() };
+  return data === null ? null : { inviteId, data };
 }
 
 export async function selectAutomatchAttempt(
@@ -137,7 +134,7 @@ export async function selectAutomatchAttempt(
   }
   const hasProfile = profile.profileId !== "";
   const emojiId = hasProfile ? profile.emoji : request.emojiId;
-  const aura = (hasProfile ? profile.aura : request.aura) || null;
+  const aura = hasProfile ? profile.aura : request.aura;
   const name = getDisplayNameFromAddress(
     profile.username,
     profile.eth,

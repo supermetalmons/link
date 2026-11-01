@@ -218,7 +218,7 @@ export const NotificationBannerComponent: React.FC<
     <NotificationBanner
       data-notification-banner="true"
       $isVisible={isVisible}
-      $dismissType={dismissType}
+      $dismissType={dismissType ?? null}
       onClick={handleNotificationClick}
     >
       <NotificationImage

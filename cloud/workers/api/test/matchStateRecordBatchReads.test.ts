@@ -9,11 +9,21 @@ import type {
 } from "../src/matchStateTypes.ts";
 
 type Request = { playerId: string; matchId: string };
+function fixtureRecord(
+  input: Request & {
+    inviteId?: string | null;
+    epoch?: number;
+    legacy?: boolean;
+  },
+) {
+  return matchDocumentFixture({ fen: JSON.stringify(input) });
+}
+
 type Control = { backend: string; state: string; epoch: number };
 type Route = {
   actor_uid: string;
   match_id: string;
-  kind: "durable" | "legacy";
+  kind: "durable" | "archive";
   invite_id: string | null;
   epoch: number;
 };
@@ -43,18 +53,14 @@ function route(input: Request, epoch = 1): Route {
     actor_uid: input.playerId,
     match_id: input.matchId,
     kind: "durable",
-    invite_id: `stored-invite-${Math.floor(Number(input.matchId.split("-")[1]) / 2)}`,
+    invite_id: `stored-invite-${Math.floor(Number(input.matchId.split("-")[1]!) / 2)}`,
     epoch,
   };
 }
 
 function records(input: MatchStateRecordsRequest): MatchStateRecord[] {
   return input.requests.map((request) =>
-    matchDocumentFixture({
-      ...request,
-      inviteId: input.inviteId,
-      epoch: input.epoch,
-    }),
+    fixtureRecord({ ...request, inviteId: input.inviteId, epoch: input.epoch }),
   );
 }
 
@@ -63,7 +69,7 @@ function fixture({
   findRoute = (input) => route(input),
   beforeRoutes = async () => {},
   read = async (input) => records(input),
-  legacy = async (input) => ({ ...input, legacy: true }),
+  legacy = async (input) => fixtureRecord({ ...input, legacy: true }),
   legacyJson,
   mapLegacyResults = (results) => results,
   mapSnapshotResults = (results) => results,
@@ -139,10 +145,10 @@ function fixture({
               async first() {
                 stats.d1Calls.push({ session, queries: [sql] });
                 const input = {
-                  playerId: statement.values[0],
-                  matchId: statement.values[1],
+                  playerId: statement.values[0]!,
+                  matchId: statement.values[1]!,
                 };
-                if (sql.includes("FROM match_state_legacy_records")) {
+                if (sql.includes("FROM match_state_records_canonical")) {
                   return tracked(() => readLegacyRow(input));
                 }
                 assert.ok(sql.includes("FROM match_state_routes"));
@@ -159,11 +165,11 @@ function fixture({
               session,
               queries: statements.map(({ sql }) => sql),
             });
-            const hasControl = statements[0]?.sql.includes(
+            const hasControl = statements[0]!?.sql.includes(
               "FROM match_state_control",
             );
-            const isLegacy = statements[0]?.sql.includes(
-              "FROM match_state_legacy_records",
+            const isLegacy = statements[0]!?.sql.includes(
+              "FROM match_state_records_canonical",
             );
             const inputs = statements
               .slice(hasControl ? 1 : 0)
@@ -171,12 +177,12 @@ function fixture({
                 assert.ok(
                   sql.includes(
                     isLegacy
-                      ? "FROM match_state_legacy_records"
+                      ? "FROM match_state_records_canonical"
                       : "FROM match_state_routes",
                   ),
                 );
                 assert.equal(values.length, 2);
-                return { playerId: values[0], matchId: values[1] };
+                return { playerId: values[0]!, matchId: values[1]! };
               });
             if (isLegacy) {
               stats.legacyBatches.push(inputs);
@@ -246,18 +252,20 @@ test("eight records batch routes once and read four stored invites in input orde
   }
   assert.deepEqual(
     await result,
-    inputs.map((input) => ({
-      ...input,
-      inviteId: route(input).invite_id,
-      epoch: 1,
-    })),
+    inputs.map((input) =>
+      fixtureRecord({
+        ...input,
+        inviteId: route(input).invite_id,
+        epoch: 1,
+      }),
+    ),
   );
   assert.equal(stats.controls, 2);
   assert.equal(stats.d1Calls.length, 2);
-  assert.equal(stats.d1Calls[0].queries.length, 9);
-  assert.match(stats.d1Calls[0].queries[0], /FROM match_state_control/);
-  assert.match(stats.d1Calls[1].queries[0], /FROM match_state_control/);
-  assert.notEqual(stats.d1Calls[0].session, stats.d1Calls[1].session);
+  assert.equal(stats.d1Calls[0]!.queries.length, 9);
+  assert.match(stats.d1Calls[0]!.queries[0]!, /FROM match_state_control/);
+  assert.match(stats.d1Calls[1]!.queries[0]!, /FROM match_state_control/);
+  assert.notEqual(stats.d1Calls[0]!.session, stats.d1Calls[1]!.session);
   assert.deepEqual(stats.routeBatches, [inputs]);
   assert.equal(stats.roomReads.length, 4);
   assert.ok(stats.roomReads.every((input) => input.requests.length === 2));
@@ -271,13 +279,13 @@ test("eight legacy records use one primary batch in input order", async () => {
   const { source, stats } = fixture({
     findRoute: (input) => ({
       ...route(input),
-      kind: "legacy",
+      kind: "archive",
       invite_id: null,
     }),
   });
   assert.deepEqual(
     await source.readMatchRecords(inputs),
-    inputs.map((input) => ({ ...input, legacy: true })),
+    inputs.map((input) => fixtureRecord({ ...input, legacy: true })),
   );
   assert.deepEqual(stats.routeBatches, [inputs]);
   assert.deepEqual(stats.legacyBatches, [inputs]);
@@ -295,10 +303,12 @@ test("single and absent records combine initial authority and routes before a fr
     const { source, stats } = fixture({
       findRoute: (input) => (missing ? null : route(input)),
     });
-    const [input] = requests(1);
+    const input = requests(1)[0]!;
     assert.deepEqual(
       await source.readMatchRecord(input),
-      missing ? null : { ...input, inviteId: "stored-invite-0", epoch: 1 },
+      missing
+        ? null
+        : fixtureRecord({ ...input, inviteId: "stored-invite-0", epoch: 1 }),
     );
     assert.equal(stats.controls, 2);
     assert.equal(stats.sessions, 2);
@@ -306,10 +316,10 @@ test("single and absent records combine initial authority and routes before a fr
       stats.d1Calls.map(({ queries }) => queries.length),
       [2, 1],
     );
-    assert.match(stats.d1Calls[0].queries[0], /FROM match_state_control/);
-    assert.match(stats.d1Calls[0].queries[1], /FROM match_state_routes/);
-    assert.match(stats.d1Calls[1].queries[0], /FROM match_state_control/);
-    assert.notEqual(stats.d1Calls[0].session, stats.d1Calls[1].session);
+    assert.match(stats.d1Calls[0]!.queries[0]!, /FROM match_state_control/);
+    assert.match(stats.d1Calls[0]!.queries[1]!, /FROM match_state_routes/);
+    assert.match(stats.d1Calls[1]!.queries[0]!, /FROM match_state_control/);
+    assert.notEqual(stats.d1Calls[0]!.session, stats.d1Calls[1]!.session);
     assert.equal(stats.roomReads.length, missing ? 0 : 1);
   }
 });
@@ -356,7 +366,7 @@ test("failed or incomplete initial snapshots fail closed without room reads or b
     },
     {
       mapSnapshotResults: (results) => [
-        results[0],
+        results[0]!,
         { success: false, results: [] },
         ...results.slice(2),
       ],
@@ -375,48 +385,54 @@ test("failed or incomplete initial snapshots fail closed without room reads or b
   }
 });
 
-test("interleaved legacy duplicates retain raw JSON values and missing positions", async () => {
+test("interleaved archive duplicates retain canonical values and missing positions", async () => {
   const inputs = requests(7);
   const targets = [
-    inputs[4],
-    inputs[5],
-    inputs[0],
-    inputs[2],
-    inputs[1],
-    inputs[0],
-    inputs[6],
-    inputs[3],
+    inputs[4]!,
+    inputs[5]!,
+    inputs[0]!,
+    inputs[2]!,
+    inputs[1]!,
+    inputs[0]!,
+    inputs[6]!,
+    inputs[3]!,
   ];
-  const values = [null, false, 0, [1, { legacy: true }], ""];
+  const values = inputs
+    .slice(0, 5)
+    .map((input) => fixtureRecord({ ...input, legacy: true }));
   const { source, stats } = fixture({
     findRoute: (input) =>
-      input.matchId === inputs[6].matchId
+      input.matchId === inputs[6]!.matchId
         ? null
-        : input.matchId === inputs[5].matchId
+        : input.matchId === inputs[5]!.matchId
           ? route(input)
-          : { ...route(input), kind: "legacy", invite_id: null },
+          : { ...route(input), kind: "archive", invite_id: null },
     legacyJson: async (input) =>
-      JSON.stringify(values[Number(input.matchId.split("-")[1])]),
+      JSON.stringify(values[Number(input.matchId.split("-")[1]!)]),
   });
   assert.deepEqual(await source.readMatchRecords(targets), [
-    "",
-    { ...inputs[5], inviteId: route(inputs[5]).invite_id, epoch: 1 },
+    values[4]!,
+    fixtureRecord({
+      ...inputs[5]!,
+      inviteId: route(inputs[5]!).invite_id,
+      epoch: 1,
+    }),
+    values[0]!,
+    values[2]!,
+    values[1]!,
+    values[0]!,
     null,
-    0,
-    false,
-    null,
-    null,
-    values[3],
+    values[3]!,
   ]);
   assert.deepEqual(stats.legacyBatches, [
-    [inputs[4], inputs[0], inputs[2], inputs[1], inputs[0], inputs[3]],
+    [inputs[4]!, inputs[0]!, inputs[2]!, inputs[1]!, inputs[0]!, inputs[3]!],
   ]);
   assert.deepEqual(stats.routeBatches, [targets]);
   assert.equal(stats.roomReads.length, 1);
 });
 
 test("only absent legacy rows recheck routes in a fresh primary session", async () => {
-  for (const recheckedKind of ["missing", "durable", "legacy"] as const) {
+  for (const recheckedKind of ["missing", "durable", "archive"] as const) {
     let routeBatch = 0;
     const inputs = requests(3);
     const { source, stats } = fixture({
@@ -424,26 +440,35 @@ test("only absent legacy rows recheck routes in a fresh primary session", async 
         routeBatch = batch;
       },
       findRoute: (input) =>
-        routeBatch === 1 || recheckedKind === "legacy"
-          ? { ...route(input), kind: "legacy", invite_id: null }
+        routeBatch === 1 || recheckedKind === "archive"
+          ? { ...route(input), kind: "archive", invite_id: null }
           : recheckedKind === "durable"
             ? route(input)
             : null,
       legacy: async (input) =>
-        input.matchId === inputs[0].matchId ? { stored: true } : null,
+        input.matchId === inputs[0]!.matchId
+          ? matchDocumentFixture({ fen: "stored" })
+          : null,
     });
     const result = source.readMatchRecords(inputs);
-    if (recheckedKind === "legacy") {
+    if (recheckedKind === "archive") {
       await assert.rejects(result, {
-        message: "match-state-legacy-record-unavailable",
+        message: "match-state-archive-record-unavailable",
       });
     } else {
-      assert.deepEqual(await result, [{ stored: true }, null, null]);
+      assert.deepEqual(await result, [
+        matchDocumentFixture({ fen: "stored" }),
+        null,
+        null,
+      ]);
     }
     assert.deepEqual(stats.legacyBatches, [inputs]);
     assert.deepEqual(stats.routeBatches, [inputs, inputs.slice(1)]);
-    assert.notEqual(stats.routeBatchSessions[1], stats.legacyBatchSessions[0]);
-    assert.notEqual(stats.routeBatchSessions[1], stats.routeBatchSessions[0]);
+    assert.notEqual(
+      stats.routeBatchSessions[1]!,
+      stats.legacyBatchSessions[0]!,
+    );
+    assert.notEqual(stats.routeBatchSessions[1]!, stats.routeBatchSessions[0]!);
     assert.deepEqual(stats.scalarRoutes, []);
     assert.equal(stats.controls, 2);
   }
@@ -454,7 +479,7 @@ test("malformed JSON and incomplete legacy batches fail closed", async () => {
     const { source, stats } = fixture({
       findRoute: (input) => ({
         ...route(input),
-        kind: "legacy",
+        kind: "archive",
         invite_id: null,
       }),
       ...(malformedJson
@@ -468,7 +493,7 @@ test("malformed JSON and incomplete legacy batches fail closed", async () => {
       else
         assert.equal(
           (error as Error).message,
-          "match-state-legacy-record-unavailable",
+          "match-state-archive-record-unavailable",
         );
       return true;
     });
@@ -482,14 +507,16 @@ test("malformed JSON and incomplete legacy batches fail closed", async () => {
 test("duplicate and interleaved targets preserve every result position", async () => {
   const { source, stats } = fixture();
   const inputs = requests(4);
-  const targets = [inputs[3], inputs[0], inputs[2], inputs[0], inputs[1]];
+  const targets = [inputs[3]!, inputs[0]!, inputs[2]!, inputs[0]!, inputs[1]!];
   assert.deepEqual(
     await source.readMatchRecords(targets),
-    targets.map((input) => ({
-      ...input,
-      inviteId: route(input).invite_id,
-      epoch: 1,
-    })),
+    targets.map((input) =>
+      fixtureRecord({
+        ...input,
+        inviteId: route(input).invite_id,
+        epoch: 1,
+      }),
+    ),
   );
   assert.equal(stats.roomReads.length, 2);
   assert.equal(stats.controls, 2);
@@ -497,13 +524,15 @@ test("duplicate and interleaved targets preserve every result position", async (
 
 test("single records and one-item batches preserve the same routing outcomes", async (t) => {
   const log = t.mock.method(console, "info", () => {});
-  const [input] = requests(1);
+  const input = requests(1)[0]!;
   const cases: Array<{
     options?: Parameters<typeof fixture>[0];
     value?: unknown;
     error?: string;
   }> = [
-    { value: { ...input, inviteId: "stored-invite-0", epoch: 1 } },
+    {
+      value: fixtureRecord({ ...input, inviteId: "stored-invite-0", epoch: 1 }),
+    },
     {
       options: { findRoute: () => null },
       value: null,
@@ -512,12 +541,12 @@ test("single records and one-item batches preserve the same routing outcomes", a
       options: {
         findRoute: (target) => ({
           ...route(target),
-          kind: "legacy",
+          kind: "archive",
           invite_id: null,
         }),
-        legacy: async () => [1, { legacy: true }],
+        legacy: async () => matchDocumentFixture({ fen: "archived" }),
       },
-      value: [1, { legacy: true }],
+      value: matchDocumentFixture({ fen: "archived" }),
     },
     {
       options: { read: async () => [null] },
@@ -527,12 +556,12 @@ test("single records and one-item batches preserve the same routing outcomes", a
       options: {
         findRoute: (target) => ({
           ...route(target),
-          kind: "legacy",
+          kind: "archive",
           invite_id: null,
         }),
         legacy: async () => null,
       },
-      error: "match-state-legacy-record-unavailable",
+      error: "match-state-archive-record-unavailable",
     },
     {
       options: { findRoute: (target) => route(target, 2) },
@@ -542,7 +571,7 @@ test("single records and one-item batches preserve the same routing outcomes", a
       options: {
         control: () => ({ backend: "durable", state: "frozen", epoch: 1 }),
       },
-      value: { ...input, inviteId: "stored-invite-0", epoch: 1 },
+      value: fixtureRecord({ ...input, inviteId: "stored-invite-0", epoch: 1 }),
     },
     {
       options: {
@@ -578,7 +607,7 @@ test("invalid and pre-aborted single records perform no storage reads", async ()
   const controller = new AbortController();
   controller.abort();
   await assert.rejects(
-    source.readMatchRecord(requests(1)[0], controller.signal),
+    source.readMatchRecord(requests(1)[0]!, controller.signal),
     {
       name: "AbortError",
     },
@@ -620,18 +649,18 @@ test("mixed durable, legacy and missing routes retain scalar read results", asyn
   const { source, stats } = fixture({
     findRoute: (input) =>
       input.matchId === "match-1"
-        ? { ...route(input), kind: "legacy", invite_id: null }
+        ? { ...route(input), kind: "archive", invite_id: null }
         : input.matchId === "match-2"
           ? null
           : route(input),
   });
   assert.deepEqual(await source.readMatchRecords(inputs), [
-    { ...inputs[0], inviteId: "stored-invite-0", epoch: 1 },
-    { ...inputs[1], legacy: true },
+    fixtureRecord({ ...inputs[0]!, inviteId: "stored-invite-0", epoch: 1 }),
+    fixtureRecord({ ...inputs[1]!, legacy: true }),
     null,
-    { ...inputs[3], inviteId: "stored-invite-1", epoch: 1 },
+    fixtureRecord({ ...inputs[3]!, inviteId: "stored-invite-1", epoch: 1 }),
   ]);
-  assert.deepEqual(stats.legacyReads, [inputs[1]]);
+  assert.deepEqual(stats.legacyReads, [inputs[1]!]);
   assert.equal(stats.roomReads.length, 2);
   assert.equal(stats.controls, 2);
   assert.equal(stats.routeBatches.length, 1);
@@ -647,16 +676,16 @@ test("one legacy batch and room groups share the four-read concurrency limit", a
   const inputs = requests(8);
   const { source, stats } = fixture({
     findRoute: (input) =>
-      Number(input.matchId.split("-")[1]) % 2 === 0
+      Number(input.matchId.split("-")[1]!) % 2 === 0
         ? { ...route(input), invite_id: input.matchId }
-        : { ...route(input), kind: "legacy", invite_id: null },
+        : { ...route(input), kind: "archive", invite_id: null },
     read: async (input) => {
       await pause();
       return records(input);
     },
     legacy: async (input) => {
       await pause();
-      return { ...input, legacy: true };
+      return fixtureRecord({ ...input, legacy: true });
     },
   });
   const result = source.readMatchRecords(inputs);
@@ -670,8 +699,8 @@ test("one legacy batch and room groups share the four-read concurrency limit", a
     await result,
     inputs.map((input, index) =>
       index % 2 === 0
-        ? { ...input, inviteId: input.matchId, epoch: 1 }
-        : { ...input, legacy: true },
+        ? fixtureRecord({ ...input, inviteId: input.matchId, epoch: 1 })
+        : fixtureRecord({ ...input, legacy: true }),
     ),
   );
   assert.equal(stats.legacyReads.length, 4);
@@ -684,24 +713,24 @@ test("one legacy batch and room groups share the four-read concurrency limit", a
 });
 
 test("routed durable or legacy records cannot silently become missing", async () => {
-  for (const kind of ["durable", "legacy"] as const) {
+  for (const kind of ["durable", "archive"] as const) {
     const { source, stats } = fixture({
       findRoute: (input) => ({
         ...route(input),
         kind,
-        invite_id: kind === "legacy" ? null : route(input).invite_id,
+        invite_id: kind === "archive" ? null : route(input).invite_id,
       }),
       read: async () => [null],
       legacy: async () => null,
     });
     await assert.rejects(source.readMatchRecords(requests(1)), {
       message:
-        kind === "legacy"
-          ? "match-state-legacy-record-unavailable"
+        kind === "archive"
+          ? "match-state-archive-record-unavailable"
           : "match-state-record-unavailable",
     });
     assert.equal(stats.controls, 2);
-    assert.equal(stats.routeBatches.length, kind === "legacy" ? 2 : 1);
+    assert.equal(stats.routeBatches.length, kind === "archive" ? 2 : 1);
     assert.equal(stats.scalarRoutes.length, 0);
   }
 });
@@ -717,11 +746,13 @@ test("authority changes discard all successful route and record results", async 
   });
   assert.deepEqual(
     await source.readMatchRecords(requests(4)),
-    requests(4).map((input) => ({
-      ...input,
-      inviteId: route(input).invite_id,
-      epoch: 2,
-    })),
+    requests(4).map((input) =>
+      fixtureRecord({
+        ...input,
+        inviteId: route(input).invite_id,
+        epoch: 2,
+      }),
+    ),
   );
   assert.equal(stats.controls, 4);
   assert.equal(stats.routeBatches.length, 2);
@@ -741,18 +772,18 @@ test("authority changes discard legacy values and repeat the whole batch", async
     },
     findRoute: (input) => ({
       ...route(input, epoch),
-      kind: "legacy",
+      kind: "archive",
       invite_id: null,
     }),
-    legacy: async (input) => ({ ...input, epoch }),
+    legacy: async (input) => fixtureRecord({ ...input, epoch }),
   });
   assert.deepEqual(
     await source.readMatchRecords(inputs),
-    inputs.map((input) => ({ ...input, epoch: 2 })),
+    inputs.map((input) => fixtureRecord({ ...input, epoch: 2 })),
   );
   assert.deepEqual(stats.legacyBatches, [inputs, inputs]);
   assert.deepEqual(stats.routeBatches, [inputs, inputs]);
-  assert.notEqual(stats.legacyBatchSessions[0], stats.legacyBatchSessions[1]);
+  assert.notEqual(stats.legacyBatchSessions[0]!, stats.legacyBatchSessions[1]!);
   assert.equal(stats.controls, 4);
   assert.deepEqual(stats.roomReads, []);
 });
@@ -789,11 +820,13 @@ test("failed old-epoch groups drain before retrying and scheduling new groups", 
   gate.resolve();
   assert.deepEqual(
     await result,
-    requests(8).map((input) => ({
-      ...input,
-      inviteId: input.matchId,
-      epoch: 2,
-    })),
+    requests(8).map((input) =>
+      fixtureRecord({
+        ...input,
+        inviteId: input.matchId,
+        epoch: 2,
+      }),
+    ),
   );
   assert.equal(stats.controls, 4);
   assert.equal(stats.routeBatches.length, 2);
@@ -872,7 +905,7 @@ test("aborted legacy reads do not recheck missing-record routes after draining",
   const { source, stats } = fixture({
     findRoute: (input) => ({
       ...route(input),
-      kind: "legacy",
+      kind: "archive",
       invite_id: null,
     }),
     legacy: async () => {
@@ -915,7 +948,7 @@ test("cancellation during legacy route recheck does not read authority afterward
   const { source, stats } = fixture({
     findRoute: (input) => ({
       ...route(input),
-      kind: "legacy",
+      kind: "archive",
       invite_id: null,
     }),
     beforeRoutes: async (_inputs, batch) => {
@@ -984,7 +1017,7 @@ test("single and batch cancellation interrupt authority, routes and rooms withou
       let outcome: { error?: unknown } | undefined;
       const observed = (
         mode === "single"
-          ? source.readMatchRecord(requests(1)[0], controller.signal)
+          ? source.readMatchRecord(requests(1)[0]!, controller.signal)
           : source.readMatchRecords(requests(8), controller.signal)
       ).then(
         () => (outcome = {}),

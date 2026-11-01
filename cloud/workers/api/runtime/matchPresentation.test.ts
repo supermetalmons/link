@@ -1,3 +1,18 @@
+import { applyCanonicalTestMigrations } from "./canonicalTestMigrations.ts";
+import {
+  readPresentationInvite,
+  readMatchPresentationSnapshot,
+} from "../src/matchPresentationAccess.ts";
+import { inviteDocumentFixture } from "../test/inviteDocumentFixture.ts";
+import {
+  APPLICATION_DATA_SOCKET_PROTOCOL,
+  APPLICATION_DATA_HEADER,
+  APPLICATION_DATA_EPOCH,
+} from "@mons/shared/data-contract";
+import { evictCanonicalMatchRoom as evictDurableObject } from "./canonicalMatchTestFixture.ts";
+import { canonicalMatchEnvironment } from "./canonicalMatchTestFixture.ts";
+import { activateCanonicalApplicationFixture } from "./applicationRoomFixture.ts";
+import { runInCanonicalMatchRoom as runInDurableObject } from "./canonicalMatchTestFixture.ts";
 import {
   PRESENTATION_MAX_MESSAGE_BYTES,
   isMatchPresentationSnapshot,
@@ -10,13 +25,9 @@ import {
   REACTION_SOCKET_PROTOCOL,
   isInviteRoomMessage,
 } from "@mons/shared/reactions";
-import {
-  applyD1Migrations,
-  evictDurableObject,
-  runInDurableObject,
-  type D1Migration,
-} from "cloudflare:test";
-import { env } from "cloudflare:workers";
+import type { D1Migration } from "cloudflare:test";
+import { env as nativeEnv } from "cloudflare:workers";
+
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { createGameplayRepository } from "../src/gameplayRepository.ts";
 import {
@@ -33,13 +44,17 @@ import {
   reactionSocketTestHeaders,
 } from "./presentationStorageFixture.ts";
 import { applyRetiredProfileMigrations } from "./profileTestMigrations.ts";
+const env = canonicalMatchEnvironment(nativeEnv);
 
 beforeAll(async () => {
   const testEnv = env as Env & {
     TEST_PROFILE_D1_MIGRATIONS: D1Migration[];
     TEST_D1_MIGRATIONS: D1Migration[];
   };
-  await applyD1Migrations(env.PROFILE_GAMES_DB, testEnv.TEST_D1_MIGRATIONS);
+  await applyCanonicalTestMigrations(
+    env.PROFILE_GAMES_DB,
+    testEnv.TEST_D1_MIGRATIONS,
+  );
   await env.PROFILE_GAMES_DB.batch([
     env.PROFILE_GAMES_DB.prepare(
       "UPDATE automatch_runtime_control SET backend = 'd1' WHERE singleton = 1",
@@ -62,8 +77,8 @@ beforeEach(() => {
   matchId = `presentation-${crypto.randomUUID()}`;
 });
 const seeds = {
-  "host-login": { emojiId: 1, aura: "" },
-  "guest-login": { emojiId: 1000, aura: "rainbow" },
+  "host-login": { emojiId: 1, aura: "none" as const },
+  "guest-login": { emojiId: 1000, aura: "rainbow" as const },
 };
 const update = (
   overrides: Partial<UpdateMatchPresentationRequest> = {},
@@ -78,7 +93,10 @@ const room = () => env.INVITE_REACTIONS.get(env.INVITE_REACTIONS.newUniqueId());
 
 async function registeredRepository(
   inviteId: string,
-  actorSeeds: Record<string, { emojiId: number; aura: string }>,
+  actorSeeds: Record<
+    string,
+    { emojiId: number; aura: import("@mons/shared/appearance").Aura }
+  >,
 ) {
   const actors = Object.keys(actorSeeds);
   const registrations = await prepareCreatedMatchPresentations(
@@ -87,7 +105,7 @@ async function registeredRepository(
       inviteId,
       matchId: inviteId,
       actorUid,
-      ...actorSeeds[actorUid],
+      ...actorSeeds[actorUid]!,
       sourceId: "test:router-creation",
     })),
   );
@@ -98,10 +116,15 @@ async function registeredRepository(
       1,
     ),
     env.PROFILE_GAMES_DB.prepare(
-      "INSERT INTO invite_sources (invite_id, source_json, revision, updated_at_ms) VALUES (?, ?, 1, 1)",
-    ).bind(inviteId, JSON.stringify({ hostId: actors[0], guestId: actors[1] })),
+      "INSERT INTO invite_sources_canonical (invite_id, source_json, revision, updated_at_ms) VALUES (?, ?, 1, 1)",
+    ).bind(
+      inviteId,
+      JSON.stringify(
+        inviteDocumentFixture({ hostId: actors[0], guestId: actors[1] }),
+      ),
+    ),
   ]);
-  return createGameplayRepository(env, {
+  const repository = createGameplayRepository(env, {
     stateClient: gameplayTestPort({
       getPath: async () => {
         throw new Error("unexpected-source-read");
@@ -114,6 +137,14 @@ async function registeredRepository(
       },
     }),
   });
+  await readMatchPresentationSnapshot(
+    env,
+    inviteId,
+    inviteId,
+    await readPresentationInvite(repository, inviteId),
+    {},
+  );
+  return repository;
 }
 
 function acceptSocket(response: Response) {
@@ -212,17 +243,17 @@ describe("durable match presentation", () => {
     await runInDurableObject(stub, async (instance) => {
       await expect(
         registerTestPresentations(instance, matchId, matchId, {
-          "host-login": { emojiId: 2, aura: "" },
+          "host-login": { emojiId: 2, aura: "none" as const },
         }),
       ).rejects.toThrow();
       await expect(
         registerTestPresentations(instance, matchId, matchId, {
-          "third-login": { emojiId: 2, aura: "" },
+          "third-login": { emojiId: 2, aura: "none" as const },
         }),
       ).rejects.toThrow();
       await expect(
         registerTestPresentations(instance, matchId, matchId, {
-          "invalid/uid": { emojiId: 2, aura: "" },
+          "invalid/uid": { emojiId: 2, aura: "none" as const },
         }),
       ).rejects.toThrow();
     });
@@ -243,7 +274,7 @@ describe("durable match presentation", () => {
     expect(
       await stub.updatePresentation("host-login", matchId, {
         ...request,
-        aura: "",
+        aura: "none" as const,
       }),
     ).toEqual({ ...first, status: "conflict" });
     expect(
@@ -252,9 +283,9 @@ describe("durable match presentation", () => {
     const second = await stub.updatePresentation(
       "host-login",
       matchId,
-      update({ expectedRevision: 1, aura: "" }),
+      update({ expectedRevision: 1, aura: "none" as const }),
     );
-    expect(second.presentation.aura).toBe("");
+    expect(second.presentation.aura).toBe("none");
     expect(second.presentation.revision).toBe(2);
     expect(
       await stub.updatePresentation("host-login", matchId, request),
@@ -288,11 +319,12 @@ describe("durable match presentation", () => {
     ]);
     expect(results[0].presentation).toEqual(results[1].presentation);
     expect(
-      (await readStoredPresentations(stub, `${matchId}1`)).players["host-login"]
-        .revision,
+      (await readStoredPresentations(stub, `${matchId}1`)).players[
+        "host-login"
+      ]!.revision,
     ).toBe(0);
     expect(
-      (await readStoredPresentations(stub, matchId)).players["guest-login"]
+      (await readStoredPresentations(stub, matchId)).players["guest-login"]!
         .revision,
     ).toBe(0);
   });
@@ -316,7 +348,7 @@ describe("durable match presentation", () => {
     const latest = await stub.updatePresentation(
       "host-login",
       matchId,
-      update({ expectedRevision: 1, aura: "" }),
+      update({ expectedRevision: 1, aura: "none" as const }),
     );
     const guest = await stub.updatePresentation(
       "guest-login",
@@ -432,17 +464,10 @@ describe("durable match presentation", () => {
     },
   );
 
-  it("preserves hibernated v2 reactions without a channel marker", async () => {
+  it("preserves canonical v2 reaction attachments through hibernation", async () => {
     const stub = room();
     const client = await connect(stub);
     await client.read();
-    await runInDurableObject(stub, (_instance, state) => {
-      for (const socket of state.getWebSockets()) {
-        const attachment = socket.deserializeAttachment();
-        delete attachment.channel;
-        socket.serializeAttachment(attachment);
-      }
-    });
     await evictDurableObject(stub);
     client.socket.send(REACTION_HEARTBEAT_REQUEST);
     expect(await client.read()).toBe(REACTION_HEARTBEAT_RESPONSE);
@@ -473,11 +498,12 @@ describe("durable match presentation", () => {
         {
           headers: {
             Origin: "https://mons.link",
+            [APPLICATION_DATA_HEADER]: String(APPLICATION_DATA_EPOCH),
             "CF-Connecting-IP": crypto.randomUUID(),
             Upgrade: "websocket",
             "Sec-WebSocket-Protocol": authenticated
-              ? `${REACTION_SOCKET_PROTOCOL}, ${REACTION_AUTH_PROTOCOL_PREFIX}host-login.payload.signature`
-              : REACTION_SOCKET_PROTOCOL,
+              ? `${REACTION_SOCKET_PROTOCOL}, ${APPLICATION_DATA_SOCKET_PROTOCOL}, ${REACTION_AUTH_PROTOCOL_PREFIX}host-login.payload.signature`
+              : `${REACTION_SOCKET_PROTOCOL}, ${APPLICATION_DATA_SOCKET_PROTOCOL}`,
           },
         },
       );
@@ -510,6 +536,7 @@ describe("durable match presentation", () => {
           method: "POST",
           headers: {
             Origin: "https://mons.link",
+            [APPLICATION_DATA_HEADER]: String(APPLICATION_DATA_EPOCH),
             Authorization: "Bearer host-login",
             "CF-Connecting-IP": crypto.randomUUID(),
           },
@@ -520,7 +547,7 @@ describe("durable match presentation", () => {
       { presentation: dependencies },
       ctx,
     );
-    expect(written.status).toBe(200);
+    expect(written.status, await written.clone().text()).toBe(200);
     const body = await written.json<{ presentation: unknown }>();
     for (const client of [host, spectator])
       expect(JSON.parse(await client.read()).presentation).toEqual(
@@ -529,6 +556,11 @@ describe("durable match presentation", () => {
     const read = await handleRequest(
       new Request(
         `https://api.mons.link/invites/${inviteId}/matches/${inviteId}/presentation`,
+        {
+          headers: {
+            [APPLICATION_DATA_HEADER]: String(APPLICATION_DATA_EPOCH),
+          },
+        },
       ),
       env,
       { presentation: dependencies },
@@ -549,10 +581,7 @@ describe("durable match presentation", () => {
       const repository = await registeredRepository(
         inviteId,
         Object.fromEntries(
-          actors.map((actorUid) => [
-            actorUid,
-            { emojiId: 1, aura: '"\\'.repeat(16) },
-          ]),
+          actors.map((actorUid) => [actorUid, { emojiId: 1, aura: "rainbow" }]),
         ),
       );
       const stub = env.INVITE_REACTIONS.getByName(inviteId);
@@ -569,9 +598,10 @@ describe("durable match presentation", () => {
           {
             headers: {
               Origin: "https://mons.link",
+              [APPLICATION_DATA_HEADER]: String(APPLICATION_DATA_EPOCH),
               "CF-Connecting-IP": crypto.randomUUID(),
               Upgrade: "websocket",
-              "Sec-WebSocket-Protocol": REACTION_SOCKET_PROTOCOL,
+              "Sec-WebSocket-Protocol": `${REACTION_SOCKET_PROTOCOL}, ${APPLICATION_DATA_SOCKET_PROTOCOL}`,
             },
           },
         ),
@@ -589,3 +619,5 @@ describe("durable match presentation", () => {
     }
   });
 });
+
+beforeAll(activateCanonicalApplicationFixture);

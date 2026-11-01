@@ -1,4 +1,5 @@
 import { env } from "cloudflare:workers";
+import { eventDocumentFixture } from "../test/eventCompatibilityFixture.ts";
 import type { D1Migration } from "cloudflare:test";
 import { beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { EventWritesDisabled, type EventD1Connection } from "../src/eventD1.ts";
@@ -18,14 +19,14 @@ const initialTimestamp = 100;
 const families = [
   {
     kind: "profile-game",
-    table: "event_profile_game_projection_outboxes",
+    table: "event_profile_game_projection_outboxes_canonical",
     timestampColumn: "last_queued_at_ms",
     limit: 20,
     pageSize: 10,
   },
   {
     kind: "telegram",
-    table: "event_telegram_projection_outboxes",
+    table: "event_telegram_projection_outboxes_canonical",
     timestampColumn: "updated_at_ms",
     limit: 100,
     pageSize: 100,
@@ -49,22 +50,25 @@ async function seed(
     return [
       db
         .prepare(
-          `INSERT INTO event_records
+          `INSERT INTO event_records_canonical
          (event_id, status, start_at_ms, updated_at_ms, revision, record_json)
-         VALUES (?, 'active', 1, 1, 1, '{}')`,
+         VALUES (?, 'active', 1, 1, 1, ?)`,
         )
-        .bind(eventId),
+        .bind(
+          eventId,
+          JSON.stringify(eventDocumentFixture({ eventId, status: "active" })),
+        ),
       kind === "profile-game"
         ? db
             .prepare(
-              `INSERT INTO event_profile_game_projection_outboxes
+              `INSERT INTO event_profile_game_projection_outboxes_canonical
              (event_id, request_id, status, last_queued_at_ms, record_json)
              VALUES (?, ?, 'pending', ?, ?)`,
             )
             .bind(eventId, requestId, initialTimestamp, recordJson)
         : db
             .prepare(
-              `INSERT INTO event_telegram_projection_outboxes
+              `INSERT INTO event_telegram_projection_outboxes_canonical
              (event_id, request_id, status, first_queued_at_ms, updated_at_ms, record_json)
              VALUES (?, ?, 'pending', ?, ?, ?)`,
             )
@@ -143,14 +147,24 @@ function expectedTasks(
   kind: EventProjectionRecoveryKind,
   eventIds: readonly string[],
 ) {
-  return eventIds.map((eventId) => ({
-    kind:
-      kind === "profile-game"
-        ? "event-profile-game-projection"
-        : "event-telegram-projection",
-    eventId,
-    requestId: `request-${eventId}`,
-  }));
+  return eventIds.map((eventId) => {
+    const task = {
+      kind:
+        kind === "profile-game"
+          ? "event-profile-game-projection"
+          : "event-telegram-projection",
+      eventId,
+      requestId: `request-${eventId}`,
+    };
+    return kind === "profile-game"
+      ? {
+          dataEpoch: 1,
+          queue: "EVENT_PROFILE_GAME_PROJECTION_QUEUE",
+          dispatchId: expect.any(String),
+          payload: task,
+        }
+      : task;
+  });
 }
 
 function admissionCount() {
@@ -192,7 +206,7 @@ describe("event projection recovery sweep admissions", () => {
   beforeEach(async () => {
     await db.batch([
       db.prepare("DELETE FROM event_write_admissions"),
-      db.prepare("DELETE FROM event_records"),
+      db.prepare("DELETE FROM event_records_canonical"),
       db.prepare(
         "UPDATE event_runtime_control SET storage_mode = 'd1' WHERE singleton = 1",
       ),

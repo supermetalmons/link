@@ -1,7 +1,8 @@
+import { applyPreCleanupTestMigrations } from "./canonicalTestMigrations.ts";
 import { env } from "cloudflare:workers";
-import { applyD1Migrations, type D1Migration } from "cloudflare:test";
+import type { D1Migration } from "cloudflare:test";
 import { beforeAll, describe, expect, it } from "vitest";
-import { createLegacyAutomatchD1Store } from "../test/legacyAutomatchStoreFixture.ts";
+import { querySql } from "../test/legacyAutomatchStoreFixture.ts";
 
 const db = env.PROFILE_GAMES_DB;
 const migrations = (env as Env & { TEST_D1_MIGRATIONS: D1Migration[] })
@@ -9,30 +10,51 @@ const migrations = (env as Env & { TEST_D1_MIGRATIONS: D1Migration[] })
 const migrationIndex = migrations.findIndex(
   ({ name }) => name === "0026_recovery_outbox_ordering.sql",
 );
-const store = createLegacyAutomatchD1Store(db);
+async function readOutbox(table: string, field: string, generated = false) {
+  const query = querySql("payload_json", {
+    orderBy: field,
+    startAt: 0,
+    endAt: 10,
+    limitToFirst: 1,
+  });
+  const where = generated
+    ? "payload_json IS NOT NULL AND recovery_sort_rank = 3 AND recovery_sort_value >= 0 AND recovery_sort_value <= 10"
+    : query.where;
+  const order = generated
+    ? "recovery_sort_rank, recovery_sort_value, recovery_key_rank, recovery_key_integer, recovery_key_length, record_key COLLATE BINARY"
+    : query.order;
+  const values = await db
+    .prepare(
+      `SELECT record_key, payload_json FROM ${table} WHERE ${where} ORDER BY ${order} LIMIT 1`,
+    )
+    .bind(...(generated ? [] : query.values))
+    .all<{ record_key: string; payload_json: string }>();
+  return Object.fromEntries(
+    values.results.map((row) => [row.record_key, JSON.parse(row.payload_json)]),
+  );
+}
 const outboxes = [
   {
     table: "automatch_telegram_projection_outbox",
+    oldIndex: "idx_automatch_telegram_projection_due",
+    newIndex: "idx_automatch_telegram_projection_recovery",
     index: "idx_automatch_telegram_projection_due",
     field: "updatedAtMs",
     read: () =>
-      store.getPath("telegramProjectionOutbox/automatch", {
-        orderBy: "updatedAtMs",
-        startAt: 0,
-        endAt: 10,
-        limitToFirst: 1,
-      }),
+      readOutbox("automatch_telegram_projection_outbox", "updatedAtMs", false),
+    legacyRead: () =>
+      readOutbox("automatch_telegram_projection_outbox", "updatedAtMs"),
   },
   {
     table: "game_session_projection_outbox",
+    oldIndex: "idx_game_session_projection_due",
+    newIndex: "idx_game_session_projection_recovery",
     index: "idx_game_session_projection_due",
     field: "lastQueuedAtMs",
     read: () =>
-      store.getPath("profileGameProjectionOutbox/automatch", {
-        orderBy: "lastQueuedAtMs",
-        endAt: 10,
-        limitToFirst: 1,
-      }),
+      readOutbox("game_session_projection_outbox", "lastQueuedAtMs", false),
+    legacyRead: () =>
+      readOutbox("game_session_projection_outbox", "lastQueuedAtMs"),
   },
 ] as const;
 
@@ -65,7 +87,10 @@ async function indexes(table: string) {
 describe("recovery outbox ordering migration", () => {
   beforeAll(async () => {
     expect(migrationIndex).toBeGreaterThan(0);
-    await applyD1Migrations(db, migrations.slice(0, migrationIndex));
+    await applyPreCleanupTestMigrations(
+      db,
+      migrations.slice(0, migrationIndex),
+    );
   });
 
   it("replaces both indexes without changing retained records and maintains later writes", async () => {
@@ -104,7 +129,7 @@ describe("recovery outbox ordering migration", () => {
       outboxes.map(({ table }) => indexes(table)),
     );
 
-    await applyD1Migrations(db, [migrations[migrationIndex]]);
+    await applyPreCleanupTestMigrations(db, [migrations[migrationIndex]!]);
 
     expect(await Promise.all(outboxes.map(({ table }) => rows(table)))).toEqual(
       beforeRows,
@@ -113,11 +138,11 @@ describe("recovery outbox ordering migration", () => {
       position,
       { table, index, field, read },
     ] of outboxes.entries()) {
-      expect(beforeIndexes[position].map(({ name }) => name)).toEqual([index]);
+      expect(beforeIndexes[position]!.map(({ name }) => name)).toEqual([index]);
       const afterIndexes = await indexes(table);
       expect(afterIndexes.map(({ name }) => name)).toEqual([index]);
-      expect(afterIndexes[0].sql).not.toBe(beforeIndexes[position][0].sql);
-      expect(afterIndexes[0].sql).toContain("WHERE payload_json IS NOT NULL");
+      expect(afterIndexes[0]!.sql).not.toBe(beforeIndexes[position]![0]!.sql);
+      expect(afterIndexes[0]!.sql).toContain("WHERE payload_json IS NOT NULL");
       const columns = await db
         .prepare(`PRAGMA index_xinfo(${index})`)
         .all<{ cid: number; key: number; name: string | null }>();

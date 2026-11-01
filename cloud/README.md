@@ -8,17 +8,21 @@ Routine compatible releases keep canonical writes and Queue delivery active. Pre
 
 ## Canonical data
 
-`PROFILE_DB.profile_login_owners` is the sole source for login-to-profile ownership, including merge targets. Unreadable or inconsistent ownership fails closed. Profiles, ratings, recovery, wagers, and transaction guards live in profile D1; browser sessions and intents live in auth-state D1.
+`PROFILE_DB.profile_login_owners_canonical` is the sole source for login-to-profile ownership, including merge targets. Unreadable or inconsistent ownership fails closed. Profiles, ratings, recovery, wagers, and transaction guards live in profile D1; browser sessions and intents live in auth-state D1.
 
 The invite Durable Object owns active match records and timer claims. Gameplay D1 owns actor/match routes, immutable archived records, invite metadata, automatch, session receipts, discovery, projection outboxes, and locks. Events, Telegram delivery, and prize withdrawals have their own D1 databases.
 
-Worker and portable-runtime callers use typed domain repositories for matches, sessions, wagers, events, leases, Telegram delivery, and prize withdrawals. Event and session plans preserve their existing guarded commit stages. Compatibility codecs retain the exact persisted path encodings, server-value markers, and replay digests; legacy-shaped test adapters live only with the tests.
+Current timer starts live in the invite object's `match_state_timer_starts_canonical` table. The retired gameplay-D1 `match_timer_starts_canonical` table and its deletion context are not runtime dependencies. Existing rooms must retain verified local-layout metadata; fresh room initialization is atomic. Writer registration, incarnation/revision guards, and retained outcomes remain permanent coordination state. Do not delete these records or relax their SQL guards to make an unavailable room writable.
+
+Applied migrations, immutable D1 timer ownership and acknowledgement records, local receipts, and protected retirement reports preserve the evidence for the storage transition. Historical cleanup effect discriminators remain decodable for replay, without reviving a D1 timer writer or sweep. The final API exposes no temporary cleanup capability or executor.
+
+Worker and portable-runtime callers use typed domain repositories for matches, sessions, wagers, events, leases, Telegram delivery, and prize withdrawals. Event and session plans preserve their existing guarded commit stages. Compatibility codecs retain the exact persisted path encodings and replay digests; legacy-shaped test adapters live only with the tests.
 
 Wager mutations require a `WagerWriteRepository` supplied inside the reservation runtime's admitted callback. Base gameplay repositories expose wager reads; required write capabilities supplement the existing runtime admission and SQL guards.
 
 Rematch preparation reads both participants through the existing match-record batch API, sharing routing, authority checks, and room reads. Join and ensure-match operations retain their scalar reads so an existing participant match can return without reading the opponent.
 
-Preserve existing login IDs, applied SQL migrations, immutable snapshots, imported legacy match records, rating completions, source digests, and both event receipt stages. Stored compatibility formats are not permission to restart a completed migration or rewrite historical data.
+Preserve existing login IDs, applied SQL migrations, immutable snapshots, imported legacy match records, rating completions, source digests, and both event receipt stages. The canonical cutover is complete at data epoch 1. Current operations do not use source exports or the completed migration executor. Typed timestamp and counter commands resolve before persistence and digest calculation; stored compatibility formats do not authorize rewriting historical data.
 
 ## Browser sessions and profile recovery
 
@@ -26,7 +30,7 @@ Persistent browser sessions use five-minute Worker access tokens. Refresh and re
 
 Browser DevTools exposes `auth:restore-start`, `auth:local-ready`, `auth:session-ready`, `auth:identity-ready`, and `auth:name-committed` marks. `auth:name-visible` is a guarded two-animation-frame approximation after the verified label commits, not an exact paint measurement. Session responses expose `session`, `identity` when requested, and `total` in `Server-Timing`, alongside existing game/event phases. No timing telemetry is uploaded.
 
-Canonical ownership changes create catch-up work atomically in D1. The scheduled sweep recovers Queue dispatch. Completed jobs stay absent; do not reset request IDs or replay cursors. `mons-link-auth-recovery` owns idempotent profile recovery. Investigate a stuck job without deleting it or purging its Queue.
+Canonical ownership changes create catch-up work atomically in D1. The scheduled sweep recovers Queue dispatch. Completed jobs stay absent; do not reset request IDs or replay cursors. `mons-link-auth-recovery-data1` owns idempotent profile recovery. Investigate a stuck job without deleting it or purging its Queue.
 
 Auth recovery reports `done`, `continued`, or `deferred`. A confirmed page or phase advance sends one immediate continuation before acknowledging the current message. Waiting, contention, uncertain commits, and failed continuation sends retain the 60-second retry. Continuations do not update the job clocks: the game and final-job quiet periods still require 60 seconds, and initial dispatch, bounded page sizes, single-consumer concurrency, and stale-job recovery remain unchanged.
 
@@ -36,7 +40,7 @@ The five-minute auth cleanup sweep processes at most 1,000 rows per deletion or 
 
 ### Auth recovery quarantine
 
-The recovery sweep quarantines malformed jobs by their raw profile ID and `CAST(revision AS TEXT)` token in `PROFILE_DB.profile_auth_recovery_quarantine`. It retains the canonical job unchanged and skips that revision on later sweeps; a changed revision is eligible again. Raw identifiers and snapshot comparisons preserve database bytes, including BLOBs and invalid UTF-8. Quarantine logs identify jobs using `profileIdHex` and `revisionHex`. Deleting a completed canonical job also removes its quarantine marker.
+The recovery sweep quarantines malformed jobs by their raw profile ID and `CAST(revision AS TEXT)` token in `PROFILE_DB.profile_auth_recovery_quarantine_canonical`. It retains the canonical job unchanged and skips that revision on later sweeps; a changed revision is eligible again. Raw identifiers and snapshot comparisons preserve database bytes, including BLOBs and invalid UTF-8. Quarantine logs identify jobs using `profileIdHex` and `revisionHex`. Deleting a completed canonical job also removes its quarantine marker.
 
 Healthy scan rows carry only their ordinary fields and raw key metadata. Malformed rows receive a primary reread with a full byte-preserving observation before quarantine. A row repaired before that reread waits until the next sweep; a repair after it prevents the stale quarantine write.
 
@@ -46,8 +50,8 @@ Inspect retained jobs with this read-only query against `PROFILE_DB`:
 SELECT hex(quarantine.profile_id) AS profile_id_hex, quarantine.reason,
        hex(quarantine.revision_token) AS revision_token_hex,
        quarantine.quarantined_at_ms, jobs.*
-FROM profile_auth_recovery_quarantine AS quarantine
-JOIN profile_auth_recovery_jobs AS jobs USING (profile_id)
+FROM profile_auth_recovery_quarantine_canonical AS quarantine
+JOIN profile_auth_recovery_jobs_canonical AS jobs USING (profile_id)
 ORDER BY quarantine.quarantined_at_ms, quarantine.profile_id;
 ```
 
@@ -80,7 +84,7 @@ Profile-game automatch, event, profile-link, and rating recovery, plus Telegram 
 
 Continuation excludes the exact raw identities already scanned before applying the SQL limit, including rows discarded during inspection. It proceeds only after dispatch succeeds and a full page supplies distinct bounded identities. Oversized keys stop continuation after the current page is processed normally. No cursor or continuation message is persisted. Failed records remain recoverable; healthy work continues within the bounded scan, and a scan, admission, or Queue failure stops that stream while independent streams finish. SQL statements inside a D1 batch and D1 binding calls are counted separately in the combined scheduled-budget tests.
 
-Automatch outbox recovery uses generated scheduling columns while preserving canonical JSON and legacy ordering. Both old expression indexes and new generated-column indexes remain available. Apply the additive schema before promoting code that requires it, following the [generated recovery columns release procedure](../scripts/deploy-cloudflare.md#generated-recovery-columns).
+Automatch outbox recovery uses the canonical scheduling fields and indexes while preserving stored payloads and deterministic ordering. Validate actual query plans when changing its recovery queries.
 
 Healthy automatch recovery claims reuse the scanned outbox snapshot for their first attempt. Seeded writes assert the revision before the existing admission and resource guards; stale or unusable snapshots fall back to primary reads. Snapshots remain local to the sweep, reducing database round trips without changing Queue payloads, malformed-record repair, or scan limits.
 
@@ -95,11 +99,11 @@ npm run manage:profile-canonical -- --audit
 
 Ordinary commits check topology only for affected profiles, so unrelated corruption does not block healthy updates. `--audit` checks topology across the whole profile store with one read-only query and reports counts for inconsistent retiring-profile redirects, active profiles with redirects, and login owners, auth methods, or recovery jobs without an active profile. It exits unsuccessfully for any violation or unreadable result and does not change maintenance state.
 
-Schema maintenance may require `--freeze`, affected Queue pauses, verification of drained admissions/leases, the reviewed D1 migration, and `PRAGMA foreign_key_check`. Resume only after required checks pass. The deployment guide contains store-specific commands. Routine code changes and the additive projection-quarantine migration described below do not need this procedure. Never rewrite profile ownership, delete imported profile fields, or restore a coordinated database independently.
+Schema maintenance may require `--freeze`, affected Queue pauses, verification of drained admissions/leases, the reviewed D1 migration, and `PRAGMA foreign_key_check`. Resume only after required checks pass. The deployment guide contains store-specific commands. Routine code changes and compatible additive schema changes do not need this procedure. Never rewrite profile ownership, delete imported profile fields, or restore a coordinated database independently.
 
 ### Projection recovery quarantine
 
-Scheduled recovery records malformed profile-link jobs in `PROFILE_DB.profile_link_catchup_quarantine` and malformed rating projections in `PROFILE_DB.rating_projection_recovery_quarantine`. The canonical job or rating row remains unchanged. A marker suppresses only the matching raw identifier and `CAST(revision AS TEXT)` token; rating markers also select one lane: `event-progress`, `profile-game`, or `telegram`. Other lanes and healthy records remain eligible. A changed revision is reconsidered, and canonical-row deletion cascades to its markers. Point reads, Queue processing, and mutation validation remain strict.
+Scheduled recovery records malformed profile-link jobs in `PROFILE_DB.profile_link_catchup_quarantine_canonical` and malformed rating projections in `PROFILE_DB.rating_projection_recovery_quarantine_canonical`. The canonical job or rating row remains unchanged. A marker suppresses only the matching raw identifier and `CAST(revision AS TEXT)` token; rating markers also select one lane: `event-progress`, `profile-game`, or `telegram`. Other lanes and healthy records remain eligible. A changed revision is reconsidered, and canonical-row deletion cascades to its markers. Point reads, Queue processing, and mutation validation remain strict.
 
 Quarantine writes compare the exact observed snapshot so a concurrent repair is not hidden. Successful reports use `loginUidHex` or `operationIdHex`, `revisionHex`, and, for ratings, `projectionKind`. Raw-key comparisons preserve BLOB and invalid UTF-8 identities. Read retained markers without modifying data:
 
@@ -109,8 +113,8 @@ SELECT hex(quarantine.login_uid) AS login_uid_hex,
        hex(quarantine.revision_token) AS revision_hex,
        hex(CAST(job.revision AS TEXT)) AS current_revision_hex,
        quarantine.reason, quarantine.quarantined_at_ms
-FROM profile_link_catchup_quarantine AS quarantine
-JOIN profile_link_catchup_jobs AS job USING (login_uid)
+FROM profile_link_catchup_quarantine_canonical AS quarantine
+JOIN profile_link_catchup_jobs_canonical AS job USING (login_uid)
 ORDER BY quarantine.quarantined_at_ms, hex(quarantine.login_uid);
 
 SELECT hex(quarantine.operation_id) AS operation_id_hex,
@@ -119,19 +123,19 @@ SELECT hex(quarantine.operation_id) AS operation_id_hex,
        hex(quarantine.revision_token) AS revision_hex,
        hex(CAST(rating.revision AS TEXT)) AS current_revision_hex,
        quarantine.reason, quarantine.quarantined_at_ms
-FROM rating_projection_recovery_quarantine AS quarantine
-JOIN rating_updates AS rating USING (operation_id)
+FROM rating_projection_recovery_quarantine_canonical AS quarantine
+JOIN rating_updates_canonical AS rating USING (operation_id)
 ORDER BY quarantine.quarantined_at_ms, hex(quarantine.operation_id),
          quarantine.projection_kind;
 ```
 
-Repair canonical data only through the existing profile maintenance procedure, preserving job/request IDs, rating completions, replay state, and cursors. A reviewed repair must bump the canonical revision; do not delete markers or pending work to force retries. Installing the empty side tables is a separate compatible operation: follow the [projection recovery quarantine release procedure](../scripts/deploy-cloudflare.md#projection-recovery-quarantine), which keeps existing writes and Queues running.
+Repair canonical data only through the existing profile maintenance procedure, preserving job/request IDs, rating completions, replay state, and cursors. A reviewed repair must bump the canonical revision; do not delete markers or pending work to force retries.
 
 ## Gameplay and operators
 
 Moves, takebacks, timer starts/claims, surrender, and rematches use authenticated Worker APIs and typed Durable Object mutations. Cumulative delivery preserves prefixes, replay, status, and timer fences. Pending downstream effects remain durable and recover through the existing alarm.
 
-New matches persist a timer-storage choice in their invite Durable Object. With `NEW_MATCH_TIMER_STORAGE=local`, timer markers and match updates commit in one local SQLite transaction. Existing matches without a choice continue using their D1 markers; configuration changes and creation retries never move a match between stores. Local timer markers retain the first deadline for each highest turn, including across takebacks and eviction. They remain alongside match records; D1 timer reconciliation continues for legacy matches. See the deployment guide's new-match timer procedure for support, activation, and compatible rollback.
+Match timers use invite Durable Object SQLite. Timer markers and match updates commit in one local transaction, preserving the first deadline for each highest turn across retries, takebacks, and eviction. Existing rooms require verified local layout version 2 and local cohorts; missing or incompatible state fails closed. Fresh rooms establish that layout before accepting business writes. Preserve timer markers alongside match records and deploy only versions that understand this local layout and its writer guards.
 
 `GET /matches/snapshot?playerId=…&matchId=…` resolves D1 routing and reads the exact canonical or archived match. An absent route returns `match: null`; unavailable canonical state is an error. Public historical pairs come solely from D1 and never backfill on reads.
 
@@ -174,15 +178,15 @@ Scheduled-start recovery ensures each outbox in one atomic D1 batch under the sw
 
 The combined Cron regression test fills urgent discovery, the background page, persisted progress and rating lanes, auth recovery, event and game-session transitions, and projection scans. Every background event is reminder-eligible, and scheduled Workflows start errored or terminated. Assertions verify the executed prefix and untouched deferred work. Real local D1 work runs alongside recording Queue/Workflow bindings and local invite Durable Objects. A shared 10,000-call test budget counts D1, Workflow, Queue, and Durable Object calls separately from SQL statements, and the tested workload must remain below 9,500 calls. Separate deadline tests cover reminders and prizes behind 800 ordinary events and 100 reminders scheduled across consecutive sweeps with a distant background cursor.
 
-Progress-outbox recovery uses `event_progress_outboxes.next_reconcile_at_ms`, independently of the stored outbox JSON and Workflow parameters. A confirmed waiting Workflow more than ten minutes before execution is checked again at the earlier of one hour later or ten minutes before execution. Other nonterminal states, unconfirmed or recreated instances, and provider failures remain eligible at the next five-minute Cron boundary. Initial producer dispatch remains immediate after durable persistence.
+Progress-outbox recovery uses `event_progress_outboxes_canonical.next_reconcile_at_ms`, independently of the stored outbox JSON and Workflow parameters. A confirmed waiting Workflow more than ten minutes before execution is checked again at the earlier of one hour later or ten minutes before execution. Other nonterminal states, unconfirmed or recreated instances, and provider failures remain eligible at the next five-minute Cron boundary. Initial producer dispatch remains immediate after durable persistence.
 
 Scheduled starts, announcements, and persisted-outbox recovery share this eligibility check. Checkpoints compare the exact observed payload and permit a concurrent urgent result to shorten a later check. Completion only removes the observed outbox; a checkpoint cannot recreate an acknowledged row. Changed outbox writes reset eligibility, including writes from older Worker versions, while identical upserts preserve it. Admission and snapshot guards remain enforced. Do not manually postpone checkpoints to hide failed work.
 
 Malformed progress-outbox quarantine archives and removes only the exact observed ID and stored JSON in one admitted D1 batch. A concurrent replacement remains pending and leaves any existing archive untouched. Archive fields and event associations retain their existing format. Non-text outbox IDs remain untouched without blocking healthy recovery; other unsupported malformed storage still fails closed.
 
-`PROFILE_DB.invite_wager_states` owns proposals, agreements, settlement state, and resolution markers. Reserved balances, consumed operation tombstones, pending settlements, and replay records are current application data. Current wager incidents use `manage:wager-reservations` and canonical-profile maintenance. Reconcile uncertain effects before settling an expired admission.
+`PROFILE_DB.invite_wager_states_canonical` owns proposals, agreements, settlement state, and resolution markers. Reserved balances, consumed operation tombstones, pending settlements, and replay records are current application data. Current wager incidents use `manage:wager-reservations` and canonical-profile maintenance. Reconcile uncertain effects before settling an expired admission.
 
-`WAGER_SETTLEMENT_QUEUE` sends initial and deferred settlement retries to `mons-link-wager-settlement`, with exhausted retries retained in `mons-link-wager-settlement-dlq`. The consumer preserves profile and reservation admission checks and runs independently of Telegram delivery. Legacy wager messages in `mons-link-telegram-delivery` forward unchanged without added delay; the original message is acknowledged only after enqueue succeeds and retried if forwarding fails. Inspect legacy Telegram DLQ entries as well as the settlement DLQ during recovery; preserve their operation IDs and reconcile canonical state before replaying a specific task.
+`WAGER_SETTLEMENT_QUEUE` sends initial and deferred settlement retries to `mons-link-wager-settlement-data1`, with exhausted retries retained in `mons-link-wager-settlement-data1-dlq`. The consumer preserves profile and reservation admission checks and runs independently of Telegram delivery. Legacy wager messages in `mons-link-telegram-delivery-data1` forward unchanged without added delay; the original message is acknowledged only after enqueue succeeds and retried if forwarding fails. Inspect legacy Telegram DLQ entries as well as the settlement DLQ during recovery; preserve their operation IDs and reconcile canonical state before replaying a specific task.
 
 Prize withdrawals retain D1 leases, destination identity, signed transaction bytes, exact signature recovery, and completion records. Freeze affected storage before a schema change or terminating an instance. The read-only withdrawal Workflow preflight validates wallet identity and RPC access without sending a transaction. Never manually rewrite assigned prizes or replay a possibly completed transfer.
 
@@ -192,7 +196,7 @@ Completed-withdrawal cleanup checks admission and profile prize revisions even w
 
 Telegram delivery is authored in `cloud/runtime/src/telegram/`. The delivery engine is the public facade; typed state transitions, delivery control, manual recovery, desired operations, sends, and cleanup have separate modules. Stored records retain their original fields and compatibility behavior. Retry proofs, send-in-flight markers, receipts, and gate ownership remain durable recovery evidence; an uncertain send still requires an explicit reviewed recovery action.
 
-Event Telegram projection runs through `mons-link-telegram-projection`. Every supported API or Workflow mutation writes `EVENT_DB.event_telegram_projection_outboxes` and increments the generation in `event_telegram_projection_state` atomically with the event update. The five-minute Worker schedule recovers pending markers; all event mutations pass through the canonical Worker repository.
+Event Telegram projection runs through `mons-link-telegram-projection-data1`. Every supported API or Workflow mutation writes `EVENT_DB.event_telegram_projection_outboxes_canonical` and increments the generation in `event_telegram_projection_state_canonical` atomically with the event update. The five-minute Worker schedule recovers pending markers; all event mutations pass through the canonical Worker repository.
 
 Event creation accepts `telegramAnnouncements` with three required booleans: `invite` sends the initial invite, `matches` sends event start and match updates, and `results` sends final results. The creation UI defaults all three to false. Omitting the settings defaults all three to false. New requests reject `announceOnTelegram`; historical stored records still decode that boolean when the current settings are absent.
 
@@ -246,7 +250,7 @@ At least one output path is required. Address exports create new mode-`0600` fil
 Publish GP, MP, or shooting-star leaderboard messages through the Queue bridge:
 
 ```sh
-node cloud/admin/topGpWithEmojis.js 25 --bridge-secret-file /Users/ivan/.config/mons-link/secrets/telegram-queue
-node cloud/admin/topMpWithEmojis.js 25 --bridge-secret-file /Users/ivan/.config/mons-link/secrets/telegram-queue
+node --experimental-strip-types cloud/admin/topGpWithEmojis.ts 25 --bridge-secret-file /Users/ivan/.config/mons-link/secrets/telegram-queue
+node --experimental-strip-types cloud/admin/topMpWithEmojis.ts 25 --bridge-secret-file /Users/ivan/.config/mons-link/secrets/telegram-queue
 npm --prefix cloud/admin run shooting:alert -- --bridge-secret-file /Users/ivan/.config/mons-link/secrets/telegram-queue
 ```

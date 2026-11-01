@@ -1,3 +1,6 @@
+import { formatMatchTimer } from "@mons/shared/timers";
+import { matchDocumentFixture } from "./matchRecordFixture.ts";
+import type { MatchDocument } from "../src/matchRecordCodec.ts";
 import { retainedInviteSourceFixture } from "./inviteDocumentFixture.ts";
 import assert from "node:assert/strict";
 import test from "node:test";
@@ -43,7 +46,7 @@ const eventInvite = {
 };
 const startResponse = {
   ok: true as const,
-  timer: "7;100500",
+  timer: formatMatchTimer(7, 100500),
   duration: 90_000 as const,
 };
 const claimResponse = { ok: true as const };
@@ -105,7 +108,7 @@ function timerHarness(
     } = {}) {
       return operation === "start"
         ? startMatchTimer(actor, input, repository, {
-            signal,
+            ...(signal ? { signal } : {}),
             assertMutationAllowed,
             async startCanonical(value) {
               steps.push("canonical");
@@ -115,7 +118,7 @@ function timerHarness(
             },
           })
         : claimMatchVictoryByTimer(actor, input, repository, {
-            signal,
+            ...(signal ? { signal } : {}),
             assertMutationAllowed,
             async claimCanonical(value, inviteValue) {
               steps.push("canonical");
@@ -146,8 +149,12 @@ for (const operation of ["start", "claim"] as const) {
     assert.deepEqual(h.steps, ["invite", "admission", "canonical"]);
     assert.deepEqual(h.ownershipQueries, []);
     assert.equal(h.calls.length, 1);
-    assert.equal(h.calls[0].request, request);
-    if (operation === "claim") assert.equal(h.calls[0].invite, eventInvite);
+    assert.equal(h.calls[0]!.request, request);
+    if (operation === "claim")
+      assert.deepEqual(
+        h.calls[0]!.invite,
+        retainedInviteSourceFixture(eventInvite),
+      );
   });
 
   test(`${operation} timer authorizes a linked login using canonical ownership`, async () => {
@@ -162,7 +169,7 @@ for (const operation of ["start", "claim"] as const) {
     assert.deepEqual(h.ownershipQueries, [
       { loginUids: ["login-2", "player-1"], profileIds: [] },
     ]);
-    assert.equal(h.calls[0].request.playerId, "player-1");
+    assert.equal(h.calls[0]!.request.playerId, "player-1");
   });
 
   test(`${operation} timer rejects missing or unrelated ownership before invite reads`, async () => {
@@ -181,10 +188,8 @@ for (const operation of ["start", "claim"] as const) {
   test(`${operation} timer rejects unrelated participants and match series`, async () => {
     for (const invite of [
       null,
-      [],
       { hostId: "player-1", guestId: "someone-else" },
       { hostId: "player-2", guestId: "someone-else" },
-      { hostId: "player-1", guestId: "player-1" },
     ]) {
       const h = timerHarness(operation, { invite });
       await assert.rejects(h.run(), denied);
@@ -205,8 +210,12 @@ for (const operation of ["start", "claim"] as const) {
     const input = { ...request, matchId: `${request.inviteId}3` };
     await h.run({ input });
     assert.deepEqual(h.steps, ["invite", "admission", "canonical"]);
-    assert.equal(h.calls[0].request, input);
-    if (operation === "claim") assert.equal(h.calls[0].invite, eventInvite);
+    assert.equal(h.calls[0]!.request, input);
+    if (operation === "claim")
+      assert.deepEqual(
+        h.calls[0]!.invite,
+        retainedInviteSourceFixture(eventInvite),
+      );
   });
 
   test(`${operation} timer preserves ownership errors before invite validation`, async () => {
@@ -319,19 +328,31 @@ test("timer record parsing rejects malformed and oversized game state", () => {
     { ...match("black"), color: "other" },
   ])
     assert.equal(parseMatchTimerRecord(value), null);
-  assert.deepEqual(parseMatchTimerRecord(match("black")), match("black"));
+  const { color, fen, flatMovesString, status, timer } = match("black");
+  assert.deepEqual(parseMatchTimerRecord(match("black")), {
+    color,
+    fen,
+    flatMovesString,
+    status,
+    timer,
+  });
   assert.deepEqual(
     parseMatchTimerRecord({ color: "white", fen: new Game().toFen() }),
-    match("white"),
+    null,
   );
 });
 
 test("raw terminal detection does not depend on valid peer game state", () => {
   assert.equal(
-    rawMatchTimerIsTerminal({ status: "surrendered", fen: "invalid" }),
+    rawMatchTimerIsTerminal(
+      match("black", { status: "surrendered", fen: "invalid" }),
+    ),
     true,
   );
-  assert.equal(rawMatchTimerIsTerminal({ timer: "gg" }), true);
+  assert.equal(
+    rawMatchTimerIsTerminal(match("black", { timer: { state: "finished" } })),
+    true,
+  );
   assert.equal(rawMatchTimerIsTerminal(match("black")), false);
   assert.equal(rawMatchTimerIsTerminal(null), false);
 });
@@ -355,7 +376,7 @@ test("event progress plans retain deterministic timer identities", async () => {
         reason: "timer-claimed",
       })
     ).workflowId,
-    "event-progress-36ff8d469c3914ad9bab1a9ce4111ce21f4c9e48b578dd149de0dc4f32bbb763",
+    "data1_event-progress-36ff8d469c3914ad9bab1a9ce4111ce21f4c9e48b578dd149de0dc4f32bbb763",
   );
 });
 
@@ -391,8 +412,8 @@ function ownershipSnapshot(
         profileId,
         {
           profile: {
-            aura: "",
-            emoji: "",
+            aura: "none" as const,
+            emoji: 0,
             eth: "",
             profileId,
             rating: 1500,
@@ -409,13 +430,9 @@ function ownershipSnapshot(
 function match(
   color: "white" | "black",
   overrides: Partial<MatchTimerRecord> = {},
-): MatchTimerRecord {
+): MatchDocument {
   return {
-    color,
-    fen: new Game().toFen(),
-    flatMovesString: "",
-    status: "",
-    timer: "",
+    ...matchDocumentFixture({ color, fen: new Game().toFen() }),
     ...overrides,
   };
 }

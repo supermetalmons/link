@@ -42,7 +42,7 @@ function fixture() {
   const resources = new Map<string, JsonRecord>();
   const versions = new Map<string, JsonRecord>();
   for (let index = 0; index < workflowNames.length; index++) {
-    const name = workflowNames[index];
+    const name = workflowNames[index]!;
     const id = uuid(index + 10);
     const versionId = uuid(index + 20);
     resources.set(name, {
@@ -159,7 +159,7 @@ function fixture() {
       if (versionList) {
         assert.equal(method, "GET");
         assert.equal(parsed.searchParams.get("per_page"), "1");
-        const resource = resources.get(versionList[1]);
+        const resource = resources.get(versionList[1]!);
         assert.ok(resource);
         const version = versions.get(String(resource.version_id));
         assert.ok(version);
@@ -182,7 +182,7 @@ function fixture() {
       );
       if (versionMatch) {
         assert.equal(method, "GET");
-        const version = versions.get(versionMatch[2]);
+        const version = versions.get(versionMatch[2]!);
         if (!version) return Response.json({ success: false }, { status: 404 });
         return Response.json({
           success: true,
@@ -191,7 +191,7 @@ function fixture() {
       }
       const resourceMatch = /^\/workflows\/([^/]+)$/.exec(path);
       assert.ok(resourceMatch, `unexpected provider surface ${path}`);
-      const name = resourceMatch[1];
+      const name = resourceMatch[1]!;
       const resource = resources.get(name);
       assert.ok(resource);
       if (method === "GET") {
@@ -263,11 +263,11 @@ test("requires an explicit Worker version and validates selected Workflow argume
     parsePublishWorkflowArgs([
       "--dry-run",
       "--workflow",
-      workflowNames[0],
+      workflowNames[0]!,
       "--version-id",
       WORKER_VERSION,
     ]),
-    { versionId: WORKER_VERSION, workflows: [workflowNames[0]], dryRun: true },
+    { versionId: WORKER_VERSION, workflows: [workflowNames[0]!], dryRun: true },
   );
   for (const args of [
     [],
@@ -299,7 +299,7 @@ test("parses JSONC and excludes bindings owned by another Worker", () => {
       ),
     /invalid tracked/,
   );
-  source.workflows.push({ ...source.workflows[0] });
+  source.workflows.push({ ...source.workflows[0]! });
   assert.throws(
     () => parseWorkflowPublicationConfiguration(JSON.stringify(source)),
     /duplicate/,
@@ -314,9 +314,9 @@ test("publishes owned Workflow definitions while preserving current options and 
   assert.equal(result.workflows.length, 2);
   const puts = f.state.calls.filter((call) => call.method === "PUT");
   assert.equal(puts.length, 2);
-  assert.deepEqual(puts[0].body, {
+  assert.deepEqual(puts[0]!.body, {
     script_name: "mons-link-api",
-    class_name: classes[0],
+    class_name: classes[0]!,
     limits: { steps: 10000 },
     default_retention: {
       success_retention: 2592000000,
@@ -325,7 +325,7 @@ test("publishes owned Workflow definitions while preserving current options and 
     concurrency: { limit: 7 },
     schedules: [{ cron: "0 12 * * 0" }],
   });
-  assert.equal("concurrency" in puts[1].body!, false);
+  assert.equal("concurrency" in puts[1]!.body!, false);
   for (const row of result.workflows) {
     assert.equal("workflowVersionId" in row, true);
     assert.notEqual(
@@ -347,18 +347,18 @@ test("dry-run performs only reads and previews the exact preserved definition", 
   const result = await f.execute({ dryRun: true });
   assert.equal(result.mode, "dry-run");
   assert.ok(f.state.calls.every((call) => call.method === "GET"));
-  assert.equal(result.workflows[0].previousWorkflowVersionId, uuid(20));
-  assert.deepEqual(result.workflows[0].publishBody.concurrency, { limit: 7 });
+  assert.equal(result.workflows[0]!.previousWorkflowVersionId, uuid(20));
+  assert.deepEqual(result.workflows[0]!.publishBody.concurrency, { limit: 7 });
   assert.deepEqual(f.state.logs, []);
 });
 
 test("explicit selection touches only the selected configured Workflow", async () => {
   const f = fixture();
-  const result = await f.execute({ workflows: [workflowNames[1]] });
+  const result = await f.execute({ workflows: [workflowNames[1]!] });
   assert.equal(result.workflows.length, 1);
   assert.equal(
     f.state.calls.some((call) =>
-      call.path.startsWith(`/workflows/${workflowNames[0]}`),
+      call.path.startsWith(`/workflows/${workflowNames[0]!}`),
     ),
     false,
   );
@@ -382,12 +382,12 @@ test("wrong or split Worker deployments fail before any Workflow publication", a
 
 test("all ownership and metadata preflights finish before the first mutation", async () => {
   const f = fixture();
-  f.resources.get(workflowNames[1])!.script_name = "unrelated-worker";
+  f.resources.get(workflowNames[1]!)!.script_name = "unrelated-worker";
   await assert.rejects(f.execute(), /ownership-conflict/);
   assert.equal(f.state.calls.filter((call) => call.method === "PUT").length, 0);
   assert.ok(
     f.state.calls.some((call) =>
-      call.path.includes(`/workflows/${workflowNames[0]}/versions/`),
+      call.path.includes(`/workflows/${workflowNames[0]!}/versions/`),
     ),
   );
 });
@@ -397,7 +397,7 @@ test("changed resource options between preparation and publication block the wri
   let reads = 0;
   f.state.before = (path, method) => {
     if (
-      path === `/workflows/${workflowNames[0]}` &&
+      path === `/workflows/${workflowNames[0]!}` &&
       method === "GET" &&
       ++reads === 2
     )
@@ -412,7 +412,7 @@ test("Worker deployment is rechecked immediately before publication", async () =
   let reads = 0;
   f.state.before = (path, method) => {
     if (
-      path === `/workflows/${workflowNames[0]}` &&
+      path === `/workflows/${workflowNames[0]!}` &&
       method === "GET" &&
       ++reads === 2
     )
@@ -435,7 +435,7 @@ test("mismatched new version metadata and changed options cannot be reported as 
 
 test("non-2xx publication failure preserves previous success evidence and never prints provider errors", async () => {
   const f = fixture();
-  f.state.failPutFor = workflowNames[1];
+  f.state.failPutFor = workflowNames[1]!;
   await assert.rejects(
     f.execute(),
     (error: unknown) =>
@@ -444,7 +444,7 @@ test("non-2xx publication failure preserves previous success evidence and never 
       !error.message.includes(TOKEN),
   );
   assert.equal(f.state.logs.length, 1);
-  assert.equal((f.state.logs[0] as JsonRecord).name, workflowNames[0]);
+  assert.equal((f.state.logs[0]! as JsonRecord).name, workflowNames[0]!);
   assert.equal(JSON.stringify(f.state.logs).includes(TOKEN), false);
 });
 
@@ -485,8 +485,8 @@ test("actual GET resource shape resolves current Workflow version from its versi
   f.state.actualGetShape = true;
   const result = await f.execute({ dryRun: true });
   assert.equal(result.mode, "dry-run");
-  assert.equal(result.workflows[0].previousWorkflowVersionId, uuid(20));
-  assert.equal(result.workflows[1].previousWorkflowVersionId, uuid(21));
+  assert.equal(result.workflows[0]!.previousWorkflowVersionId, uuid(20));
+  assert.equal(result.workflows[1]!.previousWorkflowVersionId, uuid(21));
   assert.equal(
     f.state.calls.filter((call) =>
       /^\/workflows\/[^/]+\/versions$/.test(call.path),
@@ -504,8 +504,8 @@ test("minimal PUT acknowledgment still requires full resource and version readba
   assert.equal(result.mode, "published");
   assert.equal(f.state.calls.filter((call) => call.method === "PUT").length, 2);
   assert.equal(
-    "workflowVersionId" in result.workflows[0] &&
-      result.workflows[0].workflowVersionId,
+    "workflowVersionId" in result.workflows[0]! &&
+      result.workflows[0]!.workflowVersionId,
     uuid(30),
   );
 });
@@ -546,7 +546,7 @@ test("latest uploaded Worker version is rechecked immediately before publication
   let reads = 0;
   f.state.before = (path, method) => {
     if (
-      path === `/workflows/${workflowNames[0]}` &&
+      path === `/workflows/${workflowNames[0]!}` &&
       method === "GET" &&
       ++reads === 2
     )

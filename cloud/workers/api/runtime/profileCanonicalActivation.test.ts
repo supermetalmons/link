@@ -70,15 +70,15 @@ describe("canonical profile runtime control", () => {
       `SELECT name FROM sqlite_schema
        WHERE type = 'table'
          AND name IN (
-           'profile_records', 'profile_login_owners',
+           'profile_records_canonical', 'profile_login_owners_canonical',
            'profile_canonical_control'
          )
        ORDER BY name`,
     ).all<{ name: string }>();
     expect(canonicalTables.results.map(({ name }) => name)).toEqual([
       "profile_canonical_control",
-      "profile_login_owners",
-      "profile_records",
+      "profile_login_owners_canonical",
+      "profile_records_canonical",
     ]);
     const foreignKeyFailures = await testEnv.PROFILE_DB.prepare(
       "PRAGMA foreign_key_check",

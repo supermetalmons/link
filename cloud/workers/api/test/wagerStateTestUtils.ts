@@ -49,14 +49,16 @@ export function createMemoryWagerState(state: WagerTestState): WagerWriter {
   ): Promise<TransactionResult<DecodedWager>> => {
     const result = await state.transactState(
       path(key),
-      (current) => reduce(decodeWager(current)),
+      (current) => reduce(decodeWager(current ?? null)),
       signal,
     );
-    return { ...result, value: decodeWager(result.value) };
+    return { ...result, value: decodeWager(result.value ?? null) };
   };
   return {
     readWager: async (key, signal) =>
-      decodeWager(await state.readState(path(key), undefined, signal)),
+      decodeWager(
+        (await state.readState(path(key), undefined, signal)) ?? null,
+      ),
     readWagerSnapshot: async (key, signal) => {
       const [wager, resolutionMarker] = await Promise.all([
         state.readState(path(key), undefined, signal),
@@ -67,7 +69,7 @@ export function createMemoryWagerState(state: WagerTestState): WagerWriter {
         ),
       ]);
       return {
-        wager: decodeWager(wager),
+        wager: decodeWager(wager ?? null),
         resolutionMarker: resolutionMarker as boolean | null,
       };
     },
@@ -105,21 +107,15 @@ export function createMemoryWagerState(state: WagerTestState): WagerWriter {
       if ("commit" in decision)
         return {
           committed: false,
-          decision: decision.decision,
+          ...(decision.decision === undefined
+            ? {}
+            : { decision: decision.decision }),
           value: current,
         };
       const updates: Record<string, unknown> = {
-        [`${path(key)}/settlement/state`]: "completed",
-        [`${path(key)}/settlement/completedAtMs`]: input.completedAtMs,
-        [`${path(key)}/proposals`]: null,
+        [path(key)]: decision.value,
         [`invites/${key.inviteId}/matchesWagerResolutions/${key.matchId}`]: true,
       };
-      if (input.insufficientMaterials) {
-        updates[`${path(key)}/settlement/failureReason`] =
-          "insufficient-materials";
-        updates[`${path(key)}/agreed`] = null;
-      } else if (input.settlement.kind === "agreed")
-        updates[`${path(key)}/resolved`] = decision.value?.resolved;
       await state.patchStateRoot(updates, signal);
       return { committed: true, value: decodeWager(decision.value) };
     },

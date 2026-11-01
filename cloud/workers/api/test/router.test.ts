@@ -1,3 +1,4 @@
+import { applicationRequest } from "./testEnv.ts";
 import assert from "node:assert/strict";
 import test from "node:test";
 import { handleFetch, handleRequest } from "../src/router.ts";
@@ -7,6 +8,8 @@ type Overrides = NonNullable<Parameters<typeof handleRequest>[2]>;
 
 const env = new Proxy(TELEGRAM_TEST_ENV, {
   get(_target, property) {
+    if (property === "PROFILE_GAMES_DB")
+      return TELEGRAM_TEST_ENV.PROFILE_GAMES_DB;
     return assert.fail(`Unexpected binding: ${String(property)}`);
   },
 });
@@ -45,8 +48,66 @@ const contextRoutes: { path: string; override?: keyof Overrides }[] = [
   { path: "/mining/rock", override: "mining" },
 ];
 
+test("retired migration paths are not routed and do not inspect credentials or stores", async () => {
+  const unavailableEnv = new Proxy(TELEGRAM_TEST_ENV, {
+    get: () =>
+      assert.fail("Retired migration route accessed an environment binding"),
+  });
+  for (const path of [
+    "/internal/canonical-migration",
+    "/internal/canonical-migration/control",
+  ])
+    for (const method of ["GET", "POST"])
+      assert.equal(
+        (
+          await handleRequest(
+            new Request(`https://api.mons.link${path}`, { method }),
+            unavailableEnv,
+          )
+        ).status,
+        404,
+      );
+});
+
+test("retired cleanup GET and POST return not-found without capabilities, storage, or body access", async () => {
+  const unavailableEnv = new Proxy(TELEGRAM_TEST_ENV, {
+    get: () =>
+      assert.fail("Retired cleanup route accessed an environment binding"),
+  });
+  for (const method of ["GET", "POST"])
+    for (const withRetiredHeaders of [false, true])
+      for (const entrypoint of ["request", "fetch"] as const) {
+        const input = new Request(
+          "https://api.mons.link/internal/canonical-cleanup",
+          {
+            method,
+            ...(withRetiredHeaders
+              ? {
+                  headers: {
+                    "X-Mons-Cleanup-Id": "12345678-1234-4234-8234-123456789abc",
+                    "X-Mons-Cleanup-Time": "1800000000",
+                    "X-Mons-Cleanup-Signature": "a".repeat(64),
+                  },
+                }
+              : {}),
+            ...(method === "POST" ? { body: "unread cleanup command" } : {}),
+          },
+        );
+        const response =
+          entrypoint === "fetch"
+            ? await handleFetch(input, unavailableEnv, ctx)
+            : await handleRequest(input, unavailableEnv, {}, ctx);
+        assert.equal(response.status, 404, `${entrypoint} ${method}`);
+        assert.deepEqual(await response.json(), {
+          ok: false,
+          error: "not-found",
+        });
+        assert.equal(input.bodyUsed, false);
+      }
+});
+
 function request(path: string, method = "OPTIONS"): Request {
-  return new Request(`https://api.mons.link${path}`, {
+  return applicationRequest(`https://api.mons.link${path}`, {
     method,
     headers: { Origin: "https://mons.link" },
     ...(method === "POST" ? { body: "unread body" } : {}),

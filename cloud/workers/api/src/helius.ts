@@ -100,8 +100,8 @@ function parseHeliusResult(payload: unknown): HeliusSearchResult {
   }
   return {
     items: result.items,
-    total: typeof result.total === "number" ? result.total : undefined,
-    cursor: typeof result.cursor === "string" ? result.cursor : undefined,
+    ...(typeof result.total === "number" ? { total: result.total } : {}),
+    ...(typeof result.cursor === "string" ? { cursor: result.cursor } : {}),
   };
 }
 

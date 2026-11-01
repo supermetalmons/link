@@ -5,6 +5,10 @@ import {
   type WorkflowStep,
 } from "cloudflare:workers";
 import { NonRetryableError } from "cloudflare:workflows";
+import {
+  applicationWorkflowStep,
+  scopedApplicationEnv,
+} from "./applicationExecution.ts";
 import { createEventGameplayRepository } from "./eventRepository.ts";
 import {
   createWorkflowEventRuntime,
@@ -70,27 +74,29 @@ export class EventProgressWorkflow extends WorkflowEntrypoint<
 > {
   async run(
     event: Readonly<WorkflowEvent<EventProgressWorkflowParams>>,
-    step: WorkflowStep,
+    nativeStep: WorkflowStep,
   ): Promise<
     | { status: "applied" | "not-found"; didChange?: boolean }
     | EventPrizeAnnouncementDeliveryResult
   > {
+    const env = scopedApplicationEnv(this.env);
+    const step = applicationWorkflowStep(nativeStep, this.env, 1);
     try {
       if (getEventAnnouncementKind(event.payload?.reason)) {
-        const repository = createEventGameplayRepository(this.env);
+        const repository = createEventGameplayRepository(env);
         return await runEventAnnouncementWorkflow(event, step, {
           readOutbox: (outboxId) =>
             repository.readEventProgressOutbox(outboxId),
           deliver: (input) =>
-            deliverEventPrizeAnnouncement(this.env, input, {
+            deliverEventPrizeAnnouncement(env, input, {
               eventRepository: repository,
             }),
           refreshReminder: (eventId) =>
-            refreshSundayMonsReminder(this.env, eventId, {
+            refreshSundayMonsReminder(env, eventId, {
               eventRepository: repository,
             }),
           acknowledge: async (outboxId) => {
-            await assertProfileBackgroundMutationsEnabled(this.env);
+            await assertProfileBackgroundMutationsEnabled(env);
             await removeOutbox(repository, outboxId);
           },
         });
@@ -98,7 +104,7 @@ export class EventProgressWorkflow extends WorkflowEntrypoint<
       return await runEventProgressWorkflow(
         event,
         step,
-        createEventProgressWorkflowDependencies(this.env),
+        createEventProgressWorkflowDependencies(env),
       );
     } catch (error) {
       if (error instanceof InvalidEventProgressPayloadError) {

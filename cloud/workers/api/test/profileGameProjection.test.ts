@@ -1,3 +1,6 @@
+import { canonicalQueuePayloadFixture } from "./canonicalQueueFixture.ts";
+import { queueEnvelope } from "../src/queueEnvelope.ts";
+import { publicMatchFixture } from "./matchRecordFixture.ts";
 import {
   profileProjectionWriterFixture,
   profileProjectionRepairWriterFixture,
@@ -30,8 +33,6 @@ import {
   processRatingProfileGameProjection,
   profileGameProjectionRetryDelaySeconds,
   repairInvalidEventSweepEntry,
-  sweepAutomatchProfileGameProjections,
-  sweepEventProfileGameProjections,
   sweepProfileLinkProfileGameProjections,
   sweepRatingProfileGameProjections,
   sweepProfileGameProjections,
@@ -112,6 +113,24 @@ function ratingUpdate(
   overrides: Partial<RatingUpdateData> = {},
 ): RatingUpdateData {
   return {
+    eventId: null,
+    eventOwned: false,
+    eventProgressReason: null,
+    eventProgressState: null,
+    eventProgressUpdatedAtMs: null,
+    eventProgressVersion: null,
+    historicalMatchArchiveVersion: null,
+    historicalMatchPair: null,
+    isEventMatch: false,
+    opponentManaPoints: null,
+    playerManaPoints: null,
+    profileGameProjectionReason: null,
+    telegramDeliveryVersion: null,
+    telegramProjectionReason: null,
+    telegramProjectionState: null,
+    telegramProjectionUpdatedAtMs: null,
+    telegramProjectionVersion: null,
+    updateRatingMessage: null,
     completedAtMs: 200,
     inviteId: "auto_aaaaaaaaaaa",
     leaseExpiresAtMs: 1,
@@ -139,6 +158,7 @@ function ratingRepository(
   },
 ): RatingProfileGameProjectionRepository {
   return {
+    readWagerAgreement: async () => null,
     applyFebruaryChallengeReplay: async () => undefined,
     claimRatingProfileGameProjection: async () => true,
     finalizeRatingUpdate: async () => ({ status: "lost" }),
@@ -231,7 +251,9 @@ function automatchOutbox(
   lastQueuedAtMs = 200,
 ) {
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
+    historicalMatches: {},
+    archiveRetry: null,
     status: "pending",
     requestId,
     reason: "automatch-queue",
@@ -411,8 +433,16 @@ function applyStateTransaction(
     value?: unknown;
   };
   return output.commit === false
-    ? { committed: false, decision: output.decision, value: current }
-    : { committed: true, decision: output.decision, value: output.value };
+    ? {
+        committed: false,
+        ...(output.decision === undefined ? {} : { decision: output.decision }),
+        value: current,
+      }
+    : {
+        committed: true,
+        ...(output.decision === undefined ? {} : { decision: output.decision }),
+        value: output.value,
+      };
 }
 
 function projectionLockState(values = new Map<string, unknown>()) {
@@ -423,7 +453,12 @@ function projectionLockState(values = new Map<string, unknown>()) {
     },
     getStatePath: async (path: string) => {
       assertActiveStatePath(path);
-      return values.get(path);
+      const value = values.get(path);
+      return value == null
+        ? null
+        : /^players\/[^/]+\/matches\//.test(path)
+          ? publicMatchFixture(Object(value))
+          : value;
     },
     transactStatePath: async (
       path: string,
@@ -534,7 +569,7 @@ test("automatch outboxes preserve source and recovery timestamps", () => {
   );
   assert.deepEqual(
     parseAutomatchProfileGameProjectionOutbox(automatchOutbox()),
-    automatchOutbox(),
+    { ...automatchOutbox(), historicalMatches: [] },
   );
   for (const invalid of [
     null,
@@ -576,7 +611,7 @@ test("automatch outboxes preserve source and recovery timestamps", () => {
 });
 
 test("transition archives require complete terminal consistent pairs", () => {
-  const hostMatch = {
+  const hostMatch = publicMatchFixture({
     version: 2,
     color: "white" as const,
     emojiId: 1,
@@ -586,12 +621,12 @@ test("transition archives require complete terminal consistent pairs", () => {
     status: "surrendered",
     flatMovesString: "",
     timer: "",
-  };
+  });
   const guestMatch = {
     ...hostMatch,
     color: "black" as const,
     emojiId: 2,
-    status: "",
+    status: "active" as const,
   };
   const input = {
     matchId: "auto_aaaaaaaaaaa",
@@ -656,18 +691,26 @@ test("transition archives require complete terminal consistent pairs", () => {
       fen: swappedFen,
     },
   });
-  assert.equal(
-    canonicalVariant.status === "ready"
-      ? canonicalVariant.pair.hostMatch?.gameVariant
-      : null,
-    GameVariant.SwappedManaRows,
-  );
-  assert.equal(
-    canonicalVariant.status === "ready"
-      ? canonicalVariant.pair.guestMatch?.gameVariant
-      : null,
-    GameVariant.SwappedManaRows,
-  );
+  assert.notEqual(canonicalVariant.status, "ready");
+  const validVariant = classifyTransitionHistoricalMatchPair({
+    ...input,
+    hostMatch: {
+      ...hostMatch,
+      gameVariant: GameVariant.SwappedManaRows,
+      fen: swappedFen,
+    },
+    guestMatch: {
+      ...guestMatch,
+      gameVariant: GameVariant.SwappedManaRows,
+      fen: swappedFen,
+    },
+  });
+  assert.equal(validVariant.status, "ready");
+  if (validVariant.status === "ready")
+    assert.equal(
+      validVariant.pair.guestMatch?.gameVariant,
+      GameVariant.SwappedManaRows,
+    );
 
   const completedGame = new Game();
   const moves = { white: [] as string[], black: [] as string[] };
@@ -692,7 +735,7 @@ test("transition archives require complete terminal consistent pairs", () => {
       ...input,
       hostMatch: {
         ...hostMatch,
-        status: "",
+        status: "active" as const,
         flatMovesString: moves.white.join("-"),
       },
       guestMatch: {
@@ -708,7 +751,7 @@ test("transition archives require complete terminal consistent pairs", () => {
       hostMatch: {
         ...hostMatch,
         fen: whiteFen,
-        status: "",
+        status: "active" as const,
         flatMovesString: moves.white.join("-"),
       },
       guestMatch: {
@@ -856,7 +899,7 @@ test("automatch projection archives accumulated historical descriptors", async (
         aura: "",
         gameVariant: "Classic",
         fen: transitionFen,
-        status: "",
+        status: "active" as const,
         flatMovesString: "",
         timer: "",
       },
@@ -1082,7 +1125,7 @@ test("automatch projection settles later descriptors when an earlier one retries
     aura: "",
     gameVariant: "Classic",
     fen: transitionFen,
-    status: "",
+    status: "active" as const,
     flatMovesString: "",
     timer: "",
   };
@@ -1672,7 +1715,7 @@ test("rating projection uses deterministic completion inputs and completes once"
 });
 
 test("rating projection archives the frozen rating pair", async () => {
-  const match = {
+  const match = publicMatchFixture({
     version: 2,
     color: "white" as const,
     emojiId: 1,
@@ -1682,7 +1725,7 @@ test("rating projection archives the frozen rating pair", async () => {
     status: "surrendered",
     flatMovesString: "move",
     timer: "",
-  };
+  });
   const pair = {
     matchId: "auto_aaaaaaaaaaa",
     hostPlayerId: "host",
@@ -2116,7 +2159,7 @@ test("automatch Queue waits for continuation delivery and acknowledges deferred 
         PROFILE_GAME_PROJECTION_QUEUE: {
           ...TELEGRAM_TEST_ENV.PROFILE_GAME_PROJECTION_QUEUE,
           async send(task) {
-            sent.push(task);
+            sent.push(canonicalQueuePayloadFixture(task));
             sending.resolve();
             await release.promise;
             return TELEGRAM_TEST_ENV.PROFILE_GAME_PROJECTION_QUEUE.send();
@@ -2231,7 +2274,7 @@ test("profile-link Queue immediately dispatches the next capped page", async () 
       PROFILE_GAME_PROJECTION_QUEUE: {
         ...TELEGRAM_TEST_ENV.PROFILE_GAME_PROJECTION_QUEUE,
         send: async (body: unknown) => {
-          sent.push(body);
+          sent.push(canonicalQueuePayloadFixture(body));
           sending.resolve();
           await release.promise;
           return {
@@ -2333,7 +2376,15 @@ test("Worker Queue routing selects the profile game projection consumer", async 
   try {
     await worker.queue?.(
       {
-        messages: [invalid.message],
+        messages: [
+          {
+            ...invalid.message,
+            body: queueEnvelope(
+              "PROFILE_GAME_PROJECTION_QUEUE",
+              invalid.message.body,
+            ),
+          },
+        ],
         queue: PROFILE_GAME_PROJECTION_QUEUE_NAME,
         metadata: { metrics: { backlogBytes: 0, backlogCount: 0 } },
         ackAll() {},
@@ -2360,7 +2411,8 @@ test("scheduled recovery claims, repairs, and batches valid projection records",
     sendBatch: async (messages: Iterable<MessageSendRequest<unknown>>) => {
       batches.push(
         Array.from(messages).map(
-          ({ body }) => body as ProfileGameProjectionTask,
+          ({ body }) =>
+            canonicalQueuePayloadFixture(body) as ProfileGameProjectionTask,
         ),
       );
       return {
@@ -2482,8 +2534,8 @@ test("rating recovery identifies concurrent failures and dispatches healthy work
   rating.scanDueRatingProfileGameProjections = async () =>
     recoveryCandidates(records);
   rating.claimRatingProfileGameProjection = async (id) => {
-    if (id === records[0].operationId) return first.promise;
-    if (id === records[1].operationId) return second.promise;
+    if (id === records[0]!.operationId) return first.promise;
+    if (id === records[1]!.operationId) return second.promise;
     started.resolve();
     return true;
   };
@@ -2495,7 +2547,11 @@ test("rating recovery identifies concurrent failures and dispatches healthy work
       PROFILE_GAME_PROJECTION_QUEUE: {
         ...TELEGRAM_TEST_ENV.PROFILE_GAME_PROJECTION_QUEUE,
         async sendBatch(messages) {
-          batches.push(Array.from(messages, ({ body }) => body));
+          batches.push(
+            Array.from(messages, ({ body }) =>
+              canonicalQueuePayloadFixture(body),
+            ),
+          );
           return {
             metadata: { metrics: { backlogCount: 0, backlogBytes: 0 } },
           };
@@ -2508,7 +2564,7 @@ test("rating recovery identifies concurrent failures and dispatches healthy work
       logger: {
         error(message) {
           logs.push(message);
-          if (JSON.parse(message).operationId === records[1].operationId)
+          if (JSON.parse(message).operationId === records[1]!.operationId)
             reportedSecond.resolve();
           throw new Error("logger-failed");
         },
@@ -2529,13 +2585,13 @@ test("rating recovery identifies concurrent failures and dispatches healthy work
     }),
     [
       {
-        operationId: records[1].operationId,
+        operationId: records[1]!.operationId,
         itemIndex: 1,
         phase: "claim",
         message: secondFailure.message,
       },
       {
-        operationId: records[0].operationId,
+        operationId: records[0]!.operationId,
         itemIndex: 0,
         phase: "claim",
         message: firstFailure.message,
@@ -2546,7 +2602,7 @@ test("rating recovery identifies concurrent failures and dispatches healthy work
     [
       {
         kind: "rating-profile-game-projection",
-        operationId: records[2].operationId,
+        operationId: records[2]!.operationId,
       },
     ],
   ]);
@@ -2568,8 +2624,8 @@ test("rating recovery retains falsy failures after healthy dispatch and gives Qu
       rating.scanDueRatingProfileGameProjections = async () =>
         recoveryCandidates(records);
       rating.claimRatingProfileGameProjection = async (id) => {
-        if (id === records[0].operationId) throw firstFailure;
-        if (id === records[1].operationId) throw laterFailure;
+        if (id === records[0]!.operationId) throw firstFailure;
+        if (id === records[1]!.operationId) throw laterFailure;
         return true;
       };
       const logs: Array<{ operationId: string; itemIndex: number }> = [];
@@ -2591,7 +2647,11 @@ test("rating recovery retains falsy failures after healthy dispatch and gives Qu
                     itemIndex,
                   })),
                 );
-                batches.push(Array.from(messages, ({ body }) => body));
+                batches.push(
+                  Array.from(messages, ({ body }) =>
+                    canonicalQueuePayloadFixture(body),
+                  ),
+                );
                 if (failSend) throw queueFailure;
                 return {
                   metadata: { metrics: { backlogCount: 0, backlogBytes: 0 } },
@@ -2617,7 +2677,7 @@ test("rating recovery retains falsy failures after healthy dispatch and gives Qu
         [
           {
             kind: "rating-profile-game-projection",
-            operationId: records[2].operationId,
+            operationId: records[2]!.operationId,
           },
         ],
       ]);
@@ -2638,7 +2698,13 @@ test("event recovery helpers accept only their required outbox capabilities", as
       const decision = updater(null);
       assert.ok("commit" in decision);
       assert.equal(decision.commit, false);
-      return { committed: false, decision: decision.decision, value: null };
+      return {
+        committed: false,
+        ...(decision.decision === undefined
+          ? {}
+          : { decision: decision.decision }),
+        value: null,
+      };
     },
   });
   assert.equal(
@@ -2676,7 +2742,7 @@ test("event recovery helpers accept only their required outbox capabilities", as
   );
 });
 
-test("event recovery normalizes every non-null malformed marker", async () => {
+test("event recovery rejects malformed markers without replacing canonical records", async () => {
   const runRepair = async (value: unknown, eventId = "event-1") => {
     let current = value;
     const result = await repairInvalidEventSweepEntry(
@@ -2685,12 +2751,20 @@ test("event recovery normalizes every non-null malformed marker", async () => {
           const value = current as Parameters<typeof updater>[0];
           const decision = updater(value);
           if ("commit" in decision) {
-            return { committed: false, decision: decision.decision, value };
+            return {
+              committed: false,
+              ...(decision.decision === undefined
+                ? {}
+                : { decision: decision.decision }),
+              value,
+            };
           }
           current = decision.value;
           return {
             committed: true,
-            decision: decision.decision,
+            ...(decision.decision === undefined
+              ? {}
+              : { decision: decision.decision }),
             value: decision.value,
           };
         },
@@ -2701,51 +2775,25 @@ test("event recovery normalizes every non-null malformed marker", async () => {
     );
     return { current, result };
   };
-  const repairedResult = {
-    kind: "repaired" as const,
-    task: {
-      kind: "event-profile-game-projection" as const,
-      eventId: "event-1",
-      requestId: "repair-request",
+  for (const value of [
+    {
+      status: "bad",
+      cleanupOwnerProfileIds: {
+        "owner-true": true,
+        "owner-object": false,
+        "unsafe/path": true,
+      },
     },
-  };
-  for (const [value, cleanupOwnerProfileIds] of [
-    [
-      {
-        status: "bad",
-        cleanupOwnerProfileIds: {
-          "owner-true": true,
-          "owner-object": false,
-          "unsafe/path": true,
-        },
-      },
-      ["owner-true"],
-    ],
-    [{ status: "bad", cleanupOwnerProfileIds: "owner-string" }, []],
-    [
-      {
-        status: "bad",
-        cleanupOwnerProfileIds: ["owner-array", "unsafe/path", 7],
-      },
-      [],
-    ],
-    ["corrupt", []],
-    [false, []],
-    [["corrupt"], []],
-  ] as Array<[unknown, string[]]>) {
-    assert.deepEqual(await runRepair(value), {
-      result: repairedResult,
-      current: {
-        schemaVersion: 1,
-        status: "pending",
-        requestId: "repair-request",
-        lastQueuedAtMs: 600_000,
-        cleanupOwnerProfileIds: Object.fromEntries(
-          cleanupOwnerProfileIds.map((profileId) => [profileId, true]),
-        ),
-      },
-    });
-  }
+    { status: "bad", cleanupOwnerProfileIds: "owner-string" },
+    {
+      status: "bad",
+      cleanupOwnerProfileIds: ["owner-array", "unsafe/path", 7],
+    },
+    "corrupt",
+    false,
+    ["corrupt"],
+  ])
+    await assert.rejects(runRepair(value), /invalid-event-projection-outbox/);
 
   const concurrent = eventOutbox("concurrent-request", 700_000);
   assert.deepEqual(await runRepair(null), {
@@ -2756,556 +2804,11 @@ test("event recovery normalizes every non-null malformed marker", async () => {
     current: concurrent,
     result: { kind: "changed" },
   });
-  assert.deepEqual(await runRepair({ status: "bad" }, "unsafe/path"), {
-    current: null,
-    result: { kind: "removed" },
-  });
-});
-
-test("event recovery claims due outboxes and repairs malformed records", async () => {
-  const batches: ProfileGameProjectionTask[][] = [];
-  const logs: string[] = [];
-  const queue = {
-    ...TELEGRAM_TEST_ENV.PROFILE_GAME_PROJECTION_QUEUE,
-    sendBatch: async (messages: Iterable<MessageSendRequest<unknown>>) => {
-      batches.push(
-        Array.from(messages).map(
-          ({ body }) => body as ProfileGameProjectionTask,
-        ),
-      );
-      return {
-        metadata: { metrics: { backlogCount: 0, backlogBytes: 0 } },
-      };
-    },
-  } satisfies Queue;
-  const values = new Map<string, unknown>([
-    ["event-1", eventOutbox("event-request-1", 100)],
-    [
-      "event-bad",
-      {
-        ...eventOutbox("event-request-2", 200),
-        status: "bad",
-        cleanupOwnerProfileIds: { "stale-profile": false },
-      },
-    ],
-    ["event-negative", { ...eventOutbox(), lastQueuedAtMs: -1 }],
-    ["event-boolean", { ...eventOutbox(), lastQueuedAtMs: false }],
-  ]);
-  const state = attachProjectionTestPorts({
-    readInviteMetadata: async () => {
-      throw new Error("unexpected-invite-metadata-read");
-    },
-    listDueEventProfileGameProjectionOutboxes: async (
-      beforeMs: number,
-      limit?: number,
-    ) => {
-      assert.equal(beforeMs, 300_000);
-      assert.equal(limit, 10);
-      return [...values].map(([eventId, record]) => ({ eventId, record }));
-    },
-    getStatePath: async () => {
-      throw new Error("unexpected-path-read");
-    },
-    transactStatePath: async (
-      path: string,
-      updater: (current: unknown) => unknown,
-    ) => {
-      const eventId = path.split("/").at(-1) || "";
-      const result = applyStateTransaction(values.get(eventId), updater);
-      if (result.committed) {
-        values.set(eventId, result.value);
-      }
-      return result;
-    },
-  });
-  const requestIds = ["repair-bad", "repair-negative", "repair-boolean"];
-  assert.equal(
-    await sweepEventProfileGameProjections(
-      {
-        ...TELEGRAM_TEST_ENV,
-        PROFILE_GAME_PROJECTION_QUEUE: queue,
-        EVENT_PROFILE_GAME_PROJECTION_QUEUE: queue,
-      },
-      {
-        createRequestId: () => requestIds.shift() || "unexpected",
-        createEventRecovery: () => profileGameProjectionRecoveryFixture(state),
-        logger: { error: (message) => logs.push(String(message)), info() {} },
-        now: () => 600_000,
-      },
-    ),
-    4,
-  );
-  assert.deepEqual(batches.flat(), [
-    {
-      kind: "event-profile-game-projection",
-      eventId: "event-bad",
-      requestId: "repair-bad",
-    },
-    {
-      kind: "event-profile-game-projection",
-      eventId: "event-negative",
-      requestId: "repair-negative",
-    },
-    {
-      kind: "event-profile-game-projection",
-      eventId: "event-boolean",
-      requestId: "repair-boolean",
-    },
-    eventTask(),
-  ]);
-  assert.deepEqual(values.get("event-1"), {
-    ...eventOutbox("event-request-1", 100),
-    lastQueuedAtMs: 600_000,
-  });
-  assert.deepEqual(values.get("event-bad"), {
-    schemaVersion: 1,
-    status: "pending",
-    requestId: "repair-bad",
-    lastQueuedAtMs: 600_000,
-    cleanupOwnerProfileIds: {},
-  });
-  assert.deepEqual(values.get("event-negative"), {
-    schemaVersion: 1,
-    status: "pending",
-    requestId: "repair-negative",
-    lastQueuedAtMs: 600_000,
-    cleanupOwnerProfileIds: { "stale-profile": true },
-  });
-  assert.deepEqual(values.get("event-boolean"), {
-    schemaVersion: 1,
-    status: "pending",
-    requestId: "repair-boolean",
-    lastQueuedAtMs: 600_000,
-    cleanupOwnerProfileIds: { "stale-profile": true },
-  });
-  assert.equal(
-    logs.some(
-      (entry) =>
-        entry.includes(
-          "event_profile_game_projection_invalid_outboxes_recovered",
-        ) && entry.includes('"repaired":3'),
-    ),
-    true,
+  await assert.rejects(
+    runRepair({ status: "bad" }, "unsafe/path"),
+    /invalid-event-projection-outbox/,
   );
 });
-
-test("automatch recovery claims due outboxes, repairs poison, and preserves source time", async () => {
-  const batches: ProfileGameProjectionTask[][] = [];
-  const logs: string[] = [];
-  const queue = {
-    ...TELEGRAM_TEST_ENV.PROFILE_GAME_PROJECTION_QUEUE,
-    sendBatch: async (messages: Iterable<MessageSendRequest<unknown>>) => {
-      batches.push(
-        Array.from(messages).map(
-          ({ body }) => body as ProfileGameProjectionTask,
-        ),
-      );
-      return {
-        metadata: { metrics: { backlogCount: 0, backlogBytes: 0 } },
-      };
-    },
-  } satisfies Queue;
-  const values = new Map<string, unknown>([
-    ["auto_aaaaaaaaaaa", automatchOutbox("request-1", 50, 100)],
-    ["auto_bbbbbbbbbbb", { ...automatchOutbox("unsafe/path", 60, 200) }],
-    [
-      "auto_ccccccccccc",
-      {
-        schemaVersion: 1,
-        status: "pending",
-        requestId: "request-3",
-        sourceUpdatedAtMs: 70,
-      },
-    ],
-    ["auto_ddddddddddd", "invalid"],
-    [
-      "auto_eeeeeeeeeee",
-      { ...automatchOutbox("request-5", 80, 200), lastQueuedAtMs: "bad" },
-    ],
-    [
-      "auto_fffffffffff",
-      {
-        ...automatchOutbox("request-6", 90, 200),
-        lastQueuedAtMs: { invalid: true },
-      },
-    ],
-  ]);
-  const state = attachProjectionTestPorts({
-    readInviteMetadata: async () => {
-      throw new Error("unexpected-invite-metadata-read");
-    },
-    listDueEventProfileGameProjectionOutboxes: async () => [],
-    getStatePath: async (path: string, query?: Record<string, unknown>) => {
-      assert.equal(path, "profileGameProjectionOutbox/automatch");
-      if (query?.endAt === 300_000) {
-        return Object.fromEntries(
-          [...values].filter(
-            ([inviteId]) =>
-              inviteId !== "auto_eeeeeeeeeee" &&
-              inviteId !== "auto_fffffffffff",
-          ),
-        );
-      }
-      assert.deepEqual(query, {
-        orderBy: "lastQueuedAtMs",
-        startAt: "",
-        limitToFirst: 10,
-      });
-      return Object.fromEntries(
-        [...values].filter(
-          ([inviteId]) =>
-            inviteId === "auto_eeeeeeeeeee" || inviteId === "auto_fffffffffff",
-        ),
-      );
-    },
-    transactStatePath: async (
-      path: string,
-      updater: (current: unknown) => unknown,
-    ) => {
-      const inviteId = path.split("/").at(-1) || "";
-      const result = applyStateTransaction(values.get(inviteId), updater);
-      if (result.committed) {
-        values.set(inviteId, result.value);
-      }
-      return result;
-    },
-  });
-  const requestIds = [
-    "repair-1",
-    "repair-2",
-    "repair-3",
-    "repair-4",
-    "repair-5",
-  ];
-  assert.equal(
-    await sweepAutomatchProfileGameProjections(
-      {
-        ...TELEGRAM_TEST_ENV,
-        PROFILE_GAME_PROJECTION_QUEUE: queue,
-        EVENT_PROFILE_GAME_PROJECTION_QUEUE: queue,
-      },
-      {
-        createRequestId: () => requestIds.shift() || "unexpected",
-        createStateRepository: () => state,
-        logger: { error: (message) => logs.push(String(message)), info() {} },
-        now: () => 600_000,
-      },
-    ),
-    6,
-  );
-  assert.deepEqual(batches.flat(), [
-    {
-      kind: "automatch-profile-game-projection",
-      inviteId: "auto_bbbbbbbbbbb",
-      requestId: "repair-1",
-    },
-    {
-      kind: "automatch-profile-game-projection",
-      inviteId: "auto_ccccccccccc",
-      requestId: "repair-2",
-    },
-    {
-      kind: "automatch-profile-game-projection",
-      inviteId: "auto_ddddddddddd",
-      requestId: "repair-3",
-    },
-    {
-      kind: "automatch-profile-game-projection",
-      inviteId: "auto_eeeeeeeeeee",
-      requestId: "repair-4",
-    },
-    {
-      kind: "automatch-profile-game-projection",
-      inviteId: "auto_fffffffffff",
-      requestId: "repair-5",
-    },
-    automatchTask(),
-  ]);
-  assert.deepEqual(values.get("auto_aaaaaaaaaaa"), {
-    ...automatchOutbox("request-1", 50, 100),
-    lastQueuedAtMs: 600_000,
-  });
-  assert.deepEqual(
-    values.get("auto_bbbbbbbbbbb"),
-    automatchOutbox("repair-1", 60, 600_000),
-  );
-  assert.deepEqual(
-    values.get("auto_ccccccccccc"),
-    automatchOutbox("repair-2", 70, 600_000),
-  );
-  assert.deepEqual(
-    values.get("auto_ddddddddddd"),
-    automatchOutbox("repair-3", 600_000, 600_000),
-  );
-  assert.deepEqual(
-    values.get("auto_eeeeeeeeeee"),
-    automatchOutbox("repair-4", 80, 600_000),
-  );
-  assert.deepEqual(
-    values.get("auto_fffffffffff"),
-    automatchOutbox("repair-5", 90, 600_000),
-  );
-  assert.equal(
-    logs.some(
-      (entry) =>
-        entry.includes("profile_game_projection_invalid_outboxes_recovered") &&
-        entry.includes('"repaired":5') &&
-        entry.includes('"removed":0'),
-    ),
-    true,
-  );
-});
-
-for (const kind of ["automatch", "event"] as const) {
-  test(`${kind} recovery preserves repair and claim failure precedence after sending successful work`, async () => {
-    const repairFailure = new Error("repair-unavailable");
-    const laterRepairFailure = new Error("later-repair-unavailable");
-    const claimFailure = new Error("claim-unavailable");
-    const queueFailure = new Error("queue-unavailable");
-    for (const { failClaim, failSend } of [
-      { failClaim: false, failSend: false },
-      { failClaim: true, failSend: false },
-      { failClaim: true, failSend: true },
-    ]) {
-      const batches: unknown[][] = [];
-      const logs: string[] = [];
-      const validRecord =
-        kind === "automatch" ? automatchOutbox() : eventOutbox();
-      const values = new Map<string, unknown>([
-        ["broken-repair", "invalid"],
-        ["later-broken-repair", "invalid"],
-        ["broken-claim", validRecord],
-        ["valid", validRecord],
-      ]);
-      const visited: string[] = [];
-      const state = attachProjectionTestPorts({
-        getStatePath: async (_path: string, query?: Record<string, unknown>) =>
-          query?.startAt === "" ? {} : Object.fromEntries(values),
-        listDueEventProfileGameProjectionOutboxes: async () =>
-          [...values].map(([eventId, record]) => ({ eventId, record })),
-        transactStatePath: async (
-          path: string,
-          updater: (current: unknown) => unknown,
-        ) => {
-          const id = path.split("/").at(-1) || "";
-          visited.push(id);
-          if (id === "broken-repair") throw repairFailure;
-          if (id === "later-broken-repair") throw laterRepairFailure;
-          if (id === "broken-claim" && failClaim) throw claimFailure;
-          return applyStateTransaction(values.get(id), updater);
-        },
-      });
-      const sweep =
-        kind === "automatch"
-          ? sweepAutomatchProfileGameProjections
-          : sweepEventProfileGameProjections;
-      await assert.rejects(
-        sweep(
-          {
-            ...TELEGRAM_TEST_ENV,
-            [kind === "event"
-              ? "EVENT_PROFILE_GAME_PROJECTION_QUEUE"
-              : "PROFILE_GAME_PROJECTION_QUEUE"]: {
-              ...TELEGRAM_TEST_ENV.PROFILE_GAME_PROJECTION_QUEUE,
-              async sendBatch(
-                messages: Iterable<
-                  MessageSendRequest<ProfileGameProjectionTask>
-                >,
-              ) {
-                batches.push(Array.from(messages, ({ body }) => body));
-                if (failSend) throw queueFailure;
-                return {
-                  metadata: { metrics: { backlogCount: 0, backlogBytes: 0 } },
-                };
-              },
-            },
-          },
-          {
-            createStateRepository: () => state,
-            createEventRecovery: () =>
-              profileGameProjectionRecoveryFixture(state),
-            createRequestId: () => "repair-request",
-            logger: {
-              error(message) {
-                logs.push(message);
-                throw new Error("logger-failed");
-              },
-              info() {},
-            },
-            now: () => 600_000,
-          },
-        ),
-        (error) => {
-          if (failSend) return error === queueFailure;
-          if (kind === "automatch")
-            return error === (failClaim ? claimFailure : repairFailure);
-          assert.ok(error instanceof AggregateError);
-          assert.equal(
-            error.message,
-            "event-profile-game-projection-sweep-failed",
-          );
-          assert.deepEqual(error.errors, [
-            repairFailure,
-            laterRepairFailure,
-            ...(failClaim ? [claimFailure] : []),
-          ]);
-          return true;
-        },
-      );
-      assert.deepEqual(visited, [
-        "broken-repair",
-        "later-broken-repair",
-        "broken-claim",
-        "valid",
-      ]);
-      assert.deepEqual(
-        logs.map((entry) => {
-          const { inviteId, eventId, phase, itemIndex, error } =
-            JSON.parse(entry);
-          return {
-            id: inviteId ?? eventId,
-            phase,
-            itemIndex,
-            message: error.message,
-          };
-        }),
-        [
-          {
-            id: "broken-repair",
-            phase: "repair",
-            itemIndex: 0,
-            message: repairFailure.message,
-          },
-          {
-            id: "later-broken-repair",
-            phase: "repair",
-            itemIndex: 1,
-            message: laterRepairFailure.message,
-          },
-          ...(failClaim
-            ? [
-                {
-                  id: "broken-claim",
-                  phase: "claim",
-                  itemIndex: 0,
-                  message: claimFailure.message,
-                },
-              ]
-            : []),
-        ],
-      );
-      assert.deepEqual(batches, [
-        [...(failClaim ? [] : ["broken-claim"]), "valid"].map((id) =>
-          kind === "automatch"
-            ? {
-                kind: "automatch-profile-game-projection",
-                inviteId: id,
-                requestId: validRecord.requestId,
-              }
-            : {
-                kind: "event-profile-game-projection",
-                eventId: id,
-                requestId: validRecord.requestId,
-              },
-        ),
-      ]);
-    }
-  });
-
-  test(`${kind} recovery dispatches repaired and healthy work when the repair notice logger throws`, async () => {
-    const validRecord =
-      kind === "automatch" ? automatchOutbox() : eventOutbox();
-    const values = new Map<string, unknown>([
-      ["broken", "invalid"],
-      ["valid", validRecord],
-    ]);
-    const state = attachProjectionTestPorts({
-      getStatePath: async (_path: string, query?: Record<string, unknown>) =>
-        query?.startAt === "" ? {} : Object.fromEntries(values),
-      listDueEventProfileGameProjectionOutboxes: async () =>
-        [...values].map(([eventId, record]) => ({ eventId, record })),
-      transactStatePath: async (
-        path: string,
-        updater: (current: unknown) => unknown,
-      ) => {
-        const id = path.split("/").at(-1) || "";
-        const result = applyStateTransaction(values.get(id), updater);
-        if (result.committed) values.set(id, result.value);
-        return result;
-      },
-    });
-    const batches: ProfileGameProjectionTask[][] = [];
-    const logs: string[] = [];
-    const queue = {
-      ...TELEGRAM_TEST_ENV.PROFILE_GAME_PROJECTION_QUEUE,
-      async sendBatch(
-        messages: Iterable<MessageSendRequest<ProfileGameProjectionTask>>,
-      ) {
-        batches.push(Array.from(messages, ({ body }) => body));
-        return { metadata: { metrics: { backlogCount: 0, backlogBytes: 0 } } };
-      },
-    };
-    const sweep =
-      kind === "automatch"
-        ? sweepAutomatchProfileGameProjections
-        : sweepEventProfileGameProjections;
-    assert.equal(
-      await sweep(
-        {
-          ...TELEGRAM_TEST_ENV,
-          PROFILE_GAME_PROJECTION_QUEUE: queue,
-          EVENT_PROFILE_GAME_PROJECTION_QUEUE: queue,
-        },
-        {
-          createStateRepository: () => state,
-          createEventRecovery: () =>
-            profileGameProjectionRecoveryFixture(state),
-          createRequestId: () => "repair-request",
-          now: () => 600_000,
-          logger: {
-            error(message) {
-              logs.push(message);
-              throw new Error("logger-failed");
-            },
-            info() {},
-          },
-        },
-      ),
-      2,
-    );
-    assert.equal(logs.length, 1);
-    assert.equal(JSON.parse(logs[0]).repaired, 1);
-    assert.deepEqual(batches, [
-      [
-        ...(kind === "automatch"
-          ? [
-              {
-                kind: "automatch-profile-game-projection",
-                inviteId: "broken",
-                requestId: "repair-request",
-              },
-              {
-                kind: "automatch-profile-game-projection",
-                inviteId: "valid",
-                requestId: validRecord.requestId,
-              },
-            ]
-          : [
-              {
-                kind: "event-profile-game-projection",
-                eventId: "broken",
-                requestId: "repair-request",
-              },
-              {
-                kind: "event-profile-game-projection",
-                eventId: "valid",
-                requestId: validRecord.requestId,
-              },
-            ]),
-      ],
-    ]);
-  });
-}
 
 test("automatch recovery claims an outbox only once", async () => {
   let current: unknown = automatchOutbox("request-1", 50, 100);
@@ -3352,7 +2855,8 @@ test("profile-link recovery claims due markers on the existing Queue", async () 
     sendBatch: async (messages: Iterable<MessageSendRequest<unknown>>) => {
       batches.push(
         Array.from(messages).map(
-          ({ body }) => body as ProfileGameProjectionTask,
+          ({ body }) =>
+            canonicalQueuePayloadFixture(body) as ProfileGameProjectionTask,
         ),
       );
       return {
@@ -3721,7 +3225,11 @@ test("profile-link concurrent recovery sweeps dispatch each due D1 job once", as
     PROFILE_GAME_PROJECTION_QUEUE: {
       ...TELEGRAM_TEST_ENV.PROFILE_GAME_PROJECTION_QUEUE,
       sendBatch: async (messages: Iterable<MessageSendRequest<unknown>>) => {
-        sent.push(...Array.from(messages).map(({ body }) => body));
+        sent.push(
+          ...Array.from(messages).map(({ body }) =>
+            canonicalQueuePayloadFixture(body),
+          ),
+        );
         return { metadata: { metrics: { backlogCount: 0, backlogBytes: 0 } } };
       },
     },

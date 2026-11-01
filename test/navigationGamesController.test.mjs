@@ -1,3 +1,4 @@
+import { required } from "./fixtures/canonicalData.mjs";
 import assert from "node:assert/strict";
 import { registerHooks } from "node:module";
 import test from "node:test";
@@ -15,6 +16,13 @@ registerHooks({
   },
 });
 
+/**
+ * @typedef {import("../src/ui/controls/navigationGamesController.ts").NavigationGamesClient} NavigationClient
+ * @typedef {Awaited<ReturnType<NavigationClient["getProfileGamesPage"]>>} NavigationPage
+ * @typedef {{profileId: string; authStatus: import("../src/connection/authModels.ts").AuthStatus; isOpen: boolean}} NavigationContext
+ * @typedef {{limit: number; onItems: Parameters<NavigationClient["subscribeProfileGames"]>[1];
+ * onStop: Parameters<NavigationClient["subscribeProfileGames"]>[2]; onPageMeta: Parameters<NavigationClient["subscribeProfileGames"]>[3]; stops: number}} NavigationSubscription
+ */
 const { createNavigationGamesController } =
   await import("../src/ui/controls/navigationGamesController.ts");
 const {
@@ -24,18 +32,18 @@ const {
   writeNavigationGamesRuntimeCache,
 } = await import("../src/services/navigationGamesCache.ts");
 
+/**
+ * @template [T=void]
+ * @returns {PromiseWithResolvers<T>}
+ */
 const deferred = () => {
-  let resolve;
-  let reject;
-  const promise = new Promise((onResolve, onReject) => {
-    resolve = onResolve;
-    reject = onReject;
-  });
-  return { promise, resolve, reject };
+  return Promise.withResolvers();
 };
 
-const flushPromises = () => new Promise(setImmediate);
+const flushPromises = () => new Promise((resolve) => setImmediate(resolve));
+/** @param {readonly {id: string}[]} items */
 const ids = (items) => items.map(({ id }) => id);
+/** @param {string} id @param {Partial<import("@mons/shared/navigation").NavigationGameItem>} [overrides] @returns {import("@mons/shared/navigation").NavigationGameItem} */
 const game = (id, overrides = {}) => ({
   id,
   entityType: "game",
@@ -44,29 +52,45 @@ const game = (id, overrides = {}) => ({
   status: "waiting",
   sortBucket: 30,
   listSortAtMs: 100,
+  hostLoginId: null,
+  guestLoginId: null,
+  opponentProfileId: null,
+  opponentName: null,
+  opponentEmoji: null,
+  automatchStateHint: null,
+  isPendingAutomatch: false,
   ...overrides,
 });
+/** @param {import("@mons/shared/navigation").NavigationItem[]} items @param {boolean} [hasMore] @param {import("@mons/shared/navigation").NavigationGamesCursor | null} [nextCursor] @returns {NavigationPage} */
 const page = (items, hasMore = false, nextCursor = null) => ({
   items,
   hasMore,
   nextCursor,
 });
-const cursor = (id) => ({ id, sortBucket: 30, listSortAtMs: 100 });
+const cursor = (/** @type {string} */ id) => ({
+  id,
+  sortBucket: 30,
+  listSortAtMs: 100,
+});
 
+/** @param {test.TestContext} t @param {Partial<NavigationContext>} [initial] */
 const createHarness = (t, initial = {}) => {
   const originalStorage = Object.getOwnPropertyDescriptor(
     globalThis,
     "localStorage",
   );
+  /** @type {Map<string, string>} */
   const values = new Map();
   Object.defineProperty(globalThis, "localStorage", {
     configurable: true,
     value: {
-      getItem: (key) => values.get(key) ?? null,
-      setItem: (key, value) => values.set(key, value),
-      removeItem: (key) => values.delete(key),
+      getItem: (/** @type {string} */ key) => values.get(key) ?? null,
+      setItem: (/** @type {string} */ key, /** @type {string} */ value) =>
+        values.set(key, value),
+      removeItem: (/** @type {string} */ key) => values.delete(key),
     },
   });
+  /** @type {NavigationContext} */
   let context = {
     profileId: "profile-a",
     authStatus: "authenticated",
@@ -75,9 +99,13 @@ const createHarness = (t, initial = {}) => {
   };
   let sessionEpoch = 0;
   const profiles = new Set([context.profileId]);
+  /** @type {NavigationSubscription[]} */
   const subscriptions = [];
+  /** @type {Array<{limit: number; cursor: import("@mons/shared/navigation").NavigationGamesCursor | null} & PromiseWithResolvers<NavigationPage>>} */
   const pages = [];
+  /** @type {Array<{inviteId: string} & PromiseWithResolvers<Awaited<ReturnType<NavigationClient["removeWaitingNavigationGame"]>>>>} */
   const removals = [];
+  /** @type {NavigationClient} */
   const client = {
     createSessionGuard: () => {
       const epoch = sessionEpoch;
@@ -91,23 +119,32 @@ const createHarness = (t, initial = {}) => {
       };
     },
     getProfileGamesPage: (limit, nextCursor) => {
-      const request = { limit, cursor: nextCursor, ...deferred() };
+      /** @type {PromiseWithResolvers<NavigationPage>} */
+      const pending = deferred();
+      const request = { limit, cursor: nextCursor, ...pending };
       pages.push(request);
       return request.promise;
     },
     removeWaitingNavigationGame: (inviteId) => {
-      const request = { inviteId, ...deferred() };
+      /** @type {PromiseWithResolvers<Awaited<ReturnType<NavigationClient["removeWaitingNavigationGame"]>>>} */
+      const pending = deferred();
+      const request = { inviteId, ...pending };
       removals.push(request);
       return request.promise;
     },
   };
   const controller = createNavigationGamesController({ client, ...context });
+  /** @param {Partial<NavigationContext>} [next] */
   const setContext = (next = {}) => {
     context = { ...context, ...next };
     profiles.add(context.profileId);
     controller.setContext(context);
   };
-  const seed = (profileId, topGames, pagedGames = []) => {
+  const seed = (
+    /** @type {string} */ profileId,
+    /** @type {import("@mons/shared/navigation").NavigationItem[]} */ topGames,
+    /** @type {import("@mons/shared/navigation").NavigationItem[]} */ pagedGames = [],
+  ) => {
     profiles.add(profileId);
     writeNavigationGamesRuntimeCache(
       resolveNavigationGamesCacheScope(profileId),
@@ -124,7 +161,7 @@ const createHarness = (t, initial = {}) => {
     if (originalStorage) {
       Object.defineProperty(globalThis, "localStorage", originalStorage);
     } else {
-      delete globalThis.localStorage;
+      Reflect.deleteProperty(globalThis, "localStorage");
     }
   });
   return {
@@ -141,11 +178,12 @@ const createHarness = (t, initial = {}) => {
     invalidateSession: () => {
       sessionEpoch += 1;
     },
+    /** @param {import("@mons/shared/navigation").NavigationItem[]} items @param {import("@mons/shared/navigation").NavigationGamesCursor | null} [nextCursor] */
     emit: (items, nextCursor = null, hasMore = false) => {
       const subscription = subscriptions.at(-1);
       assert.ok(subscription);
       subscription.onItems(items);
-      subscription.onPageMeta({ nextCursor, hasMore });
+      subscription.onPageMeta({ items: [], nextCursor, hasMore });
     },
   };
 };
@@ -160,7 +198,7 @@ test("construction is inert and a disposed controller can activate again", (t) =
   );
   h.setContext();
   assert.equal(h.subscriptions.length, 1);
-  assert.equal(h.subscriptions[0].limit, 80);
+  assert.equal(required(h.subscriptions[0]).limit, 80);
   assert.deepEqual(ids(h.snapshot().topGames), ["cached"]);
   assert.equal(h.snapshot().isLoading, true);
   h.emit([game("live")]);
@@ -171,12 +209,12 @@ test("construction is inert and a disposed controller can activate again", (t) =
   const oldGuard = h.controller.createProfileRequestGuard();
   h.controller.dispose();
   h.controller.dispose();
-  assert.equal(oldSubscription.stops, 1);
+  assert.equal(required(oldSubscription).stops, 1);
   assert.equal(oldGuard(), false);
   h.setContext();
   assert.equal(h.subscriptions.length, 2);
   h.emit([game("reactivated")]);
-  oldSubscription.onItems([game("stale")]);
+  required(oldSubscription).onItems([game("stale")]);
   assert.deepEqual(ids(h.snapshot().topGames), ["reactivated"]);
   unsubscribe();
 });
@@ -186,16 +224,20 @@ test("polling failure preserves hydrated rows and retires pending paging", async
   h.seed("profile-a", [game("cached-top")], [game("cached-tail")]);
   h.open();
   const subscription = h.subscriptions[0];
-  subscription.onPageMeta({ nextCursor: cursor("warm"), hasMore: true });
+  required(subscription).onPageMeta({
+    items: [],
+    nextCursor: cursor("warm"),
+    hasMore: true,
+  });
   assert.equal(h.pages.length, 1);
-  subscription.onStop();
-  assert.equal(subscription.stops, 1);
+  required(subscription).onStop(undefined);
+  assert.equal(required(subscription).stops, 1);
   assert.deepEqual(ids(h.snapshot().topGames), ["cached-top"]);
   assert.deepEqual(ids(h.snapshot().pagedGames), ["cached-tail"]);
   assert.equal(h.snapshot().isLoading, false);
   assert.equal(h.snapshot().isLoadingMore, false);
   assert.equal(h.snapshot().hasMore, false);
-  h.pages[0].resolve(page([game("late-tail")], true, cursor("late")));
+  required(h.pages[0]).resolve(page([game("late-tail")], true, cursor("late")));
   await flushPromises();
   assert.deepEqual(ids(h.snapshot().pagedGames), ["cached-tail"]);
   h.controller.loadMore();
@@ -219,10 +261,16 @@ test("profile A to B to A invalidates old subscriptions, pages, and removals", a
   assert.equal(h.snapshot().isLoadingMore, false);
   h.setContext({ profileId: "profile-a", isOpen: true });
   h.emit([game("same-invite"), game("fresh-a")]);
-  oldSubscription.onItems([game("stale-a")]);
-  oldSubscription.onPageMeta({ nextCursor: cursor("stale"), hasMore: true });
-  h.pages[0].resolve(page([game("stale-page")], true, cursor("stale")));
-  h.removals[0].resolve({ ok: true });
+  required(oldSubscription).onItems([game("stale-a")]);
+  required(oldSubscription).onPageMeta({
+    items: [],
+    nextCursor: cursor("stale"),
+    hasMore: true,
+  });
+  required(h.pages[0]).resolve(
+    page([game("stale-page")], true, cursor("stale")),
+  );
+  required(h.removals[0]).resolve({ ok: true });
   await flushPromises();
   assert.deepEqual(ids(h.snapshot().topGames), ["fresh-a", "same-invite"]);
   assert.deepEqual(h.snapshot().pagedGames, []);
@@ -238,20 +286,20 @@ test("an old popup request cannot finish the new popup's load-more state", async
   h.controller.loadMore();
   h.controller.loadMore();
   assert.equal(h.pages.length, 1);
-  assert.equal(h.pages[0].limit, 50);
+  assert.equal(required(h.pages[0]).limit, 50);
   h.close();
   assert.equal(guard(), true);
-  assert.equal(h.subscriptions[0].stops, 1);
+  assert.equal(required(h.subscriptions[0]).stops, 1);
   assert.deepEqual(ids(h.snapshot().topGames), ["top"]);
   h.open();
   h.emit([game("new-top")], cursor("second"), true);
   h.controller.loadMore();
   assert.equal(h.pages.length, 2);
-  h.pages[0].resolve(page([game("stale")], false));
+  required(h.pages[0]).resolve(page([game("stale")], false));
   await flushPromises();
   assert.equal(h.snapshot().isLoadingMore, true);
   assert.deepEqual(h.snapshot().pagedGames, []);
-  h.pages[1].resolve(page([game("new-tail")]));
+  required(h.pages[1]).resolve(page([game("new-tail")]));
   await flushPromises();
   assert.equal(h.snapshot().isLoadingMore, false);
   assert.deepEqual(ids(h.snapshot().pagedGames), ["new-tail"]);
@@ -265,7 +313,7 @@ for (const hasMore of [false, true]) {
     h.emit([game("top")], cursor("warm"), true);
     h.emit([game("top")], cursor("warm"), true);
     assert.equal(h.pages.length, 1);
-    h.pages[0].resolve(
+    required(h.pages[0]).resolve(
       page(
         [game("top"), game("new-tail")],
         hasMore,
@@ -278,7 +326,11 @@ for (const hasMore of [false, true]) {
       hasMore ? ["cached-tail", "new-tail"] : ["new-tail"],
     );
     assert.equal(h.snapshot().hasMore, hasMore);
-    h.subscriptions[0].onPageMeta({ nextCursor: null, hasMore: false });
+    required(h.subscriptions[0]).onPageMeta({
+      items: [],
+      nextCursor: null,
+      hasMore: false,
+    });
     assert.deepEqual(h.snapshot().pagedGames, []);
     assert.equal(h.snapshot().hasMore, false);
   });
@@ -289,7 +341,7 @@ test("paging merges duplicates, promotes top rows, and retains rows on failure",
   h.open();
   h.emit([game("top")], cursor("first"), true);
   h.controller.loadMore();
-  h.pages[0].resolve(
+  required(h.pages[0]).resolve(
     page(
       [game("top"), game("older", { listSortAtMs: 10 })],
       true,
@@ -299,7 +351,7 @@ test("paging merges duplicates, promotes top rows, and retains rows on failure",
   await flushPromises();
   assert.deepEqual(ids(h.snapshot().pagedGames), ["older"]);
   h.controller.loadMore();
-  h.pages[1].resolve(
+  required(h.pages[1]).resolve(
     page(
       [
         game("older", { listSortAtMs: 30 }),
@@ -311,10 +363,10 @@ test("paging merges duplicates, promotes top rows, and retains rows on failure",
   );
   await flushPromises();
   assert.deepEqual(ids(h.snapshot().pagedGames), ["older", "newer"]);
-  h.subscriptions[0].onItems([game("top"), game("older")]);
+  required(h.subscriptions[0]).onItems([game("top"), game("older")]);
   assert.deepEqual(ids(h.snapshot().pagedGames), ["newer"]);
   h.controller.loadMore();
-  h.pages[2].reject(new Error("offline"));
+  required(h.pages[2]).reject(new Error("offline"));
   await flushPromises();
   assert.deepEqual(ids(h.snapshot().pagedGames), ["newer"]);
   assert.equal(h.snapshot().isLoadingMore, false);
@@ -326,7 +378,7 @@ test("terminal metadata discards paged rows promoted into the top page", async (
   h.open();
   h.emit([game("top")], cursor("next"), true);
   h.controller.loadMore();
-  h.pages[0].resolve(page([game("older")]));
+  required(h.pages[0]).resolve(page([game("older")]));
   await flushPromises();
   assert.deepEqual(ids(h.snapshot().pagedGames), ["older"]);
   h.emit([game("top"), game("older")]);
@@ -346,8 +398,8 @@ test("an expired session cannot apply paging or removal results", async (t) => {
   h.controller.removeWaitingGame("waiting");
   h.invalidateSession();
   assert.equal(guard(), false);
-  h.pages[0].resolve(page([game("stale")]));
-  h.removals[0].resolve({ ok: true });
+  required(h.pages[0]).resolve(page([game("stale")]));
+  required(h.removals[0]).resolve({ ok: true });
   await flushPromises();
   assert.deepEqual(h.snapshot().pagedGames, []);
   assert.equal(h.snapshot().isLoadingMore, false);
@@ -357,7 +409,7 @@ test("an expired session cannot apply paging or removal results", async (t) => {
   assert.deepEqual(ids(h.snapshot().topGames), ["waiting"]);
   h.controller.removeWaitingGame("waiting");
   assert.equal(h.removals.length, 2);
-  h.removals[1].resolve({ ok: true });
+  required(h.removals[1]).resolve({ ok: true });
   await flushPromises();
   assert.deepEqual(h.snapshot().topGames, []);
 });
@@ -387,7 +439,7 @@ test("anonymous optimism is ephemeral and authoritative rows replace optimism", 
   );
   h.emit([game("pending", { status: "active", kind: "auto" })]);
   assert.deepEqual(ids(h.snapshot().topGames), ["pending"]);
-  assert.equal(h.snapshot().topGames[0].status, "active");
+  assert.equal(required(h.snapshot().topGames[0]).status, "active");
   h.emit([]);
   assert.deepEqual(h.snapshot().topGames, []);
 });
@@ -405,8 +457,13 @@ for (const result of ["success", "skipped", "failure"]) {
     assert.equal(h.removals.length, 1);
     assert.deepEqual(ids(h.snapshot().topGames), ["active"]);
     assert.equal(h.snapshot().removingInviteIds.has("shared"), true);
-    if (result === "failure") h.removals[0].reject(new Error("offline"));
-    else h.removals[0].resolve({ ok: true, skipped: result === "skipped" });
+    if (result === "failure")
+      required(h.removals[0]).reject(new Error("offline"));
+    else
+      required(h.removals[0]).resolve({
+        ok: true,
+        skipped: result === "skipped",
+      });
     await flushPromises();
     assert.deepEqual(
       ids(h.snapshot().topGames),
@@ -418,12 +475,13 @@ for (const result of ["success", "skipped", "failure"]) {
 
 test("event previews use the current profile's cache and live navigation rows", (t) => {
   const h = createHarness(t);
-  const participant = (profileId) => ({
+  const participant = (/** @type {string} */ profileId) => ({
     profileId,
     displayName: profileId,
     emojiId: 1,
     aura: null,
   });
+  /** @param {string} profileId @returns {import("@mons/shared/navigation").NavigationEventItem} */
   const event = (profileId) => ({
     id: "event_tournament",
     entityType: "event",
@@ -431,6 +489,11 @@ test("event previews use the current profile's cache and live navigation rows", 
     status: "active",
     sortBucket: 0,
     listSortAtMs: 1,
+    startAtMs: null,
+    updatedAtMs: null,
+    endedAtMs: null,
+    participantCount: 1,
+    winnerDisplayName: null,
     participantPreview: [participant(profileId)],
   });
   h.seed("profile-a", [], [event("participant-a")]);

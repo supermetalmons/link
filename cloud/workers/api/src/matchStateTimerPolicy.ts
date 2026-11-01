@@ -4,9 +4,11 @@ import {
   MATCH_TIMER_TERMINAL,
   formatMatchTimer,
   parseStrictMatchTimer,
+  matchTimersEqual,
+  type RunningMatchTimer,
 } from "@mons/shared/timers";
 import { AuthApiFailure } from "./authErrors.ts";
-import type { MatchTimerStartCandidate } from "./gameplayCoordinationD1.ts";
+import type { MatchTimerStartCandidate } from "./matchTimerRecords.ts";
 import type { MatchTimerGameState, MatchTimerRecord } from "./matchTimer.ts";
 import { canonicalMatchStateJson } from "./matchStateLogic.ts";
 import {
@@ -33,7 +35,7 @@ export type TimerPair = {
 
 export type MatchStateTimerStartPreparation = {
   turnNumber: number;
-  existingTimer: string | null;
+  existingTimer: RunningMatchTimer | null;
 };
 
 function fail(message: string): never {
@@ -56,8 +58,8 @@ export function timerTerminal(pair: TimerPair): boolean {
   return (
     pair.player.status === "surrendered" ||
     pair.opponent.status === "surrendered" ||
-    pair.player.timer === MATCH_TIMER_TERMINAL ||
-    pair.opponent.timer === MATCH_TIMER_TERMINAL ||
+    pair.player.timer.state === "finished" ||
+    pair.opponent.timer.state === "finished" ||
     pair.game.winner !== undefined
   );
 }
@@ -83,8 +85,7 @@ export function prepareMatchStateTimerStart(
     fail("game state changed.");
   return {
     turnNumber: pair.game.turnNumber,
-    existingTimer:
-      stored?.turnNumber === pair.game.turnNumber ? pair.player.timer : null,
+    existingTimer: stored?.turnNumber === pair.game.turnNumber ? stored : null,
   };
 }
 
@@ -107,7 +108,7 @@ export function decideMatchStateTimerStartCommit(
   initial: TimerPair,
   fresh: TimerPair,
   marker: MatchTimerStartCandidate,
-): { changed: boolean; playerMatch: MatchDocument; timer: string } {
+): { changed: boolean; playerMatch: MatchDocument; timer: RunningMatchTimer } {
   assertTimerTurn(fresh);
   if (
     !sameGameFields(initial.player, fresh.player) ||
@@ -131,7 +132,7 @@ export function decideMatchStateTimerStartCommit(
   if (freshTimer && freshTimer.turnNumber > fresh.game.turnNumber)
     fail("game state changed.");
   return {
-    changed: fresh.player.timer !== marker.timer,
+    changed: !matchTimersEqual(fresh.player.timer, marker.timer),
     playerMatch: writeMatchTimer(fresh.pair.playerMatch, marker.timer),
     timer: marker.timer,
   };
@@ -148,23 +149,24 @@ export function decideMatchStateTimerClaim(
   claimedAtMs: number;
 } {
   const existing = current.pair.claim;
-  const replay = current.player.timer === MATCH_TIMER_TERMINAL;
+  const replay = current.player.timer.state === "finished";
   if (!replay) {
     assertTimerTurn(current, true);
-    if (!current.player.timer) fail("could not find an existing timer.");
+    if (current.player.timer.state === "idle")
+      fail("could not find an existing timer.");
     const timer = parseStrictMatchTimer(current.player.timer);
     if (!timer) fail("wrong timer format.");
     if (timer.turnNumber !== current.game.turnNumber)
       fail("can't claim this timer anymore, it's turn is over.");
-    if (timer.targetTimestamp > nowMs)
-      fail(`can't claim yet, ${timer.targetTimestamp - nowMs} ms remaining`);
+    if (timer.deadlineAtMs > nowMs)
+      fail(`can't claim yet, ${timer.deadlineAtMs - nowMs} ms remaining`);
     if (timerClaimStatus(existing) === "claimed") {
       const committed = readCommittedTimerClaim(existing, input.inviteId);
       if (
         !committed ||
         committed.playerId !== input.playerId ||
         committed.opponentId !== input.opponentId ||
-        committed.timer !== current.player.timer ||
+        !matchTimersEqual(committed.timer, current.player.timer) ||
         committed.turnNumber !== current.game.turnNumber
       )
         fail("game state changed.");
@@ -186,12 +188,15 @@ export function decideMatchStateTimerClaim(
     replay && existing
       ? readCommittedTimerClaim(existing, input.inviteId)
       : null;
+  const claimTimer = replayClaim ? replayClaim.timer : current.player.timer;
+  if (claimTimer.state === "idle") fail("could not find an existing timer.");
   const claim = createClaimedTimerDocument({
+    schemaVersion: 1,
     status: "claimed",
     playerId: input.playerId,
     opponentId: input.opponentId,
     inviteId: input.inviteId,
-    timer: replayClaim ? replayClaim.timer : current.player.timer,
+    timer: claimTimer,
     turnNumber: current.game.turnNumber,
     claimedAtMs,
     expiresAtMs: null,

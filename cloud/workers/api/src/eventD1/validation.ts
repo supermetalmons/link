@@ -1,4 +1,7 @@
-import type { EventProgressDocument } from "../../../../runtime/eventProgressRecords.js";
+import {
+  readEventProgressPending,
+  type EventProgressDocument,
+} from "../../../../runtime/eventProgressRecords.js";
 import {
   retainEventProjectionOutbox,
   type EventProjectionOutboxDocument,
@@ -14,8 +17,12 @@ import type {
   EventJsonRecord,
   EventPrizeAssignmentRecord,
 } from "../../../../runtime/eventReads.js";
-import { isEventPrizeId } from "@mons/shared/event-prizes";
-import { STATE_EFFECTS_FIELD } from "../stateCompatibility.ts";
+import {
+  isEventPrizeId,
+  isEventPrizeAssignmentWireRecord,
+} from "@mons/shared/event-prizes";
+import { isEventRecord } from "@mons/shared/events";
+import { parseEventTransitionIntent } from "../eventTransitionCodec.ts";
 
 export const EVENT_STATUSES = new Set([
   "scheduled",
@@ -81,12 +88,6 @@ export function safeInteger(value: unknown, minimum = 0): number {
   return value;
 }
 
-function nullableInteger(value: unknown, minimum = 0): number | null {
-  return value === null || value === undefined
-    ? null
-    : safeInteger(value, minimum);
-}
-
 export function cloneJson<T>(value: T): T {
   if (!isJsonValue(value)) throw new EventD1Failure("invalid-event-json");
   return structuredClone(value);
@@ -138,32 +139,12 @@ export function validateEventAggregate(
   eventId: string,
   value: unknown,
 ): EventJsonRecord {
-  const normalizedEventId = exactKey(eventId);
-  if (!normalizedEventId || !isRecord(value) || !isJsonValue(value)) {
-    throw new EventD1Failure("invalid-event-record");
-  }
   if (
-    value.eventId !== normalizedEventId ||
-    !EVENT_STATUSES.has(String(value.status)) ||
-    !Number.isSafeInteger(value.startAtMs) ||
-    Number(value.startAtMs) < 0 ||
-    !Number.isSafeInteger(value.updatedAtMs) ||
-    Number(value.updatedAtMs) < 0 ||
-    !isRecord(value.participants) ||
-    !isRecord(value.rounds)
+    !exactKey(eventId) ||
+    !isEventRecord(value) ||
+    value.eventId !== eventId
   ) {
     throw new EventD1Failure("invalid-event-record");
-  }
-  if (Object.keys(value.participants).length > 32) {
-    throw new EventD1Failure("invalid-event-record");
-  }
-  for (const [profileId, participant] of Object.entries(value.participants)) {
-    if (!exactKey(profileId) || !isRecord(participant)) {
-      throw new EventD1Failure("invalid-event-record");
-    }
-  }
-  for (const round of Object.values(value.rounds)) {
-    if (!isRecord(round)) throw new EventD1Failure("invalid-event-record");
   }
   return cloneJson(value);
 }
@@ -175,22 +156,16 @@ export function parseStoredEventPrizeAssignment(
 ): EventPrizeAssignmentRecord {
   const normalizedProfileId = exactKey(profileId);
   const normalizedEventId = exactKey(eventId);
-  const prizeId = isRecord(value) ? exactKey(value.prizeId) : "";
   if (
     !normalizedProfileId ||
     !normalizedEventId ||
-    !prizeId ||
-    !isRecord(value) ||
-    !isJsonValue(value) ||
+    !isEventPrizeAssignmentWireRecord(value) ||
     value.profileId !== normalizedProfileId ||
-    value.eventId !== normalizedEventId ||
-    (value.place !== 1 && value.place !== 2 && value.place !== 3) ||
-    !Number.isSafeInteger(value.assignedAtMs) ||
-    Number(value.assignedAtMs) < 0
+    value.eventId !== normalizedEventId
   ) {
     throw new EventD1Failure("invalid-event-prize-assignment");
   }
-  return cloneJson(value) as EventPrizeAssignmentRecord;
+  return cloneJson(value);
 }
 
 export function validateEventPrizeAssignment(
@@ -232,7 +207,8 @@ export function decodeEventRow(row: EventRow): DecodedEventRow {
   if (
     event.status !== row.status ||
     event.startAtMs !== row.start_at_ms ||
-    event.updatedAtMs !== row.updated_at_ms
+    event.updatedAtMs !== row.updated_at_ms ||
+    (row.pending_transition_id !== null && !exactKey(row.pending_transition_id))
   ) {
     throw new EventD1Failure("event-row-mismatch");
   }
@@ -246,85 +222,21 @@ export function decodeEventRow(row: EventRow): DecodedEventRow {
 export function validateTransitionIntent(
   input: unknown,
 ): EventTransitionIntent {
-  const value = input as Record<string, unknown>;
-  if (
-    (value.schemaVersion !== 1 && value.schemaVersion !== 2) ||
-    !exactKey(value.transitionId) ||
-    !exactKey(value.eventId) ||
-    !Number.isSafeInteger(value.expectedRevision) ||
-    (value.expectedRevision as number) < 1 ||
-    !isRecord(value[STATE_EFFECTS_FIELD]) ||
-    !isRecord(value.canonicalUpdates) ||
-    !Number.isSafeInteger(value.createdAtMs) ||
-    (value.createdAtMs as number) < 0 ||
-    !Number.isSafeInteger(value.updatedAtMs) ||
-    (value.updatedAtMs as number) < (value.createdAtMs as number) ||
-    !isJsonValue(value)
-  ) {
-    throw new EventD1Failure("invalid-event-transition");
+  try {
+    return parseEventTransitionIntent(input);
+  } catch (cause) {
+    throw new EventD1Failure("invalid-event-transition", { cause });
   }
-  if (
-    value.schemaVersion === 2 &&
-    (!Number.isSafeInteger(value.sourceEpoch) ||
-      (value.sourceEpoch as number) < 1 ||
-      typeof value.payloadDigest !== "string" ||
-      !/^[a-f0-9]{64}$/.test(value.payloadDigest) ||
-      !Array.isArray(value.inviteMutations) ||
-      value.inviteMutations.length > 32 ||
-      value.inviteMutations.some(
-        (mutation) =>
-          !isRecord(mutation) ||
-          !isRecord(mutation.current) ||
-          !exactKey(mutation.current.inviteId) ||
-          !Number.isSafeInteger(mutation.current.revision) ||
-          (mutation.current.revision as number) < 0 ||
-          (mutation.current.value === null
-            ? mutation.current.revision !== 0
-            : !isRecord(mutation.current.value) ||
-              (mutation.current.revision as number) < 1) ||
-          !isRecord(mutation.value),
-      ) ||
-      new Set(value.inviteMutations.map(({ current }) => current.inviteId))
-        .size !== value.inviteMutations.length)
-  ) {
-    throw new EventD1Failure("invalid-event-transition");
-  }
-  const retained: unknown = cloneJson(value);
-  return retained as EventTransitionIntent;
 }
 
 export function validateEventProgressOutbox(
   outboxId: string,
   value: unknown,
-): EventProgressDocument<"pending"> & {
-  reason?: unknown;
-  firstQueuedAtMs?: unknown;
-  eventId: string;
-  lastQueuedAtMs: number;
-  runAtMs: number | null;
-} {
-  if (!exactKey(outboxId) || !isRecord(value) || !isJsonValue(value)) {
+): EventProgressDocument<"pending"> {
+  const record = readEventProgressPending(value);
+  if (!exactKey(outboxId) || !record)
     throw new EventD1Failure("invalid-event-progress-outbox");
-  }
-  const eventId = exactKey(value.eventId);
-  const runAtMs = nullableInteger(value.runAtMs);
-  const lastQueuedAtMs = safeInteger(value.lastQueuedAtMs);
-  if (!eventId || value.schemaVersion !== 1) {
-    throw new EventD1Failure("invalid-event-progress-outbox");
-  }
-  const retained: unknown = {
-    ...cloneJson(value),
-    eventId,
-    runAtMs,
-    lastQueuedAtMs,
-  };
-  return retained as EventProgressDocument<"pending"> & {
-    reason?: unknown;
-    firstQueuedAtMs?: unknown;
-    eventId: string;
-    runAtMs: number | null;
-    lastQueuedAtMs: number;
-  };
+  return record;
 }
 
 export function validateProjectionOutbox<
@@ -341,38 +253,39 @@ export function validateProjectionOutbox<
   requestId: string;
   updatedAtMs?: number;
 } {
-  if (!exactKey(eventId) || !isRecord(value) || !isJsonValue(value)) {
-    throw new EventD1Failure("invalid-event-projection-outbox");
+  exactKey(eventId);
+  let raw: EventProjectionOutboxDocument<Kind>;
+  try {
+    raw = retainEventProjectionOutbox(kind, value);
+  } catch (cause) {
+    throw new EventD1Failure("invalid-event-projection-outbox", { cause });
   }
-  const raw = retainEventProjectionOutbox(kind, cloneJson(value));
-  if (kind === "telegram" && value.status === "dead") {
-    const deadAtMs = safeInteger(value.deadAtMs);
+  if (raw.status === "dead")
     return {
       raw,
       status: "dead",
-      requestId: exactKey(value.requestId) || eventId,
-      firstQueuedAtMs: deadAtMs,
-      updatedAtMs: deadAtMs,
+      requestId: raw.requestId,
+      ...(kind === "profile-game"
+        ? { lastQueuedAtMs: raw.deadAtMs }
+        : { firstQueuedAtMs: raw.deadAtMs, updatedAtMs: raw.deadAtMs }),
     };
-  }
-  const requestId = exactKey(value.requestId);
-  if (!requestId || value.schemaVersion !== 1 || value.status !== "pending") {
-    throw new EventD1Failure("invalid-event-projection-outbox");
-  }
   if (kind === "profile-game") {
+    if (!("lastQueuedAtMs" in raw))
+      throw new EventD1Failure("invalid-event-projection-outbox");
     return {
       raw,
       status: "pending",
-      requestId,
-      lastQueuedAtMs: safeInteger(value.lastQueuedAtMs),
+      requestId: raw.requestId,
+      lastQueuedAtMs: raw.lastQueuedAtMs,
     };
   }
-  const updatedAtMs = safeInteger(value.updatedAtMs);
+  if (!("firstQueuedAtMs" in raw))
+    throw new EventD1Failure("invalid-event-projection-outbox");
   return {
     raw,
     status: "pending",
-    requestId,
-    firstQueuedAtMs: safeInteger(value.firstQueuedAtMs ?? updatedAtMs),
-    updatedAtMs,
+    requestId: raw.requestId,
+    firstQueuedAtMs: raw.firstQueuedAtMs,
+    updatedAtMs: raw.updatedAtMs,
   };
 }

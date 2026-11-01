@@ -5,11 +5,11 @@ const test = require("node:test");
 const {
   parseArgs: parseRecoveryArgs,
   recoverTelegramDelivery,
-} = require("../admin/recoverTelegramDelivery");
+} = require("../admin/recoverTelegramDelivery.ts");
 const {
   parseBridgeSecretFile,
   readBridgeSecret,
-} = require("../admin/telegramQueueCli");
+} = require("../admin/telegramQueueCli.ts");
 
 test("Telegram admin bridge arguments require a bounded secret file", () => {
   assert.deepEqual(
@@ -36,7 +36,7 @@ test("Telegram admin bridge arguments require a bounded secret file", () => {
 });
 
 test("bridge secret file failures do not expose file diagnostics or contents", () => {
-  for (const [readFile, message] of [
+  for (const [readFile, message] of /** @type {[() => Buffer, string][]} */ ([
     [
       () => {
         throw new Error("private path and diagnostic");
@@ -45,10 +45,11 @@ test("bridge secret file failures do not expose file diagnostics or contents", (
     ],
     [() => Buffer.from("  "), "Telegram bridge secret file is empty."],
     [() => Buffer.alloc(8193), "Telegram bridge secret file is too large."],
-  ]) {
+  ])) {
     assert.throws(
       () => readBridgeSecret("/private/secret", { readFile }),
       (error) => {
+        assert.ok(error instanceof Error);
         assert.equal(error.message, message);
         assert.equal(error.cause, undefined);
         return true;
@@ -94,6 +95,7 @@ test("manual recovery arguments default to dry-run and reject Firebase flags", (
 });
 
 test("manual recovery dry-run delegates to the signed command endpoint", async () => {
+  /** @type {Parameters<NonNullable<NonNullable<Parameters<typeof recoverTelegramDelivery>[1]>["sendCommand"]>>[0][]} */
   const commands = [];
   const result = await recoverTelegramDelivery(
     {
@@ -104,7 +106,13 @@ test("manual recovery dry-run delegates to the signed command endpoint", async (
     {
       sendCommand: async (command) => {
         commands.push(command);
-        return { ok: true, dryRun: true, ...command };
+        assert.ok(command.kind === "recovery-preview");
+        return {
+          ok: true,
+          dryRun: true,
+          messageKey: command.messageKey,
+          action: command.action,
+        };
       },
     },
   );
@@ -119,6 +127,7 @@ test("manual recovery dry-run delegates to the signed command endpoint", async (
 });
 
 test("manual recovery requests and polls the exact accepted result", async () => {
+  /** @type {Parameters<NonNullable<NonNullable<Parameters<typeof recoverTelegramDelivery>[1]>["sendCommand"]>>[0][]} */
   const commands = [];
   const requestId = "18ea8b32-ca88-4492-8ecb-42f87670a901";
   const result = await recoverTelegramDelivery(
@@ -133,11 +142,21 @@ test("manual recovery requests and polls the exact accepted result", async () =>
       sleepImpl: async () => undefined,
       sendCommand: async (command) => {
         commands.push(command);
+        assert.ok(
+          command.kind === "recovery-request" ||
+            command.kind === "recovery-status",
+        );
         return command.kind === "recovery-request"
-          ? { ok: true, requestId }
+          ? {
+              ok: true,
+              requestId,
+              messageKey: command.messageKey,
+              action: command.action,
+            }
           : {
               ok: true,
               requestId,
+              messageKey: command.messageKey,
               status: "accepted",
               deliveryStatus: "pending",
             };
@@ -184,6 +203,7 @@ test("manual recovery reports a possibly pending request after bridge failure", 
 test("manual recovery resumes the request ID returned by the server", async () => {
   const proposed = "18ea8b32-ca88-4492-8ecb-42f87670a901";
   const existing = "28ea8b32-ca88-4492-8ecb-42f87670a902";
+  /** @type {Parameters<NonNullable<NonNullable<Parameters<typeof recoverTelegramDelivery>[1]>["sendCommand"]>>[0][]} */
   const commands = [];
   await recoverTelegramDelivery(
     { action: "abandon", dryRun: false, messageKey: "key" },
@@ -193,9 +213,24 @@ test("manual recovery resumes the request ID returned by the server", async () =
       sleepImpl: async () => undefined,
       sendCommand: async (command) => {
         commands.push(command);
+        assert.ok(
+          command.kind === "recovery-request" ||
+            command.kind === "recovery-status",
+        );
         return command.kind === "recovery-request"
-          ? { requestId: existing }
-          : { requestId: existing, status: "accepted" };
+          ? {
+              ok: true,
+              requestId: existing,
+              messageKey: command.messageKey,
+              action: command.action,
+            }
+          : {
+              ok: true,
+              requestId: existing,
+              messageKey: command.messageKey,
+              status: "accepted",
+              deliveryStatus: null,
+            };
       },
     },
   );

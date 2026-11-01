@@ -1,3 +1,4 @@
+import { applicationStorageKey } from "../session/applicationDataStorage.ts";
 type AppleAuthOptions = {
   clientId: string;
   redirectURI: string;
@@ -23,14 +24,18 @@ let appleScriptPromise: Promise<void> | null = null;
 
 const APPLE_SCRIPT_SRC =
   "https://appleid.cdn-apple.com/appleauth/static/jsapi/appleid/1/en_US/appleid.auth.js";
+const configuredAppleClientId: unknown = import.meta.env.VITE_APPLE_CLIENT_ID;
 const APPLE_CLIENT_ID = (
-  import.meta.env.VITE_APPLE_CLIENT_ID || "link.mons"
+  typeof configuredAppleClientId === "string" && configuredAppleClientId
+    ? configuredAppleClientId
+    : "link.mons"
 ).trim();
 const APPLE_REDIRECT_URI = "https://mons.link";
-const APPLE_PENDING_INTENTS_STORAGE_KEY = "appleIntentByStateV1";
+const APPLE_PENDING_INTENTS_STORAGE_KEY = applicationStorageKey(
+  "appleIntentByStateV1",
+);
 const APPLE_PENDING_INTENT_MAX_ITEMS = 20;
 const APPLE_PENDING_INTENT_MAX_AGE_MS = 15 * 60 * 1000;
-const APPLE_STATE_ENVELOPE_PREFIX = "apple.v1.";
 const APPLE_CALLBACK_PARAM_KEYS = [
   "state",
   "id_token",
@@ -52,13 +57,6 @@ type AppleRedirectResult = {
   idToken: string;
   intentId: string;
   consentSource: string;
-};
-
-type AppleStateEnvelope = {
-  stateToken: string;
-  intentId: string;
-  consentSource: string;
-  expiresAtMs: number;
 };
 
 type AppleCallbackParams = {
@@ -90,82 +88,6 @@ const logAppleRedirectDebug = (
   try {
     console.log("apple-redirect-debug", { event, ...payload });
   } catch {}
-};
-
-const encodeStatePart = (value: string): string => {
-  if (!value) {
-    return "";
-  }
-  try {
-    return encodeURIComponent(value);
-  } catch {
-    return "";
-  }
-};
-
-const decodeStatePart = (value: string): string => {
-  if (!value) {
-    return "";
-  }
-  try {
-    return decodeURIComponent(value);
-  } catch {
-    return "";
-  }
-};
-
-const buildAppleStateEnvelope = (record: ApplePendingIntentRecord): string => {
-  const stateTokenPart = encodeStatePart(record.state);
-  const intentIdPart = encodeStatePart(record.intentId);
-  const consentSourcePart = encodeStatePart(record.consentSource || "signin");
-  const expiresAtMsPart = Number.isFinite(record.expiresAtMs)
-    ? Math.floor(record.expiresAtMs).toString(36)
-    : "";
-  if (
-    !stateTokenPart ||
-    !intentIdPart ||
-    !consentSourcePart ||
-    !expiresAtMsPart
-  ) {
-    return record.state;
-  }
-  return `${APPLE_STATE_ENVELOPE_PREFIX}${stateTokenPart}.${intentIdPart}.${expiresAtMsPart}.${consentSourcePart}`;
-};
-
-const parseCompactAppleStateEnvelope = (
-  payloadRaw: string,
-): AppleStateEnvelope | null => {
-  const parts = payloadRaw.split(".");
-  if (parts.length < 4) {
-    return null;
-  }
-  const [stateTokenRaw, intentIdRaw, expiresAtMsRaw, ...consentSourceParts] =
-    parts;
-  const stateToken = decodeStatePart(stateTokenRaw || "");
-  const intentId = decodeStatePart(intentIdRaw || "");
-  const consentSource =
-    decodeStatePart(consentSourceParts.join(".")) || "signin";
-  const expiresAtMs = Number.parseInt(expiresAtMsRaw || "", 36);
-  if (!stateToken || !intentId || !Number.isFinite(expiresAtMs)) {
-    return null;
-  }
-  return {
-    stateToken,
-    intentId,
-    consentSource,
-    expiresAtMs: Math.floor(expiresAtMs),
-  };
-};
-
-const parseAppleStateEnvelope = (state: string): AppleStateEnvelope | null => {
-  if (!state || !state.startsWith(APPLE_STATE_ENVELOPE_PREFIX)) {
-    return null;
-  }
-  const payloadRaw = state.slice(APPLE_STATE_ENVELOPE_PREFIX.length);
-  if (!payloadRaw) {
-    return null;
-  }
-  return parseCompactAppleStateEnvelope(payloadRaw);
 };
 
 const loadAppleScript = async (): Promise<void> => {
@@ -292,36 +214,35 @@ const parsePendingAppleIntentRecordsFromStorage = (
     const nowMs = Date.now();
     return parsed
       .map((value: unknown) => {
-        const item = value as
-          | {
-              state?: unknown;
-              intentId?: unknown;
-              consentSource?: unknown;
-              createdAtMs?: unknown;
-              expiresAtMs?: unknown;
-            }
-          | null
-          | undefined;
+        if (
+          !value ||
+          typeof value !== "object" ||
+          Array.isArray(value) ||
+          Object.keys(value).length !== 5
+        )
+          return null;
+        const item = value as {
+          state?: unknown;
+          intentId?: unknown;
+          consentSource?: unknown;
+          createdAtMs?: unknown;
+          expiresAtMs?: unknown;
+        };
         const state = typeof item?.state === "string" ? item.state : "";
         const intentId =
           typeof item?.intentId === "string" ? item.intentId : "";
         const consentSource =
-          typeof item?.consentSource === "string"
-            ? item.consentSource
-            : "signin";
-        const createdAtMs =
-          typeof item?.createdAtMs === "number"
-            ? item.createdAtMs
-            : Number(item?.createdAtMs);
-        const expiresAtMs =
-          typeof item?.expiresAtMs === "number"
-            ? item.expiresAtMs
-            : Number(item?.expiresAtMs);
+          typeof item?.consentSource === "string" ? item.consentSource : "";
+        const createdAtMs = item.createdAtMs;
+        const expiresAtMs = item.expiresAtMs;
         if (
           !state ||
           !intentId ||
-          !Number.isFinite(createdAtMs) ||
-          !Number.isFinite(expiresAtMs)
+          !consentSource ||
+          typeof createdAtMs !== "number" ||
+          !Number.isSafeInteger(createdAtMs) ||
+          typeof expiresAtMs !== "number" ||
+          !Number.isSafeInteger(expiresAtMs)
         ) {
           return null;
         }
@@ -335,8 +256,8 @@ const parsePendingAppleIntentRecordsFromStorage = (
           state,
           intentId,
           consentSource,
-          createdAtMs: Math.floor(createdAtMs),
-          expiresAtMs: Math.floor(expiresAtMs),
+          createdAtMs,
+          expiresAtMs,
         };
       })
       .filter((record): record is ApplePendingIntentRecord => !!record);
@@ -444,10 +365,6 @@ const takePendingAppleIntentRecord = (
     return null;
   }
   return record;
-};
-
-const shouldUseRedirectFlow = (): boolean => {
-  return false;
 };
 
 const parseAppleCallbackParamsFromRaw = (
@@ -565,10 +482,10 @@ export const consumeAppleRedirectResult = (): AppleRedirectResult | null => {
     });
     return null;
   }
+  didConsumeInitialAppleCallbackSnapshot = true;
   clearAppleCallbackParams();
   const { state, idToken, error, errorDescription } = callback;
   logAppleRedirectDebug("callback-detected", {
-    statePrefix: state.slice(0, APPLE_STATE_ENVELOPE_PREFIX.length),
     stateLength: state.length,
     hasIdToken: idToken !== "",
     hasError: error !== "",
@@ -577,13 +494,10 @@ export const consumeAppleRedirectResult = (): AppleRedirectResult | null => {
     throw new Error("Apple sign in returned without state. Please try again.");
   }
   const pending = takePendingAppleIntentRecord(state);
-  const stateEnvelope = parseAppleStateEnvelope(state);
-  const resolvedIntentId = pending?.intentId || stateEnvelope?.intentId || "";
-  const resolvedConsentSource =
-    pending?.consentSource || stateEnvelope?.consentSource || "signin";
+  const resolvedIntentId = pending?.intentId || "";
+  const resolvedConsentSource = pending?.consentSource || "signin";
   logAppleRedirectDebug("callback-resolved", {
     hasPending: !!pending,
-    hasEnvelope: !!stateEnvelope,
     hasResolvedIntentId: resolvedIntentId !== "",
     resolvedConsentSource,
   });
@@ -592,9 +506,6 @@ export const consumeAppleRedirectResult = (): AppleRedirectResult | null => {
     throw new Error(`Apple sign in failed: ${error}${details}`);
   }
   if (!resolvedIntentId) {
-    throw new Error("Apple sign in session expired. Please try again.");
-  }
-  if (stateEnvelope && stateEnvelope.expiresAtMs <= Date.now()) {
     throw new Error("Apple sign in session expired. Please try again.");
   }
   if (!idToken) {
@@ -846,7 +757,6 @@ export async function signInWithApplePopup({
   consentSource: string;
 }): Promise<{ idToken: string } | null> {
   await loadAppleScript();
-  const useRedirect = shouldUseRedirectFlow();
   const clientId = getAppleClientId();
   const redirectURI = getAppleRedirectUri();
   const nowMs = Date.now();
@@ -859,56 +769,33 @@ export async function signInWithApplePopup({
       ? Math.floor(expiresAtMs)
       : nowMs + APPLE_PENDING_INTENT_MAX_AGE_MS,
   };
-  const resolvedState = useRedirect
-    ? buildAppleStateEnvelope(pendingRecord)
-    : state;
   logAppleRedirectDebug("signin-init", {
-    useRedirect,
+    useRedirect: false,
     redirectURI,
-    stateLength: resolvedState.length,
-    statePrefix: resolvedState.slice(0, APPLE_STATE_ENVELOPE_PREFIX.length),
+    stateLength: state.length,
   });
 
-  storePendingAppleIntentRecord({
-    ...pendingRecord,
-    state: resolvedState,
-  });
-  if (resolvedState !== state) {
-    storePendingAppleIntentRecord({
-      ...pendingRecord,
-      state,
-    });
-  }
+  storePendingAppleIntentRecord(pendingRecord);
 
   window.AppleID!.auth.init({
     clientId,
     redirectURI,
-    state: resolvedState,
+    state,
     nonce,
-    usePopup: !useRedirect,
+    usePopup: true,
     responseType: "id_token",
     responseMode: "fragment",
   });
 
-  if (useRedirect) {
-    await window.AppleID!.auth.signIn();
-    return null;
-  }
-
-  const response = await waitForApplePopupResult([resolvedState, state]);
+  const response = await waitForApplePopupResult([state]);
   const popupSignals = extractApplePopupSignals(response);
-  const hasMatchingState =
-    popupSignals.stateCandidates.includes(resolvedState) ||
-    popupSignals.stateCandidates.includes(state);
+  const hasMatchingState = popupSignals.stateCandidates.includes(state);
   if (!popupSignals.idToken) {
     throw new Error("Apple sign in did not return id_token");
   }
   if (!hasMatchingState) {
     throw new Error("Apple sign in state mismatch");
   }
-  takePendingAppleIntentRecord(resolvedState);
-  if (resolvedState !== state) {
-    takePendingAppleIntentRecord(state);
-  }
+  takePendingAppleIntentRecord(state);
   return { idToken: popupSignals.idToken };
 }

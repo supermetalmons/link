@@ -1,3 +1,4 @@
+import { browserServerOrigin } from "./browserViteServer.mjs";
 import assert from "node:assert/strict";
 import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
@@ -5,19 +6,15 @@ import test from "node:test";
 import { createBrowserViteServer as createServer } from "./browserViteServer.mjs";
 
 const require = createRequire(import.meta.url);
+/** @type {typeof import("playwright")} */
 const { chromium } = require(process.env.MONS_PLAYWRIGHT_PATH || "playwright");
 const repository = fileURLToPath(new URL("../", import.meta.url));
 const noticeText =
   "Your session was reset. Sign in again to restore your profile.";
 const noticeKey = "__mons_link_session_reset_notice__";
 const uid = "m".repeat(28);
-const deferred = () => {
-  let resolve;
-  const promise = new Promise((done) => {
-    resolve = done;
-  });
-  return { promise, resolve };
-};
+/** @returns {PromiseWithResolvers<void>} */
+const deferred = () => Promise.withResolvers();
 
 test(
   "the real React sign-in popup stays silent after a legacy session reset, including an old pending notice",
@@ -28,12 +25,12 @@ test(
       server: { host: "127.0.0.1", port: 0, open: false },
       logLevel: "error",
     });
+    /** @type {import("playwright").Browser | undefined} */
     let browser;
     const releaseCreate = deferred();
     try {
       await server.listen();
-      const address = server.httpServer.address();
-      const origin = `http://127.0.0.1:${address.port}`;
+      const origin = browserServerOrigin(server);
       browser = await chromium.launch({
         headless: true,
         ...(process.env.MONS_BROWSER_EXECUTABLE
@@ -65,11 +62,18 @@ test(
         if (url.origin !== "https://api.mons.link") return route.abort();
         const headers = {
           "Access-Control-Allow-Origin": origin,
-          "Access-Control-Allow-Headers": "Content-Type, Authorization",
+          "Access-Control-Allow-Headers":
+            "Content-Type, Authorization, X-Mons-Data-Epoch",
           "Access-Control-Allow-Methods": "POST, GET, OPTIONS",
         };
         if (request.method() === "OPTIONS")
           return route.fulfill({ status: 204, headers });
+        if (url.pathname === "/release")
+          return route.fulfill({
+            status: 200,
+            headers,
+            json: { state: "active", dataEpoch: 1, generation: 1 },
+          });
         if (url.pathname === "/auth/session/anonymous") {
           const session = request.postDataJSON();
           sessions.set(session.sessionId, session);
@@ -90,7 +94,10 @@ test(
           });
         }
         if (url.pathname === "/auth/session/refresh") {
-          const sessionId = request.headers().authorization.split(".")[1];
+          const authorization = request.headers().authorization;
+          assert.ok(authorization);
+          const sessionId = authorization.split(".")[1];
+          assert.ok(sessionId);
           assert.ok(sessions.has(sessionId));
           const expiresAt = Math.floor(Date.now() / 1000) + 300;
           return route.fulfill({
@@ -121,12 +128,21 @@ test(
       const signIn = page.getByRole("button", { name: "Sign In", exact: true });
       await signIn.waitFor({ state: "visible" });
       assert.equal(
-        await page.evaluate(() => localStorage.getItem("profileId")),
+        await page.evaluate(() =>
+          localStorage.getItem("mons:data:v1:profileId"),
+        ),
         null,
       );
       assert.equal(
         await page.evaluate(() => localStorage.getItem("isMuted")),
-        "true",
+        null,
+      );
+      await page.waitForFunction(
+        () => localStorage.getItem("mons:data:v1:isMuted") === "false",
+      );
+      assert.equal(
+        await page.evaluate(() => localStorage.getItem("mons:data:v1:isMuted")),
+        "false",
       );
       assert.equal(
         await page.evaluate((key) => localStorage.getItem(key), noticeKey),

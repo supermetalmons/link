@@ -32,7 +32,7 @@ export type GameplayRouteDependencies = {
   gameSession?: Partial<GameSessionMutationDependencies>;
   logCoordinationFailure?: (record: {
     operation: string;
-    store: "mutation-lock" | "timer-start";
+    store: "mutation-lock";
   }) => void;
   logFailure?: (kind: string) => void;
   profileGamesDb?: D1Database;

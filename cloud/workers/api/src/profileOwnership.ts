@@ -1,4 +1,10 @@
 import { AuthApiFailure } from "./authErrors.ts";
+import {
+  isAura,
+  isEmojiId,
+  type Aura,
+  type EmojiId,
+} from "@mons/shared/appearance";
 
 export type ProfileOwnershipQuery = Readonly<{
   loginUids: readonly string[];
@@ -11,8 +17,8 @@ export type ProfileOwnershipLogin = Readonly<{
 }>;
 
 export type ProfileOwnershipProfile = Readonly<{
-  aura: string;
-  emoji: number | string;
+  aura: Aura;
+  emoji: EmojiId;
   eth: string;
   profileId: string;
   rating: number;
@@ -69,9 +75,8 @@ function isProfile(value: ProfileOwnershipProfile, profileId: string): boolean {
     value !== null &&
     typeof value === "object" &&
     value.profileId === profileId &&
-    typeof value.aura === "string" &&
-    (typeof value.emoji === "string" ||
-      (typeof value.emoji === "number" && Number.isFinite(value.emoji))) &&
+    isAura(value.aura) &&
+    isEmojiId(value.emoji) &&
     typeof value.eth === "string" &&
     typeof value.rating === "number" &&
     Number.isFinite(value.rating) &&

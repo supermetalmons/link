@@ -1,4 +1,5 @@
 // Generated from src/shared/invite-metadata.ts. Run npm run generate:runtime.
+import { type RematchSeries } from "./rematches.js";
 import type { InviteRole } from "./game-sessions.js";
 export type InviteMetadataSnapshot = {
   inviteId: string;
@@ -6,8 +7,8 @@ export type InviteMetadataSnapshot = {
   hostId: string;
   guestId: string | null;
   hostColor: "white" | "black";
-  hostRematches: string;
-  guestRematches: string;
+  hostRematches: RematchSeries;
+  guestRematches: RematchSeries;
   automatchStateHint: "pending" | "matched" | "canceled" | null;
   eventId: string | null;
   eventOwned: boolean;

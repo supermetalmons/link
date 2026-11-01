@@ -29,37 +29,22 @@ export function handleLoginSuccess(res: AuthProfileResponse): boolean {
   const profile: PlayerProfile = {
     id: profileId,
     username,
-    rating: undefined,
-    nonce: undefined,
-    win: undefined,
-    cardBackgroundId: undefined,
-    cardSubtitleId: undefined,
-    profileCounter: undefined,
-    profileMons: undefined,
-    cardStickers: undefined,
+    cardBackgroundId: res.cardBackgroundId,
+    cardSubtitleId: res.cardSubtitleId,
+    profileCounter: res.profileCounter,
+    profileMons: res.profileMons,
+    cardStickers: res.cardStickers,
     emoji,
-    aura: res.aura ?? undefined,
-    completedProblemIds: undefined,
-    isTutorialCompleted: undefined,
+    aura: res.aura,
     eth: resolvedEth ?? null,
     sol: resolvedSol ?? null,
-    mining: isMiningSnapshot(res.mining) ? res.mining : undefined,
+    ...(isMiningSnapshot(res.mining) ? { mining: res.mining } : {}),
   };
 
   if (typeof res.rating === "number") profile.rating = res.rating;
   if (typeof res.nonce === "number") profile.nonce = res.nonce;
   if (typeof res.totalManaPoints === "number")
     profile.totalManaPoints = res.totalManaPoints;
-  if (typeof res.cardBackgroundId === "number")
-    profile.cardBackgroundId = res.cardBackgroundId;
-  if (typeof res.cardStickers === "string")
-    profile.cardStickers = res.cardStickers;
-  if (typeof res.cardSubtitleId === "number")
-    profile.cardSubtitleId = res.cardSubtitleId;
-  if (typeof res.profileCounter === "string")
-    profile.profileCounter = res.profileCounter;
-  if (typeof res.profileMons === "string")
-    profile.profileMons = res.profileMons;
 
   profile.completedProblemIds = Array.isArray(res.completedProblems)
     ? res.completedProblems.filter(
@@ -73,7 +58,7 @@ export function handleLoginSuccess(res: AuthProfileResponse): boolean {
   clearPendingLogoutWipeAfterSignIn();
 
   if (!isWatchOnly) {
-    updateEmojiAndAuraIfNeeded(emoji.toString(), res.aura ?? undefined, false);
+    updateEmojiAndAuraIfNeeded(emoji, res.aura, false);
   }
 
   handleFreshlySignedInProfileInGameIfNeeded();

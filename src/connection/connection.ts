@@ -1,3 +1,11 @@
+import type {
+  CardBackgroundId,
+  CardSubtitleId,
+  ProfileCounter,
+  SelectedMons,
+  StickerMap,
+} from "@mons/shared/appearance";
+import type { Aura } from "@mons/shared/appearance";
 import { sessionAuth } from "../session/sessionAuth";
 import {
   invalidateInitialIdentity,
@@ -162,10 +170,7 @@ import {
   type LeaveEventResponse,
   type EventScheduleTimezone as SharedEventScheduleTimezone,
 } from "@mons/shared/events";
-import {
-  normalizeAuthPresentation,
-  type AuthMethodKey,
-} from "@mons/shared/auth";
+import { createAuthPresentation, type AuthMethodKey } from "@mons/shared/auth";
 import type {
   XConsentSource,
   XRedirectStartResponse,
@@ -222,7 +227,7 @@ import {
   readMatchSyncViaApi,
 } from "../services/matchSyncApi";
 import { readInviteWagersViaApi } from "../services/inviteWagersApi";
-import { InviteMetadataState } from "./inviteMetadataState";
+import { InviteMetadataState, rematchSeriesEqual } from "./inviteMetadataState";
 import type {
   InviteMetadataSnapshot,
   InviteMetadataViewer,
@@ -252,11 +257,11 @@ import { createPollingAuthTokenProvider } from "./pollingAuthTokenProvider";
 
 const getStoredAuthPresentation = (): {
   emoji: number;
-  aura: string | null;
+  aura: Aura;
 } => {
-  return normalizeAuthPresentation(
-    storage.getPlayerEmojiId("1"),
-    storage.getPlayerEmojiAura(""),
+  return createAuthPresentation(
+    storage.getPlayerEmojiId(1),
+    storage.getPlayerEmojiAura("none"),
   );
 };
 
@@ -390,7 +395,7 @@ class Connection {
       operationId: crypto.randomUUID(),
       request: {
         emojiId: getPlayersEmojiId(),
-        aura: storage.getPlayerEmojiAura(""),
+        aura: storage.getPlayerEmojiAura("none"),
       },
       resolvedInviteId: null,
       uid,
@@ -742,7 +747,7 @@ class Connection {
         showNotificationBanner(
           "Reload to continue wagering",
           "Tap here to reload this page.",
-          storage.getPlayerEmojiId("1"),
+          storage.getPlayerEmojiId(1),
           () => window.location.reload(),
         ),
       now: () => Date.now(),
@@ -824,7 +829,7 @@ class Connection {
       getAuthApiToken: this.getAuthApiToken,
       getUserBoundAuthTokenProvider: () => this.getUserBoundAuthTokenProvider(),
       getLocalProfileId: () => this.getLocalProfileId(),
-      getStoredEmojiAura: () => storage.getPlayerEmojiAura(""),
+      getStoredEmojiAura: () => storage.getPlayerEmojiAura("none"),
       invalidateInitialIdentity,
       api: {
         editUsernameViaApi,
@@ -1207,7 +1212,9 @@ class Connection {
     this.didCreateNewGameInvite = false;
     this.newInviteId = "";
     this.eventClient.reset({ preserveSnapshots: true });
-    this.wagerClient.resetMatch({ preserveInvite });
+    this.wagerClient.resetMatch(
+      preserveInvite === undefined ? {} : { preserveInvite },
+    );
   }
 
   public detachFromProfileSession(): void {
@@ -1277,7 +1284,7 @@ class Connection {
       ensureAuthenticated: () => this.ensureAuthenticated(),
       getUserBoundProvider: () => this.getUserBoundAuthTokenProvider(),
       isSessionCurrent: sessionGuard,
-      signal,
+      ...(signal ? { signal } : {}),
     });
   }
 
@@ -1765,7 +1772,7 @@ class Connection {
           operationId,
           inviteId,
           emojiId: getPlayersEmojiId(),
-          aura: storage.getPlayerEmojiAura(""),
+          aura: storage.getPlayerEmojiAura("none"),
         },
         tokenProvider,
       );
@@ -1863,7 +1870,7 @@ class Connection {
       if (hostIndices[i] !== guestIndices[i]) {
         break;
       }
-      approved.push(hostIndices[i]);
+      approved.push(hostIndices[i]!);
     }
     return approved;
   }
@@ -2540,7 +2547,7 @@ class Connection {
   public updateEmoji(
     newId: number,
     matchOnly: boolean,
-    aura: string | null | undefined,
+    aura: Aura | undefined,
   ): void {
     if (!matchOnly) {
       this.updateStoredEmoji(newId, aura);
@@ -2554,11 +2561,8 @@ class Connection {
     }
     const subscription = this.inviteReactionSubscription;
     if (subscription?.contextId !== writableContext.contextId) return;
-    const nextAura = aura ?? storage.getPlayerEmojiAura("");
-    subscription.presentation.update(
-      newId,
-      nextAura === "rainbow" ? "rainbow" : "",
-    );
+    const nextAura = aura ?? storage.getPlayerEmojiAura("none");
+    subscription.presentation.update(newId, nextAura);
   }
 
   private rememberMatchPresentation(presentation: MatchPresentation): void {
@@ -2591,7 +2595,7 @@ class Connection {
           matchId,
           actorUid,
           emojiId: match.emojiId,
-          aura: match.aura ?? "",
+          aura: match.aura ?? "none",
           revision: 0,
         };
       }
@@ -2727,30 +2731,27 @@ class Connection {
     return this.activeContext?.matchId ?? null;
   }
 
-  public updateStoredEmoji(
-    newId: number,
-    aura: string | null | undefined,
-  ): void {
+  public updateStoredEmoji(newId: number, aura: Aura | undefined): void {
     this.profileClient.updateStoredEmoji(newId, aura);
   }
 
-  public updateCardBackgroundId(newId: number): void {
+  public updateCardBackgroundId(newId: CardBackgroundId): void {
     this.profileClient.updateCardBackgroundId(newId);
   }
 
-  public updateCardSubtitleId(newId: number): void {
+  public updateCardSubtitleId(newId: CardSubtitleId): void {
     this.profileClient.updateCardSubtitleId(newId);
   }
 
-  public updateProfileCounter(counter: string): void {
+  public updateProfileCounter(counter: ProfileCounter): void {
     this.profileClient.updateProfileCounter(counter);
   }
 
-  public updateProfileMons(mons: string): void {
+  public updateProfileMons(mons: SelectedMons | null): void {
     this.profileClient.updateProfileMons(mons);
   }
 
-  public updateCardStickers(stickers: string): void {
+  public updateCardStickers(stickers: StickerMap): void {
     this.profileClient.updateCardStickers(stickers);
   }
 
@@ -3320,7 +3321,7 @@ class Connection {
           operationId: crypto.randomUUID(),
           inviteId,
           emojiId: getPlayersEmojiId(),
-          aura: storage.getPlayerEmojiAura(""),
+          aura: storage.getPlayerEmojiAura("none"),
         },
         tokenProvider,
       );
@@ -3391,7 +3392,7 @@ class Connection {
                 operationId: crypto.randomUUID(),
                 inviteId,
                 emojiId: getPlayersEmojiId(),
-                aura: storage.getPlayerEmojiAura(""),
+                aura: storage.getPlayerEmojiAura("none"),
               },
               tokenProvider,
             );
@@ -3490,7 +3491,7 @@ class Connection {
                   inviteId,
                   matchId,
                   emojiId: getPlayersEmojiId(),
-                  aura: storage.getPlayerEmojiAura(""),
+                  aura: storage.getPlayerEmojiAura("none"),
                 },
                 tokenProvider,
               );
@@ -3749,7 +3750,7 @@ class Connection {
           operationId: crypto.randomUUID(),
           inviteId,
           emojiId: getPlayersEmojiId(),
-          aura: storage.getPlayerEmojiAura(""),
+          aura: storage.getPlayerEmojiAura("none"),
         },
         tokenProvider,
       );
@@ -3817,8 +3818,8 @@ class Connection {
       this.observeMatch(next.guestId, context.matchId, context);
     }
     const rematchesChanged =
-      previous.hostRematches !== next.hostRematches ||
-      previous.guestRematches !== next.guestRematches;
+      !rematchSeriesEqual(previous.hostRematches, next.hostRematches) ||
+      !rematchSeriesEqual(previous.guestRematches, next.guestRematches);
     if (!rematchesChanged && !notifyInitially) return;
     if (this.rematchSeriesEndIsIndicatedForInvite(next)) {
       if (
@@ -3827,7 +3828,10 @@ class Connection {
       ) {
         didReceiveRematchesSeriesEndIndicator();
       }
-    } else if (next.hostRematches || next.guestRematches) {
+    } else if (
+      next.hostRematches.indices.length > 0 ||
+      next.guestRematches.indices.length > 0
+    ) {
       didUpdateRematchSeriesMetadata();
     }
     if (this.isContextActive(context.contextId, context.sessionEpoch)) {
@@ -3850,7 +3854,7 @@ class Connection {
     let initialized = initialSnapshot !== undefined;
     const channel = new InviteMetadataChannel({
       inviteId: context.inviteId,
-      initialSnapshot,
+      ...(initialSnapshot === undefined ? {} : { initialSnapshot }),
       createSocket: (url, protocols) => new WebSocket(url, protocols),
       getTokenRemainingMs: (token) => this.auth.getTokenRemainingMs(token),
       getProtocols: async (forceRefresh) => {
@@ -3980,16 +3984,18 @@ class Connection {
       matchId: context.matchId,
       createSocket: (url, protocols) => new WebSocket(url, protocols),
       getTokenRemainingMs: (token) => this.auth.getTokenRemainingMs(token),
-      getProtocols: context.canWrite
-        ? async (forceRefresh) => {
-            const tokenProvider = this.getUserBoundAuthTokenProvider(
-              context.loginUid,
-            );
-            const token = await tokenProvider(forceRefresh);
-            tokenProvider.assertCurrentUser();
-            return createInviteReactionSocketProtocols(token);
+      ...(context.canWrite
+        ? {
+            getProtocols: async (forceRefresh: boolean) => {
+              const tokenProvider = this.getUserBoundAuthTokenProvider(
+                context.loginUid,
+              );
+              const token = await tokenProvider(forceRefresh);
+              tokenProvider.assertCurrentUser();
+              return createInviteReactionSocketProtocols(token);
+            },
           }
-        : undefined,
+        : {}),
       isActive,
       isOnline: () => typeof navigator === "undefined" || navigator.onLine,
       canConnect: () =>
@@ -4165,7 +4171,7 @@ class Connection {
         inviteId: context.inviteId,
         matchId,
         requiredPlayerIds: () => players,
-        initialSnapshot,
+        ...(initialSnapshot === undefined ? {} : { initialSnapshot }),
         createSocket: (url, protocols) => new WebSocket(url, protocols),
         getTokenRemainingMs: (token) => this.auth.getTokenRemainingMs(token),
         getProtocols: async (forceRefresh) => {

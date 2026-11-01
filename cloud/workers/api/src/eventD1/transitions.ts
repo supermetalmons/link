@@ -31,7 +31,7 @@ export async function createEventTransitionIntent(
       guardStatement(
         db,
         `EXISTS (
-           SELECT 1 FROM event_records
+           SELECT 1 FROM event_records_canonical
            WHERE event_id = ? AND pending_transition_id IS NOT NULL
              AND pending_transition_id != ?
          )`,
@@ -40,7 +40,7 @@ export async function createEventTransitionIntent(
       ),
       db
         .prepare(
-          `INSERT INTO event_transition_intents (
+          `INSERT INTO event_transition_intents_canonical (
              transition_id, event_id, expected_revision, status, intent_json,
              attempts, last_error, created_at_ms, updated_at_ms
            ) VALUES (?, ?, ?, 'pending', ?, 0, NULL, ?, ?)
@@ -57,7 +57,7 @@ export async function createEventTransitionIntent(
       guardStatement(
         db,
         `NOT EXISTS (
-           SELECT 1 FROM event_transition_intents
+           SELECT 1 FROM event_transition_intents_canonical
            WHERE transition_id = ? AND event_id = ?
              AND expected_revision = ? AND status = 'pending'
              AND intent_json = ?
@@ -67,7 +67,7 @@ export async function createEventTransitionIntent(
       ),
       db
         .prepare(
-          `UPDATE event_records SET pending_transition_id = ?
+          `UPDATE event_records_canonical SET pending_transition_id = ?
            WHERE event_id = ? AND revision = ?`,
         )
         .bind(intent.transitionId, intent.eventId, intent.expectedRevision),
@@ -89,7 +89,7 @@ export async function readEventTransitionIntent(
 ): Promise<EventTransitionIntent | null> {
   const row = await db
     .prepare(
-      `SELECT intent_json FROM event_transition_intents
+      `SELECT intent_json FROM event_transition_intents_canonical
        WHERE transition_id = ? AND status = 'pending'`,
     )
     .bind(exactKey(transitionId))
@@ -104,7 +104,7 @@ export async function listPendingEventTransitionIntents(
   safeInteger(limit, 1);
   const rows = await db
     .prepare(
-      `SELECT intent_json, attempts FROM event_transition_intents
+      `SELECT intent_json, attempts FROM event_transition_intents_canonical
        WHERE status = 'pending'
        ORDER BY updated_at_ms, transition_id LIMIT ?`,
     )
@@ -122,7 +122,7 @@ export async function recordEventTransitionAttempt(
 ): Promise<boolean> {
   const result = await db
     .prepare(
-      `UPDATE event_transition_intents
+      `UPDATE event_transition_intents_canonical
        SET attempts = attempts + 1, last_error = ?, updated_at_ms = ?
        WHERE transition_id = ? AND status = 'pending'`,
     )

@@ -1,3 +1,5 @@
+import { required } from "./fixtures/canonicalData.mjs";
+import { isEmojiId } from "@mons/shared/appearance";
 import assert from "node:assert/strict";
 import { registerHooks } from "node:module";
 import test from "node:test";
@@ -37,7 +39,6 @@ const {
   isProfileLookupResponse,
   isResolveProfileIdRequest,
   isResolveProfileIdResponse,
-  normalizeProfileEmojiId,
   PROFILE_STICKER_CATALOG,
 } = await import("@mons/shared/profiles");
 const { STICKER_PATHS } = await import("../src/utils/stickers.ts");
@@ -51,13 +52,13 @@ const profile = {
   rating: 1500,
   totalManaPoints: 0,
   win: true,
-  emoji: "12",
+  emoji: 12,
   aura: "rainbow",
   cardBackgroundId: 3,
   cardSubtitleId: 4,
   profileCounter: "mp",
-  profileMons: "1,2",
-  cardStickers: "{}",
+  profileMons: { demon: 1, angel: 2, drainer: 0, spirit: 0, mystic: 0 },
+  cardStickers: {},
   username: null,
   eth: null,
   sol: null,
@@ -67,6 +68,10 @@ const profile = {
   },
 };
 
+/**
+ * @param {unknown} body
+ * @param {number} [status]
+ */
 const jsonResponse = (body, status = 200) =>
   new Response(JSON.stringify(body), {
     status,
@@ -107,10 +112,10 @@ test("shared profile contracts validate exact requests and responses", () => {
     }),
     false,
   );
-  assert.equal(getProfileFallbackEmojiId("A"), "66");
-  assert.equal(normalizeProfileEmojiId("12"), 12);
-  assert.equal(normalizeProfileEmojiId(0), 0);
-  assert.equal(normalizeProfileEmojiId("invalid", 7), 7);
+  assert.equal(getProfileFallbackEmojiId("A"), 66);
+  assert.equal(isEmojiId("12"), false);
+  assert.equal(isEmojiId(0), true);
+  assert.equal(isEmojiId("invalid"), false);
   assert.equal(isUsernameEditRequest({ username: "Mons" }), true);
   assert.equal(isUsernameEditRequest({ username: "Mons", extra: true }), false);
   assert.equal(isUsernameEditRequest({ username: 7 }), false);
@@ -125,7 +130,7 @@ test("shared profile contracts validate exact requests and responses", () => {
     false,
   );
   for (const request of [
-    { field: "emojiAndAura", value: { emoji: 7, aura: "" } },
+    { field: "emojiAndAura", value: { emoji: 7, aura: "none" } },
     {
       field: "emojiAndAura",
       value: { emoji: 1009, aura: "rainbow" },
@@ -133,8 +138,11 @@ test("shared profile contracts validate exact requests and responses", () => {
     { field: "cardBackgroundId", value: 3 },
     { field: "cardSubtitleId", value: 4 },
     { field: "profileCounter", value: "mp" },
-    { field: "profileMons", value: "1,2,3,1,2" },
-    { field: "cardStickers", value: "{}" },
+    {
+      field: "profileMons",
+      value: { demon: 1, angel: 2, drainer: 3, spirit: 1, mystic: 2 },
+    },
+    { field: "cardStickers", value: {} },
     { field: "completedProblems", value: ["one"] },
     { field: "tutorialCompleted", value: true },
   ]) {
@@ -143,8 +151,8 @@ test("shared profile contracts validate exact requests and responses", () => {
   for (const request of [
     { field: "emoji", value: 7 },
     { field: "aura", value: "rainbow" },
-    { field: "emojiAndAura", value: { emoji: -1, aura: "" } },
-    { field: "emojiAndAura", value: { emoji: 156, aura: "" } },
+    { field: "emojiAndAura", value: { emoji: -1, aura: "none" } },
+    { field: "emojiAndAura", value: { emoji: 156, aura: "none" } },
     { field: "emojiAndAura", value: { emoji: 7, aura: "rainbow" } },
     {
       field: "emojiAndAura",
@@ -211,6 +219,9 @@ test("canonical profile ID contracts distinguish missing ownership from malforme
 });
 
 test("resolves canonical profile IDs with an authenticated request and preserves null", async () => {
+  /**
+   * @type {{ input: string; init: RequestInit | undefined; }[]}
+   */
   const calls = [];
   const ids = ["canonical-profile", null];
   globalThis.fetch = async (input, init) => {
@@ -227,7 +238,10 @@ test("resolves canonical profile IDs with an authenticated request and preserves
     null,
   );
   assert.deepEqual(
-    calls.map(({ input, init }) => [input, JSON.parse(init.body)]),
+    calls.map(({ input, init }) => [
+      input,
+      parseRequestJson(required(init).body),
+    ]),
     [
       [
         "https://api.mons.link/profiles/canonical-id",
@@ -240,10 +254,10 @@ test("resolves canonical profile IDs with an authenticated request and preserves
     ],
   );
   for (const { init } of calls) {
-    assert.equal(init.method, "POST");
-    assert.equal(init.cache, "no-store");
+    assert.equal(required(init).method, "POST");
+    assert.equal(required(init).cache, "no-store");
     assert.equal(
-      new Headers(init.headers).get("Authorization"),
+      new Headers(required(init).headers).get("Authorization"),
       "Bearer session-token",
     );
   }
@@ -283,6 +297,7 @@ test("canonical profile ID resolution rejects malformed responses and unavailabl
 });
 
 test("sends exact authenticated profile requests", async () => {
+  /** @type {Array<{ input: string; init: RequestInit | undefined; }>} */
   const calls = [];
   const responses = [
     { ok: true, profile },
@@ -303,7 +318,7 @@ test("sends exact authenticated profile requests", async () => {
   );
   assert.equal(await getProfileByIdViaApi("missing", tokenProvider), null);
   assert.equal(
-    (await readLeaderboardViaApi("rating", tokenProvider))[0].id,
+    required((await readLeaderboardViaApi("rating", tokenProvider))[0]).id,
     "profile-1",
   );
   assert.deepEqual(await editUsernameViaApi("Mons", tokenProvider), {
@@ -321,7 +336,10 @@ test("sends exact authenticated profile requests", async () => {
   );
 
   assert.deepEqual(
-    calls.map((call) => [call.input, JSON.parse(call.init.body)]),
+    calls.map((call) => [
+      call.input,
+      parseRequestJson(required(call.init).body),
+    ]),
     [
       [
         "https://api.mons.link/profiles/lookup",
@@ -343,22 +361,24 @@ test("sends exact authenticated profile requests", async () => {
     ],
   );
   for (const call of calls) {
-    assert.equal(call.init.method, "POST");
-    assert.equal(call.init.cache, "no-store");
-    assert.ok(call.init.signal instanceof AbortSignal);
-    const headers = new Headers(call.init.headers);
+    assert.equal(required(call.init).method, "POST");
+    assert.equal(required(call.init).cache, "no-store");
+    assert.ok(required(call.init).signal instanceof AbortSignal);
+    const headers = new Headers(required(call.init).headers);
     assert.equal(headers.get("Authorization"), "Bearer session-token");
     assert.equal(headers.get("Accept"), "application/json");
     assert.equal(headers.get("Content-Type"), "application/json");
   }
-  assert.equal(calls.at(-1).init.keepalive, true);
+  assert.equal(required(required(calls.at(-1)).init).keepalive, true);
 });
 
 test("refreshes once after 401 and preserves missing-login compatibility", async () => {
+  /** @type {Array<boolean>} */
   const refreshes = [];
+  /** @type {Array<string | null>} */
   const tokens = [];
   globalThis.fetch = async (_input, init) => {
-    tokens.push(new Headers(init.headers).get("Authorization"));
+    tokens.push(new Headers(required(init).headers).get("Authorization"));
     if (tokens.length === 1) {
       return jsonResponse(
         {
@@ -372,12 +392,14 @@ test("refreshes once after 401 and preserves missing-login compatibility", async
     return jsonResponse({ ok: true, profiles: [profile] });
   };
   assert.equal(
-    (
-      await readLeaderboardViaApi("mp", async (forceRefresh) => {
-        refreshes.push(forceRefresh);
-        return forceRefresh ? "fresh-token" : "stale-token";
-      })
-    )[0].id,
+    required(
+      (
+        await readLeaderboardViaApi("mp", async (forceRefresh) => {
+          refreshes.push(forceRefresh);
+          return forceRefresh ? "fresh-token" : "stale-token";
+        })
+      )[0],
+    ).id,
     "profile-1",
   );
   assert.deepEqual(refreshes, [false, true]);
@@ -394,11 +416,20 @@ test("refreshes once after 401 and preserves missing-login compatibility", async
 });
 
 test("serializes profile edits after each token and retains keepalive", async () => {
-  const request = { field: "profileMons", value: "1,2" };
+  /** @type {Extract<import("@mons/shared/profiles").ProfileCustomizationUpdateRequest, {field: "profileMons"}>} */
+  const request = {
+    field: "profileMons",
+    value: { demon: 1, angel: 2, drainer: 0, spirit: 0, mystic: 0 },
+  };
+  /** @type {Array<{ body: Record<string, unknown>; keepalive: boolean | undefined; }>} */
   const calls = [];
+  /** @type {Array<boolean>} */
   const refreshes = [];
   globalThis.fetch = async (_input, init) => {
-    calls.push({ body: JSON.parse(init.body), keepalive: init.keepalive });
+    calls.push({
+      body: parseRequestJson(required(init).body),
+      keepalive: required(init).keepalive,
+    });
     return calls.length === 1
       ? jsonResponse({ ok: false }, 401)
       : jsonResponse({ ok: true });
@@ -406,14 +437,32 @@ test("serializes profile edits after each token and retains keepalive", async ()
 
   await updateProfileCustomizationViaApi(request, async (forceRefresh) => {
     refreshes.push(forceRefresh);
-    request.value = forceRefresh ? "3,4" : "2,3";
+    request.value = {
+      demon: forceRefresh ? 1 : 0,
+      angel: 3,
+      drainer: 4,
+      spirit: 0,
+      mystic: 0,
+    };
     return "token";
   });
 
   assert.deepEqual(refreshes, [false, true]);
   assert.deepEqual(calls, [
-    { body: { field: "profileMons", value: "2,3" }, keepalive: true },
-    { body: { field: "profileMons", value: "3,4" }, keepalive: true },
+    {
+      body: {
+        field: "profileMons",
+        value: { demon: 0, angel: 3, drainer: 4, spirit: 0, mystic: 0 },
+      },
+      keepalive: true,
+    },
+    {
+      body: {
+        field: "profileMons",
+        value: { demon: 1, angel: 3, drainer: 4, spirit: 0, mystic: 0 },
+      },
+      keepalive: true,
+    },
   ]);
 });
 
@@ -428,9 +477,13 @@ test("masks auth token failures as profile service errors", async () => {
   await assert.rejects(
     getProfileByIdViaApi("profile-1", async () => {
       tokenCalls++;
-      throw new AuthApiError("unauthenticated", "authentication-changed", {
-        reason: "private-session-detail",
-      });
+      throw Reflect.construct(AuthApiError, [
+        "unauthenticated",
+        "authentication-changed",
+        {
+          reason: "private-session-detail",
+        },
+      ]);
     }),
     (error) =>
       error instanceof ProfileApiError &&
@@ -473,8 +526,16 @@ test("rejects malformed, oversized, failed, and timed-out responses", async () =
   );
 
   const originalSetTimeout = globalThis.setTimeout;
-  globalThis.setTimeout = (callback, _delay, ...args) =>
-    originalSetTimeout(callback, 0, ...args);
+  Object.defineProperty(globalThis, "setTimeout", {
+    configurable: true,
+    writable: true,
+    value:
+      /** @param {(...args: unknown[]) => void} callback @param {number | undefined} _delay @param {...unknown} args */ (
+        callback,
+        _delay,
+        ...args
+      ) => originalSetTimeout(callback, 0, ...args),
+  });
   try {
     await assert.rejects(
       getProfileByIdViaApi("profile-1", () => new Promise(() => undefined)),
@@ -486,3 +547,14 @@ test("rejects malformed, oversized, failed, and timed-out responses", async () =
     globalThis.setTimeout = originalSetTimeout;
   }
 });
+
+/** @param {unknown} body @returns {Record<string, unknown>} */
+function parseRequestJson(body) {
+  assert.ok(typeof body === "string");
+  /** @type {unknown} */
+  const value = JSON.parse(body);
+  assert.ok(
+    value !== null && typeof value === "object" && !Array.isArray(value),
+  );
+  return Object.fromEntries(Object.entries(value));
+}

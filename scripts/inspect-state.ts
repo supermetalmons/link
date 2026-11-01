@@ -72,10 +72,10 @@ async function execute(argv = process.argv.slice(2)): Promise<void> {
   const apiToken =
     args.domain === "event-receipts" ? resolveCloudflareToken() : undefined;
   await inspectState(args, {
-    run: createWranglerRunner({ apiToken }),
+    run: createWranglerRunner(apiToken ? { apiToken } : {}),
     log: (value) => console.log(JSON.stringify(value)),
     ...(args.domain === "event-receipts"
-      ? { receiptProvider: createProvider({ apiToken }) }
+      ? { receiptProvider: createProvider(apiToken ? { apiToken } : {}) }
       : {}),
   });
 }

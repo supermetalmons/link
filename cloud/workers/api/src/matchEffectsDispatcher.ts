@@ -1,7 +1,5 @@
-import type { MatchStateStore } from "./matchStateStore.ts";
 import type { MatchEffectsOutbox } from "./matchEffectsOutbox.ts";
 import {
-  cleanupRetainedMatchEffect,
   captureMatchEffectTarget,
   matchEffectLogIdentity,
   prepareMatchEffectProgress,
@@ -24,13 +22,9 @@ type MatchEffectsDependencies = {
   now?: () => number;
 };
 
-export function createMatchEffectDelivery(
-  env: Env,
-  cleanupLegacyTimerStarts: MatchStateStore["cleanupRetainedTimerStarts"],
-) {
+export function createMatchEffectDelivery(env: Env) {
   return async (effect: DueMatchEffect): Promise<void> => {
     await assertProfileBackgroundMutationsEnabled(env);
-    await cleanupRetainedMatchEffect(effect, cleanupLegacyTimerStarts);
     const prepared = prepareMatchEffectProgress(effect);
     if (!prepared) return;
     const plan = await prepared;

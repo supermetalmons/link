@@ -1,8 +1,12 @@
+import { inviteDocumentFixture } from "./inviteDocumentFixture.ts";
 import assert from "node:assert/strict";
 import test from "node:test";
 import { decodeCanonicalInviteParticipants } from "../src/canonicalInviteParticipants.ts";
 
-const paired = { hostId: "host-login", guestId: "guest-login" };
+const paired = inviteDocumentFixture({
+  hostId: "host-login",
+  guestId: "guest-login",
+});
 
 test("canonical participants distinguish missing sources from invalid records", () => {
   for (const value of [null, undefined]) {
@@ -42,65 +46,63 @@ test("canonical participants reject malformed IDs without trimming or coercion",
   );
 });
 
-test("canonical participants preserve source identity, fields, and valid IDs", () => {
-  const source = Object.freeze({
-    hostId: "Høst-login",
-    guestId: "Guest-login",
-    hostColor: 7,
-    hostRematches: false,
-    guestRematches: ["1"],
-    eventId: { malformed: true },
-    automatchStateHint: "future-state",
-    custom: Object.freeze({ retained: [1, null, false] }),
-  });
+test("canonical participants preserve complete source identity and valid IDs", () => {
+  const source = Object.freeze(
+    inviteDocumentFixture({ hostId: "Høst-login", guestId: "Guest-login" }),
+  );
   const before = structuredClone(source);
   const result = decodeCanonicalInviteParticipants(source);
-  assert.equal(result.status, "ok");
-  if (result.status !== "ok") return;
+  assert.ok(result.status === "ok");
   assert.equal(result.source, source);
-  assert.equal(result.source.custom, source.custom);
   assert.equal(result.hostId, source.hostId);
   assert.equal(result.guestId, source.guestId);
   assert.equal(result.passwordProtected, false);
   assert.deepEqual(source, before);
+  assert.equal(
+    decodeCanonicalInviteParticipants({ ...source, custom: {} }).status,
+    "invalid",
+  );
 });
 
-test("pending participants expose null guests without changing stored presence", () => {
-  for (const source of [
-    { hostId: paired.hostId },
-    { hostId: paired.hostId, guestId: undefined },
-    { hostId: paired.hostId, guestId: null },
-  ]) {
-    const before = structuredClone(source);
-    const result = decodeCanonicalInviteParticipants(source);
-    assert.equal(result.status, "ok");
-    if (result.status !== "ok") continue;
-    assert.equal(result.guestId, null);
-    assert.equal(result.source, source);
-    assert.deepEqual(source, before);
-  }
-});
-
-test("any own password property protects an invite regardless of its value", () => {
-  for (const password of [undefined, null, false, "", "private"]) {
-    const source = { ...paired, password };
-    const result = decodeCanonicalInviteParticipants(source);
-    assert.equal(result.status, "ok");
-    if (result.status !== "ok") continue;
-    assert.equal(result.passwordProtected, true);
-    assert.equal(result.source, source);
-    assert.equal(result.source.password, password);
-  }
-});
-
-test("participants preserve accepted prototype fields without inheriting password protection", () => {
-  const source = Object.create({ ...paired, password: "inherited" });
+test("pending participants require an explicit null guest", () => {
+  const source = inviteDocumentFixture({ hostId: paired.hostId });
   const result = decodeCanonicalInviteParticipants(source);
-  assert.equal(result.status, "ok");
-  if (result.status !== "ok") return;
+  assert.ok(result.status === "ok");
+  assert.equal(result.guestId, null);
   assert.equal(result.source, source);
-  assert.equal(result.hostId, paired.hostId);
-  assert.equal(result.guestId, paired.guestId);
+  for (const value of [
+    { hostId: paired.hostId },
+    { ...source, guestId: undefined },
+  ])
+    assert.equal(decodeCanonicalInviteParticipants(value).status, "invalid");
+});
+
+test("password protection requires a canonical automatch password", () => {
+  const source = inviteDocumentFixture({
+    hostId: paired.hostId,
+    password: "private",
+  });
+  const result = decodeCanonicalInviteParticipants(source);
+  assert.ok(result.status === "ok");
+  assert.equal(result.passwordProtected, true);
+  for (const password of [undefined, null, false, ""])
+    assert.equal(
+      decodeCanonicalInviteParticipants({ ...source, password }).status,
+      "invalid",
+    );
+});
+
+test("participant reads require own fields and ignore inherited password values", () => {
+  assert.equal(
+    decodeCanonicalInviteParticipants(Object.create(paired)).status,
+    "invalid",
+  );
+  const source = Object.assign(
+    Object.create({ password: "inherited" }),
+    paired,
+  );
+  const result = decodeCanonicalInviteParticipants(source);
+  assert.ok(result.status === "ok");
+  assert.equal(result.source, source);
   assert.equal(result.passwordProtected, false);
-  assert.deepEqual(Object.keys(source), []);
 });

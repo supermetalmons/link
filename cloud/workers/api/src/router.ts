@@ -1,4 +1,14 @@
 import { MATCH_SNAPSHOT_PATH } from "@mons/shared/game-sessions";
+import { APPLICATION_RELEASE_PATH } from "@mons/shared/data-contract";
+import {
+  ApplicationDataUnavailable,
+  readApplicationDataControl,
+} from "./applicationDataControl.ts";
+import { runApplicationOperation } from "./applicationExecution.ts";
+import {
+  applicationContractResponse,
+  gateApplicationRequest,
+} from "./applicationDataHttp.ts";
 import { jsonResponse } from "./http.ts";
 import { handleNftRoute } from "./nftRoute.ts";
 import type { WorkerDependencies } from "./provider.ts";
@@ -254,14 +264,49 @@ async function dispatchRequest(
       (entrypoint === "fetch" || !candidate.fetchOnly) &&
       candidate.matches(pathname),
   );
-  if (!route) {
+  if (!route && pathname !== APPLICATION_RELEASE_PATH) {
     return jsonResponse({ ok: false, error: "not-found" }, 404);
   }
-  if (route.needsContext) {
-    if (!ctx) return jsonResponse({ ok: false, error: "unavailable" }, 503);
-    return route.run({ request, env, overrides, ctx });
+  if (route?.needsContext && !ctx)
+    return jsonResponse({ ok: false, error: "unavailable" }, 503);
+  if (request.method !== "OPTIONS") {
+    try {
+      const gate = gateApplicationRequest(
+        request,
+        await readApplicationDataControl(env.PROFILE_GAMES_DB),
+      );
+      if (gate) return gate;
+    } catch {
+      return applicationContractResponse(request, "maintenance");
+    }
   }
-  return route.run({ request, env, overrides });
+  if (!route) return jsonResponse({ ok: false, error: "not-found" }, 404);
+  const run = (
+    admittedEnv: Env,
+    admittedContext: WorkerExecutionContext | undefined,
+  ) => {
+    if (route.needsContext) {
+      if (!admittedContext)
+        return Promise.resolve(
+          jsonResponse({ ok: false, error: "unavailable" }, 503),
+        );
+      return route.run({
+        request,
+        env: admittedEnv,
+        overrides,
+        ctx: admittedContext,
+      });
+    }
+    return route.run({ request, env: admittedEnv, overrides });
+  };
+  if (request.method === "OPTIONS") return run(env, ctx);
+  try {
+    return await runApplicationOperation(env, "http", 1, run, ctx);
+  } catch (error) {
+    if (error instanceof ApplicationDataUnavailable)
+      return applicationContractResponse(request, "maintenance");
+    throw error;
+  }
 }
 
 export async function handleRequest(

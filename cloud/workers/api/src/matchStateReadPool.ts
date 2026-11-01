@@ -12,7 +12,7 @@ export async function runMatchStateReads<T>(
       while (!failed && nextIndex < reads.length) {
         signal?.throwIfAborted();
         const index = nextIndex++;
-        results[index] = await reads[index]();
+        results[index] = await reads[index]!();
       }
     } catch (error) {
       if (!failed) failure = error;

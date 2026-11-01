@@ -35,6 +35,14 @@ function harness(t: test.TestContext) {
     db.exec(
       readFileSync(resolve("cloud/workers/api/migrations", file), "utf8"),
     );
+  for (const table of [
+    "automatch_entries",
+    "automatch_telegram_sources",
+    "automatch_telegram_projection_outbox",
+    "game_session_projection_outbox",
+    "game_session_mutation_receipts",
+  ])
+    db.exec(`ALTER TABLE ${table} RENAME TO ${table}_canonical`);
   db.prepare(
     "UPDATE automatch_runtime_control SET backend='d1',staged_at_ms=1,candidate_version_id=?,source_digest=?,import_digest=?,activated_at_ms=100,metadata_json=?",
   ).run(
@@ -266,7 +274,7 @@ test("D1 prepared admissions need completed-request scope and D1 source evidence
   };
   h.db
     .prepare(
-      "INSERT INTO game_session_mutation_receipts (record_key,payload_json,revision,updated_at_ms) VALUES ('operation',?,1,900)",
+      "INSERT INTO game_session_mutation_receipts_canonical (record_key,payload_json,revision,updated_at_ms) VALUES ('operation',?,1,900)",
     )
     .run(canonicalJson(receipt));
   evidence.sources = [
@@ -284,7 +292,7 @@ test("D1 prepared admissions need completed-request scope and D1 source evidence
   };
   writeFileSync(file, JSON.stringify(evidence));
   h.db.exec(
-    "UPDATE game_session_mutation_receipts SET payload_json = '{}' WHERE record_key = 'operation'",
+    "UPDATE game_session_mutation_receipts_canonical SET payload_json = '{}' WHERE record_key = 'operation'",
   );
   await assert.rejects(
     h.command("reconcile-admission", ["--evidence", file]),
@@ -293,7 +301,7 @@ test("D1 prepared admissions need completed-request scope and D1 source evidence
   assert.equal((await h.dependencies.status()).admissions, 1);
   h.db
     .prepare(
-      "UPDATE game_session_mutation_receipts SET payload_json = ? WHERE record_key = 'operation'",
+      "UPDATE game_session_mutation_receipts_canonical SET payload_json = ? WHERE record_key = 'operation'",
     )
     .run(canonicalJson(receipt));
   insertAdmission(h, "prepared", null, "d1", "admission-2");
@@ -329,7 +337,7 @@ test("D1 admission proofs read owned snapshots from SQL and reject retired match
   const expiration = { completedAtMs: 900 };
   h.db
     .prepare(
-      "INSERT INTO game_session_mutation_receipts (record_key,payload_json,revision,expiration_json,expiration_revision,updated_at_ms) VALUES ('operation',?,1,?,1,900)",
+      "INSERT INTO game_session_mutation_receipts_canonical (record_key,payload_json,revision,expiration_json,expiration_revision,updated_at_ms) VALUES ('operation',?,1,?,1,900)",
     )
     .run(canonicalJson(receipt), canonicalJson(expiration));
   const updates = {
@@ -354,6 +362,7 @@ test("D1 admission proofs read owned snapshots from SQL and reject retired match
   );
 
   const [admission] = await h.dependencies.readAdmissions();
+  assert.ok(admission);
   await assert.rejects(
     h.dependencies.readAdmissionPath(admission, "players/host/matches/10"),
     /retired admission source-proof path/,
@@ -418,11 +427,11 @@ test("D1 maintenance preserves records, receipts and original activation evidenc
   const h = harness(t);
   h.db
     .prepare(
-      "INSERT INTO game_session_mutation_receipts(record_key,payload_json,revision,updated_at_ms) VALUES('retained',?,1,100)",
+      "INSERT INTO game_session_mutation_receipts_canonical(record_key,payload_json,revision,updated_at_ms) VALUES('retained',?,1,100)",
     )
     .run(canonicalJson({ response: { ok: true } }));
   const receipt = h.db
-    .prepare("SELECT * FROM game_session_mutation_receipts")
+    .prepare("SELECT * FROM game_session_mutation_receipts_canonical")
     .all();
   const original = (await h.dependencies.status()).control;
   await h.command("freeze");
@@ -441,7 +450,9 @@ test("D1 maintenance preserves records, receipts and original activation evidenc
     candidateVersionId: OTHER_VERSION,
   });
   assert.deepEqual(
-    h.db.prepare("SELECT * FROM game_session_mutation_receipts").all(),
+    h.db
+      .prepare("SELECT * FROM game_session_mutation_receipts_canonical")
+      .all(),
     receipt,
   );
 
@@ -502,6 +513,7 @@ test("D1 recovery rejects retired source evidence without attempting remote read
   const h = harness(t);
   insertAdmission(h, "prepared");
   const [admission] = await h.dependencies.readAdmissions();
+  assert.ok(admission);
   for (const path of [
     "invites/10",
     "players",
@@ -520,6 +532,7 @@ test("Legacy admissions reject even completed evidence and cannot be inspected o
     const h = harness(t);
     insertAdmission(h, phase, null, "rtdb");
     const [admission] = await h.dependencies.readAdmissions();
+    assert.ok(admission);
     const file = resolve(h.directory, "legacy-evidence.json");
     writeFileSync(
       file,
@@ -583,13 +596,13 @@ test("uncertain D1 patch reconciliation requires every recorded target and rejec
   evidence.sources = saved;
   writeFileSync(file, JSON.stringify(evidence));
   h.db.exec(
-    "INSERT INTO automatch_entries(record_key,payload_json,revision,updated_at_ms) VALUES('10','{}',1,100)",
+    "INSERT INTO automatch_entries_canonical(record_key,payload_json,revision,updated_at_ms) VALUES('10','{}',1,100)",
   );
   await assert.rejects(
     h.command("reconcile-admission", ["--evidence", file]),
     /sources changed/,
   );
-  h.db.exec("DELETE FROM automatch_entries WHERE record_key='10'");
+  h.db.exec("DELETE FROM automatch_entries_canonical WHERE record_key='10'");
   await h.command("reconcile-admission", ["--evidence", file]);
   assert.equal((await h.dependencies.status()).admissions, 0);
 });
@@ -647,6 +660,7 @@ test("D1 admissions with retired match source proofs remain untouched even when 
         updates: { "players/host/matches/game": { fen: "retained-source" } },
       });
       const [admission] = await h.dependencies.readAdmissions();
+      assert.ok(admission);
       const file = resolve(h.directory, "retired-source-proof.json");
       writeFileSync(
         file,

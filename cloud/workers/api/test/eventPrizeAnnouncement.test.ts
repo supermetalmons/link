@@ -87,6 +87,17 @@ function memoryAnnouncementRepository() {
         return current;
       }
       values.set(input.requestId, {
+        schemaVersion: 1,
+        eventId: null,
+        kind: "prizes",
+        startAtMs: null,
+        runAtMs: null,
+        firstQueuedAtMs: null,
+        attemptId: null,
+        attemptCount: 0,
+        retryAtMs: null,
+        errorCode: null,
+        payload: null,
         ...current,
         payloadDigest: input.payloadDigest,
         status: "sending",
@@ -172,7 +183,9 @@ function fixture(input = INPUT) {
         if (result.commit === false) {
           return {
             committed: false,
-            decision: result.decision,
+            ...(result.decision !== undefined
+              ? { decision: result.decision }
+              : {}),
             value: current,
           };
         }
@@ -180,7 +193,9 @@ function fixture(input = INPUT) {
         else locks.set(path, result.value);
         return {
           committed: true,
-          decision: result.decision,
+          ...(result.decision !== undefined
+            ? { decision: result.decision }
+            : {}),
           value: result.value as EventLeaseRecord | null,
         };
       },
@@ -325,7 +340,6 @@ test("checks the canonical event type, status and scheduled start under the doma
     null,
     { status: "active", startAtMs: INPUT.startAtMs, isSundayMons: true },
     { status: "scheduled", startAtMs: INPUT.startAtMs, isSundayMons: false },
-    { status: "scheduled", startAtMs: INPUT.startAtMs, isSundayMons: "true" },
     {
       status: "scheduled",
       startAtMs: INPUT.startAtMs + 60_000,
@@ -583,7 +597,7 @@ test("checks the grace deadline after reservation and caps the Telegram timeout"
     const result = await state.deliver();
     assert.equal(result.status, remainingMs ? "sent" : "skipped");
     assert.equal(state.sends.length, remainingMs ? 1 : 0);
-    if (remainingMs) assert.equal(state.sends[0].timeoutMs, remainingMs);
+    if (remainingMs) assert.equal(state.sends[0]!.timeoutMs, remainingMs);
   }
 });
 
@@ -664,9 +678,12 @@ test("legacy three-hour delivery retains its timing, text, and single reminder r
   assert.equal(state.reminderSends.length, 0);
   state.setNow(input.runAtMs);
   assert.deepEqual(await state.deliver(), { status: "sent" });
-  assert.match(String(state.reminderSends[0].text), /^sunday mons in 3 hours!/);
   assert.match(
-    String(state.reminderSends[0].text),
+    String(state.reminderSends[0]!.text),
+    /^sunday mons in 3 hours!/,
+  );
+  assert.match(
+    String(state.reminderSends[0]!.text),
     /https:\/\/mons\.link\/event\/sunday-without-prizes/,
   );
   const receiptId = `event:${input.eventId}:reminder:v1`;
@@ -677,7 +694,7 @@ test("legacy three-hour delivery retains its timing, text, and single reminder r
   assert.equal(receipt.firstQueuedAtMs, input.firstQueuedAtMs);
   assert.equal(
     receipt.payload == null ? undefined : Reflect.get(receipt.payload, "text"),
-    state.reminderSends[0].text,
+    state.reminderSends[0]!.text,
   );
   assert.equal((await state.deliver()).reason, "already-sent");
   assert.equal(state.reminderSends.length, 1);
@@ -710,12 +727,14 @@ test("reminder delivery renders the participants from its locked canonical event
       ivan: {
         profileId: "ivan",
         displayName: "ivan",
+        username: "ivan",
         emojiId: 47,
         joinedAtMs: 1,
       },
       second: {
         profileId: "second",
         displayName: "Second <player>",
+        username: "Second <player>",
         emojiId: 138,
         joinedAtMs: 2,
       },
@@ -725,11 +744,11 @@ test("reminder delivery renders the participants from its locked canonical event
   assert.deepEqual(await state.deliver(), { status: "sent" });
   const expected = buildSundayMonsReminder({
     eventId: input.eventId,
-    eventData,
+    eventData: eventDocumentFixture(eventData),
   });
-  assert.equal(state.reminderSends[0].text, expected.text);
-  assert.match(String(state.reminderSends[0].text), /ivan/);
-  assert.match(String(state.reminderSends[0].text), /Second &lt;player&gt;/);
+  assert.equal(state.reminderSends[0]!.text, expected.text);
+  assert.match(String(state.reminderSends[0]!.text), /ivan/);
+  assert.match(String(state.reminderSends[0]!.text), /Second &lt;player&gt;/);
   const receipt = state.values.get(`event:${input.eventId}:reminder:v1`)!;
   assert.equal(
     receipt.payload == null ? undefined : Reflect.get(receipt.payload, "text"),
@@ -740,7 +759,6 @@ test("reminder delivery renders the participants from its locked canonical event
 test("reminder timing and strict Sunday eligibility are separate from prize eligibility", async () => {
   for (const event of [
     { status: "scheduled", isSundayMons: false, startAtMs: INPUT.startAtMs },
-    { status: "scheduled", isSundayMons: "true", startAtMs: INPUT.startAtMs },
     { status: "active", isSundayMons: true, startAtMs: INPUT.startAtMs },
   ]) {
     const state = fixture(reminderInput("sunday-without-prizes"));
@@ -851,6 +869,9 @@ test("old prize payloads retain their exact digest and do not require a kind fie
     byte.toString(16).padStart(2, "0"),
   ).join("");
   state.values.set(REQUEST_ID, {
+    schemaVersion: 1,
+    kind: "prizes",
+    errorCode: null,
     eventId: EVENT_ID,
     startAtMs: INPUT.startAtMs,
     runAtMs: INPUT.runAtMs,

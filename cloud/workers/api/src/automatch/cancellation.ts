@@ -15,9 +15,9 @@ import {
   withGameSessionMutationLease,
 } from "../gameSessionMutationRunner.ts";
 import {
-  STATE_SERVER_TIMESTAMP,
-  stateIncrement,
-} from "../stateCompatibility.ts";
+  SESSION_TIMESTAMP,
+  sessionIncrement,
+} from "../sessionValueOperations.ts";
 import {
   AUTOMATCH_CANCELLATION_RECONCILE_TIMEOUT_MS,
   AUTOMATCH_TOTAL_TIMEOUT_MS,
@@ -69,7 +69,7 @@ async function readAutomatchCancellationProof(
     ]);
     const invite = inviteProjectionState(inviteValue);
     return Boolean(
-      queueValue.isNull &&
+      queueValue === null &&
       normalizeString(invite?.hostId) === expectedUid &&
       !normalizeString(invite?.guestId) &&
       invite?.automatchStateHint === "canceled" &&
@@ -159,7 +159,7 @@ export async function cancelQueuedAutomatch(
         ]);
         const { guestId: currentGuestId, hostId: currentHostId } =
           inviteTrimmedParticipants(currentInvite);
-        const currentQueue = currentQueueValue.record;
+        const currentQueue = currentQueueValue;
         const currentUid = normalizeString(currentQueue?.uid);
         if (
           !currentQueue ||
@@ -180,13 +180,13 @@ export async function cancelQueuedAutomatch(
             inviteId: queued.inviteId,
             value: {
               automatchStateHint: "canceled",
-              automatchCanceledAt: STATE_SERVER_TIMESTAMP,
+              automatchCanceledAt: (dependencies.now ?? Date.now)(),
             },
           },
           ...requestAutomatchProfileProjection({
             inviteId: queued.inviteId,
             requestId: profileGameProjectionTask.requestId,
-            timestamp: STATE_SERVER_TIMESTAMP,
+            timestamp: SESSION_TIMESTAMP,
           }),
         ];
         if (expectedTelegramDeliveryVersion) {
@@ -194,13 +194,13 @@ export async function cancelQueuedAutomatch(
             ...buildAutomatchTelegramLifecycleChanges({
               inviteId: queued.inviteId,
               lifecycle: "canceled",
-              timestamp: STATE_SERVER_TIMESTAMP,
-              generation: stateIncrement(1),
+              timestamp: SESSION_TIMESTAMP,
+              generation: sessionIncrement(1),
             }),
             ...buildAutomatchTelegramProjectionChanges({
               inviteId: queued.inviteId,
               requestId: projectionTask?.requestId || "",
-              timestamp: STATE_SERVER_TIMESTAMP,
+              timestamp: SESSION_TIMESTAMP,
             }),
           );
         }

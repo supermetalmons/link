@@ -1,6 +1,13 @@
-import { inviteDocumentFixture } from "./inviteDocumentFixture.ts";
 import assert from "node:assert/strict";
 import test from "node:test";
+import { inviteDocumentFixture } from "./inviteDocumentFixture.ts";
+import { canonicalAutomatchFixture } from "./automatchRecordFixture.ts";
+import {
+  parseAutomatchRecord,
+  type AutomatchProfileOutboxRecord,
+  type AutomatchTelegramOutboxRecord,
+  type AutomatchTelegramSourceRecord,
+} from "../../../runtime/automatchRecords.js";
 import {
   createAutomatchProfileOutboxSnapshot,
   createAutomatchProjectionCommands,
@@ -8,64 +15,73 @@ import {
   createAutomatchTelegramSourceSnapshot,
   type AutomatchTelegramRatingResultInput,
 } from "../src/automatchProjectionRecords.ts";
-import type { RawGameSessionPort } from "../src/gameSessionContracts.ts";
-import type { TransactionDecision } from "../src/repositoryContracts.ts";
+import type {
+  TransactionDecision,
+  TransactionResult,
+} from "../src/repositoryContracts.ts";
 
 const inviteId = "auto_example";
 const descriptor = {
-  matchId: inviteId,
   finalizedAtMs: 100,
   hostPlayerId: "host",
   guestPlayerId: "guest",
   source: "transition" as const,
+  retryNotBeforeMs: null,
 };
-
-function profileOutbox() {
-  return {
-    schemaVersion: 1,
-    status: "pending",
-    requestId: "request-1",
-    reason: "  automatch-result  ",
-    sourceUpdatedAtMs: 100.75,
-    lastQueuedAtMs: 200.5,
-    historicalMatches: {
-      [descriptor.matchId]: {
-        finalizedAtMs: descriptor.finalizedAtMs,
-        hostPlayerId: descriptor.hostPlayerId,
-        guestPlayerId: descriptor.guestPlayerId,
-        source: descriptor.source,
-        extra: { preserve: true },
-      },
-    },
-    extra: { preserve: true },
-  };
-}
-
-function ratingUpdate(): AutomatchTelegramRatingResultInput {
-  return {
-    inviteId,
-    matchId: inviteId,
-    telegramDeliveryVersion: 2,
-    status: "done",
-    updateRatingMessage: "  rating result  ",
-    completedAtMs: 123.75,
-  };
-}
-
-type RawProjectionTransactions = Pick<
-  RawGameSessionPort,
-  | "transactAutomatchTelegramSource"
-  | "transactAutomatchTelegramOutbox"
-  | "transactAutomatchProfileOutbox"
->;
-
-function rawTransactions(initial: unknown, retryWith?: unknown) {
+const pendingProfile = (): Extract<
+  AutomatchProfileOutboxRecord,
+  { status: "pending" }
+> => ({
+  schemaVersion: 2,
+  status: "pending",
+  requestId: "request",
+  reason: "automatch-result",
+  sourceUpdatedAtMs: 100,
+  lastQueuedAtMs: 200,
+  historicalMatches: { [inviteId]: descriptor },
+  archiveRetry: null,
+});
+const pendingTelegram = (): Extract<
+  AutomatchTelegramOutboxRecord,
+  { status: "pending" }
+> => ({
+  schemaVersion: 2,
+  status: "pending",
+  requestId: "request",
+  updatedAtMs: 200,
+});
+const source = (): AutomatchTelegramSourceRecord =>
+  canonicalAutomatchFixture("telegramAutomatches", {
+    lifecycle: "matched",
+    matchedText: "Matched",
+    matchedInstanceKey: `matched:${inviteId}`,
+  })!;
+const rating = (): AutomatchTelegramRatingResultInput => ({
+  inviteId,
+  matchId: inviteId,
+  telegramDeliveryVersion: 2,
+  status: "done",
+  updateRatingMessage: "rating result",
+  completedAtMs: 300,
+  isEventMatch: false,
+  eventOwned: false,
+  eventId: null,
+});
+function memory<Value>(initial: Value | null, retryWith?: Value | null) {
   let current = structuredClone(initial);
   const calls: Array<{ inviteId: string; signal?: AbortSignal }> = [];
-  const decisions: TransactionDecision<unknown>[] = [];
-  const transact: RawProjectionTransactions["transactAutomatchTelegramSource"] =
-    async (id, update, signal) => {
-      calls.push({ inviteId: id, signal });
+  const decisions: TransactionDecision<Value>[] = [];
+  return {
+    calls,
+    decisions,
+    read: () => current,
+    async transact(
+      id: string,
+      update: (current: Value | null) => TransactionDecision<Value>,
+      signal?: AbortSignal,
+    ): Promise<TransactionResult<Value>> {
+      signal?.throwIfAborted();
+      calls.push({ inviteId: id, ...(signal === undefined ? {} : { signal }) });
       let decision = update(structuredClone(current));
       decisions.push(decision);
       if (retryWith !== undefined) {
@@ -73,340 +89,241 @@ function rawTransactions(initial: unknown, retryWith?: unknown) {
         decision = update(structuredClone(current));
         decisions.push(decision);
       }
-      const committed = "value" in decision;
       if ("value" in decision) current = decision.value;
-      return { committed, decision: decision.decision, value: current };
-    };
-  const raw: RawProjectionTransactions = {
-    transactAutomatchTelegramSource: transact,
-    transactAutomatchTelegramOutbox: transact,
-    transactAutomatchProfileOutbox: transact,
+      return {
+        committed: "value" in decision,
+        ...(decision.decision === undefined
+          ? {}
+          : { decision: decision.decision }),
+        value: current,
+      };
+    },
   };
+}
+function fixture(
+  input: {
+    source?: AutomatchTelegramSourceRecord;
+    telegram?: AutomatchTelegramOutboxRecord;
+    profile?: AutomatchProfileOutboxRecord;
+    retrySource?: AutomatchTelegramSourceRecord;
+    retryTelegram?: AutomatchTelegramOutboxRecord;
+  } = {},
+) {
+  const sources = memory(input.source ?? null, input.retrySource);
+  const telegram = memory(input.telegram ?? null, input.retryTelegram);
+  const profile = memory(input.profile ?? null);
   return {
-    commands: createAutomatchProjectionCommands(raw),
-    calls,
-    decisions,
-    read: () => current,
+    sources,
+    telegram,
+    profile,
+    commands: createAutomatchProjectionCommands({
+      transactAutomatchTelegramSource: sources.transact,
+      transactAutomatchTelegramOutbox: telegram.transact,
+      transactAutomatchProfileOutbox: profile.transact,
+    }),
   };
 }
 
-test("source snapshots defer lifecycle resolution to the concurrent invite read", () => {
-  const raw = {
-    version: 2,
-    lifecycle: "invalid",
-    generation: "invalid",
-    matchedText: "  matched  ",
-    matchedInstanceKey: "  matched:auto_example  ",
-    results: {
-      auto_example: "  legacy result  ",
-      auto_example1: { text: "  next result  ", extra: true },
-      empty: { text: "" },
-    },
-    extra: { preserve: true },
-  };
-  const snapshot = createAutomatchTelegramSourceSnapshot(inviteId, raw);
-  assert.equal(snapshot.project(null), null);
-  const projection = snapshot.project(
-    inviteDocumentFixture({ guestId: "  guest  " }),
-  );
-  assert.equal(projection?.lifecycle, "matched");
-  assert.equal(projection?.sourceGeneration, 0);
-  assert.equal(projection?.text, "matched\n\nlegacy result\n\nnext result");
-  assert.equal(projection?.instanceKey, "matched:auto_example");
-  assert.equal(
-    snapshot.fingerprint(inviteDocumentFixture({ guestId: "  guest  " })),
-    JSON.stringify({ source: raw, guestId: "  guest  " }),
-  );
-  assert.notEqual(
-    snapshot.fingerprint(inviteDocumentFixture({ guestId: "guest" })),
-    createAutomatchTelegramSourceSnapshot(inviteId, {
-      ...raw,
-      extra: { preserve: false },
-    }).fingerprint(inviteDocumentFixture({ guestId: "guest" })),
-  );
+test("source snapshots cannot publish a stale waiting message after the invite joins", () => {
+  const pending = canonicalAutomatchFixture("telegramAutomatches", {})!;
+  const snapshot = createAutomatchTelegramSourceSnapshot(inviteId, pending);
+  assert.equal(snapshot.project(null)?.lifecycle, "pending");
+  const joined = inviteDocumentFixture({ hostId: "host", guestId: "guest" });
+  assert.equal(snapshot.project(joined), null);
+  const matched = createAutomatchTelegramSourceSnapshot(inviteId, source());
+  assert.equal(matched.project(joined)?.lifecycle, "matched");
+  assert.notEqual(snapshot.fingerprint(null), matched.fingerprint(joined));
 });
-
-test("source snapshots retain raw fingerprints for missing and malformed values", () => {
-  for (const raw of [undefined, null, false, "malformed", ["malformed"]]) {
-    const snapshot = createAutomatchTelegramSourceSnapshot(inviteId, raw);
-    assert.equal(
-      snapshot.project(inviteDocumentFixture({ guestId: "guest" })),
-      null,
+test("outbox snapshots expose exact canonical times and no raw escape", () => {
+  const value = pendingTelegram();
+  const snapshot = createAutomatchTelegramOutboxSnapshot(value);
+  assert.strictEqual(snapshot.value, value);
+  assert.equal("raw" in snapshot, false);
+  for (const updatedAtMs of [undefined, "200", 200.5, -1])
+    assert.throws(
+      () =>
+        parseAutomatchRecord("telegramProjectionOutbox/automatch", {
+          ...value,
+          updatedAtMs,
+        }),
+      /invalid-canonical/,
     );
-    for (const guestId of [undefined, null, false, 0, "", "guest", { id: 1 }]) {
-      assert.equal(
-        snapshot.fingerprint(inviteDocumentFixture({ guestId: guestId })),
-        JSON.stringify({ source: raw, guestId: guestId || null }),
-      );
-    }
-  }
-  const snapshot = createAutomatchTelegramSourceSnapshot(inviteId, {
-    version: 1,
-    lifecycle: "matched",
-    matchedText: "matched",
-    matchedInstanceKey: "matched:auto_example",
-  });
-  assert.equal(
-    snapshot.project(inviteDocumentFixture({ guestId: "guest" })),
-    null,
-  );
 });
-
-test("Telegram outbox snapshots keep source fields intact while exposing the parsed timestamp", () => {
-  const raw = {
-    schemaVersion: 1,
-    status: "pending",
-    requestId: "request-1",
-    updatedAtMs: 123.75,
-    extra: { preserve: true },
-  };
-  const before = structuredClone(raw);
-  const snapshot = createAutomatchTelegramOutboxSnapshot(raw);
-  assert.equal("raw" in snapshot, false);
-  assert.deepEqual(raw, before);
-  assert.deepEqual(snapshot.value, {
-    schemaVersion: 1,
-    status: "pending",
-    requestId: "request-1",
-    updatedAtMs: 123,
-  });
-  for (const invalid of [
-    undefined,
-    null,
-    false,
-    ["malformed"],
-    { ...raw, status: "dead" },
-    { ...raw, updatedAtMs: Number.NaN },
-    { ...raw, requestId: "unsafe/path" },
-  ]) {
-    const before = structuredClone(invalid);
-    const invalidSnapshot = createAutomatchTelegramOutboxSnapshot(invalid);
-    assert.equal("raw" in invalidSnapshot, false);
-    assert.deepEqual(invalid, before);
-    assert.equal(invalidSnapshot.value, null);
-  }
-});
-
-test("profile snapshots separate parsed arrays and defaults from the stored maps", () => {
-  const raw = {
-    ...profileOutbox(),
-    archiveRetry: { requestId: "unsafe/path", notBeforeMs: 1 },
-  };
-  const before = structuredClone(raw);
-  const snapshot = createAutomatchProfileOutboxSnapshot(raw);
-  assert.equal("raw" in snapshot, false);
-  assert.deepEqual(raw, before);
-  assert.deepEqual(snapshot.value, {
-    schemaVersion: 1,
-    status: "pending",
-    requestId: "request-1",
-    reason: "automatch-result",
-    sourceUpdatedAtMs: 100,
-    lastQueuedAtMs: 200,
-    historicalMatches: [descriptor],
-  });
-  assert.equal(
-    createAutomatchProfileOutboxSnapshot({ ...raw, reason: "" }).value?.reason,
-    "automatch-queue",
-  );
-  const invalidRetry = {
-    ...raw,
-    historicalMatches: {
-      ...raw.historicalMatches,
-      [descriptor.matchId]: {
-        ...raw.historicalMatches[descriptor.matchId],
-        retryNotBeforeMs: "invalid",
-      },
+test("profile snapshots expose descriptors without changing stored maps or filling invalid fields", () => {
+  const value = pendingProfile(),
+    before = structuredClone(value);
+  const snapshot = createAutomatchProfileOutboxSnapshot(value);
+  assert.deepEqual(snapshot.value?.historicalMatches, [
+    {
+      matchId: inviteId,
+      finalizedAtMs: 100,
+      hostPlayerId: "host",
+      guestPlayerId: "guest",
+      source: "transition",
     },
-  };
-  assert.deepEqual(
-    createAutomatchProfileOutboxSnapshot(invalidRetry).value?.historicalMatches,
-    [descriptor],
+  ]);
+  assert.equal(snapshot.matchesCancellationRequest("request"), true);
+  assert.equal(snapshot.matchesCancellationRequest(" request "), false);
+  assert.deepEqual(value, before);
+  assert.throws(
+    () =>
+      parseAutomatchRecord("profileGameProjectionOutbox/automatch", {
+        ...value,
+        extra: true,
+      }),
+    /invalid-canonical/,
   );
-  const malformed = {
-    ...raw,
-    historicalMatches: { ...raw.historicalMatches, broken: {} },
-  };
-  const beforeMalformed = structuredClone(malformed);
-  const malformedSnapshot = createAutomatchProfileOutboxSnapshot(malformed);
-  assert.equal("raw" in malformedSnapshot, false);
-  assert.deepEqual(malformed, beforeMalformed);
-  assert.equal(malformedSnapshot.value, null);
 });
-
-test("rating result commands preserve raw siblings, coercions and duplicate behavior", async () => {
-  const raw = {
-    version: 2,
-    generation: "invalid",
-    updatedAtMs: 50.75,
-    results: { older: "legacy", malformed: { extra: true } },
-    extra: { preserve: true },
+test("rating result commands retain existing fragments and advance exact generation once", async () => {
+  const original = {
+    ...source(),
+    results: { [`${inviteId}1`]: { completedAtMs: 200, text: "earlier" } },
   };
-  const fixture = rawTransactions(raw);
-  const signal = new AbortController().signal;
+  const f = fixture({ source: original });
   assert.equal(
-    await fixture.commands.mergeAutomatchTelegramRatingResult(
-      inviteId,
-      ratingUpdate(),
-      signal,
-    ),
+    await f.commands.mergeAutomatchTelegramRatingResult(inviteId, rating()),
     "inserted",
   );
-  const stored = {
-    ...raw,
-    generation: 1,
-    updatedAtMs: 123,
-    results: {
-      ...raw.results,
-      [inviteId]: { text: "  rating result  ", completedAtMs: 123 },
+  const stored = f.sources.read()!;
+  assert.equal(stored.generation, original.generation + 1);
+  assert.deepEqual(
+    stored.results[`${inviteId}1`],
+    original.results[`${inviteId}1`],
+  );
+  assert.deepEqual(stored.results[inviteId], {
+    completedAtMs: 300,
+    text: "rating result",
+  });
+  assert.equal(stored.updatedAtMs, 300);
+  assert.equal(
+    await f.commands.mergeAutomatchTelegramRatingResult(inviteId, rating()),
+    "duplicate",
+  );
+  assert.deepEqual(f.sources.read(), stored);
+});
+test("rating result commands report the final transaction attempt disposition", async () => {
+  const retry = {
+    ...source(),
+    results: { [inviteId]: { completedAtMs: 300, text: "rating result" } },
+    generation: 2,
+    updatedAtMs: 300,
+  };
+  const f = fixture({ source: source(), retrySource: retry });
+  assert.equal(
+    await f.commands.mergeAutomatchTelegramRatingResult(inviteId, rating()),
+    "duplicate",
+  );
+  assert.equal(f.sources.decisions.length, 2);
+  assert.deepEqual(f.sources.read(), retry);
+});
+test("dead marking requires a pending exact request and samples time at each attempt", async () => {
+  const f = fixture({
+    telegram: pendingTelegram(),
+    retryTelegram: pendingTelegram(),
+  });
+  let clock = 300;
+  assert.equal(
+    await f.commands.markAutomatchTelegramOutboxDead(
+      inviteId,
+      "other",
+      "terminal",
+      () => ++clock,
+    ),
+    false,
+  );
+  assert.equal(clock, 300);
+  assert.equal(
+    await f.commands.markAutomatchTelegramOutboxDead(
+      inviteId,
+      "request",
+      "terminal",
+      () => ++clock,
+    ),
+    true,
+  );
+  assert.deepEqual(f.telegram.read(), {
+    schemaVersion: 2,
+    status: "dead",
+    requestId: "request",
+    reason: "terminal",
+    updatedAtMs: null,
+    deadAtMs: 302,
+  });
+});
+test("historical settlement uses exact descriptor identity and retains explicit empty history", async () => {
+  const f = fixture({ profile: pendingProfile() });
+  const expected = {
+    matchId: inviteId,
+    finalizedAtMs: 100,
+    hostPlayerId: "host",
+    guestPlayerId: "guest",
+    source: "transition" as const,
+  };
+  assert.equal(
+    await f.commands.settleAutomatchHistoricalDescriptor(inviteId, "request", {
+      ...expected,
+      finalizedAtMs: 101,
+    }),
+    false,
+  );
+  assert.equal(
+    await f.commands.settleAutomatchHistoricalDescriptor(
+      inviteId,
+      "request",
+      expected,
+    ),
+    true,
+  );
+  assert.deepEqual(f.profile.read()?.historicalMatches, {});
+  assert.equal(f.profile.read()?.archiveRetry, null);
+});
+test("cancelled histories and terminal Telegram outboxes cannot be revived by repair commands", async () => {
+  const retired: AutomatchProfileOutboxRecord = {
+    ...pendingProfile(),
+    status: "cancelled",
+    retirement: {
+      state: "retired",
+      retiredAtMs: 500,
+      sourceDigest: "a".repeat(64),
     },
   };
-  assert.deepEqual(fixture.read(), stored);
-  assert.deepEqual(fixture.calls, [{ inviteId, signal }]);
-  assert.equal(
-    await fixture.commands.mergeAutomatchTelegramRatingResult(
-      inviteId,
-      ratingUpdate(),
-    ),
-    "duplicate",
-  );
-  assert.deepEqual(fixture.read(), stored);
-  assert.equal(
-    await fixture.commands.mergeAutomatchTelegramRatingResult(inviteId, {
-      ...ratingUpdate(),
-      isEventMatch: true,
-    }),
-    "skipped",
-  );
-  assert.deepEqual(fixture.read(), stored);
-});
-
-test("rating result commands return the final transaction attempt's disposition", async () => {
-  const fixture = rawTransactions(
-    { version: 2 },
-    { version: 2, results: { [inviteId]: null }, extra: true },
-  );
-  assert.equal(
-    await fixture.commands.mergeAutomatchTelegramRatingResult(
-      inviteId,
-      ratingUpdate(),
-    ),
-    "duplicate",
-  );
-  assert.deepEqual(fixture.read(), {
-    version: 2,
-    results: { [inviteId]: null },
-    extra: true,
-  });
-  assert.equal(fixture.decisions.length, 2);
-});
-
-test("dead marking matches only the request and samples its clock inside each attempt", async () => {
-  const raw = { requestId: "request-1", status: "invalid", extra: true };
-  const fixture = rawTransactions(raw, { ...raw, extra: "newer" });
-  const signal = new AbortController().signal;
-  let nowMs = 100;
-  assert.equal(
-    await fixture.commands.markAutomatchTelegramOutboxDead(
-      inviteId,
-      "request-1",
-      "invalid-source",
-      () => nowMs++,
-      signal,
-    ),
-    true,
-  );
-  assert.deepEqual(fixture.read(), {
-    ...raw,
-    extra: "newer",
-    status: "dead",
-    reason: "invalid-source",
-    updatedAtMs: null,
-    deadAtMs: 101,
-  });
-  assert.deepEqual(fixture.calls, [{ inviteId, signal }]);
-  assert.equal(
-    await fixture.commands.markAutomatchTelegramOutboxDead(
-      inviteId,
-      "superseded",
-      "invalid-source",
-      () => {
-        throw new Error("unexpected-clock");
-      },
-    ),
-    false,
-  );
-});
-
-test("historical settlement preserves extra fields and deletes the empty history property", async () => {
-  const raw = profileOutbox();
-  const fixture = rawTransactions(raw);
-  const signal = new AbortController().signal;
-  assert.equal(
-    await fixture.commands.settleAutomatchHistoricalDescriptor(
-      inviteId,
-      "request-1",
-      descriptor,
-      500,
-      signal,
-    ),
-    true,
-  );
-  assert.deepEqual(fixture.read(), {
-    ...raw,
-    historicalMatches: {
-      [descriptor.matchId]: {
-        ...raw.historicalMatches[descriptor.matchId],
-        retryNotBeforeMs: 500,
-      },
+  const f = fixture({
+    profile: retired,
+    telegram: {
+      schemaVersion: 2,
+      status: "dead",
+      requestId: "request",
+      updatedAtMs: null,
+      deadAtMs: 500,
+      reason: "terminal",
     },
   });
-  assert.deepEqual(fixture.calls, [{ inviteId, signal }]);
-  assert.equal(
-    await fixture.commands.settleAutomatchHistoricalDescriptor(
-      inviteId,
-      "request-1",
-      descriptor,
-    ),
-    false,
+  assert.deepEqual(
+    await f.commands.repairInvalidAutomatchProfileOutbox(inviteId, 600, () => {
+      throw new Error("must-not-create");
+    }),
+    { kind: "changed" },
   );
+  await f.commands.repairInvalidAutomatchTelegramOutbox(inviteId, 600);
+  assert.deepEqual(f.profile.read(), retired);
   assert.equal(
-    await fixture.commands.settleAutomatchHistoricalDescriptor(
-      inviteId,
-      "request-1",
-      { ...descriptor, retryNotBeforeMs: 500 },
-    ),
-    true,
-  );
-  const { historicalMatches, ...remaining } = raw;
-  assert.equal(Object.keys(historicalMatches).length, 1);
-  assert.deepEqual(fixture.read(), remaining);
-  assert.equal(
-    await fixture.commands.settleAutomatchHistoricalDescriptor(
-      inviteId,
-      "request-1",
-      descriptor,
+    createAutomatchProfileOutboxSnapshot(retired).matchesCancellationRequest(
+      "request",
     ),
     false,
   );
 });
-
-test("historical settlement rejects superseded and malformed outboxes", async () => {
-  for (const raw of [
-    null,
-    "malformed",
-    { ...profileOutbox(), requestId: "newer-request" },
-    { ...profileOutbox(), historicalMatches: { broken: {} } },
-  ]) {
-    const fixture = rawTransactions(raw);
-    assert.equal(
-      await fixture.commands.settleAutomatchHistoricalDescriptor(
-        inviteId,
-        "request-1",
-        descriptor,
-      ),
-      false,
-    );
-    assert.deepEqual(fixture.read(), raw);
-  }
+test("source command cancellation prevents any mutation", async () => {
+  const f = fixture({ source: source() }),
+    failure = new Error("cancelled");
+  await assert.rejects(
+    f.commands.mergeAutomatchTelegramRatingResult(
+      inviteId,
+      rating(),
+      AbortSignal.abort(failure),
+    ),
+    (error) => error === failure,
+  );
+  assert.deepEqual(f.sources.read(), source());
+  assert.deepEqual(f.sources.decisions, []);
 });

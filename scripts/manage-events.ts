@@ -1,3 +1,4 @@
+import { runGuardedOperatorSqlSync } from "./operator/guardedSql.ts";
 import { spawnSync } from "node:child_process";
 import { isAbsolute, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -89,7 +90,9 @@ function parseArgs(argv: string[]): ManagementOperation {
     if (
       !validAdmissionId(argv[1]) ||
       (argv.length !== 2 &&
-        (argv.length !== 4 || argv[2] !== "--evidence" || !isAbsolute(argv[3])))
+        (argv.length !== 4 ||
+          argv[2] !== "--evidence" ||
+          !isAbsolute(argv[3]!)))
     ) {
       throw new TypeError(
         "--recover-stale-admission requires one valid admission ID and optional --evidence with an absolute private JSON path",
@@ -342,8 +345,9 @@ function updateRemoteControl({
   nextStorageMode,
   updatedAtMs,
 }: Parameters<ManagementDependencies["updateControl"]>[0]): void {
-  runWrangler(
+  runGuardedOperatorSqlSync(
     `UPDATE event_runtime_control SET storage_mode = '${nextStorageMode}', freeze_generation = freeze_generation + ${Number(nextStorageMode === "frozen")}, updated_at_ms = ${updatedAtMs} WHERE singleton = 1 AND storage_mode = '${expected.storageMode}' AND freeze_generation = ${expected.freezeGeneration}`,
+    DATABASE,
   );
 }
 
@@ -394,7 +398,8 @@ function readWriteAdmissionRows(_nowMs: number): EventWriteAdmissionStatus[] {
 function recoverRemoteStaleAdmission(
   admission: EventWriteAdmissionStatus,
   _nowMs: number,
-  executeSql: typeof runWrangler = runWrangler,
+  executeSql: typeof runWrangler = (command) =>
+    runGuardedOperatorSqlSync(command, DATABASE),
 ): boolean {
   const rows = executeSql(
     `DELETE FROM event_write_admissions WHERE admission_id = ${sqlText(admission.admissionId)} AND freeze_generation = ${admission.freezeGeneration} AND created_at_ms = ${admission.createdAtMs} AND expires_at_ms = ${admission.expiresAtMs} AND expires_at_ms <= unixepoch() * 1000 RETURNING admission_id`,
@@ -402,13 +407,15 @@ function recoverRemoteStaleAdmission(
   return rows.length === 1 && rows[0]?.admission_id === admission.admissionId;
 }
 
-function readPendingTransitionRows(): PendingEventTransitionStatus[] {
-  return runWrangler(
+function readPendingTransitionRows(
+  executeSql: typeof runWrangler = runWrangler,
+): PendingEventTransitionStatus[] {
+  return executeSql(
     `SELECT intent.transition_id, intent.event_id, intent.expected_revision,
             intent.attempts, intent.last_error, intent.created_at_ms,
             intent.updated_at_ms,
             lease.expires_at_ms AS application_lease_expires_at_ms
-     FROM event_transition_intents AS intent
+     FROM event_transition_intents_canonical AS intent
      LEFT JOIN event_leases AS lease
        ON lease.event_id = 'transition:' || intent.transition_id
      WHERE intent.status = 'pending'
@@ -499,6 +506,7 @@ export {
   parseAdmissionRecoveryEvidence,
   readAdmissionRecoveryEvidence,
   recoverRemoteStaleAdmission,
+  readPendingTransitionRows,
   type EventControl,
   type EventWriteAdmissionStatus,
   type ExpectedEventWriteAdmission,

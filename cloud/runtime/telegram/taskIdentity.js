@@ -61,6 +61,7 @@ exports.normalizeTaskPayload =
   exports.normalizeOptionalTimestamp =
   exports.buildTelegramDeliveryTaskId =
     void 0;
+exports.parseTelegramTaskPayload = parseTelegramTaskPayload;
 const values_js_1 = require("./values.js");
 const crypto = __importStar(require("node:crypto"));
 const desiredStateCore_js_1 = require("./desiredStateCore.js");
@@ -107,6 +108,8 @@ const normalizeTaskPayload = (input) => {
     (0, values_js_1.readProperty)(input, "retrySequence") ?? 0,
   );
   const payload = {
+    schemaVersion: 1,
+    dataEpoch: 1,
     messageKey,
     revision,
     taskKind,
@@ -166,7 +169,7 @@ const buildTelegramDeliveryTaskId = (input) => {
   const payload = normalizeTaskPayload(input);
   const cleanupIdentity =
     payload.safeRejectedAttemptId || payload.pendingDeleteId || "none";
-  return `tg_${crypto
+  return `data1_tg_${crypto
     .createHash("sha256")
     .update(
       [
@@ -188,3 +191,78 @@ const buildTelegramDeliveryTaskId = (input) => {
     .slice(0, 40)}`;
 };
 exports.buildTelegramDeliveryTaskId = buildTelegramDeliveryTaskId;
+function parseTelegramTaskPayload(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const record = value;
+  const allowed = [
+    "schemaVersion",
+    "dataEpoch",
+    "messageKey",
+    "revision",
+    "taskKind",
+    "retrySequence",
+    "generation",
+    "retryStartedAtMs",
+    "retryDeadlineAtMs",
+    "retryAtMs",
+    "barrierRetryNotBeforeMs",
+    "safeRejectedAttemptId",
+    "pendingDeleteId",
+    "retryProofLeaseOwner",
+    "proofTaskKind",
+    "barrierProofOwner",
+    "apiGateReclaimOwner",
+    "apiGateSettleOwner",
+  ];
+  if (
+    record.schemaVersion !== 1 ||
+    record.dataEpoch !== 1 ||
+    Object.keys(record).some((key) => !allowed.includes(key)) ||
+    typeof record.retrySequence !== "number" ||
+    !Number.isSafeInteger(record.retrySequence) ||
+    record.retrySequence < 0 ||
+    typeof record.taskKind !== "string" ||
+    !taskKinds_js_1.TELEGRAM_TASK_KINDS.has(record.taskKind)
+  )
+    return null;
+  for (const key of ["messageKey", "revision", "generation"])
+    if (
+      typeof record[key] !== "string" ||
+      !record[key] ||
+      record[key].trim() !== record[key]
+    )
+      return null;
+  for (const key of [
+    "retryStartedAtMs",
+    "retryDeadlineAtMs",
+    "retryAtMs",
+    "barrierRetryNotBeforeMs",
+  ])
+    if (
+      Object.hasOwn(record, key) &&
+      (typeof record[key] !== "number" ||
+        !Number.isSafeInteger(record[key]) ||
+        record[key] <= 0)
+    )
+      return null;
+  for (const key of [
+    "safeRejectedAttemptId",
+    "pendingDeleteId",
+    "retryProofLeaseOwner",
+    "barrierProofOwner",
+    "apiGateReclaimOwner",
+    "apiGateSettleOwner",
+  ])
+    if (
+      Object.hasOwn(record, key) &&
+      (typeof record[key] !== "string" ||
+        !record[key] ||
+        record[key].trim() !== record[key])
+    )
+      return null;
+  try {
+    return normalizeTaskPayload(record);
+  } catch {
+    return null;
+  }
+}

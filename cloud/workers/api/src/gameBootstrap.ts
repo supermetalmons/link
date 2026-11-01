@@ -4,7 +4,7 @@ import {
   isReadGameBootstrapResponse,
   type ReadGameBootstrapResponse,
 } from "@mons/shared/game-bootstrap";
-import { selectInviteMatch } from "@mons/shared/rematches";
+import { selectInviteMatch, type RematchSeries } from "@mons/shared/rematches";
 import type { SessionBootstrapTarget } from "@mons/shared/session-bootstrap";
 import { AuthApiFailure } from "./authErrors.ts";
 import { readGameBootstrapAdmission } from "./gameBootstrapAdmission.ts";
@@ -59,15 +59,33 @@ function requireMetadata(read: InviteMetadataReadResult) {
   return read;
 }
 
+function sameRematches(first: RematchSeries, second: RematchSeries): boolean {
+  return (
+    first.state === second.state &&
+    first.indices.length === second.indices.length &&
+    first.indices.every((index, position) => second.indices[position] === index)
+  );
+}
+
 function sameMetadata(
   first: Extract<InviteMetadataReadResult, { status: "ok" }>,
   second: Extract<InviteMetadataReadResult, { status: "ok" }>,
 ): boolean {
   return (
     first.passwordProtected === second.passwordProtected &&
+    sameRematches(
+      first.snapshot.hostRematches,
+      second.snapshot.hostRematches,
+    ) &&
+    sameRematches(
+      first.snapshot.guestRematches,
+      second.snapshot.guestRematches,
+    ) &&
     Object.entries(first.snapshot).every(
       ([key, value]) =>
         key === "revision" ||
+        key === "hostRematches" ||
+        key === "guestRematches" ||
         second.snapshot[key as keyof typeof second.snapshot] === value,
     ) &&
     Object.keys(first.automatchOperationIds).length ===

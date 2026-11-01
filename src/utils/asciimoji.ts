@@ -1,8 +1,8 @@
 export function getAsciimojiAtIndex(index: number): string {
-  if (index >= 0 && index < asciimojis.length) {
-    return asciimojis[index];
+  if (Number.isInteger(index) && index >= 0 && index < asciimojis.length) {
+    return asciimojis[index]!;
   }
-  return asciimojis[0];
+  return asciimojis[0]!;
 }
 
 const asciimojis = [

@@ -1,4 +1,5 @@
-import { inviteRecordFixture } from "../test/inviteDocumentFixture.ts";
+import { wagerRecordFixture } from "../test/wagerRecordFixture.ts";
+import { inviteDocumentFixture } from "../test/inviteDocumentFixture.ts";
 import type { D1Migration } from "cloudflare:test";
 import { env } from "cloudflare:workers";
 import { beforeAll, beforeEach, describe, expect, it } from "vitest";
@@ -18,12 +19,11 @@ const testEnv = env as Env & {
 };
 const db = env.PROFILE_GAMES_DB;
 const inviteId = "metadata-invite";
-const source = {
+const source = inviteDocumentFixture({
   hostId: "host-login",
   guestId: "guest-login",
   hostColor: "white",
-  customMetadata: { retained: true },
-};
+});
 const unexpectedRead = async (): Promise<never> => {
   throw new Error("unexpected-raw-source-read");
 };
@@ -66,7 +66,7 @@ async function insertSource(
 ) {
   await db
     .prepare(
-      `INSERT INTO invite_sources (invite_id, source_json, revision, updated_at_ms)
+      `INSERT INTO invite_sources_canonical (invite_id, source_json, revision, updated_at_ms)
        VALUES (?, ?, 1, 1)`,
     )
     .bind(targetInviteId, JSON.stringify(value))
@@ -77,14 +77,28 @@ async function reserveInvite() {
   await db.batch([
     db
       .prepare(
-        `INSERT INTO game_session_transitions
+        `INSERT INTO game_session_transitions_canonical
          (transition_id, invite_id, payload_json, status, created_at_ms, updated_at_ms)
-         VALUES ('metadata-transition', ?, '{}', 'pending', 1, 1)`,
+         VALUES ('metadata-transition', ?, ?, 'pending', 1, 1)`,
       )
-      .bind(inviteId),
+      .bind(
+        inviteId,
+        JSON.stringify({
+          version: 3,
+          inviteId,
+          inviteSourceEpoch: 1,
+          inviteMutations: [],
+          transitionId: "metadata-transition",
+          operationDigest: "a".repeat(64),
+          resources: [inviteId],
+          mutations: [],
+          creations: [],
+          createdAtMs: 1,
+        }),
+      ),
     db
       .prepare(
-        `INSERT INTO game_session_transition_resources (resource_key, transition_id)
+        `INSERT INTO game_session_transition_resources_canonical (resource_key, transition_id)
          VALUES (?, 'metadata-transition')`,
       )
       .bind(inviteId),
@@ -175,11 +189,11 @@ describe("gameplay invite metadata reads", () => {
 
   beforeEach(async () => {
     await db.batch([
-      db.prepare("DELETE FROM game_session_transition_resources"),
-      db.prepare("DELETE FROM game_session_transitions"),
+      db.prepare("DELETE FROM game_session_transition_resources_canonical"),
+      db.prepare("DELETE FROM game_session_transitions_canonical"),
       db.prepare("DELETE FROM game_session_mutation_locks"),
-      db.prepare("DELETE FROM automatch_entries"),
-      db.prepare("DELETE FROM invite_sources"),
+      db.prepare("DELETE FROM automatch_entries_canonical"),
+      db.prepare("DELETE FROM invite_sources_canonical"),
       db.prepare("DELETE FROM automatch_runtime_control"),
       db.prepare(
         `INSERT INTO automatch_runtime_control
@@ -200,7 +214,7 @@ describe("gameplay invite metadata reads", () => {
     const gameplay = repository();
     const value = await gameplay.readInviteMetadata(inviteId);
     expect(value).toEqual(source);
-    expect(Object.hasOwn(value!, "password")).toBe(false);
+    expect(value!.password).toBeNull();
     expect(Object.hasOwn(value!, "wagers")).toBe(false);
     expect(Object.hasOwn(value!, "matchesWagerResolutions")).toBe(false);
     expect(normalizeInviteMetadata(inviteId, value)).toMatchObject({
@@ -210,6 +224,20 @@ describe("gameplay invite metadata reads", () => {
     await expect(
       gameplay.wagers.readWagerSnapshot({ inviteId, matchId: inviteId }),
     ).rejects.toThrow("unexpected-profile-database-access");
+  });
+
+  it("reads canonical metadata after the retired source table is removed", async () => {
+    await insertSource();
+    const gameplay = repository();
+    expect(await gameplay.readInviteMetadata(inviteId)).toEqual(source);
+    expect(await gameplay.readInviteMetadataMany([inviteId])).toEqual([source]);
+    expect(
+      await db
+        .prepare(
+          "SELECT name FROM sqlite_schema WHERE type = 'table' AND name = 'invite_sources'",
+        )
+        .first(),
+    ).toBeNull();
   });
 
   it("returns null for a missing invite without accessing wagers", async () => {
@@ -267,7 +295,7 @@ describe("gameplay invite metadata reads", () => {
     ]);
   });
 
-  it("preserves explicit password presence and malformed field values", async () => {
+  it("rejects malformed invite fields at canonical storage", async () => {
     const value = {
       hostId: 7,
       guestId: ["guest-login"],
@@ -276,17 +304,27 @@ describe("gameplay invite metadata reads", () => {
       password: null,
       customMetadata: { retained: true },
     };
-    await insertSource(value);
-    expect(await repository().readInviteMetadata(inviteId)).toEqual(value);
+    await expect(insertSource(value)).rejects.toThrow(
+      "CHECK constraint failed",
+    );
+    expect(await repository().readInviteMetadata(inviteId)).toBeNull();
   });
 
   it("keeps complete invite reads composed with canonical wager state", async () => {
     await insertSource();
-    const wager = {
-      proposals: { "host-login": { material: "dust", count: 2 } },
-    };
+    const wager = wagerRecordFixture({
+      proposals: {
+        "host-login": {
+          material: "dust",
+          count: 2,
+          createdAt: 1,
+          operationId: "a".repeat(64),
+          reservationOperationId: "b".repeat(64),
+        },
+      },
+    });
     await env.PROFILE_DB.prepare(
-      `INSERT INTO invite_wager_states
+      `INSERT INTO invite_wager_states_canonical
        (invite_id, match_id, wager_json, resolution_marker, revision, updated_at_ms)
        VALUES (?, ?, ?, 1, 1, 1)`,
     )
@@ -300,9 +338,9 @@ describe("gameplay invite metadata reads", () => {
         await createWagerStateD1Store(env.PROFILE_DB).readInvite(inviteId),
       ),
     ).toEqual({
-      ...source,
+      invite: source,
       wagers: { [inviteId]: wager },
-      matchesWagerResolutions: { [inviteId]: true },
+      resolutionMarkers: { [inviteId]: true },
     });
   });
 
@@ -337,7 +375,7 @@ describe("gameplay invite metadata reads", () => {
           .run();
       }
       await expect(repository().readInviteMetadata(inviteId)).rejects.toThrow(
-        "backend-retired",
+        backend === "automatch" ? "control-unavailable" : "backend-retired",
       );
     },
   );
@@ -407,19 +445,13 @@ describe("gameplay invite metadata reads", () => {
       );
       expect(values).toEqual([second, null, source, second]);
       expect(values[0]).not.toBe(values[3]);
-      expect(inviteRecordFixture(values[0]!).customMetadata).not.toBe(
-        inviteRecordFixture(values[3]!).customMetadata,
-      );
-      (
-        inviteRecordFixture(values[0]!).customMetadata as { retained: boolean }
-      ).retained = false;
-      expect(inviteRecordFixture(values[3]!).customMetadata).toEqual({
-        retained: true,
-      });
+      expect(values[0]!.hostRematches).not.toBe(values[3]!.hostRematches);
+      values[0]!.hostRematches.indices.push(1);
+      expect(values[3]!.hostRematches.indices).toEqual([]);
       expect(observed.constraints).toEqual(["first-primary"]);
       expect(observed.batchSizes).toEqual([3]);
       expect(observed.queries).toHaveLength(3);
-      expect(JSON.parse(String(observed.queries[2].bindings[0]))).toEqual([
+      expect(JSON.parse(String(observed.queries[2]!.bindings[0]))).toEqual([
         secondId,
         "metadata-missing",
         inviteId,
@@ -507,7 +539,9 @@ describe("gameplay invite metadata reads", () => {
         const observed = observeBulkReads();
         await expect(
           repository(observed.database).readInviteMetadataMany([inviteId]),
-        ).rejects.toThrow("backend-retired");
+        ).rejects.toThrow(
+          backend === "automatch" ? "control-unavailable" : "backend-retired",
+        );
         expect(observed.constraints).toEqual(["first-primary"]);
         expect(observed.batchSizes).toEqual([3]);
         expect(observed.queries).toHaveLength(3);
@@ -550,11 +584,11 @@ describe("gameplay invite metadata reads", () => {
         await insertSource({ ...source, wagers: {} });
         await reserveInvite();
         await db
-          .prepare("UPDATE game_session_transitions SET status = ?")
+          .prepare("UPDATE game_session_transitions_canonical SET status = ?")
           .bind(status)
           .run();
         const before = await db
-          .prepare("SELECT * FROM game_session_transitions")
+          .prepare("SELECT * FROM game_session_transitions_canonical")
           .all();
         const observed = observeBulkReads();
         await expect(
@@ -567,12 +601,17 @@ describe("gameplay invite metadata reads", () => {
         expect(observed.batchSizes).toEqual([3]);
         expect(observed.queries).toHaveLength(3);
         expect(
-          (await db.prepare("SELECT * FROM game_session_transitions").all())
-            .results,
+          (
+            await db
+              .prepare("SELECT * FROM game_session_transitions_canonical")
+              .all()
+          ).results,
         ).toEqual(before.results);
         expect(
           await db
-            .prepare("SELECT * FROM game_session_transition_resources")
+            .prepare(
+              "SELECT * FROM game_session_transition_resources_canonical",
+            )
             .all(),
         ).toMatchObject({
           results: [
@@ -613,7 +652,7 @@ describe("gameplay invite metadata reads", () => {
       const changed = { ...source, guestId: "updated-guest" };
       await db
         .prepare(
-          "UPDATE invite_sources SET source_json = ?, revision = revision + 1 WHERE invite_id = ?",
+          "UPDATE invite_sources_canonical SET source_json = ?, revision = revision + 1 WHERE invite_id = ?",
         )
         .bind(JSON.stringify(changed), inviteId)
         .run();

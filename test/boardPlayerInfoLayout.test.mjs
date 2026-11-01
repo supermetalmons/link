@@ -1,3 +1,4 @@
+import { required } from "./fixtures/canonicalData.mjs";
 import assert from "node:assert/strict";
 import { registerHooks } from "node:module";
 import test from "node:test";
@@ -24,6 +25,7 @@ const {
   playerInfoSlotHasVisibleName,
 } = await import("../src/ui/boardPlayerInfoLayout.ts");
 
+/** @param {Partial<Parameters<typeof playerInfoSlotHasVisibleName>[0]>} [overrides] @returns {Parameters<typeof playerInfoSlotHasVisibleName>[0]} */
 const slot = (overrides = {}) => ({
   visible: true,
   nameVisible: true,
@@ -38,6 +40,7 @@ const slot = (overrides = {}) => ({
   ...overrides,
 });
 
+/** @param {Partial<Parameters<typeof getBoardPlayerInfoLayout>[0]>} [overrides] @returns {Parameters<typeof getBoardPlayerInfoLayout>[0]} */
 const state = (overrides = {}) => ({
   player: slot(),
   opponent: slot({ scoreText: "8", nameText: "Luna" }),
@@ -48,6 +51,7 @@ const state = (overrides = {}) => ({
   ...overrides,
 });
 
+/** @param {Partial<Parameters<typeof getBoardPlayerInfoLayout>[1]>} [overrides] @returns {Parameters<typeof getBoardPlayerInfoLayout>[1]} */
 const measurements = (overrides = {}) => ({
   playerScore: emptyTextMeasurement,
   opponentScore: emptyTextMeasurement,
@@ -58,6 +62,7 @@ const measurements = (overrides = {}) => ({
   ...overrides,
 });
 
+/** @param {{ overlayState?: Parameters<typeof getBoardPlayerInfoLayout>[0], measured?: Parameters<typeof getBoardPlayerInfoLayout>[1], size?: Parameters<typeof getBoardPlayerInfoLayout>[3], narrow?: boolean, pangchiu?: boolean }} [options] */
 const layout = ({
   overlayState = state(),
   measured = measurements(),
@@ -74,6 +79,7 @@ const layout = ({
     pangchiu,
   );
 
+/** @param {ReturnType<typeof getBoardPlayerInfoLayout>["player"]} value */
 const coordinates = (value) => [
   value.scoreX,
   value.scoreY,
@@ -125,7 +131,7 @@ test("narrow and large picture boards preserve their offsets and scaling", () =>
       0.5703189999999999, 50, 32,
     ],
   );
-  assert.equal(narrow.inviteBotButtonLayout.x, 1.3301699999999999);
+  assert.equal(required(narrow.inviteBotButtonLayout).x, 1.3301699999999999);
 
   const wide = layout({ size: { width: 840, height: 1000 }, pangchiu: true });
   assert.deepEqual(
@@ -204,7 +210,7 @@ test("bot and reaction spacing follows the top control slot on either side", () 
       botY: 0.08965883199999994,
     },
   };
-  for (const side of ["player", "opponent"]) {
+  for (const side of /** @type {const} */ (["player", "opponent"])) {
     const overlayState = terminalState();
     overlayState.topControlSlot = side;
     overlayState.botStrengthControlVisible = true;
@@ -246,7 +252,10 @@ test("hidden result markers still reserve name space", () => {
 
 test("normal and winner wagers retain their size and board-edge clamping", () => {
   const result = layout();
-  const wager = (side, width) =>
+  const wager = (
+    /** @type {"player" | "opponent"} */ side,
+    /** @type {number} */ width,
+  ) =>
     getWagerSlotLayoutForName(
       result[side],
       { width, bounds: null },
@@ -343,7 +352,7 @@ test("unchanged measurements preserve state identity and changed bounds update i
     playerScore: { width: 1.4, bounds: { y: 12.2, height: 0.6 } },
   });
   assert.notEqual(next, previous);
-  assert.equal(next.playerScore.bounds.y, 12.2);
-  assert.equal(previous.playerScore.bounds.y, 12.1);
+  assert.equal(required(next.playerScore.bounds).y, 12.2);
+  assert.equal(required(previous.playerScore.bounds).y, 12.1);
   assert.equal(next.opponentScore, previous.opponentScore);
 });

@@ -1,3 +1,5 @@
+import { applyCanonicalTestMigrations } from "./canonicalTestMigrations.ts";
+import { withdrawalWorkflowInstanceId } from "../src/eventPrizeWithdrawal/contracts.ts";
 import type { D1Migration } from "cloudflare:test";
 import { beforeAll, describe, expect, it } from "vitest";
 import { env } from "cloudflare:workers";
@@ -6,12 +8,18 @@ import {
   buildEventPrizeWithdrawalOperationId,
   type EventPrizeWithdrawalWorkflowInput,
 } from "../src/eventPrizeWithdrawal.ts";
-import { runEventPrizeWithdrawalWorkflow } from "../src/eventPrizeWithdrawalWorkflow.ts";
+import {
+  runEventPrizeWithdrawalWorkflow,
+  runAdmittedEventPrizeWithdrawalWorkflow,
+} from "../src/eventPrizeWithdrawalWorkflow.ts";
 import { loadSolanaDependencies } from "../../../runtime/eventPrizes/solana.js";
 import { withProfileControl } from "../test/testEnv.ts";
 import { applyRetiredProfileMigrations } from "./profileTestMigrations.ts";
 
-const testEnv = env as Env & { TEST_PROFILE_D1_MIGRATIONS: D1Migration[] };
+const testEnv = env as Env & {
+  TEST_PROFILE_D1_MIGRATIONS: D1Migration[];
+  TEST_D1_MIGRATIONS: D1Migration[];
+};
 
 function workflowStep(afterStep?: (name: string) => void | Promise<void>) {
   const calls: Array<{ config: unknown; name: string }> = [];
@@ -59,7 +67,8 @@ describe("event prize withdrawal Workflow", () => {
       prizeId,
     );
     const params = {
-      schemaVersion: 1,
+      schemaVersion: 2,
+      dataEpoch: 1,
       kind: "withdrawal",
       eventId,
       operationId,
@@ -69,7 +78,7 @@ describe("event prize withdrawal Workflow", () => {
       requesterUid: "login-1",
     } as const;
     const event: Readonly<WorkflowEvent<EventPrizeWithdrawalWorkflowInput>> = {
-      instanceId: operationId,
+      instanceId: withdrawalWorkflowInstanceId(operationId),
       payload: params,
       timestamp: new Date(0),
       workflowName: "mons-link-event-prize-withdrawal",
@@ -132,9 +141,10 @@ describe("event prize withdrawal Workflow", () => {
       runEventPrizeWithdrawalWorkflow(
         env,
         {
-          instanceId: operationId,
+          instanceId: withdrawalWorkflowInstanceId(operationId),
           payload: {
-            schemaVersion: 1,
+            schemaVersion: 2,
+            dataEpoch: 1,
             kind: "withdrawal",
             eventId,
             operationId,
@@ -166,7 +176,7 @@ describe("event prize withdrawal Workflow", () => {
       env,
       {
         instanceId: "preflight-instance",
-        payload: { schemaVersion: 1, kind: "preflight" },
+        payload: { schemaVersion: 2, dataEpoch: 1, kind: "preflight" },
         timestamp: new Date(0),
         workflowName: "mons-link-event-prize-withdrawal",
       },
@@ -198,9 +208,10 @@ describe("event prize withdrawal Workflow", () => {
       "1092",
     );
     const withdrawalEvent = {
-      instanceId: operationId,
+      instanceId: withdrawalWorkflowInstanceId(operationId),
       payload: {
-        schemaVersion: 1,
+        schemaVersion: 2,
+        dataEpoch: 1,
         kind: "withdrawal",
         eventId: "NN3eRzoZo80",
         operationId,
@@ -251,7 +262,7 @@ describe("event prize withdrawal Workflow", () => {
         withProfileControl(env, "frozen"),
         {
           instanceId: "frozen-preflight",
-          payload: { schemaVersion: 1, kind: "preflight" },
+          payload: { schemaVersion: 2, dataEpoch: 1, kind: "preflight" },
           timestamp: new Date(0),
           workflowName: "mons-link-event-prize-withdrawal",
         },
@@ -297,9 +308,10 @@ describe("event prize withdrawal Workflow", () => {
       runEventPrizeWithdrawalWorkflow(
         mutableEnv,
         {
-          instanceId: operationId,
+          instanceId: withdrawalWorkflowInstanceId(operationId),
           payload: {
-            schemaVersion: 1,
+            schemaVersion: 2,
+            dataEpoch: 1,
             kind: "withdrawal",
             eventId: "NN3eRzoZo80",
             operationId,
@@ -327,4 +339,127 @@ describe("event prize withdrawal Workflow", () => {
       "execute event prize withdrawal",
     ]);
   });
+});
+
+it("allows only the exact read-only preflight while the global gate is closed", async () => {
+  await applyCanonicalTestMigrations(
+    testEnv.PROFILE_GAMES_DB,
+    testEnv.TEST_D1_MIGRATIONS,
+  );
+  await testEnv.PROFILE_GAMES_DB.prepare(
+    "UPDATE application_data_control SET phase = 'closed', migration_id = 'preflight-migration'",
+  ).run();
+  await testEnv.PROFILE_GAMES_DB.prepare(
+    "CREATE TABLE preflight_preserved (value INTEGER NOT NULL)",
+  ).run();
+  await testEnv.PROFILE_GAMES_DB.prepare(
+    "INSERT INTO preflight_preserved VALUES (7)",
+  ).run();
+  const step = workflowStep();
+  let checks = 0;
+  const result = await runAdmittedEventPrizeWithdrawalWorkflow(
+    env,
+    {
+      instanceId: "closed-preflight",
+      payload: { schemaVersion: 2, dataEpoch: 1, kind: "preflight" },
+      timestamp: new Date(0),
+      workflowName: "mons-link-event-prize-withdrawal-data1",
+    },
+    step.value,
+    {
+      execute: async () => {
+        throw new Error("unexpected-withdrawal-execution");
+      },
+      preflight: async (readonlyEnv) => {
+        checks++;
+        expect(
+          await readonlyEnv.PROFILE_GAMES_DB.prepare(
+            "SELECT phase FROM application_data_control",
+          ).first("phase"),
+        ).toBe("closed");
+        expect(
+          await readonlyEnv.PROFILE_GAMES_DB.withSession("first-primary")
+            .prepare("SELECT value FROM preflight_preserved")
+            .first("value"),
+        ).toBe(7);
+        expect(
+          (
+            await readonlyEnv.PROFILE_GAMES_DB.batch([
+              readonlyEnv.PROFILE_GAMES_DB.prepare(
+                "SELECT value FROM preflight_preserved",
+              ),
+            ])
+          )[0]?.results,
+        ).toEqual([{ value: 7 }]);
+        expect(() =>
+          readonlyEnv.PROFILE_GAMES_DB.prepare(
+            "UPDATE preflight_preserved SET value = 0",
+          ),
+        ).toThrow("application-read-only-operation");
+        expect(() =>
+          readonlyEnv.PROFILE_GAMES_DB.exec("DELETE FROM preflight_preserved"),
+        ).toThrow("application-read-only-operation");
+        expect(() =>
+          readonlyEnv.PROFILE_GAMES_DB.batch([
+            env.PROFILE_GAMES_DB.prepare("DELETE FROM preflight_preserved"),
+          ]),
+        ).toThrow("application-read-only-operation");
+        expect(() =>
+          readonlyEnv.INVITE_REACTIONS.getByName("preflight"),
+        ).toThrow("application-read-only-operation");
+        expect(() => readonlyEnv.TELEGRAM_DELIVERY_QUEUE.send({})).toThrow(
+          "application-read-only-operation",
+        );
+        expect(() =>
+          readonlyEnv.EVENT_PROGRESS_WORKFLOW.get("preflight"),
+        ).toThrow("application-read-only-operation");
+      },
+    },
+  );
+  expect(result).toEqual({ ok: true, status: "ready" });
+  expect(checks).toBe(1);
+  expect(step.calls).toEqual([
+    { name: "validate event prize runtime", config: { timeout: "30 seconds" } },
+  ]);
+  expect(
+    await testEnv.PROFILE_GAMES_DB.prepare(
+      "SELECT value FROM preflight_preserved",
+    ).first("value"),
+  ).toBe(7);
+  expect(
+    await testEnv.PROFILE_GAMES_DB.prepare(
+      "SELECT COUNT(*) AS count FROM application_data_admissions",
+    ).first("count"),
+  ).toBe(0);
+});
+
+it("rejects preflight lookalikes before invoking read or mutation dependencies", async () => {
+  for (const payload of [
+    { schemaVersion: 1, kind: "preflight" },
+    { schemaVersion: 2, dataEpoch: 0, kind: "preflight" },
+    { schemaVersion: 2, dataEpoch: 1, kind: "preflight", extra: true },
+  ]) {
+    const step = workflowStep();
+    await expect(
+      runAdmittedEventPrizeWithdrawalWorkflow(
+        env,
+        {
+          instanceId: "invalid-preflight",
+          payload: JSON.parse(JSON.stringify(payload)),
+          timestamp: new Date(0),
+          workflowName: "mons-link-event-prize-withdrawal-data1",
+        },
+        step.value,
+        {
+          execute: async () => {
+            throw new Error("unexpected-execution");
+          },
+          preflight: async () => {
+            throw new Error("unexpected-preflight");
+          },
+        },
+      ),
+    ).rejects.toThrow("invalid-event-prize-withdrawal-payload");
+    expect(step.calls).toEqual([]);
+  }
 });

@@ -1,4 +1,6 @@
+import assert from "node:assert/strict";
 import { registerHooks } from "node:module";
+import { createTimerHandle } from "./fixtures/timerHandle.mjs";
 
 registerHooks({
   resolve(specifier, context, nextResolve) {
@@ -21,19 +23,39 @@ const { FrozenMaterialsPoller } =
 const { computeAvailableMaterials, applyMaterialDeltas } =
   await import("@mons/shared/mining");
 
+/**
+ * @typedef {import("../src/connection/wagerClient.ts").WagerClientDependencies} WagerDependencies
+ * @typedef {import("../src/connection/matchRuntimeContext.ts").MatchRuntimeContext} MatchContext
+ * @typedef {import("../src/connection/matchRuntimeContext.ts").WritableMatchRuntimeContext} WritableContext
+ * @typedef {import("../src/session/sessionAuth.ts").SessionUser} SessionUser
+ * @typedef {import("../src/connection/connectionModels.ts").MatchWagerState} WagerState
+ * @typedef {import("../src/connection/connectionModels.ts").PlayerMiningData} MiningData
+ * @typedef {ReturnType<WagerDependencies["materialStore"]["getFrozenMaterials"]>} Materials
+ * @typedef {ReturnType<WagerDependencies["materialStore"]["getFrozenMaterialsStatus"]>} MaterialsStatus
+ * @typedef {Parameters<NonNullable<WagerDependencies["createWagerChannel"]>>[0]} ChannelOptions
+ * @typedef {import("@mons/shared/invite-wagers").InviteWagersSnapshot} WagerSnapshot
+ * @typedef {import("../src/connection/inviteWagersChannel.ts").InviteWagersDelivery} WagerDelivery
+ * @typedef {{ options: ChannelOptions, stops: number, refreshes: number, stop(): void, requestRefresh(): void, emit(snapshot: WagerSnapshot, source?: WagerDelivery["source"], requestGeneration?: number): void }} TestChannel
+ * @typedef {{ activeContext: MatchContext | null, epoch: number, actorUid: string | null, profileId: string, auth: { currentUser: SessionUser | null, getTokenRemainingMs: WagerDependencies["auth"]["getTokenRemainingMs"] } }} HarnessSession
+ * @typedef {{ states: { matchId: string | null, state: WagerState | null, confirmed?: boolean | undefined }[], frozen: { materials: Materials, status: MaterialsStatus }[], inventory: MiningData[], banners: boolean[], initial: boolean[], refreshes: number, observers: number, channels: TestChannel[], pollers: import("../src/connection/frozenMaterialsPoller.ts").FrozenMaterialsPoller[], flushes: { context: Parameters<WagerDependencies["flushPendingMoves"]>[0], options: Parameters<WagerDependencies["flushPendingMoves"]>[1] }[] }} HarnessEvents
+ * @typedef {Pick<WagerDependencies, "auth" | "getUserBoundAuthTokenProvider" | "flushPendingMoves"> & Partial<Pick<WagerDependencies, "requireWritableContext" | "ensureAuthenticated" | "getOpponentId" | "registerObserverCleanup" | "unregisterObserverCleanup">> & { activeContext: MatchContext | null, sessionEpoch: number, sameProfilePlayerUid?: string | null }} HarnessConnection
+ */
+
+/**
+ * @template [T=void]
+ * @returns {{ promise: Promise<T>, resolve: (value: T | PromiseLike<T>) => void, reject: (reason?: unknown) => void }}
+ */
 export const deferred = () => {
-  let resolve;
-  let reject;
-  const promise = new Promise((yes, no) => {
-    resolve = yes;
-    reject = no;
-  });
-  return { promise, resolve, reject };
+  /** @type {PromiseWithResolvers<T>} */
+  const pending = Promise.withResolvers();
+  return pending;
 };
 export const flush = () => new Promise(setImmediate);
 export const emptyMaterials = { dust: 0, slime: 0, gum: 0, metal: 0, ice: 0 };
 
+/** @param {Partial<WagerDependencies>} [overrides] */
 export function createWagerClientHarness(overrides = {}) {
+  /** @type {HarnessSession} */
   const session = {
     activeContext: {
       contextId: 1,
@@ -50,10 +72,16 @@ export function createWagerClientHarness(overrides = {}) {
     actorUid: "actor",
     profileId: "profile",
     auth: {
-      currentUser: { uid: "login", getIdToken: async () => "token" },
+      currentUser: {
+        uid: "login",
+        sessionId: "wager-test-session",
+        generation: "wager-test-generation",
+        getIdToken: async () => "token",
+      },
       getTokenRemainingMs: () => 60_000,
     },
   };
+  /** @type {HarnessEvents} */
   const events = {
     states: [],
     frozen: [],
@@ -66,12 +94,16 @@ export function createWagerClientHarness(overrides = {}) {
     pollers: [],
     flushes: [],
   };
+  /** @type {WagerState | null} */
   let state = null;
+  /** @type {string | null} */
   let selectedMatchId = null;
   let frozen = { ...emptyMaterials };
+  /** @type {MaterialsStatus} */
   let frozenStatus = "idle";
+  /** @type {Map<ReturnType<typeof setTimeout>, { callback: () => void, ms: number }>} */
   const timers = new Map();
-  let timerId = 0;
+  /** @type {WagerDependencies} */
   const dependencies = {
     auth: session.auth,
     getActiveContext: () => session.activeContext,
@@ -80,7 +112,7 @@ export function createWagerClientHarness(overrides = {}) {
     getProfileId: () => session.profileId,
     requireWritableContext: () =>
       session.activeContext?.canWrite && session.activeContext.actorUid
-        ? session.activeContext
+        ? /** @type {WritableContext} */ (session.activeContext)
         : null,
     ensureAuthenticated: async () => {},
     getUserBoundAuthTokenProvider: (uid) => {
@@ -174,13 +206,17 @@ export function createWagerClientHarness(overrides = {}) {
       cancelWagerProposalViaApi: async () => ({ ok: true }),
       declineWagerProposalViaApi: async () => ({ ok: true }),
       acceptWagerProposalViaApi: async () => ({ ok: true, count: 3 }),
-      resolveWagerOutcomeViaApi: async () => ({ ok: true, reason: "no-wager" }),
+      resolveWagerOutcomeViaApi: async () => ({
+        ok: true,
+        reason: "no-wager",
+        mining: null,
+      }),
     },
     onInitialWagers: () => events.initial.push(true),
     onReloadRequired: () => events.banners.push(true),
     now: () => 100,
     setTimer: (callback, ms) => {
-      const id = ++timerId;
+      const id = createTimerHandle();
       timers.set(id, { callback, ms });
       if ([160, 180, 320, 360].includes(ms))
         queueMicrotask(() => {
@@ -202,6 +238,7 @@ export function createWagerClientHarness(overrides = {}) {
     logError: () => {},
     debug: false,
     createWagerChannel: (options) => {
+      /** @type {TestChannel} */
       const channel = {
         options,
         stops: 0,
@@ -212,11 +249,11 @@ export function createWagerClientHarness(overrides = {}) {
         requestRefresh() {
           this.refreshes++;
         },
-        emit(
-          snapshot,
-          source = "http",
-          requestGeneration = options.captureGeneration(),
-        ) {
+        emit(snapshot, source = "http", requestGeneration) {
+          if (requestGeneration === undefined) {
+            assert.ok(options.captureGeneration);
+            requestGeneration = options.captureGeneration();
+          }
           options.onSnapshot(snapshot, { source, requestGeneration });
         },
       };
@@ -236,18 +273,23 @@ export function createWagerClientHarness(overrides = {}) {
     ...overrides,
   };
   const client = new WagerClient(dependencies);
-  if (dependencies.getActiveContext())
-    client.bindContext(dependencies.getActiveContext());
+  const activeContext = dependencies.getActiveContext();
+  if (activeContext) client.bindContext(activeContext);
   return {
     client,
     dependencies,
     session,
     events,
     timers,
+    /** @param {WagerSnapshot["wagers"]} [wagers] */
     observe: (wagers = {}, revision = 1) => {
       client.observeWagers();
-      events.channels.at(-1).emit({
-        inviteId: dependencies.getActiveContext().inviteId,
+      const channel = events.channels.at(-1);
+      const context = dependencies.getActiveContext();
+      assert.ok(channel);
+      assert.ok(context);
+      channel.emit({
+        inviteId: context.inviteId,
         revision,
         wagers,
       });
@@ -259,6 +301,10 @@ export function createWagerClientHarness(overrides = {}) {
   };
 }
 
+/**
+ * @param {HarnessConnection} connection
+ * @param {Partial<WagerDependencies>} [overrides]
+ */
 export function createConnectionWagerClientHarness(connection, overrides = {}) {
   return createWagerClientHarness({
     auth: connection.auth,
@@ -272,7 +318,7 @@ export function createConnectionWagerClientHarness(connection, overrides = {}) {
       connection.requireWritableContext
         ? connection.requireWritableContext(...args)
         : connection.activeContext?.canWrite
-          ? connection.activeContext
+          ? /** @type {WritableContext} */ (connection.activeContext)
           : null,
     ensureAuthenticated: () =>
       connection.ensureAuthenticated?.() ?? Promise.resolve(),

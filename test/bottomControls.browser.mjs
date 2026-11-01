@@ -1,3 +1,5 @@
+import { required } from "./fixtures/canonicalData.mjs";
+import { browserServerOrigin } from "./browserViteServer.mjs";
 import assert from "node:assert/strict";
 import {
   mkdirSync,
@@ -16,6 +18,7 @@ import test from "node:test";
 import { createServer } from "vite";
 
 const require = createRequire(import.meta.url);
+/** @type {typeof import("playwright")} */
 const { chromium } = require(process.env.MONS_PLAYWRIGHT_PATH || "playwright");
 const repository = fileURLToPath(new URL("../", import.meta.url));
 const sharedManifest = JSON.parse(
@@ -247,7 +250,8 @@ const settle = async callback => {
   try { await act(callback); }
   finally { globalThis.IS_REACT_ACT_ENVIRONMENT = false; }
 };
-window.harness = {
+window.bottomControlsHarness = {
+  required(value) { if (value === null || value === undefined) throw new Error("bottom-fixture-value-missing"); return value; },
   environment, port, run, controlsStore, applyRouteControlsPreset, applyDisposedControlsPreset, applyGameplayControlsPreset,
   render(profileId = 'a', authStatus = 'authenticated') {
     run(() => root.render(React.createElement(React.StrictMode, null,
@@ -280,7 +284,8 @@ window.harness = {
   seedEventPreview(profileId, eventId, emojiIds) {
     writeNavigationGamesRuntimeCache(resolveNavigationGamesCacheScope(profileId), [{
       id: 'event_' + eventId, entityType: 'event', eventId, status: 'active',
-      sortBucket: 10, listSortAtMs: 1, participantCount: emojiIds.length,
+      sortBucket: 40, listSortAtMs: 1, participantCount: emojiIds.length,
+      startAtMs: null, updatedAtMs: null, endedAtMs: null, winnerDisplayName: null,
       participantPreview: emojiIds.map((emojiId, index) => ({
         profileId: profileId + '-' + index, displayName: 'Player ' + index, emojiId, aura: null,
       })),
@@ -352,7 +357,7 @@ window.harness = {
       environment.wagerPlayers = { playerUid, opponentUid, opponentProfileId };
       controlsStore.updateGameControlsContext({ isOnlineGame: true, isWatchOnly: false, isGameWithBot: false, isGameOver: false, boardViewMode: 'activeLive', ...context });
     });
-    window.harness.render(profileId, authStatus);
+    window.bottomControlsHarness.render(profileId, authStatus);
   },
   wagerSubscriptions: () => ({ wager: environment.wagerListeners.size, materials: environment.materialListeners.size }),
   updateConnection({ inviteId = null, eventId = null, eventOwned = false, online = false } = {}) {
@@ -360,7 +365,7 @@ window.harness = {
     environment.inviteEventId = eventId;
     environment.inviteEventOwned = eventOwned;
     setOnlineGame(online);
-    window.harness.render();
+    window.bottomControlsHarness.render();
   },
   navigate(route) { run(() => setRoute(route)); },
   openEvent(eventId) { run(() => openEventModal(eventId)); },
@@ -390,7 +395,7 @@ window.harness = {
   remount() {
     run(() => root.unmount());
     root = createRoot(document.getElementById('root'));
-    window.harness.render();
+    window.bottomControlsHarness.render();
   },
   dispose() { run(() => root.unmount()); },
 };
@@ -402,7 +407,7 @@ import * as modal from '/src/ui/event/modalState.ts';
 import * as navigation from '/src/navigation/appNavigation.ts';
 import { getCurrentRouteState, getRoutePathForTarget } from '/src/navigation/routeState.ts';
 import { connection } from 'bottom-connection';
-Object.assign(window.harness, {
+Object.assign(window.bottomControlsHarness, {
   navigate: route => navigation.pushRoutePath(getRoutePathForTarget(route)),
   openEvent: modal.openEventModal,
   dismissEvent: modal.closeEventModal,
@@ -432,6 +437,7 @@ navigation.replaceRoutePath('/event-game-1');
 session.initializeAppSessionManager();
 `;
 
+/** @param {(page: import("playwright").Page) => Promise<void>} run @param {{realNavigation?: boolean, mobile?: boolean, mount?: boolean, productionStyles?: boolean}} [options] */
 async function fixture(
   run,
   {
@@ -452,7 +458,7 @@ async function fixture(
     ["bottom-event-modal", eventModalSource],
     [
       "bottom-harness",
-      harnessSource + (mount ? "\nwindow.harness.render();" : ""),
+      harnessSource + (mount ? "\nwindow.bottomControlsHarness.render();" : ""),
     ],
   ]);
   const replacements = new Map([
@@ -525,19 +531,19 @@ async function fixture(
     modules.set(name, source);
   }
   if (realNavigation) {
-    for (const id of [
+    for (const id of /** @type {const} */ ([
       "../session/AppSessionManager",
       "../navigation/appNavigation",
       "../navigation/routeState",
       "./eventModalController",
-    ]) {
+    ])) {
       replacements.delete(id);
     }
     modules.set(
       "bottom-harness",
       harnessSource +
         realNavigationHarnessSource +
-        (mount ? "\nwindow.harness.render();" : ""),
+        (mount ? "\nwindow.bottomControlsHarness.render();" : ""),
     );
     modules.set(
       "bottom-connection",
@@ -661,10 +667,11 @@ export const teardownProfileScope = () => {};
       },
     ],
   });
+  /** @type {import("playwright").Browser | undefined} */
   let browser;
   try {
     await server.listen();
-    const origin = `http://127.0.0.1:${server.httpServer.address().port}`;
+    const origin = browserServerOrigin(server);
     browser = await chromium.launch({
       headless: true,
       ...(process.env.MONS_BROWSER_EXECUTABLE
@@ -682,13 +689,16 @@ export const teardownProfileScope = () => {};
         : route.abort(),
     );
     const page = await context.newPage();
+    /** @type {string[]} */
     const errors = [];
     page.on("pageerror", (error) => errors.push(error.message));
     const start = new Date("2026-01-01T00:00:00Z");
     await page.clock.install({ time: start });
     await page.clock.pauseAt(start);
     await page.goto(`${origin}/__bottom`);
-    await page.waitForFunction(() => !!window.harness, null, { polling: 50 });
+    await page.waitForFunction(() => !!window.bottomControlsHarness, null, {
+      polling: 50,
+    });
     await run(page);
     assert.deepEqual(errors, []);
   } finally {
@@ -697,30 +707,43 @@ export const teardownProfileScope = () => {};
   }
 }
 
+/** @param {import("playwright").Page} page @param {string} name */
 const button = (page, name) => page.getByRole("button", { name, exact: true });
+/** @param {import("playwright").Page} page @param {string} name */
 const click = async (page, name) =>
-  button(page, name).evaluate((element) =>
-    window.harness.run(() => element.click()),
+  button(page, name).evaluate(
+    /** @param {HTMLButtonElement} element */ (element) =>
+      window.bottomControlsHarness.run(() => element.click()),
   );
+/** @param {import("playwright").Page} page @param {string} name */
 const count = (page, name) => button(page, name).count();
+/** @param {import("playwright").Page} page @param {string} label */
 const confirmationGeometry = (page, label) =>
   button(page, label)
     .last()
     .evaluate((action, label) => {
-      const popup = action.parentElement;
-      const container = popup.parentElement;
+      const popup = window.bottomControlsHarness.required(action.parentElement);
+      const container = window.bottomControlsHarness.required(
+        popup.parentElement,
+      );
       const trigger = container.querySelector(
         label === "Start a Timer"
           ? '[aria-label="Timer"]'
           : '[aria-label="Claim Victory"]',
       );
+      /** @param {Element} element */
       const measure = (element) => {
         const bounds = element.getBoundingClientRect();
         const style = getComputedStyle(element);
         return {
-          rect: [bounds.x, bounds.y, bounds.width, bounds.height],
+          rect: /** @type {[number, number, number, number]} */ ([
+            bounds.x,
+            bounds.y,
+            bounds.width,
+            bounds.height,
+          ]),
           style: Object.fromEntries(
-            [
+            /** @type {const} */ ([
               "display",
               "position",
               "bottom",
@@ -734,12 +757,12 @@ const confirmationGeometry = (page, label) =>
               "color",
               "fontFamily",
               "fontSize",
-            ].map((key) => [key, style[key]]),
+            ]).map((key) => [key, style[key]]),
           ),
         };
       };
       return {
-        trigger: measure(trigger),
+        trigger: measure(window.bottomControlsHarness.required(trigger)),
         container: measure(container),
         popup: measure(popup),
         action: measure(action),
@@ -747,6 +770,7 @@ const confirmationGeometry = (page, label) =>
       };
     }, label);
 
+/** @param {Awaited<ReturnType<typeof confirmationGeometry>>} geometry */
 const assertConfirmationAnchor = (geometry) => {
   const [triggerX, , triggerWidth] = geometry.trigger.rect;
   const [containerX, , containerWidth] = geometry.container.rect;
@@ -759,6 +783,7 @@ const assertConfirmationAnchor = (geometry) => {
   assert.ok(Math.abs(popupX + popupWidth / 2 - containerX - expected) < 0.02);
 };
 
+/** @param {string | undefined} baselineDirectory @param {string} outputDirectory */
 const prepareConfirmationOutputDirectory = (
   baselineDirectory,
   outputDirectory,
@@ -773,7 +798,11 @@ const prepareConfirmationOutputDirectory = (
   }
 };
 
-for (const alias of ["same path", "relative path", "symlink"]) {
+for (const alias of /** @type {const} */ ([
+  "same path",
+  "relative path",
+  "symlink",
+])) {
   test(`confirmation capture rejects a shared directory via ${alias}`, (t) => {
     const directory = mkdtempSync(
       path.join(tmpdir(), "mons-confirmation-guard-"),
@@ -819,7 +848,7 @@ test(
     );
     prepareConfirmationOutputDirectory(baselineDirectory, outputDirectory);
     let captures = 0;
-    for (const mobile of [false, true]) {
+    for (const mobile of /** @type {const} */ ([false, true])) {
       await fixture(
         async (page) => {
           const viewports = mobile
@@ -830,14 +859,20 @@ test(
               ]
             : [{ width: 1200, height: 900 }];
           for (const viewport of viewports) {
-            for (const colorScheme of ["light", "dark"]) {
+            for (const colorScheme of /** @type {const} */ ([
+              "light",
+              "dark",
+            ])) {
               await page.setViewportSize(viewport);
               await page.emulateMedia({ colorScheme });
               await page.evaluate(() => document.fonts.ready);
-              for (const label of ["Start a Timer", "Claim Victory"]) {
+              for (const label of /** @type {const} */ ([
+                "Start a Timer",
+                "Claim Victory",
+              ])) {
                 await page.evaluate((label) => {
                   const { port, run, applyDisposedControlsPreset } =
-                    window.harness;
+                    window.bottomControlsHarness;
                   run(() => {
                     applyDisposedControlsPreset(false);
                     port.setHomeVisible(true);
@@ -870,7 +905,7 @@ test(
                   height: viewport.height - 19,
                 });
                 await page.evaluate(() =>
-                  window.harness.run(() =>
+                  window.bottomControlsHarness.run(() =>
                     window.dispatchEvent(new Event("resize")),
                   ),
                 );
@@ -879,7 +914,7 @@ test(
                 assertConfirmationAnchor(resized);
                 await page.setViewportSize(viewport);
                 await page.evaluate(() =>
-                  window.harness.run(() =>
+                  window.bottomControlsHarness.run(() =>
                     window.dispatchEvent(new Event("resize")),
                   ),
                 );
@@ -925,8 +960,10 @@ test(
   },
 );
 
+/** @param {import("playwright").Page} page */
 const rematchButtons = (page) =>
   page.getByRole("group", { name: "Rematch series" }).getByRole("button");
+/** @param {string} matchId @param {Partial<import("../src/game/gameController.ts").RematchSeriesNavigatorItem>} [overrides] */
 const rematchItem = (matchId, overrides = {}) => ({
   matchId,
   index: 0,
@@ -938,33 +975,37 @@ const rematchItem = (matchId, overrides = {}) => ({
   playerIsWhite: true,
   ...overrides,
 });
+/** @param {import("playwright").Page} page */
 const popupState = (page) =>
   page.evaluate(() => ({
     appearance: !!document.querySelector('[data-testid="appearance-picker"]'),
     history: !!document.querySelector('[data-testid="history-popup"]'),
-    navigation: window.harness.port.hasNavigationPopupVisible(),
+    navigation: window.bottomControlsHarness.port.hasNavigationPopupVisible(),
     reaction: [...document.querySelectorAll("button")].some(
       (element) => element.textContent === "yo",
     ),
-    bottom: window.harness.port.hasBottomPopupsVisible(),
+    bottom: window.bottomControlsHarness.port.hasBottomPopupsVisible(),
   }));
+/** @param {import("playwright").Page} page */
 const showPopupControls = (page) =>
   page.evaluate(() =>
-    window.harness.run(() => {
-      window.harness.port.showMoveHistoryButton(true);
-      window.harness.port.showVoiceReactionButton(true);
-      window.harness.port.showResignButton();
+    window.bottomControlsHarness.run(() => {
+      window.bottomControlsHarness.port.showMoveHistoryButton(true);
+      window.bottomControlsHarness.port.showVoiceReactionButton(true);
+      window.bottomControlsHarness.port.showResignButton();
     }),
   );
+/** @param {import("playwright").Page} page */
 const startAutomatch = async (page) => {
   await page.evaluate(() =>
-    window.harness.run(() => {
-      window.harness.port.setAutomatchVisible(true);
-      window.harness.port.setAutomatchEnabled(true);
+    window.bottomControlsHarness.run(() => {
+      window.bottomControlsHarness.port.setAutomatchVisible(true);
+      window.bottomControlsHarness.port.setAutomatchEnabled(true);
     }),
   );
   await click(page, "Automatch");
 };
+/** @param {import("playwright").Page} page */
 const enterEventGame = async (
   page,
   inviteId = "event-game-1",
@@ -972,59 +1013,73 @@ const enterEventGame = async (
 ) => {
   await page.evaluate(
     ({ inviteId, eventId }) => {
-      window.harness.navigate({ mode: "invite", inviteId, path: inviteId });
-      window.harness.updateConnection({
+      window.bottomControlsHarness.navigate({
+        mode: "invite",
+        inviteId,
+        path: inviteId,
+      });
+      window.bottomControlsHarness.updateConnection({
         inviteId,
         eventId,
         eventOwned: true,
         online: true,
       });
-      window.harness.publishEvent(eventId, [1, 2, 3]);
+      window.bottomControlsHarness.publishEvent(eventId, [1, 2, 3]);
     },
     { inviteId, eventId },
   );
 };
+/** @param {import("playwright").Page} page */
 const activeEventSubscriptions = (page) =>
   page.evaluate(() =>
-    window.harness.environment.eventSubscriptions
+    window.bottomControlsHarness.environment.eventSubscriptions
       .filter((subscription) => subscription.active)
       .map((subscription) => subscription.eventId),
   );
+/** @param {import("playwright").Page} page */
 const eventAvatarSlots = (page) =>
-  button(page, "Event").evaluate((element) =>
-    [...element.children]
-      .filter((child) => child.tagName.toLowerCase() !== "svg")
-      .map((child) => child.getAttribute("src")),
+  button(page, "Event").evaluate(
+    /** @param {HTMLButtonElement} element */ (element) =>
+      [...element.children]
+        .filter((child) => child.tagName.toLowerCase() !== "svg")
+        .map((child) => child.getAttribute("src")),
   );
+/** @param {import("playwright").Page} page */
 const rememberEventButton = (page) =>
-  button(page, "Event").evaluate((element) => {
-    window.savedEventButton = element;
-    window.savedEventAvatars = [...element.querySelectorAll("img")];
-    window.savedEventSubscription =
-      window.harness.environment.eventSubscriptions.findLast(
-        (subscription) => subscription.active,
+  button(page, "Event").evaluate(
+    /** @param {HTMLButtonElement} element */ (element) => {
+      window.savedEventButton = element;
+      window.savedEventAvatars = [...element.querySelectorAll("img")];
+      window.savedEventSubscription = window.bottomControlsHarness.required(
+        window.bottomControlsHarness.environment.eventSubscriptions.findLast(
+          (subscription) => subscription.active,
+        ),
       );
-    window.savedEventSubscriptionCount =
-      window.harness.environment.eventSubscriptions.length;
-  });
+      window.savedEventSubscriptionCount =
+        window.bottomControlsHarness.environment.eventSubscriptions.length;
+    },
+  );
+/** @param {import("playwright").Page} page */
 const assertEventButtonRetained = async (page) => {
   assert.deepEqual(
-    await button(page, "Event").evaluate((element) => {
-      const avatars = [...element.querySelectorAll("img")];
-      return {
-        sameButton: element === window.savedEventButton,
-        sameAvatars:
-          avatars.length === 3 &&
-          avatars.every(
-            (avatar, index) => avatar === window.savedEventAvatars[index],
-          ),
-        avatarUrls: avatars.map((avatar) => avatar.getAttribute("src")),
-        subscriptionActive: window.savedEventSubscription.active,
-        subscriptionUnchanged:
-          window.harness.environment.eventSubscriptions.length ===
-          window.savedEventSubscriptionCount,
-      };
-    }),
+    await button(page, "Event").evaluate(
+      /** @param {HTMLButtonElement} element */ (element) => {
+        const avatars = [...element.querySelectorAll("img")];
+        return {
+          sameButton: element === window.savedEventButton,
+          sameAvatars:
+            avatars.length === 3 &&
+            avatars.every(
+              (avatar, index) => avatar === window.savedEventAvatars[index],
+            ),
+          avatarUrls: avatars.map((avatar) => avatar.getAttribute("src")),
+          subscriptionActive: window.savedEventSubscription.active,
+          subscriptionUnchanged:
+            window.bottomControlsHarness.environment.eventSubscriptions
+              .length === window.savedEventSubscriptionCount,
+        };
+      },
+    ),
     {
       sameButton: true,
       sameAvatars: true,
@@ -1053,7 +1108,7 @@ test(
         rematchItem("pending", { index: 2, isPendingResponse: true }),
       ];
       await page.evaluate(
-        (items) => window.harness.publishRematches(items),
+        (items) => window.bottomControlsHarness.publishRematches(items),
         items,
       );
       assert.equal(await rematchButtons(page).count(), 3);
@@ -1064,28 +1119,30 @@ test(
       );
       assert.equal(await rematchButtons(page).nth(2).locator("svg").count(), 1);
       await page.evaluate(() =>
-        window.harness.respondRematchPreload(0, [], true),
+        window.bottomControlsHarness.respondRematchPreload(0, [], true),
       );
       assert.equal(
-        await page.evaluate(() => window.harness.counters().uiTimeouts),
+        await page.evaluate(
+          () => window.bottomControlsHarness.counters().uiTimeouts,
+        ),
         1,
       );
       await page.clock.runFor(649);
       assert.equal(
         await page.evaluate(
-          () => window.harness.environment.rematchPreloads.length,
+          () => window.bottomControlsHarness.environment.rematchPreloads.length,
         ),
         1,
       );
       await page.clock.runFor(1);
       assert.equal(
         await page.evaluate(
-          () => window.harness.environment.rematchPreloads.length,
+          () => window.bottomControlsHarness.environment.rematchPreloads.length,
         ),
         2,
       );
       await page.evaluate(() =>
-        window.harness.respondRematchPreload(1, [
+        window.bottomControlsHarness.respondRematchPreload(1, [
           { matchId: "previous", whiteScore: 15, blackScore: 9 },
         ]),
       );
@@ -1094,12 +1151,14 @@ test(
         ["9", "15"],
       );
       assert.equal(
-        await page.evaluate(() => window.harness.counters().uiTimeouts),
+        await page.evaluate(
+          () => window.bottomControlsHarness.counters().uiTimeouts,
+        ),
         0,
       );
       await page.evaluate(() =>
-        window.harness.publishRematches(
-          window.harness.environment.rematchItems.map((item) =>
+        window.bottomControlsHarness.publishRematches(
+          window.bottomControlsHarness.environment.rematchItems.map((item) =>
             item.matchId === "live" ? { ...item, blackScore: 8 } : item,
           ),
         ),
@@ -1111,7 +1170,7 @@ test(
       await page.clock.runFor(6500);
       assert.equal(
         await page.evaluate(
-          () => window.harness.environment.rematchPreloads.length,
+          () => window.bottomControlsHarness.environment.rematchPreloads.length,
         ),
         2,
       );
@@ -1125,73 +1184,91 @@ test(
   async () => {
     await fixture(async (page) => {
       await page.evaluate(
-        (items) => window.harness.publishRematches(items),
+        (items) => window.bottomControlsHarness.publishRematches(items),
         [rematchItem("missing")],
       );
       for (let index = 0; index < 9; index++) {
         await page.evaluate(
-          (index) => window.harness.respondRematchPreload(index),
+          (index) => window.bottomControlsHarness.respondRematchPreload(index),
           index,
         );
         await page.clock.runFor(650);
       }
       assert.equal(
         await page.evaluate(
-          () => window.harness.environment.rematchPreloads.length,
+          () => window.bottomControlsHarness.environment.rematchPreloads.length,
         ),
         9,
       );
       assert.equal(
-        await page.evaluate(() => window.harness.counters().uiTimeouts),
+        await page.evaluate(
+          () => window.bottomControlsHarness.counters().uiTimeouts,
+        ),
         0,
       );
       await page.evaluate(
-        (items) => window.harness.publishRematches(items),
+        (items) => window.bottomControlsHarness.publishRematches(items),
         [rematchItem("old-series")],
       );
-      await page.evaluate(() => window.harness.publishRematches([]));
-      await page.evaluate(() => window.harness.respondRematchPreload(9));
+      await page.evaluate(() =>
+        window.bottomControlsHarness.publishRematches([]),
+      );
+      await page.evaluate(() =>
+        window.bottomControlsHarness.respondRematchPreload(9),
+      );
       assert.equal(await rematchButtons(page).count(), 0);
       assert.equal(
-        await page.evaluate(() => window.harness.counters().uiTimeouts),
+        await page.evaluate(
+          () => window.bottomControlsHarness.counters().uiTimeouts,
+        ),
         0,
       );
       await page.evaluate(
-        (items) => window.harness.publishRematches(items),
+        (items) => window.bottomControlsHarness.publishRematches(items),
         [rematchItem("reset-series")],
       );
-      await page.evaluate(() => window.harness.respondRematchPreload(10));
+      await page.evaluate(() =>
+        window.bottomControlsHarness.respondRematchPreload(10),
+      );
       assert.equal(
-        await page.evaluate(() => window.harness.counters().uiTimeouts),
+        await page.evaluate(
+          () => window.bottomControlsHarness.counters().uiTimeouts,
+        ),
         1,
       );
-      await page.evaluate(() => window.harness.resetMatch());
+      await page.evaluate(() => window.bottomControlsHarness.resetMatch());
       assert.equal(
-        await page.evaluate(() => window.harness.counters().uiTimeouts),
+        await page.evaluate(
+          () => window.bottomControlsHarness.counters().uiTimeouts,
+        ),
         0,
       );
       await page.clock.runFor(650);
       assert.equal(
         await page.evaluate(
-          () => window.harness.environment.rematchPreloads.length,
+          () => window.bottomControlsHarness.environment.rematchPreloads.length,
         ),
         11,
       );
       await page.evaluate(
-        (items) => window.harness.publishRematches(items),
+        (items) => window.bottomControlsHarness.publishRematches(items),
         [rematchItem("unmounted-series")],
       );
-      await page.evaluate(() => window.harness.dispose());
-      await page.evaluate(() => window.harness.respondRematchPreload(11));
+      await page.evaluate(() => window.bottomControlsHarness.dispose());
+      await page.evaluate(() =>
+        window.bottomControlsHarness.respondRematchPreload(11),
+      );
       await page.clock.runFor(650);
       assert.equal(
         await page.evaluate(
-          () => window.harness.environment.rematchPreloads.length,
+          () => window.bottomControlsHarness.environment.rematchPreloads.length,
         ),
         12,
       );
       assert.equal(
-        await page.evaluate(() => window.harness.counters().uiTimeouts),
+        await page.evaluate(
+          () => window.bottomControlsHarness.counters().uiTimeouts,
+        ),
         0,
       );
       assert.equal(await page.locator("#root").textContent(), "");
@@ -1205,7 +1282,7 @@ test(
   async () => {
     await fixture(async (page) => {
       await page.evaluate(
-        (items) => window.harness.publishRematches(items),
+        (items) => window.bottomControlsHarness.publishRematches(items),
         [
           rematchItem("previous", { whiteScore: 15, blackScore: 9 }),
           rematchItem("live", {
@@ -1217,80 +1294,94 @@ test(
           }),
         ],
       );
-      await page.evaluate(() => window.harness.respondRematchPreload(0));
+      await page.evaluate(() =>
+        window.bottomControlsHarness.respondRematchPreload(0),
+      );
       assert.deepEqual(
-        await rematchButtons(page).evaluateAll((elements) =>
-          elements.map(
-            (element) => getComputedStyle(element, "::before").display,
-          ),
+        await rematchButtons(page).evaluateAll(
+          /** @param {HTMLButtonElement[]} elements */ (elements) =>
+            elements.map(
+              (element) => getComputedStyle(element, "::before").display,
+            ),
         ),
         ["none", "block"],
       );
-      await rematchButtons(page).evaluateAll((elements) => {
-        window.harness.run(() => {
-          elements[0].click();
-          elements[1].click();
-        });
-      });
+      await rematchButtons(page).evaluateAll(
+        /** @param {HTMLButtonElement[]} elements */ (elements) => {
+          window.bottomControlsHarness.run(() => {
+            window.bottomControlsHarness.required(elements[0]).click();
+            window.bottomControlsHarness.required(elements[1]).click();
+          });
+        },
+      );
       assert.deepEqual(
         await page.evaluate(() =>
-          window.harness.environment.rematchSelections.map(
+          window.bottomControlsHarness.environment.rematchSelections.map(
             ({ matchId }) => matchId,
           ),
         ),
         ["previous"],
       );
       assert.equal(
-        await rematchButtons(page).evaluateAll((elements) =>
-          elements.every((element) => element.disabled),
+        await rematchButtons(page).evaluateAll(
+          /** @param {HTMLButtonElement[]} elements */ (elements) =>
+            elements.every((element) => element.disabled),
         ),
         true,
       );
       await page.evaluate(() =>
-        window.harness.respondRematchSelection(0, true),
+        window.bottomControlsHarness.respondRematchSelection(0, true),
       );
       assert.equal(
         await page.evaluate(
-          () => window.harness.environment.historySelectionResets,
+          () => window.bottomControlsHarness.environment.historySelectionResets,
         ),
         1,
       );
       assert.deepEqual(
-        await rematchButtons(page).evaluateAll((elements) =>
-          elements.map(
-            (element) => getComputedStyle(element, "::before").display,
-          ),
+        await rematchButtons(page).evaluateAll(
+          /** @param {HTMLButtonElement[]} elements */ (elements) =>
+            elements.map(
+              (element) => getComputedStyle(element, "::before").display,
+            ),
         ),
         ["block", "none"],
       );
       assert.equal(
-        await rematchButtons(page).evaluateAll((elements) =>
-          elements.every((element) => !element.disabled),
+        await rematchButtons(page).evaluateAll(
+          /** @param {HTMLButtonElement[]} elements */ (elements) =>
+            elements.every((element) => !element.disabled),
         ),
         true,
       );
       await rematchButtons(page)
         .nth(0)
-        .evaluate((element) => window.harness.run(() => element.click()));
+        .evaluate(
+          /** @param {HTMLButtonElement} element */ (element) =>
+            window.bottomControlsHarness.run(() => element.click()),
+        );
       await page.evaluate(() =>
-        window.harness.respondRematchSelection(1, false),
+        window.bottomControlsHarness.respondRematchSelection(1, false),
       );
       assert.equal(
         await page.evaluate(
-          () => window.harness.environment.historySelectionResets,
+          () => window.bottomControlsHarness.environment.historySelectionResets,
         ),
         1,
       );
       assert.equal(await rematchButtons(page).nth(0).isDisabled(), false);
       await rematchButtons(page)
         .nth(1)
-        .evaluate((element) => window.harness.run(() => element.click()));
+        .evaluate(
+          /** @param {HTMLButtonElement} element */ (element) =>
+            window.bottomControlsHarness.run(() => element.click()),
+        );
       await page.evaluate(() =>
-        window.harness.respondRematchSelection(2, true),
+        window.bottomControlsHarness.respondRematchSelection(2, true),
       );
       assert.equal(
         await page.evaluate(
-          () => window.harness.environment.historySelectionResets,
+          () => window.bottomControlsHarness.environment.historySelectionResets,
         ),
         2,
       );
@@ -1313,10 +1404,14 @@ test(
         bottom: false,
       });
       await page.evaluate(() =>
-        window.harness.port.setWagerPanelVisibilityChecker(() => true),
+        window.bottomControlsHarness.port.setWagerPanelVisibilityChecker(
+          () => true,
+        ),
       );
       assert.equal((await popupState(page)).bottom, true);
-      await page.evaluate(() => window.harness.port.resetWagerPanelApi());
+      await page.evaluate(() =>
+        window.bottomControlsHarness.port.resetWagerPanelApi(),
+      );
       assert.equal((await popupState(page)).bottom, false);
       await click(page, "Appearance");
       await click(page, "Move History");
@@ -1329,7 +1424,9 @@ test(
         bottom: true,
       });
       await page.evaluate(() =>
-        window.harness.run(() => window.harness.port.toggleReactionPicker()),
+        window.bottomControlsHarness.run(() =>
+          window.bottomControlsHarness.port.toggleReactionPicker(),
+        ),
       );
       await click(page, "Resign");
       assert.deepEqual(await popupState(page), {
@@ -1341,7 +1438,9 @@ test(
       });
       assert.equal(await count(page, "Resign"), 2);
       await page.evaluate(() =>
-        window.harness.run(() => window.harness.port.toggleReactionPicker()),
+        window.bottomControlsHarness.run(() =>
+          window.bottomControlsHarness.port.toggleReactionPicker(),
+        ),
       );
       assert.equal(await count(page, "Resign"), 2);
       await click(page, "Move History");
@@ -1362,7 +1461,7 @@ test(
         reaction: false,
         bottom: true,
       });
-      await page.evaluate(() => window.harness.resetMatch());
+      await page.evaluate(() => window.bottomControlsHarness.resetMatch());
       assert.deepEqual(await popupState(page), {
         appearance: false,
         history: false,
@@ -1374,7 +1473,7 @@ test(
   },
 );
 
-for (const mobile of [false, true]) {
+for (const mobile of /** @type {const} */ ([false, true])) {
   test(
     `${mobile ? "touch" : "mouse"} input excludes each popup's trigger and content while dismissing outside`,
     { timeout: 60000 },
@@ -1382,15 +1481,16 @@ for (const mobile of [false, true]) {
       await fixture(
         async (page) => {
           await showPopupControls(page);
+          /** @param {import("playwright").Locator} target */
           const activate = (target) =>
             mobile
               ? target.tap({ force: true })
               : target.click({ force: true });
-          for (const [trigger, content, testId] of [
+          for (const [trigger, content, testId] of /** @type {const} */ ([
             ["Appearance", "Appearance contents", "appearance-picker"],
             ["Move History", "History contents", "history-popup"],
             ["Navigation", "Navigation contents", "navigation-picker"],
-          ]) {
+          ])) {
             await activate(button(page, trigger));
             assert.equal(await page.getByTestId(testId).count(), 1);
             await activate(button(page, content));
@@ -1413,8 +1513,12 @@ for (const mobile of [false, true]) {
           await activate(button(page, "yo"));
           assert.equal(await count(page, "yo"), 0);
           await page.evaluate(() =>
-            window.harness.run(() =>
-              window.harness.port.showTimerButtonProgressing(1, 1, true),
+            window.bottomControlsHarness.run(() =>
+              window.bottomControlsHarness.port.showTimerButtonProgressing(
+                1,
+                1,
+                true,
+              ),
             ),
           );
           await activate(button(page, "Timer"));
@@ -1428,8 +1532,8 @@ for (const mobile of [false, true]) {
           await activate(button(page, "Start a Timer"));
           assert.equal(await count(page, "Start a Timer"), 0);
           await page.evaluate(() =>
-            window.harness.run(() =>
-              window.harness.port.enableTimerVictoryClaim(),
+            window.bottomControlsHarness.run(() =>
+              window.bottomControlsHarness.port.enableTimerVictoryClaim(),
             ),
           );
           await activate(button(page, "Claim Victory"));
@@ -1448,7 +1552,9 @@ for (const mobile of [false, true]) {
           await activate(button(page, "Claim Victory").last());
           assert.equal(await count(page, "Claim Victory"), 1);
           assert.deepEqual(
-            await page.evaluate(() => window.harness.environment.calls),
+            await page.evaluate(
+              () => window.bottomControlsHarness.environment.calls,
+            ),
             [["reaction", { kind: "yo" }], ["timer"], ["claim"]],
           );
         },
@@ -1467,7 +1573,7 @@ test(
       await click(page, "Appearance");
       await click(page, "Navigation");
       await page.evaluate(() =>
-        window.harness.publishNavigation([
+        window.bottomControlsHarness.publishNavigation([
           {
             id: "event-1",
             entityType: "event",
@@ -1484,11 +1590,13 @@ test(
       assert.equal((await popupState(page)).navigation, true);
       await click(page, "Voice Reaction");
       await page.evaluate(() =>
-        window.harness.run(() => {
-          window.harness.port.closeNavigationAndAppearancePopupIfAny({
-            preserveNavigationSelection: true,
-          });
-          window.harness.applyDisposedControlsPreset(false);
+        window.bottomControlsHarness.run(() => {
+          window.bottomControlsHarness.port.closeNavigationAndAppearancePopupIfAny(
+            {
+              preserveNavigationSelection: true,
+            },
+          );
+          window.bottomControlsHarness.applyDisposedControlsPreset(false);
         }),
       );
       await page.locator("#monsboard").click({ force: true });
@@ -1500,30 +1608,32 @@ test(
         bottom: false,
       });
       await page.evaluate(() =>
-        window.harness.run(() =>
-          window.harness.port.closeNavigationAndAppearancePopupIfAny(),
+        window.bottomControlsHarness.run(() =>
+          window.bottomControlsHarness.port.closeNavigationAndAppearancePopupIfAny(),
         ),
       );
       assert.equal((await popupState(page)).navigation, false);
       await click(page, "Navigation");
       await page.evaluate(() => {
-        window.harness.navigate({
+        window.bottomControlsHarness.navigate({
           mode: "event",
           eventId: "event-1",
           path: "event/event-1",
         });
-        window.harness.dismissEvent();
-        window.harness.run(() =>
-          window.harness.port.closeNavigationAndAppearancePopupIfAny({
-            preserveNavigationSelection: true,
-          }),
+        window.bottomControlsHarness.dismissEvent();
+        window.bottomControlsHarness.run(() =>
+          window.bottomControlsHarness.port.closeNavigationAndAppearancePopupIfAny(
+            {
+              preserveNavigationSelection: true,
+            },
+          ),
         );
       });
       assert.equal((await popupState(page)).navigation, true);
       await page.clock.runFor(10001);
       await page.evaluate(() =>
-        window.harness.run(() =>
-          window.harness.applyDisposedControlsPreset(false),
+        window.bottomControlsHarness.run(() =>
+          window.bottomControlsHarness.applyDisposedControlsPreset(false),
         ),
       );
       assert.equal((await popupState(page)).navigation, false);
@@ -1536,25 +1646,34 @@ test(
   { timeout: 60000 },
   async () => {
     await fixture(async (page) => {
-      for (const preserveNavigationSelection of [false, true]) {
+      for (const preserveNavigationSelection of /** @type {const} */ ([
+        false,
+        true,
+      ])) {
         await click(page, "Navigation");
-        await page.evaluate(() => window.harness.holdHomeTransition());
+        await page.evaluate(() =>
+          window.bottomControlsHarness.holdHomeTransition(),
+        );
         await click(page, "Open test puzzle");
         assert.equal((await popupState(page)).navigation, false);
         await page.evaluate(
           (preserveNavigationSelection) =>
-            window.harness.run(() => {
-              window.harness.port.closeNavigationAndAppearancePopupIfAny({
-                preserveNavigationSelection,
-              });
+            window.bottomControlsHarness.run(() => {
+              window.bottomControlsHarness.port.closeNavigationAndAppearancePopupIfAny(
+                {
+                  preserveNavigationSelection,
+                },
+              );
             }),
           preserveNavigationSelection,
         );
-        await page.evaluate(() => window.harness.releaseHomeTransition());
+        await page.evaluate(() =>
+          window.bottomControlsHarness.releaseHomeTransition(),
+        );
         assert.equal(
           await page.evaluate(
             () =>
-              window.harness.environment.calls.filter(
+              window.bottomControlsHarness.environment.calls.filter(
                 ([name]) => name === "puzzle",
               ).length,
           ),
@@ -1562,7 +1681,9 @@ test(
         );
       }
       assert.deepEqual(
-        await page.evaluate(() => window.harness.environment.calls.at(-1)),
+        await page.evaluate(() =>
+          window.bottomControlsHarness.environment.calls.at(-1),
+        ),
         ["puzzle", "test-puzzle"],
       );
     });
@@ -1575,8 +1696,8 @@ test(
   async () => {
     await fixture(async (page) => {
       await page.evaluate(() => {
-        window.harness.environment.wagerEligible = true;
-        window.harness.updateConnection({ online: true });
+        window.bottomControlsHarness.environment.wagerEligible = true;
+        window.bottomControlsHarness.updateConnection({ online: true });
       });
       await showPopupControls(page);
       await click(page, "Voice Reaction");
@@ -1585,14 +1706,14 @@ test(
       await click(page, "3");
       assert.equal(await count(page, "Propose 2"), 1);
       await page.evaluate(() =>
-        window.harness.run(() =>
-          window.harness.port.showVoiceReactionButton(false),
+        window.bottomControlsHarness.run(() =>
+          window.bottomControlsHarness.port.showVoiceReactionButton(false),
         ),
       );
       assert.equal(await count(page, "Propose 2"), 0);
       await page.evaluate(() =>
-        window.harness.run(() =>
-          window.harness.port.showVoiceReactionButton(true),
+        window.bottomControlsHarness.run(() =>
+          window.bottomControlsHarness.port.showVoiceReactionButton(true),
         ),
       );
       await click(page, "Voice Reaction");
@@ -1604,7 +1725,9 @@ test(
       await click(page, "Propose 2");
       assert.equal(await count(page, "Propose 2"), 0);
       assert.deepEqual(
-        await page.evaluate(() => window.harness.environment.calls),
+        await page.evaluate(
+          () => window.bottomControlsHarness.environment.calls,
+        ),
         [["wager", "slime", 2]],
       );
       await click(page, "Voice Reaction");
@@ -1613,7 +1736,9 @@ test(
       await click(page, "Move History");
       await click(page, "Resign");
       await page.evaluate(() =>
-        window.harness.run(() => window.harness.port.toggleReactionPicker()),
+        window.bottomControlsHarness.run(() =>
+          window.bottomControlsHarness.port.toggleReactionPicker(),
+        ),
       );
       assert.equal(await count(page, "yo"), 0);
       assert.equal(await count(page, "Resign"), 2);
@@ -1628,31 +1753,34 @@ test(
   async () => {
     await fixture(async (page) => {
       await page.evaluate(() => {
-        window.harness.setWagerEligibility();
-        window.harness.publishWager(null, false);
+        window.bottomControlsHarness.setWagerEligibility();
+        window.bottomControlsHarness.publishWager(null, false);
       });
       await showPopupControls(page);
       await click(page, "Voice Reaction");
       assert.equal(await count(page, "Propose a Wager"), 0);
       await click(page, "Voice Reaction");
-      await page.evaluate(() => window.harness.publishWager(null, true));
+      await page.evaluate(() =>
+        window.bottomControlsHarness.publishWager(null, true),
+      );
       await click(page, "Voice Reaction");
       assert.equal(await count(page, "Propose a Wager"), 1);
-      for (const confirmed of [false, true]) {
+      for (const confirmed of /** @type {const} */ ([false, true])) {
         await page.evaluate(
-          (confirmed) => window.harness.publishWager(null, confirmed),
+          (confirmed) =>
+            window.bottomControlsHarness.publishWager(null, confirmed),
           confirmed,
         );
         assert.equal(await count(page, "Propose a Wager"), Number(confirmed));
       }
-      for (const state of [
+      for (const state of /** @type {const} */ ([
         { proposedBy: { player: true } },
         { proposals: { player: { material: "dust", count: 1 } } },
         { agreed: {} },
         { resolved: {} },
-      ]) {
+      ])) {
         await page.evaluate(
-          (state) => window.harness.publishWager(state),
+          (state) => window.bottomControlsHarness.publishWager(state),
           state,
         );
         assert.equal(
@@ -1662,13 +1790,15 @@ test(
         );
       }
       await page.evaluate(() =>
-        window.harness.publishWager({
+        window.bottomControlsHarness.publishWager({
           proposals: { opponent: { material: "dust", count: 1 } },
         }),
       );
       assert.equal(await count(page, "Propose a Wager"), 1);
-      await page.evaluate(() => window.harness.publishWager(null));
-      for (const eligibility of [
+      await page.evaluate(() =>
+        window.bottomControlsHarness.publishWager(null),
+      );
+      for (const eligibility of /** @type {const} */ ([
         { context: { isOnlineGame: false } },
         { context: { isWatchOnly: true } },
         { context: { isGameWithBot: true } },
@@ -1681,9 +1811,10 @@ test(
         { playerUid: null },
         { opponentUid: null },
         { opponentProfileId: "" },
-      ]) {
+      ])) {
         await page.evaluate(
-          (eligibility) => window.harness.setWagerEligibility(eligibility),
+          (eligibility) =>
+            window.bottomControlsHarness.setWagerEligibility(eligibility),
           eligibility,
         );
         assert.equal(
@@ -1691,15 +1822,17 @@ test(
           0,
           JSON.stringify(eligibility),
         );
-        await page.evaluate(() => window.harness.setWagerEligibility());
+        await page.evaluate(() =>
+          window.bottomControlsHarness.setWagerEligibility(),
+        );
         assert.equal(await count(page, "Propose a Wager"), 1);
       }
       await click(page, "Propose a Wager");
       await click(page, "3");
       await click(page, "3");
       await page.evaluate(() => {
-        window.harness.publishWager(null, false);
-        window.harness.publishMaterials({
+        window.bottomControlsHarness.publishWager(null, false);
+        window.bottomControlsHarness.publishMaterials({
           availableMaterials: { dust: 1, slime: 2 },
         });
       });
@@ -1708,10 +1841,14 @@ test(
       assert.equal(await button(page, "2").isDisabled(), false);
       await click(page, "Propose 2");
       assert.deepEqual(
-        await page.evaluate(() => window.harness.environment.calls),
+        await page.evaluate(
+          () => window.bottomControlsHarness.environment.calls,
+        ),
         [],
       );
-      await page.evaluate(() => window.harness.publishWager(null, true));
+      await page.evaluate(() =>
+        window.bottomControlsHarness.publishWager(null, true),
+      );
       assert.equal(await button(page, "Propose 2").isDisabled(), false);
       assert.equal(await count(page, "1"), 1);
     });
@@ -1724,18 +1861,23 @@ test(
   async () => {
     await fixture(async (page) => {
       await page.evaluate(() => {
-        window.harness.setWagerEligibility();
-        window.harness.publishMaterials({
+        window.bottomControlsHarness.setWagerEligibility();
+        window.bottomControlsHarness.publishMaterials({
           availableMaterials: { dust: 4, slime: 0 },
           hasConfirmedSnapshot: false,
         });
       });
       await showPopupControls(page);
       await click(page, "Voice Reaction");
-      for (const frozenMaterialsStatus of ["loading", "unavailable"]) {
+      for (const frozenMaterialsStatus of /** @type {const} */ ([
+        "loading",
+        "unavailable",
+      ])) {
         await page.evaluate(
           (frozenMaterialsStatus) =>
-            window.harness.publishMaterials({ frozenMaterialsStatus }),
+            window.bottomControlsHarness.publishMaterials({
+              frozenMaterialsStatus,
+            }),
           frozenMaterialsStatus,
         );
         assert.equal(await count(page, "Propose a Wager"), 1);
@@ -1746,7 +1888,9 @@ test(
         true,
       );
       await page.evaluate(() =>
-        window.harness.publishMaterials({ frozenMaterialsStatus: "ready" }),
+        window.bottomControlsHarness.publishMaterials({
+          frozenMaterialsStatus: "ready",
+        }),
       );
       const picker = button(page, "Select a Material").locator("..");
       const materials = picker.locator(":scope > div > button");
@@ -1754,20 +1898,24 @@ test(
       assert.equal(await materials.nth(0).isDisabled(), false);
       assert.equal(await materials.nth(1).isDisabled(), true);
       await page.evaluate(() =>
-        window.harness.publishMaterials({ hasConfirmedSnapshot: true }),
+        window.bottomControlsHarness.publishMaterials({
+          hasConfirmedSnapshot: true,
+        }),
       );
       assert.deepEqual(await materials.allTextContents(), ["4", "0"]);
       await click(page, "4");
-      for (const status of [
+      for (const status of /** @type {const} */ ([
         "idle",
         "loading",
         "updating",
         "unavailable",
         "ready",
-      ]) {
+      ])) {
         await page.evaluate(
           (frozenMaterialsStatus) =>
-            window.harness.publishMaterials({ frozenMaterialsStatus }),
+            window.bottomControlsHarness.publishMaterials({
+              frozenMaterialsStatus,
+            }),
           status,
         );
         const label =
@@ -1793,7 +1941,9 @@ test(
         }
       }
       await page.evaluate(() =>
-        window.harness.publishMaterials({ hasConfirmedSnapshot: false }),
+        window.bottomControlsHarness.publishMaterials({
+          hasConfirmedSnapshot: false,
+        }),
       );
       assert.equal(await button(page, "Propose 1").isDisabled(), false);
       assert.deepEqual(
@@ -1804,27 +1954,32 @@ test(
         ["—", "—"],
       );
       assert.deepEqual(
-        await page.evaluate(() => window.harness.environment.calls),
+        await page.evaluate(
+          () => window.bottomControlsHarness.environment.calls,
+        ),
         [],
       );
     });
   },
 );
 
-for (const mobile of [false, true]) {
+for (const mobile of /** @type {const} */ ([false, true])) {
   test(
     `wager ${mobile ? "touch" : "mouse"} submission preserves direct children, selection, dismissal, and caught rejection`,
     { timeout: 60000 },
     async () => {
       await fixture(
         async (page) => {
-          await page.evaluate(() => window.harness.setWagerEligibility());
+          await page.evaluate(() =>
+            window.bottomControlsHarness.setWagerEligibility(),
+          );
           await showPopupControls(page);
+          /** @param {string} name */
           const activate = (name) =>
             mobile
               ? button(page, name).tap({ force: true })
               : button(page, name).click({ force: true });
-          for (const reject of [false, true]) {
+          for (const reject of /** @type {const} */ ([false, true])) {
             await activate("Voice Reaction");
             await activate("Propose a Wager");
             assert.equal(
@@ -1833,8 +1988,12 @@ for (const mobile of [false, true]) {
             );
             assert.deepEqual(
               await button(page, "Select a Material").evaluate((action) => {
-                const picker = action.parentElement;
-                const grid = picker.lastElementChild;
+                const picker = window.bottomControlsHarness.required(
+                  action.parentElement,
+                );
+                const grid = window.bottomControlsHarness.required(
+                  picker.lastElementChild,
+                );
                 return {
                   children: [...picker.children].map(
                     (element) => element.tagName,
@@ -1859,12 +2018,16 @@ for (const mobile of [false, true]) {
             await activate("2");
             await activate("2");
             assert.equal(await count(page, "Propose 2"), 1);
-            await page.evaluate(() => window.harness.holdWagerSend());
+            await page.evaluate(() =>
+              window.bottomControlsHarness.holdWagerSend(),
+            );
             await activate("Propose 2");
             assert.equal(await count(page, "Propose 2"), 0);
             assert.equal(
               await page.evaluate(
-                () => window.harness.environment.wagerSendGate !== null,
+                () =>
+                  window.bottomControlsHarness.environment.wagerSendGate !==
+                  null,
               ),
               true,
             );
@@ -1880,13 +2043,15 @@ for (const mobile of [false, true]) {
             else await outside.click({ force: true });
             assert.equal(await count(page, "Select a Material"), 0);
             await page.evaluate(
-              (reject) => window.harness.respondWagerSend(reject),
+              (reject) => window.bottomControlsHarness.respondWagerSend(reject),
               reject,
             );
             assert.equal(await count(page, "yo"), 0);
             assert.equal(await count(page, "Select a Material"), 0);
             assert.deepEqual(
-              await page.evaluate(() => window.harness.environment.calls),
+              await page.evaluate(
+                () => window.bottomControlsHarness.environment.calls,
+              ),
               Array.from({ length: reject ? 2 : 1 }, () => [
                 "wager",
                 "slime",
@@ -1907,12 +2072,12 @@ test(
   async () => {
     await fixture(async (page) => {
       const subscriptions = () =>
-        page.evaluate(() => window.harness.wagerSubscriptions());
+        page.evaluate(() => window.bottomControlsHarness.wagerSubscriptions());
       assert.deepEqual(await subscriptions(), { wager: 2, materials: 1 });
       await page.evaluate(() => {
-        window.harness.setWagerEligibility();
-        window.harness.publishWager({ agreed: {} });
-        window.harness.publishMaterials({
+        window.bottomControlsHarness.setWagerEligibility();
+        window.bottomControlsHarness.publishWager({ agreed: {} });
+        window.bottomControlsHarness.publishMaterials({
           availableMaterials: { dust: 5, slime: 0 },
         });
       });
@@ -1920,22 +2085,24 @@ test(
       await showPopupControls(page);
       await click(page, "Voice Reaction");
       assert.equal(await count(page, "Propose a Wager"), 0);
-      await page.evaluate(() => window.harness.publishWager(null));
+      await page.evaluate(() =>
+        window.bottomControlsHarness.publishWager(null),
+      );
       await click(page, "Propose a Wager");
       assert.equal(await count(page, "5"), 1);
       await click(page, "Voice Reaction");
       assert.deepEqual(await subscriptions(), { wager: 2, materials: 1 });
-      await page.evaluate(() => window.harness.remount());
+      await page.evaluate(() => window.bottomControlsHarness.remount());
       assert.deepEqual(await subscriptions(), { wager: 2, materials: 1 });
       await showPopupControls(page);
       await click(page, "Voice Reaction");
       await click(page, "Propose a Wager");
       assert.equal(await count(page, "5"), 1);
-      await page.evaluate(() => window.harness.dispose());
+      await page.evaluate(() => window.bottomControlsHarness.dispose());
       assert.deepEqual(await subscriptions(), { wager: 0, materials: 0 });
       await page.evaluate(() => {
-        window.harness.publishWager(null, false);
-        window.harness.publishMaterials({
+        window.bottomControlsHarness.publishWager(null, false);
+        window.bottomControlsHarness.publishMaterials({
           frozenMaterialsStatus: "unavailable",
         });
       });
@@ -1953,52 +2120,54 @@ test(
           .getByTestId("navigation-picker")
           .getAttribute("data-selected-navigation-item-id");
       await page.evaluate(() => {
-        window.harness.navigate({
+        window.bottomControlsHarness.navigate({
           mode: "invite",
           inviteId: "selected-game",
           path: "selected-game",
         });
-        window.harness.render();
+        window.bottomControlsHarness.render();
       });
       await click(page, "Navigation");
       assert.equal(await selectedItem(), "selected-game");
       await page.evaluate(() => {
-        window.harness.openEvent("overlay-event");
-        window.harness.navigate({
+        window.bottomControlsHarness.openEvent("overlay-event");
+        window.bottomControlsHarness.navigate({
           mode: "event",
           eventId: "route-event",
           path: "event/route-event",
         });
-        window.harness.render();
+        window.bottomControlsHarness.render();
       });
       assert.equal(await selectedItem(), "event_overlay-event");
       await page.evaluate(() => {
-        window.harness.dismissEvent();
-        window.harness.navigate({
+        window.bottomControlsHarness.dismissEvent();
+        window.bottomControlsHarness.navigate({
           mode: "event",
           eventId: "route-event",
           path: "event/route-event",
         });
-        window.harness.render();
+        window.bottomControlsHarness.render();
       });
       assert.equal(await selectedItem(), "event_route-event");
       await page.evaluate(() => {
-        window.harness.navigate({ mode: "home", path: "" });
-        window.harness.render();
+        window.bottomControlsHarness.navigate({ mode: "home", path: "" });
+        window.bottomControlsHarness.render();
       });
       assert.equal(await selectedItem(), null);
       await page.evaluate(() => {
-        window.harness.navigate({
+        window.bottomControlsHarness.navigate({
           mode: "invite",
           inviteId: "selected-game",
           path: "selected-game",
         });
-        window.harness.openPendingEvent();
-        window.harness.render();
+        window.bottomControlsHarness.openPendingEvent();
+        window.bottomControlsHarness.render();
       });
       assert.equal(await selectedItem(), "selected-game");
       assert.deepEqual(
-        await page.evaluate(() => window.harness.environment.eventModalState),
+        await page.evaluate(
+          () => window.bottomControlsHarness.environment.eventModalState,
+        ),
         {
           isOpen: true,
           eventId: null,
@@ -2011,8 +2180,10 @@ test(
       assert.equal((await popupState(page)).navigation, false);
       await click(page, "Navigation");
       await page.evaluate(() =>
-        window.harness.run(() =>
-          window.harness.port.setNavigationListButtonVisible(false),
+        window.bottomControlsHarness.run(() =>
+          window.bottomControlsHarness.port.setNavigationListButtonVisible(
+            false,
+          ),
         ),
       );
       assert.equal((await popupState(page)).navigation, false);
@@ -2026,13 +2197,13 @@ test(
   async () => {
     await fixture(async (page) => {
       await page.evaluate(() => {
-        window.harness.seedEventPreview("a", "event-1", [9]);
-        window.harness.navigate({
+        window.bottomControlsHarness.seedEventPreview("a", "event-1", [9]);
+        window.bottomControlsHarness.navigate({
           mode: "invite",
           inviteId: "event-game-1",
           path: "event-game-1",
         });
-        window.harness.updateConnection({
+        window.bottomControlsHarness.updateConnection({
           inviteId: "event-game-1",
           eventId: "event-1",
           eventOwned: true,
@@ -2041,22 +2212,24 @@ test(
       });
       assert.deepEqual(await eventAvatarSlots(page), ["/__emoji/9.svg"]);
       await page.evaluate(() =>
-        window.harness.publishEventParticipants("event-1", [
-          { emojiId: 3.9, joinedAtMs: 30 },
+        window.bottomControlsHarness.publishEventParticipants("event-1", [
+          { emojiId: 3, joinedAtMs: 30 },
           { emojiId: 1, joinedAtMs: 10 },
-          { emojiId: 0, joinedAtMs: 20 },
+          { emojiId: null, joinedAtMs: 20 },
         ]),
       );
       const threeSlots = ["/__emoji/1.svg", null, "/__emoji/3.svg"];
       assert.deepEqual(await eventAvatarSlots(page), threeSlots);
       await page.evaluate(() =>
-        window.harness.publishEvent("event-1", [8, 7, 6]),
+        window.bottomControlsHarness.publishEvent("event-1", [8, 7, 6]),
       );
       assert.deepEqual(await eventAvatarSlots(page), threeSlots);
-      await page.evaluate(() => window.harness.publishEvent("event-1", [8]));
+      await page.evaluate(() =>
+        window.bottomControlsHarness.publishEvent("event-1", [8]),
+      );
       assert.deepEqual(await eventAvatarSlots(page), threeSlots);
       await page.evaluate(() =>
-        window.harness.publishEventParticipants("event-1", [
+        window.bottomControlsHarness.publishEventParticipants("event-1", [
           { emojiId: 5, joinedAtMs: 50 },
           { emojiId: 4, joinedAtMs: 40 },
           { joinedAtMs: 20 },
@@ -2067,7 +2240,7 @@ test(
       const fourSlots = [...threeSlots, "/__emoji/4.svg"];
       assert.deepEqual(await eventAvatarSlots(page), fourSlots);
       await page.evaluate(() =>
-        window.harness.publishEvent("event-1", [9, 8, 7, 6, 5]),
+        window.bottomControlsHarness.publishEvent("event-1", [9, 8, 7, 6, 5]),
       );
       assert.deepEqual(await eventAvatarSlots(page), fourSlots);
     });
@@ -2080,19 +2253,19 @@ test(
   async () => {
     await fixture(async (page) => {
       await page.evaluate(() => {
-        window.harness.seedEventPreview("a", "event-1", [9]);
-        window.harness.environment.eventSnapshots.set("event-1", {
+        window.bottomControlsHarness.seedEventPreview("a", "event-1", [9]);
+        window.bottomControlsHarness.environment.eventSnapshots.set("event-1", {
           participants: {
             second: { profileId: "second", emojiId: 2, joinedAtMs: 2 },
             first: { profileId: "first", emojiId: 1, joinedAtMs: 1 },
           },
         });
-        window.harness.navigate({
+        window.bottomControlsHarness.navigate({
           mode: "invite",
           inviteId: "event-game-1",
           path: "event-game-1",
         });
-        window.harness.updateConnection({
+        window.bottomControlsHarness.updateConnection({
           inviteId: "event-game-1",
           eventId: "event-1",
           eventOwned: true,
@@ -2115,18 +2288,19 @@ test(
     await fixture(async (page) => {
       await enterEventGame(page);
       await page.evaluate(() => {
-        window.oldEventSubscription =
-          window.harness.environment.eventSubscriptions.findLast(
+        window.oldEventSubscription = window.bottomControlsHarness.required(
+          window.bottomControlsHarness.environment.eventSubscriptions.findLast(
             (subscription) => subscription.active,
-          );
-        window.harness.updateConnection({
+          ),
+        );
+        window.bottomControlsHarness.updateConnection({
           inviteId: "event-game-1",
           eventId: "event-2",
           eventOwned: true,
           online: true,
         });
-        window.harness.publishEvent("event-2", [7]);
-        window.harness.run(() =>
+        window.bottomControlsHarness.publishEvent("event-2", [7]);
+        window.bottomControlsHarness.run(() =>
           window.oldEventSubscription.update({
             participants: {
               old: { profileId: "old", emojiId: 9, joinedAtMs: 1 },
@@ -2142,13 +2316,14 @@ test(
       assert.deepEqual(await eventAvatarSlots(page), ["/__emoji/7.svg"]);
       assert.deepEqual(await activeEventSubscriptions(page), ["event-2"]);
       await page.evaluate(() => {
-        window.oldEventSubscription =
-          window.harness.environment.eventSubscriptions.findLast(
+        window.oldEventSubscription = window.bottomControlsHarness.required(
+          window.bottomControlsHarness.environment.eventSubscriptions.findLast(
             (subscription) => subscription.active,
-          );
-        window.harness.remount();
-        window.harness.publishEvent("event-2", [6]);
-        window.harness.run(() =>
+          ),
+        );
+        window.bottomControlsHarness.remount();
+        window.bottomControlsHarness.publishEvent("event-2", [6]);
+        window.bottomControlsHarness.run(() =>
           window.oldEventSubscription.update({
             participants: {
               old: { profileId: "old", emojiId: 9, joinedAtMs: 1 },
@@ -2173,14 +2348,14 @@ test(
   async () => {
     await fixture(async (page) => {
       await page.evaluate(() => {
-        window.harness.seedEventPreview("a", "event-1", [1, 2]);
-        window.harness.seedEventPreview("b", "event-1", [7]);
-        window.harness.navigate({
+        window.bottomControlsHarness.seedEventPreview("a", "event-1", [1, 2]);
+        window.bottomControlsHarness.seedEventPreview("b", "event-1", [7]);
+        window.bottomControlsHarness.navigate({
           mode: "invite",
           inviteId: "event-game-1",
           path: "event-game-1",
         });
-        window.harness.updateConnection({
+        window.bottomControlsHarness.updateConnection({
           inviteId: "event-game-1",
           eventId: "event-1",
           eventOwned: true,
@@ -2192,24 +2367,27 @@ test(
         "/__emoji/2.svg",
       ]);
       await page.evaluate(() => {
-        window.profileEventSubscription =
-          window.harness.environment.eventSubscriptions.findLast(
+        window.profileEventSubscription = window.bottomControlsHarness.required(
+          window.bottomControlsHarness.environment.eventSubscriptions.findLast(
             (subscription) => subscription.active,
-          );
+          ),
+        );
         window.profileEventSubscriptionCount =
-          window.harness.environment.eventSubscriptions.length;
-        window.harness.publishEvent("event-1", [3, 4, 5]);
+          window.bottomControlsHarness.environment.eventSubscriptions.length;
+        window.bottomControlsHarness.publishEvent("event-1", [3, 4, 5]);
       });
       assert.deepEqual(await eventAvatarSlots(page), [
         "/__emoji/3.svg",
         "/__emoji/4.svg",
         "/__emoji/5.svg",
       ]);
-      await page.evaluate(() => window.harness.render("b"));
+      await page.evaluate(() => window.bottomControlsHarness.render("b"));
       assert.deepEqual(await eventAvatarSlots(page), ["/__emoji/7.svg"]);
-      await page.evaluate(() => window.harness.render("a"));
+      await page.evaluate(() => window.bottomControlsHarness.render("a"));
       assert.deepEqual(await eventAvatarSlots(page), []);
-      await page.evaluate(() => window.harness.publishEvent("event-1", [1, 2]));
+      await page.evaluate(() =>
+        window.bottomControlsHarness.publishEvent("event-1", [1, 2]),
+      );
       assert.deepEqual(await eventAvatarSlots(page), [
         "/__emoji/1.svg",
         "/__emoji/2.svg",
@@ -2218,13 +2396,13 @@ test(
       assert.deepEqual(
         await page.evaluate(() => ({
           sameSubscription:
-            window.harness.environment.eventSubscriptions.findLast(
+            window.bottomControlsHarness.environment.eventSubscriptions.findLast(
               (subscription) => subscription.active,
             ) === window.profileEventSubscription,
           originalStillActive: window.profileEventSubscription.active,
           subscriptionCountUnchanged:
-            window.harness.environment.eventSubscriptions.length ===
-            window.profileEventSubscriptionCount,
+            window.bottomControlsHarness.environment.eventSubscriptions
+              .length === window.profileEventSubscriptionCount,
         })),
         {
           sameSubscription: true,
@@ -2243,32 +2421,32 @@ test(
     await fixture(
       async (page) => {
         await page.waitForFunction(
-          () => !window.harness.navigationState().transitioning,
+          () => !window.bottomControlsHarness.navigationState().transitioning,
         );
         await page.evaluate(() => {
-          window.harness.updateConnection({
+          window.bottomControlsHarness.updateConnection({
             inviteId: "event-game-1",
             eventId: "event-1",
             eventOwned: true,
             online: true,
           });
-          window.harness.publishEvent("event-1", [1, 2, 3]);
+          window.bottomControlsHarness.publishEvent("event-1", [1, 2, 3]);
         });
         await rememberEventButton(page);
         await click(page, "Event");
         await page.evaluate(() => {
-          window.harness.holdBootstrap("event-game-2");
-          window.harness.launchEventGame("event-game-2");
+          window.bottomControlsHarness.holdBootstrap("event-game-2");
+          window.bottomControlsHarness.launchEventGame("event-game-2");
         });
         await page.waitForFunction(
           () =>
-            window.harness.navigationState().bootstraps.at(-1) ===
+            window.bottomControlsHarness.navigationState().bootstraps.at(-1) ===
             "event-game-2",
         );
         assert.deepEqual(
           await page.evaluate(() => {
             const { route, modal, transitioning } =
-              window.harness.navigationState();
+              window.bottomControlsHarness.navigationState();
             return {
               inviteId: route.inviteId,
               closeReason: modal.lastCloseReason,
@@ -2286,39 +2464,43 @@ test(
         await click(page, "Event");
         assert.equal(
           await page.evaluate(
-            () => window.harness.navigationState().modal.eventId,
+            () => window.bottomControlsHarness.navigationState().modal.eventId,
           ),
           "event-1",
         );
         await assertEventButtonRetained(page);
         await page.evaluate(() =>
-          window.harness.launchEventGame("event-game-2"),
+          window.bottomControlsHarness.launchEventGame("event-game-2"),
         );
         await assertEventButtonRetained(page);
 
         await page.evaluate(() => window.history.back());
         await page.waitForFunction(
-          () => window.harness.navigationState().modal.eventId === "event-1",
+          () =>
+            window.bottomControlsHarness.navigationState().modal.eventId ===
+            "event-1",
         );
         await assertEventButtonRetained(page);
         await page.evaluate(() => window.history.forward());
         await page.waitForFunction(
-          () => !window.harness.navigationState().modal.isOpen,
+          () => !window.bottomControlsHarness.navigationState().modal.isOpen,
         );
         await assertEventButtonRetained(page);
 
-        await page.evaluate(() => window.harness.releaseBootstrap());
+        await page.evaluate(() =>
+          window.bottomControlsHarness.releaseBootstrap(),
+        );
         await page.waitForFunction(
-          () => !window.harness.navigationState().transitioning,
+          () => !window.bottomControlsHarness.navigationState().transitioning,
         );
         assert.deepEqual(
           await page.evaluate(
-            () => window.harness.navigationState().bootstraps,
+            () => window.bottomControlsHarness.navigationState().bootstraps,
           ),
           ["event-game-1", "event-game-2"],
         );
         await page.evaluate(() =>
-          window.harness.updateConnection({
+          window.bottomControlsHarness.updateConnection({
             inviteId: "event-game-2",
             eventId: "event-1",
             eventOwned: true,
@@ -2341,9 +2523,9 @@ test(
       await rememberEventButton(page);
       await click(page, "Event");
       await page.evaluate(() => {
-        window.harness.launchEventGame("event-game-2");
-        window.harness.updateConnection();
-        window.harness.resetMatch();
+        window.bottomControlsHarness.launchEventGame("event-game-2");
+        window.bottomControlsHarness.updateConnection();
+        window.bottomControlsHarness.resetMatch();
       });
       await assertEventButtonRetained(page);
       await page.clock.runFor(3001);
@@ -2351,17 +2533,18 @@ test(
       await click(page, "Event");
       assert.equal(
         await page.evaluate(
-          () => window.harness.environment.eventModalState.eventId,
+          () =>
+            window.bottomControlsHarness.environment.eventModalState.eventId,
         ),
         "event-1",
       );
       await assertEventButtonRetained(page);
-      await page.evaluate(() => window.harness.dismissEvent());
+      await page.evaluate(() => window.bottomControlsHarness.dismissEvent());
       await assertEventButtonRetained(page);
       await page.clock.runFor(10000);
       await assertEventButtonRetained(page);
       await page.evaluate(() =>
-        window.harness.updateConnection({
+        window.bottomControlsHarness.updateConnection({
           inviteId: "event-game-2",
           eventId: "event-1",
           eventOwned: true,
@@ -2369,13 +2552,14 @@ test(
         }),
       );
       await assertEventButtonRetained(page);
-      await page.evaluate(() => window.harness.dispose());
+      await page.evaluate(() => window.bottomControlsHarness.dispose());
       assert.deepEqual(await activeEventSubscriptions(page), []);
       assert.deepEqual(
         await page.evaluate(() => ({
-          modalListeners: window.harness.environment.eventModalListeners.size,
+          modalListeners:
+            window.bottomControlsHarness.environment.eventModalListeners.size,
           navigationListeners:
-            window.harness.environment.navigationListeners.size,
+            window.bottomControlsHarness.environment.navigationListeners.size,
         })),
         { modalListeners: 0, navigationListeners: 0 },
       );
@@ -2390,25 +2574,26 @@ test(
     await fixture(async (page) => {
       await enterEventGame(page);
       await page.evaluate(() => {
-        window.harness.openEvent("event-2");
-        window.harness.launchEventGame("event-2-game-1");
+        window.bottomControlsHarness.openEvent("event-2");
+        window.bottomControlsHarness.launchEventGame("event-2-game-1");
       });
       assert.deepEqual(await activeEventSubscriptions(page), ["event-2"]);
       await click(page, "Event");
       assert.equal(
         await page.evaluate(
-          () => window.harness.environment.eventModalState.eventId,
+          () =>
+            window.bottomControlsHarness.environment.eventModalState.eventId,
         ),
         "event-2",
       );
       await page.evaluate(() =>
-        window.harness.launchEventGame("event-2-game-2"),
+        window.bottomControlsHarness.launchEventGame("event-2-game-2"),
       );
       assert.deepEqual(await activeEventSubscriptions(page), ["event-2"]);
       await page.evaluate(() => {
-        window.harness.openEvent("event-3");
-        window.harness.launchEventGame("event-3-game-1");
-        window.harness.updateConnection({
+        window.bottomControlsHarness.openEvent("event-3");
+        window.bottomControlsHarness.launchEventGame("event-3-game-1");
+        window.bottomControlsHarness.updateConnection({
           inviteId: "event-2-game-2",
           eventId: "event-2",
           eventOwned: true,
@@ -2420,13 +2605,14 @@ test(
       await click(page, "Event");
       assert.equal(
         await page.evaluate(
-          () => window.harness.environment.eventModalState.eventId,
+          () =>
+            window.bottomControlsHarness.environment.eventModalState.eventId,
         ),
         "event-3",
       );
       await page.evaluate(() => {
-        window.harness.dismissEvent();
-        window.harness.updateConnection({
+        window.bottomControlsHarness.dismissEvent();
+        window.bottomControlsHarness.updateConnection({
           inviteId: "event-3-game-1",
           eventId: "event-3",
           eventOwned: true,
@@ -2443,26 +2629,29 @@ test(
   { timeout: 60000 },
   async () => {
     await fixture(async (page) => {
-      for (const route of [
+      for (const route of /** @type {const} */ ([
         { mode: "home", path: "" },
         { mode: "invite", inviteId: "unrelated-game", path: "unrelated-game" },
-      ]) {
+      ])) {
         await enterEventGame(page);
         await click(page, "Event");
         await page.evaluate(() =>
-          window.harness.launchEventGame("event-game-2"),
+          window.bottomControlsHarness.launchEventGame("event-game-2"),
         );
         assert.equal(await count(page, "Event"), 1);
-        await page.evaluate((route) => window.harness.navigate(route), route);
+        await page.evaluate(
+          (route) => window.bottomControlsHarness.navigate(route),
+          route,
+        );
         assert.equal(await count(page, "Event"), 0);
         assert.deepEqual(await activeEventSubscriptions(page), []);
         await page.evaluate(() => {
-          window.harness.navigate({
+          window.bottomControlsHarness.navigate({
             mode: "invite",
             inviteId: "event-game-2",
             path: "event-game-2",
           });
-          window.harness.render();
+          window.bottomControlsHarness.render();
         });
         assert.equal(await count(page, "Event"), 0);
       }
@@ -2475,21 +2664,21 @@ test(
   { timeout: 60000 },
   async () => {
     await fixture(async (page) => {
-      for (const destination of [
+      for (const destination of /** @type {const} */ ([
         { eventId: null, eventOwned: true, expectedEventId: null },
         { eventId: "event-1", eventOwned: false, expectedEventId: null },
         { eventId: "event-2", eventOwned: true, expectedEventId: "event-2" },
-      ]) {
+      ])) {
         await enterEventGame(page);
         await click(page, "Event");
         await page.evaluate(() => {
-          window.harness.launchEventGame("event-game-2");
-          window.harness.updateConnection();
+          window.bottomControlsHarness.launchEventGame("event-game-2");
+          window.bottomControlsHarness.updateConnection();
         });
         assert.equal(await count(page, "Event"), 1);
         await page.evaluate(
           (destination) =>
-            window.harness.updateConnection({
+            window.bottomControlsHarness.updateConnection({
               inviteId: "event-game-2",
               online: true,
               ...destination,
@@ -2508,13 +2697,19 @@ test(
           await click(page, "Event");
           assert.equal(
             await page.evaluate(
-              () => window.harness.environment.eventModalState.eventId,
+              () =>
+                window.bottomControlsHarness.environment.eventModalState
+                  .eventId,
             ),
             destination.expectedEventId,
           );
-          await page.evaluate(() => window.harness.dismissEvent());
+          await page.evaluate(() =>
+            window.bottomControlsHarness.dismissEvent(),
+          );
         }
-        await page.evaluate(() => window.harness.updateConnection());
+        await page.evaluate(() =>
+          window.bottomControlsHarness.updateConnection(),
+        );
         assert.equal(await count(page, "Event"), 0);
       }
     });
@@ -2527,7 +2722,7 @@ test(
   async () => {
     await fixture(async (page) => {
       await page.evaluate(() => {
-        const { port, environment, run } = window.harness;
+        const { port, environment, run } = window.bottomControlsHarness;
         environment.callbacks.timer = () =>
           port.showTimerButtonProgressing(20, 20, true);
         environment.callbacks.claim = () => port.enableTimerVictoryClaim();
@@ -2549,20 +2744,29 @@ test(
       assert.equal(await count(page, "Start a Timer"), 0);
       assert.equal(await button(page, "Timer").isDisabled(), true);
       await page.evaluate(() =>
-        window.harness.run(() => window.harness.port.enableTimerVictoryClaim()),
+        window.bottomControlsHarness.run(() =>
+          window.bottomControlsHarness.port.enableTimerVictoryClaim(),
+        ),
       );
       await click(page, "Claim Victory");
       assert.equal(await count(page, "Claim Victory"), 2);
       await button(page, "Claim Victory")
         .last()
-        .evaluate((element) => window.harness.run(() => element.click()));
+        .evaluate(
+          /** @param {HTMLButtonElement} element */ (element) =>
+            window.bottomControlsHarness.run(() => element.click()),
+        );
       assert.equal(await count(page, "Claim Victory"), 1);
       assert.equal(await button(page, "Claim Victory").isDisabled(), true);
       await click(page, "Resign");
       assert.equal(await count(page, "Resign"), 2);
       await page.evaluate(() =>
-        window.harness.run(() =>
-          window.harness.port.showTimerButtonProgressing(1, 1, true),
+        window.bottomControlsHarness.run(() =>
+          window.bottomControlsHarness.port.showTimerButtonProgressing(
+            1,
+            1,
+            true,
+          ),
         ),
       );
       assert.equal(await count(page, "Resign"), 2);
@@ -2570,16 +2774,16 @@ test(
       assert.equal(await count(page, "Resign"), 1);
       assert.equal(await count(page, "Start a Timer"), 1);
       await page.evaluate(() =>
-        window.harness.run(() =>
-          window.harness.port.disableAndHideUndoResignAndTimerControls(),
+        window.bottomControlsHarness.run(() =>
+          window.bottomControlsHarness.port.disableAndHideUndoResignAndTimerControls(),
         ),
       );
       assert.equal(await count(page, "Resign"), 0);
       assert.equal(await count(page, "Start a Timer"), 0);
       await page.evaluate(() =>
-        window.harness.run(() =>
-          window.harness.port.showPrimaryAction(
-            window.harness.port.PrimaryActionType.JoinGame,
+        window.bottomControlsHarness.run(() =>
+          window.bottomControlsHarness.port.showPrimaryAction(
+            window.bottomControlsHarness.port.PrimaryActionType.JoinGame,
           ),
         ),
       );
@@ -2587,7 +2791,9 @@ test(
       assert.equal(await count(page, "Join Game"), 0);
       assert.equal(await count(page, "Play Again"), 0);
       assert.deepEqual(
-        await page.evaluate(() => window.harness.environment.calls),
+        await page.evaluate(
+          () => window.bottomControlsHarness.environment.calls,
+        ),
         [["timer"], ["claim"], ["primary", "joinGame"]],
       );
     });
@@ -2600,7 +2806,7 @@ test(
   async () => {
     await fixture(async (page) => {
       await page.evaluate(() => {
-        const { port, environment, run } = window.harness;
+        const { port, environment, run } = window.bottomControlsHarness;
         environment.callbacks.end = () => {
           port.showPrimaryAction(port.PrimaryActionType.None);
           port.setEndMatchConfirmed(true);
@@ -2618,7 +2824,9 @@ test(
       assert.equal(await count(page, "Play Again"), 0);
       await click(page, "Finished");
       assert.deepEqual(
-        await page.evaluate(() => window.harness.environment.calls),
+        await page.evaluate(
+          () => window.bottomControlsHarness.environment.calls,
+        ),
         [["end"]],
       );
     });
@@ -2634,7 +2842,7 @@ test(
       assert.equal(await count(page, "Cancel"), 0);
       await page.clock.runFor(3000);
       await page.evaluate(() =>
-        window.harness.respondAutomatch(0, {
+        window.bottomControlsHarness.respondAutomatch(0, {
           ok: true,
           mode: "pending",
           inviteId: "fresh",
@@ -2642,8 +2850,8 @@ test(
       );
       await page.clock.runFor(3000);
       await page.evaluate(() =>
-        window.harness.run(() =>
-          window.harness.port.setAutomatchWaitingState(true),
+        window.bottomControlsHarness.run(() =>
+          window.bottomControlsHarness.port.setAutomatchWaitingState(true),
         ),
       );
       await page.clock.runFor(3999);
@@ -2651,24 +2859,28 @@ test(
       await page.clock.runFor(1);
       assert.equal(await button(page, "Cancel").isDisabled(), false);
       await page.evaluate(() =>
-        window.harness.run(() =>
-          window.harness.port.setAutomatchWaitingState(false),
+        window.bottomControlsHarness.run(() =>
+          window.bottomControlsHarness.port.setAutomatchWaitingState(false),
         ),
       );
       assert.equal(await count(page, "Cancel"), 0);
       assert.equal(await button(page, "Automatch").isDisabled(), true);
       await click(page, "Navigation");
-      await page.evaluate(() => window.harness.publishPending("existing"));
+      await page.evaluate(() =>
+        window.bottomControlsHarness.publishPending("existing"),
+      );
       await click(page, "Open existing");
       assert.equal(await button(page, "Cancel").isDisabled(), false);
       await page.evaluate(() =>
-        window.harness.run(() =>
-          window.harness.port.setAutomatchWaitingState(true),
+        window.bottomControlsHarness.run(() =>
+          window.bottomControlsHarness.port.setAutomatchWaitingState(true),
         ),
       );
       assert.equal(await button(page, "Cancel").isDisabled(), false);
       assert.deepEqual(
-        await page.evaluate(() => window.harness.environment.calls),
+        await page.evaluate(
+          () => window.bottomControlsHarness.environment.calls,
+        ),
         [["connect", "existing"]],
       );
     });
@@ -2683,33 +2895,37 @@ test(
       await startAutomatch(page);
       await page.clock.runFor(3000);
       await page.evaluate(() =>
-        window.harness.respondAutomatch(
+        window.bottomControlsHarness.respondAutomatch(
           0,
           { ok: true, mode: "pending", inviteId: "fresh-after-reset" },
           false,
         ),
       );
-      await page.evaluate(() => window.harness.resetMatch());
+      await page.evaluate(() => window.bottomControlsHarness.resetMatch());
       await page.evaluate(() =>
-        window.harness.run(() =>
-          window.harness.applyDisposedControlsPreset(true),
+        window.bottomControlsHarness.run(() =>
+          window.bottomControlsHarness.applyDisposedControlsPreset(true),
         ),
       );
       assert.equal(
-        await page.evaluate(() => window.harness.counters().uiTimeouts),
+        await page.evaluate(
+          () => window.bottomControlsHarness.counters().uiTimeouts,
+        ),
         0,
       );
       assert.equal(await count(page, "Automatching"), 1);
       await click(page, "Navigation");
       assert.equal(await count(page, "Open fresh-after-reset"), 1);
       await page.evaluate(() =>
-        window.harness.run(() => {
-          window.harness.environment.route = {
+        window.bottomControlsHarness.run(() => {
+          window.bottomControlsHarness.environment.route = {
             mode: "invite",
             inviteId: "fresh-after-reset",
             path: "fresh-after-reset",
           };
-          window.harness.applyRouteControlsPreset("automatchTransition");
+          window.bottomControlsHarness.applyRouteControlsPreset(
+            "automatchTransition",
+          );
         }),
       );
       await page.clock.runFor(6999);
@@ -2717,7 +2933,9 @@ test(
       await page.clock.runFor(1);
       assert.equal(await button(page, "Cancel").isDisabled(), false);
       assert.equal(
-        await page.evaluate(() => window.harness.counters().uiTimeouts),
+        await page.evaluate(
+          () => window.bottomControlsHarness.counters().uiTimeouts,
+        ),
         0,
       );
     });
@@ -2732,7 +2950,7 @@ test(
       await startAutomatch(page);
       await page.clock.runFor(3000);
       await page.evaluate(() =>
-        window.harness.respondAutomatch(
+        window.bottomControlsHarness.respondAutomatch(
           0,
           { ok: true, mode: "pending", inviteId: "discarded-pending" },
           false,
@@ -2741,33 +2959,39 @@ test(
       await click(page, "Navigation");
       assert.equal(await count(page, "Open discarded-pending"), 1);
       await page.evaluate(() => {
-        window.harness.resetMatch();
-        window.harness.run(() => {
-          window.harness.applyDisposedControlsPreset(false);
-          window.harness.applyRouteControlsPreset("lobby");
+        window.bottomControlsHarness.resetMatch();
+        window.bottomControlsHarness.run(() => {
+          window.bottomControlsHarness.applyDisposedControlsPreset(false);
+          window.bottomControlsHarness.applyRouteControlsPreset("lobby");
         });
       });
       assert.equal(await button(page, "Automatch").isDisabled(), false);
       assert.equal(await count(page, "Cancel"), 0);
       assert.equal(
-        await page.evaluate(() => window.harness.counters().uiTimeouts),
+        await page.evaluate(
+          () => window.bottomControlsHarness.counters().uiTimeouts,
+        ),
         0,
       );
       await click(page, "Navigation");
       assert.equal(await count(page, "Open discarded-pending"), 0);
       await page.evaluate(() =>
-        window.harness.run(() => {
-          window.harness.environment.route = {
+        window.bottomControlsHarness.run(() => {
+          window.bottomControlsHarness.environment.route = {
             mode: "invite",
             inviteId: "discarded-pending",
             path: "discarded-pending",
           };
-          window.harness.applyRouteControlsPreset("automatchTransition");
+          window.bottomControlsHarness.applyRouteControlsPreset(
+            "automatchTransition",
+          );
         }),
       );
       assert.equal(await button(page, "Cancel").isDisabled(), false);
       assert.equal(
-        await page.evaluate(() => window.harness.counters().uiTimeouts),
+        await page.evaluate(
+          () => window.bottomControlsHarness.counters().uiTimeouts,
+        ),
         0,
       );
     });
@@ -2780,33 +3004,47 @@ test(
   async () => {
     await fixture(async (page) => {
       await page.evaluate(() =>
-        window.harness.run(() =>
-          window.harness.port.setAutomatchWaitingState(true),
+        window.bottomControlsHarness.run(() =>
+          window.bottomControlsHarness.port.setAutomatchWaitingState(true),
         ),
       );
       await click(page, "Cancel");
       assert.equal(await button(page, "Canceling").isDisabled(), true);
       assert.equal(await count(page, "Automatching"), 0);
-      await page.evaluate(() => window.harness.respondCancel(0, { ok: false }));
+      await page.evaluate(() =>
+        window.bottomControlsHarness.respondCancel(0, { ok: false }),
+      );
       assert.equal(await button(page, "Cancel").isDisabled(), false);
       await click(page, "Cancel");
-      await page.evaluate(() => window.harness.respondCancel(1, null, true));
+      await page.evaluate(() =>
+        window.bottomControlsHarness.respondCancel(1, null, true),
+      );
       assert.equal(await button(page, "Cancel").isDisabled(), false);
       await click(page, "Cancel");
-      await page.evaluate(() => window.harness.render("b"));
+      await page.evaluate(() => window.bottomControlsHarness.render("b"));
       assert.equal(await button(page, "Cancel").isDisabled(), false);
       await click(page, "Cancel");
-      await page.evaluate(() => window.harness.respondCancel(2, { ok: true }));
+      await page.evaluate(() =>
+        window.bottomControlsHarness.respondCancel(2, { ok: true }),
+      );
       assert.equal(await button(page, "Canceling").isDisabled(), true);
       assert.deepEqual(
-        await page.evaluate(() => window.harness.environment.calls),
+        await page.evaluate(
+          () => window.bottomControlsHarness.environment.calls,
+        ),
         [],
       );
-      await page.evaluate(() => window.harness.respondCancel(3, { ok: false }));
+      await page.evaluate(() =>
+        window.bottomControlsHarness.respondCancel(3, { ok: false }),
+      );
       await click(page, "Cancel");
-      await page.evaluate(() => window.harness.respondCancel(4, { ok: true }));
+      await page.evaluate(() =>
+        window.bottomControlsHarness.respondCancel(4, { ok: true }),
+      );
       assert.deepEqual(
-        await page.evaluate(() => window.harness.environment.calls),
+        await page.evaluate(
+          () => window.bottomControlsHarness.environment.calls,
+        ),
         [["dismiss"], ["transitionHome", { forceMatchScopeReset: true }]],
       );
     });
@@ -2820,8 +3058,12 @@ test(
     await fixture(async (page) => {
       await startAutomatch(page);
       await page.evaluate(() =>
-        window.harness.run(() =>
-          window.harness.port.showTimerButtonProgressing(0, 10, true),
+        window.bottomControlsHarness.run(() =>
+          window.bottomControlsHarness.port.showTimerButtonProgressing(
+            0,
+            10,
+            true,
+          ),
         ),
       );
       assert.equal(await button(page, "Timer").isDisabled(), true);
@@ -2829,7 +3071,7 @@ test(
       assert.equal(await button(page, "Timer").isDisabled(), true);
       assert.equal(await count(page, "Cancel"), 0);
       await page.evaluate(() =>
-        window.harness.run(() => {
+        window.bottomControlsHarness.run(() => {
           document.dispatchEvent(new Event("visibilitychange"));
           window.dispatchEvent(new Event("focus"));
           window.dispatchEvent(new Event("pageshow"));
@@ -2838,7 +3080,9 @@ test(
       assert.equal(await button(page, "Timer").isDisabled(), false);
       assert.equal(await button(page, "Cancel").isDisabled(), false);
       assert.equal(
-        await page.evaluate(() => window.harness.counters().uiTimeouts),
+        await page.evaluate(
+          () => window.bottomControlsHarness.counters().uiTimeouts,
+        ),
         0,
       );
     });
@@ -2852,23 +3096,31 @@ test(
     await fixture(async (page) => {
       assert.equal(
         await page.evaluate(
-          () => window.harness.environment.transientHandlers.size,
+          () => window.bottomControlsHarness.environment.transientHandlers.size,
         ),
         1,
       );
       await startAutomatch(page);
       await page.evaluate(() =>
-        window.harness.run(() =>
-          window.harness.port.showTimerButtonProgressing(0, 10, true),
+        window.bottomControlsHarness.run(() =>
+          window.bottomControlsHarness.port.showTimerButtonProgressing(
+            0,
+            10,
+            true,
+          ),
         ),
       );
       assert.equal(
-        await page.evaluate(() => window.harness.counters().uiTimeouts),
+        await page.evaluate(
+          () => window.bottomControlsHarness.counters().uiTimeouts,
+        ),
         2,
       );
-      await page.evaluate(() => window.harness.resetMatch());
+      await page.evaluate(() => window.bottomControlsHarness.resetMatch());
       assert.equal(
-        await page.evaluate(() => window.harness.counters().uiTimeouts),
+        await page.evaluate(
+          () => window.bottomControlsHarness.counters().uiTimeouts,
+        ),
         0,
       );
       await page.clock.runFor(10001);
@@ -2876,38 +3128,46 @@ test(
       assert.equal(await button(page, "Timer").isDisabled(), true);
       assert.equal(await count(page, "Cancel"), 0);
       await page.evaluate(() =>
-        window.harness.run(() => {
-          window.harness.port.setAutomatchWaitingState(false);
-          window.harness.port.hideTimerButtons();
+        window.bottomControlsHarness.run(() => {
+          window.bottomControlsHarness.port.setAutomatchWaitingState(false);
+          window.bottomControlsHarness.port.hideTimerButtons();
         }),
       );
       await startAutomatch(page);
       await page.evaluate(() =>
-        window.harness.run(() =>
-          window.harness.port.showTimerButtonProgressing(0, 10, true),
+        window.bottomControlsHarness.run(() =>
+          window.bottomControlsHarness.port.showTimerButtonProgressing(
+            0,
+            10,
+            true,
+          ),
         ),
       );
       assert.equal(
-        await page.evaluate(() => window.harness.counters().uiTimeouts),
+        await page.evaluate(
+          () => window.bottomControlsHarness.counters().uiTimeouts,
+        ),
         2,
       );
-      await page.evaluate(() => window.harness.dispose());
+      await page.evaluate(() => window.bottomControlsHarness.dispose());
       assert.equal(
-        await page.evaluate(() => window.harness.counters().uiTimeouts),
+        await page.evaluate(
+          () => window.bottomControlsHarness.counters().uiTimeouts,
+        ),
         0,
       );
       assert.equal(
         await page.evaluate(
-          () => window.harness.environment.transientHandlers.size,
+          () => window.bottomControlsHarness.environment.transientHandlers.size,
         ),
         0,
       );
       await page.evaluate(() =>
-        window.harness.respondAutomatch(1, { ok: false }, false),
+        window.bottomControlsHarness.respondAutomatch(1, { ok: false }, false),
       );
       await page.clock.runFor(10001);
       const unmountedUpdates = await page.evaluate(() => {
-        const { port, controlsStore, run } = window.harness;
+        const { port, controlsStore, run } = window.bottomControlsHarness;
         const snapshot = controlsStore.getGameControlsSnapshot();
         const before = structuredClone(snapshot);
         let notifications = 0;
@@ -2951,7 +3211,9 @@ test(
       assert.deepEqual(unmountedUpdates.after, unmountedUpdates.before);
       assert.equal(await page.locator("#root").textContent(), "");
       assert.deepEqual(
-        await page.evaluate(() => window.harness.environment.calls),
+        await page.evaluate(
+          () => window.bottomControlsHarness.environment.calls,
+        ),
         [],
       );
     });
@@ -2965,12 +3227,16 @@ test(
     await fixture(async (page) => {
       const result = await page.evaluate(() => {
         const { run, controlsStore, applyGameplayControlsPreset, port } =
-          window.harness;
+          window.bottomControlsHarness;
+        /** @type {ReturnType<typeof controlsStore.getGameControlsSnapshot>[]} */
         const observed = [];
         const unsubscribe = controlsStore.subscribeGameControls(() => {
           observed.push(controlsStore.getGameControlsSnapshot());
         });
+        /** @type {ReturnType<typeof controlsStore.getGameControlsSnapshot> | undefined} */
         let intermediate;
+        /** @returns {ReturnType<typeof controlsStore.getGameControlsSnapshot> | undefined} */
+        const readIntermediate = () => intermediate;
         let notificationsInside;
         let returned;
         try {
@@ -2996,7 +3262,7 @@ test(
           );
           return {
             notificationsInside,
-            intermediate,
+            intermediate: readIntermediate(),
             observed,
             final: controlsStore.getGameControlsSnapshot(),
             returnedFinal: returned === controlsStore.getGameControlsSnapshot(),
@@ -3006,9 +3272,12 @@ test(
         }
       });
       assert.equal(result.notificationsInside, 0);
-      assert.equal(result.intermediate.context.sessionId, 2);
-      assert.equal(result.intermediate.context.puzzleMode, true);
-      assert.equal(result.intermediate.presentation.homeVisible, true);
+      assert.equal(required(result.intermediate).context.sessionId, 2);
+      assert.equal(required(result.intermediate).context.puzzleMode, true);
+      assert.equal(
+        required(result.intermediate).presentation.homeVisible,
+        true,
+      );
       assert.equal(result.returnedFinal, true);
       assert.deepEqual(result.observed, [result.final]);
       assert.equal(
@@ -3027,16 +3296,16 @@ test(
   async () => {
     await fixture(async (page) => {
       await page.evaluate(() =>
-        window.harness.run(() => {
-          window.harness.port.showPrimaryAction(
-            window.harness.port.PrimaryActionType.Rematch,
+        window.bottomControlsHarness.run(() => {
+          window.bottomControlsHarness.port.showPrimaryAction(
+            window.bottomControlsHarness.port.PrimaryActionType.Rematch,
           );
         }),
       );
       assert.equal(await count(page, "Play Again"), 1);
       await page.evaluate(() =>
-        window.harness.run(() => {
-          window.harness.controlsStore.updateGameControlsContext({
+        window.bottomControlsHarness.run(() => {
+          window.bottomControlsHarness.controlsStore.updateGameControlsContext({
             puzzleMode: true,
             selectedPuzzleId: "test-puzzle",
           });
@@ -3045,8 +3314,8 @@ test(
       assert.equal(await count(page, "Play Again"), 0);
       assert.equal(await count(page, "Next Lesson"), 1);
       await page.evaluate(() =>
-        window.harness.run(() => {
-          window.harness.controlsStore.updateGameControlsContext({
+        window.bottomControlsHarness.run(() => {
+          window.bottomControlsHarness.controlsStore.updateGameControlsContext({
             puzzleMode: false,
             selectedPuzzleId: null,
           });
@@ -3064,8 +3333,8 @@ test(
   async () => {
     await fixture(async (page) => {
       await page.evaluate(() =>
-        window.harness.run(() => {
-          const { port, controlsStore } = window.harness;
+        window.bottomControlsHarness.run(() => {
+          const { port, controlsStore } = window.bottomControlsHarness;
           controlsStore.updateGameControlsContext({
             puzzleMode: true,
             selectedPuzzleId: "test-puzzle",
@@ -3078,18 +3347,18 @@ test(
       );
       await click(page, "Resign");
       assert.equal((await popupState(page)).bottom, true);
-      await page.evaluate(() => window.harness.render());
+      await page.evaluate(() => window.bottomControlsHarness.render());
       assert.equal(await count(page, "Next Lesson"), 1);
       assert.equal(await count(page, "Finished"), 1);
       assert.equal((await popupState(page)).bottom, true);
-      await page.evaluate(() => window.harness.remount());
+      await page.evaluate(() => window.bottomControlsHarness.remount());
       assert.equal(await count(page, "Next Lesson"), 0);
       assert.equal(await count(page, "Finished"), 0);
       assert.equal((await popupState(page)).bottom, false);
       assert.deepEqual(
         await page.evaluate(() => {
           const { context, presentation } =
-            window.harness.controlsStore.getGameControlsSnapshot();
+            window.bottomControlsHarness.controlsStore.getGameControlsSnapshot();
           return {
             puzzleMode: context.puzzleMode,
             selectedPuzzleId: context.selectedPuzzleId,
@@ -3121,10 +3390,12 @@ test(
       assert.equal(await button(page, "Voice Reaction").isDisabled(), false);
       await click(page, "Voice Reaction");
       await click(page, "yo");
-      await page.evaluate(() => window.harness.resetMatch());
+      await page.evaluate(() => window.bottomControlsHarness.resetMatch());
       assert.equal(await button(page, "Voice Reaction").isDisabled(), false);
       assert.equal(
-        await page.evaluate(() => window.harness.counters().uiTimeouts),
+        await page.evaluate(
+          () => window.bottomControlsHarness.counters().uiTimeouts,
+        ),
         0,
       );
       await page.clock.runFor(9999);
@@ -3133,7 +3404,7 @@ test(
   },
 );
 
-for (const isGameWithBot of [false, true]) {
+for (const isGameWithBot of /** @type {const} */ ([false, true])) {
   test(
     `${isGameWithBot ? "bot reply" : "reaction cooldown"} timers clear on unmount`,
     { timeout: 60000 },
@@ -3141,21 +3412,27 @@ for (const isGameWithBot of [false, true]) {
       await fixture(async (page) => {
         await showPopupControls(page);
         await page.evaluate((isGameWithBot) => {
-          window.harness.run(() =>
-            window.harness.controlsStore.updateGameControlsContext({
-              isGameWithBot,
-            }),
+          window.bottomControlsHarness.run(() =>
+            window.bottomControlsHarness.controlsStore.updateGameControlsContext(
+              {
+                isGameWithBot,
+              },
+            ),
           );
         }, isGameWithBot);
         await click(page, "Voice Reaction");
         await click(page, "yo");
         assert.equal(
-          await page.evaluate(() => window.harness.counters().uiTimeouts),
+          await page.evaluate(
+            () => window.bottomControlsHarness.counters().uiTimeouts,
+          ),
           1,
         );
-        await page.evaluate(() => window.harness.dispose());
+        await page.evaluate(() => window.bottomControlsHarness.dispose());
         assert.equal(
-          await page.evaluate(() => window.harness.counters().uiTimeouts),
+          await page.evaluate(
+            () => window.bottomControlsHarness.counters().uiTimeouts,
+          ),
           0,
         );
         await page.clock.runFor(9999);
@@ -3170,22 +3447,25 @@ test(
   async () => {
     await fixture(async (page) => {
       await page.evaluate(() =>
-        window.harness.run(() =>
-          window.harness.port.showVoiceReactionButton(true),
+        window.bottomControlsHarness.run(() =>
+          window.bottomControlsHarness.port.showVoiceReactionButton(true),
         ),
       );
       await click(page, "Voice Reaction");
-      await button(page, "yo").evaluate((element) =>
-        window.harness.run(() => {
-          window.harness.controlsStore.updateGameControlsContext({
-            isGameWithBot: true,
-          });
-          element.click();
-        }),
+      await button(page, "yo").evaluate(
+        /** @param {HTMLButtonElement} element */ (element) =>
+          window.bottomControlsHarness.run(() => {
+            window.bottomControlsHarness.controlsStore.updateGameControlsContext(
+              {
+                isGameWithBot: true,
+              },
+            );
+            element.click();
+          }),
       );
       assert.deepEqual(
         await page.evaluate(() =>
-          window.harness.environment.calls.filter(
+          window.bottomControlsHarness.environment.calls.filter(
             ([name]) => name === "reaction",
           ),
         ),
@@ -3193,18 +3473,21 @@ test(
       );
       await page.clock.runFor(2000);
       await click(page, "Voice Reaction");
-      await button(page, "yo").evaluate((element) =>
-        window.harness.run(() => {
-          window.harness.controlsStore.updateGameControlsContext({
-            isGameWithBot: false,
-            puzzleMode: true,
-          });
-          element.click();
-        }),
+      await button(page, "yo").evaluate(
+        /** @param {HTMLButtonElement} element */ (element) =>
+          window.bottomControlsHarness.run(() => {
+            window.bottomControlsHarness.controlsStore.updateGameControlsContext(
+              {
+                isGameWithBot: false,
+                puzzleMode: true,
+              },
+            );
+            element.click();
+          }),
       );
       assert.deepEqual(
         await page.evaluate(() =>
-          window.harness.environment.calls.filter(
+          window.bottomControlsHarness.environment.calls.filter(
             ([name]) => name === "reaction",
           ),
         ),
@@ -3219,7 +3502,7 @@ test(
   { timeout: 60000 },
   async () => {
     await fixture(async (page) => {
-      for (const preset of [
+      for (const preset of /** @type {const} */ ([
         "lobby",
         "watch",
         "snapshot",
@@ -3230,7 +3513,7 @@ test(
         "puzzle",
         false,
         true,
-      ]) {
+      ])) {
         const result = await page.evaluate((preset) => {
           const {
             run,
@@ -3239,12 +3522,14 @@ test(
             applyRouteControlsPreset,
             applyDisposedControlsPreset,
             applyGameplayControlsPreset,
-          } = window.harness;
+          } = window.bottomControlsHarness;
           const applyPreset = () => {
             if (typeof preset === "boolean") {
               applyDisposedControlsPreset(preset);
             } else if (
-              ["localMatch", "automatchRequest", "puzzle"].includes(preset)
+              preset === "localMatch" ||
+              preset === "automatchRequest" ||
+              preset === "puzzle"
             ) {
               applyGameplayControlsPreset(preset);
             } else {
@@ -3262,6 +3547,7 @@ test(
             }
           });
           const before = controlsStore.getGameControlsSnapshot();
+          /** @type {ReturnType<typeof controlsStore.getGameControlsSnapshot>[]} */
           const observed = [];
           const unsubscribe = controlsStore.subscribeGameControls(() => {
             observed.push(controlsStore.getGameControlsSnapshot());
@@ -3308,13 +3594,15 @@ test(
     await fixture(async (page) => {
       for (let attempt = 0; attempt < 2; attempt += 1) {
         await page.evaluate(() =>
-          window.harness.run(() => window.harness.port.toggleReactionPicker()),
+          window.bottomControlsHarness.run(() =>
+            window.bottomControlsHarness.port.toggleReactionPicker(),
+          ),
         );
         assert.equal(await count(page, "yo"), 1);
         assert.equal(await count(page, "Voice Reaction"), 0);
         await page.evaluate(() =>
-          window.harness.run(() =>
-            window.harness.applyDisposedControlsPreset(false),
+          window.bottomControlsHarness.run(() =>
+            window.bottomControlsHarness.applyDisposedControlsPreset(false),
           ),
         );
         assert.equal(await count(page, "yo"), 0);
@@ -3330,7 +3618,7 @@ test(
     await fixture(async (page) => {
       const retained = await page.evaluate(() => {
         const { run, port, controlsStore, applyRouteControlsPreset } =
-          window.harness;
+          window.bottomControlsHarness;
         run(() => port.showTimerButtonProgressing(0, 10, true));
         const config =
           controlsStore.getGameControlsSnapshot().presentation.gameControls
@@ -3345,39 +3633,52 @@ test(
       assert.equal(retained, true);
       assert.equal(await button(page, "Timer").isDisabled(), true);
       assert.equal(
-        await page.evaluate(() => window.harness.counters().uiTimeouts),
+        await page.evaluate(
+          () => window.bottomControlsHarness.counters().uiTimeouts,
+        ),
         1,
       );
       await page.evaluate(() =>
-        window.harness.run(() =>
-          window.harness.applyDisposedControlsPreset(false),
+        window.bottomControlsHarness.run(() =>
+          window.bottomControlsHarness.applyDisposedControlsPreset(false),
         ),
       );
       assert.equal(await count(page, "Timer"), 0);
       assert.equal(
         await page.evaluate(
           () =>
-            window.harness.controlsStore.getGameControlsSnapshot().presentation
-              .gameControls.timer.config === window.savedTimerConfig,
+            window.bottomControlsHarness.controlsStore.getGameControlsSnapshot()
+              .presentation.gameControls.timer.config ===
+            window.savedTimerConfig,
         ),
         true,
       );
       assert.equal(
-        await page.evaluate(() => window.harness.counters().uiTimeouts),
+        await page.evaluate(
+          () => window.bottomControlsHarness.counters().uiTimeouts,
+        ),
         0,
       );
       await page.evaluate(() =>
-        window.harness.run(() =>
-          window.harness.port.showTimerButtonProgressing(0, 30, false),
+        window.bottomControlsHarness.run(() =>
+          window.bottomControlsHarness.port.showTimerButtonProgressing(
+            0,
+            30,
+            false,
+          ),
         ),
       );
       await page.clock.runFor(10001);
       await page.evaluate(() =>
-        window.harness.run(() => window.dispatchEvent(new Event("focus"))),
+        window.bottomControlsHarness.run(() =>
+          window.dispatchEvent(new Event("focus")),
+        ),
       );
       assert.equal(await button(page, "Timer").isDisabled(), true);
       assert.equal(
-        await page.evaluate(() => window.harness.counters().uiTimeouts),
+        await page.evaluate(
+          () => window.bottomControlsHarness.counters().uiTimeouts,
+        ),
         0,
       );
     });
@@ -3395,7 +3696,7 @@ test(
           port,
           applyDisposedControlsPreset,
           applyGameplayControlsPreset,
-        } = window.harness;
+        } = window.bottomControlsHarness;
         run(() => {
           applyDisposedControlsPreset(false);
           port.setAutomoveActionEnabled(false);
@@ -3405,19 +3706,23 @@ test(
       });
       assert.equal(await button(page, "Undo").isDisabled(), true);
       assert.equal(await button(page, "Bot").isDisabled(), false);
-      for (const name of ["Move History", "Resign", "End Match"]) {
+      for (const name of /** @type {const} */ ([
+        "Move History",
+        "Resign",
+        "End Match",
+      ])) {
         assert.equal(await count(page, name), 1);
       }
-      for (const name of [
+      for (const name of /** @type {const} */ ([
         "Automatch",
         "Bot Game",
         "New Link Game",
         "Voice Reaction",
-      ]) {
+      ])) {
         assert.equal(await count(page, name), 0);
       }
 
-      for (const waiting of [false, true]) {
+      for (const waiting of /** @type {const} */ ([false, true])) {
         const retained = await page.evaluate((waiting) => {
           const {
             run,
@@ -3425,7 +3730,7 @@ test(
             controlsStore,
             applyDisposedControlsPreset,
             applyGameplayControlsPreset,
-          } = window.harness;
+          } = window.bottomControlsHarness;
           run(() => {
             applyDisposedControlsPreset(false);
             port.setAutomatchVisible(true);
@@ -3439,7 +3744,7 @@ test(
             port.showResignButton();
           });
           const before = controlsStore.getGameControlsSnapshot().presentation;
-          const timeouts = window.harness.counters().uiTimeouts;
+          const timeouts = window.bottomControlsHarness.counters().uiTimeouts;
           run(() => applyGameplayControlsPreset("automatchRequest"));
           const after = controlsStore.getGameControlsSnapshot().presentation;
           return {
@@ -3450,7 +3755,7 @@ test(
               before.gameControls.resignVisible ===
               after.gameControls.resignVisible,
             deadlineUnchanged:
-              timeouts === window.harness.counters().uiTimeouts,
+              timeouts === window.bottomControlsHarness.counters().uiTimeouts,
           };
         }, waiting);
         assert.deepEqual(retained, {
@@ -3471,7 +3776,7 @@ test(
         assert.equal(await count(page, "Move History"), 0);
       }
 
-      for (const visible of [false, true]) {
+      for (const visible of /** @type {const} */ ([false, true])) {
         const retained = await page.evaluate((visible) => {
           const {
             run,
@@ -3479,7 +3784,7 @@ test(
             controlsStore,
             applyDisposedControlsPreset,
             applyGameplayControlsPreset,
-          } = window.harness;
+          } = window.bottomControlsHarness;
           run(() => {
             applyDisposedControlsPreset(false);
             port.showTimerButtonProgressing(0, 10, false);
@@ -3528,7 +3833,7 @@ test(
   { timeout: 60000 },
   async () => {
     await fixture(async (page) => {
-      for (const preset of [
+      for (const preset of /** @type {const} */ ([
         "watch",
         "snapshot",
         false,
@@ -3536,11 +3841,11 @@ test(
         "localMatch",
         "automatchRequest",
         "puzzle",
-      ]) {
+      ])) {
         await page.evaluate(() =>
-          window.harness.run(() => {
-            window.harness.applyDisposedControlsPreset(false);
-            window.harness.applyRouteControlsPreset("lobby");
+          window.bottomControlsHarness.run(() => {
+            window.bottomControlsHarness.applyDisposedControlsPreset(false);
+            window.bottomControlsHarness.applyRouteControlsPreset("lobby");
           }),
         );
         await click(page, "New Link Game");
@@ -3548,29 +3853,37 @@ test(
         const hideInvite = () =>
           page.evaluate(
             (preset) =>
-              window.harness.run(() => {
+              window.bottomControlsHarness.run(() => {
                 if (typeof preset === "boolean") {
-                  window.harness.applyDisposedControlsPreset(preset);
+                  window.bottomControlsHarness.applyDisposedControlsPreset(
+                    preset,
+                  );
                 } else if (
-                  ["localMatch", "automatchRequest", "puzzle"].includes(preset)
+                  preset === "localMatch" ||
+                  preset === "automatchRequest" ||
+                  preset === "puzzle"
                 ) {
-                  window.harness.applyGameplayControlsPreset(preset);
+                  window.bottomControlsHarness.applyGameplayControlsPreset(
+                    preset,
+                  );
                 } else {
-                  window.harness.applyRouteControlsPreset(preset);
+                  window.bottomControlsHarness.applyRouteControlsPreset(preset);
                 }
               }),
             preset,
           );
         const openLobby = () =>
           page.evaluate(() =>
-            window.harness.run(() =>
-              window.harness.applyRouteControlsPreset("lobby"),
+            window.bottomControlsHarness.run(() =>
+              window.bottomControlsHarness.applyRouteControlsPreset("lobby"),
             ),
           );
         const completeInvite = () =>
           page.evaluate(() =>
-            window.harness.run(() =>
-              window.harness.environment.inviteRequests.at(-1)(true),
+            window.bottomControlsHarness.run(() =>
+              window.bottomControlsHarness.required(
+                window.bottomControlsHarness.environment.inviteRequests.at(-1),
+              )(true),
             ),
           );
         await hideInvite();
@@ -3586,7 +3899,7 @@ test(
         assert.equal(
           await page.evaluate(
             () =>
-              window.harness.controlsStore.getGameControlsSnapshot()
+              window.bottomControlsHarness.controlsStore.getGameControlsSnapshot()
                 .presentation.inviteReadyToCopy,
           ),
           false,
@@ -3616,7 +3929,7 @@ test(
               applyRouteControlsPreset,
               applyDisposedControlsPreset,
               applyGameplayControlsPreset,
-            } = window.harness;
+            } = window.bottomControlsHarness;
             const before = controlsStore.getGameControlsSnapshot();
             let notifications = 0;
             const unsubscribe = controlsStore.subscribeGameControls(() => {
@@ -3624,22 +3937,22 @@ test(
             });
             try {
               run(() => {
-                for (const preset of [
+                for (const preset of /** @type {const} */ ([
                   "lobby",
                   "watch",
                   "snapshot",
                   "invite",
                   "automatchTransition",
-                ]) {
+                ])) {
                   applyRouteControlsPreset(preset);
                 }
                 applyDisposedControlsPreset(false);
                 applyDisposedControlsPreset(true);
-                for (const preset of [
+                for (const preset of /** @type {const} */ ([
                   "localMatch",
                   "automatchRequest",
                   "puzzle",
-                ]) {
+                ])) {
                   applyGameplayControlsPreset(preset);
                 }
               });
@@ -3656,13 +3969,13 @@ test(
           notifications: 0,
         });
         await page.evaluate(() => {
-          window.harness.render();
-          window.harness.run(() =>
-            window.harness.applyRouteControlsPreset("lobby"),
+          window.bottomControlsHarness.render();
+          window.bottomControlsHarness.run(() =>
+            window.bottomControlsHarness.applyRouteControlsPreset("lobby"),
           );
         });
         assert.equal(await count(page, "New Link Game"), 1);
-        await page.evaluate(() => window.harness.dispose());
+        await page.evaluate(() => window.bottomControlsHarness.dispose());
         assert.deepEqual(await checkUnboundPresets(), {
           unchanged: true,
           notifications: 0,
@@ -3680,29 +3993,31 @@ test(
   async () => {
     await fixture(async (page) => {
       await page.evaluate(() =>
-        window.harness.run(() =>
-          window.harness.port.setInviteLinkActionVisible(true),
+        window.bottomControlsHarness.run(() =>
+          window.bottomControlsHarness.port.setInviteLinkActionVisible(true),
         ),
       );
       await click(page, "New Link Game");
       assert.equal(await count(page, "Creating a Link..."), 1);
-      await page.evaluate(() => window.harness.remount());
+      await page.evaluate(() => window.bottomControlsHarness.remount());
       await page.evaluate(() =>
-        window.harness.run(() =>
-          window.harness.environment.inviteRequests[0](true),
+        window.bottomControlsHarness.run(() =>
+          window.bottomControlsHarness.required(
+            window.bottomControlsHarness.environment.inviteRequests[0],
+          )(true),
         ),
       );
       assert.equal(
         await page.evaluate(
           () =>
-            window.harness.controlsStore.getGameControlsSnapshot().presentation
-              .inviteReadyToCopy,
+            window.bottomControlsHarness.controlsStore.getGameControlsSnapshot()
+              .presentation.inviteReadyToCopy,
         ),
         false,
       );
       await page.evaluate(() =>
-        window.harness.run(() =>
-          window.harness.port.setInviteLinkActionVisible(true),
+        window.bottomControlsHarness.run(() =>
+          window.bottomControlsHarness.port.setInviteLinkActionVisible(true),
         ),
       );
       assert.equal(await count(page, "New Link Game"), 1);

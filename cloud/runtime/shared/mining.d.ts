@@ -24,8 +24,8 @@ export type MineRockResponse =
       reason: MineRockFailureReason;
     };
 export interface WagerProposalLike {
-  material?: string | null;
-  count?: unknown;
+  material: MiningMaterialName;
+  count: number;
 }
 export interface AcceptedMaterialReservation {
   acceptedCount: number;
@@ -42,14 +42,15 @@ declare const MINE_ROCK_FAILURE_REASONS: readonly [
 ];
 declare const createEmptyMaterials: () => MiningMaterials;
 declare const cloneMaterials: (source: MiningMaterials) => MiningMaterials;
-declare const normalizeMaterials: (source?: unknown) => MiningMaterials;
 declare const sumMaterials: (
   left: MiningMaterials,
   right: MiningMaterials,
 ) => MiningMaterials;
-declare const normalizeMiningSnapshot: (source?: unknown) => MiningSnapshot;
 declare const isMiningMaterials: (value: unknown) => value is MiningMaterials;
 declare const isMiningSnapshot: (value: unknown) => value is MiningSnapshot;
+declare const parseMiningMaterials: (value: unknown) => MiningMaterials | null;
+declare const parseMiningSnapshot: (value: unknown) => MiningSnapshot | null;
+declare const createEmptyMiningSnapshot: () => MiningSnapshot;
 declare const isMineRockResponse: (value: unknown) => value is MineRockResponse;
 declare const formatMiningDateLocal: (date: Date) => string;
 declare const formatMiningDateUtc: (date: Date) => string;
@@ -60,7 +61,7 @@ declare const createMiningSeededRandom: (
 declare const pickWeightedMaterial: (
   random: () => number,
 ) => MiningMaterialName;
-declare const isFirstMiningEvent: (source?: unknown) => boolean;
+declare const isFirstMiningEvent: (source: MiningSnapshot) => boolean;
 declare const createFirstRockDrops: () => MiningDrops;
 declare const createDropsFromRandom: (random: () => number) => MiningDrops;
 declare const createDeterministicDrops: (
@@ -70,18 +71,17 @@ declare const createDeterministicDrops: (
 declare const createDropsForMiningEvent: (
   profileId: string,
   date: string,
-  miningSnapshot?: unknown,
+  miningSnapshot: MiningSnapshot,
 ) => MiningDrops;
 declare const isMaterialName: (value: unknown) => value is MiningMaterialName;
-declare const normalizeCount: (value: unknown) => number;
 declare const applyMaterialDeltas: (
-  source?: unknown,
-  deltas?: unknown,
+  source: MiningMaterials,
+  deltas?: Partial<MiningMaterials> | null,
 ) => MiningMaterials;
 declare const applyMaterialDeltasWithCap: (
-  source: unknown,
-  deltas: unknown,
-  totalMaterials?: unknown,
+  source: MiningMaterials,
+  deltas: Partial<MiningMaterials> | null | undefined,
+  totalMaterials?: MiningMaterials,
 ) => MiningMaterials;
 declare const computeAvailableCount: (
   total: Partial<Record<string, number>> | null | undefined,
@@ -93,11 +93,11 @@ declare const computeAvailableMaterials: (
   frozen: MiningMaterials,
 ) => MiningMaterials;
 declare const computeAcceptedReservation: (
-  current: unknown,
-  material: string,
+  current: MiningMaterials,
+  material: MiningMaterialName,
   proposedCount: number,
   ownProposal: WagerProposalLike | null | undefined,
-  totalMaterials: unknown,
+  totalMaterials: MiningMaterials,
 ) => AcceptedMaterialReservation;
 export {
   MATERIAL_KEYS,
@@ -105,9 +105,10 @@ export {
   MINE_ROCK_FAILURE_REASONS,
   createEmptyMaterials,
   cloneMaterials,
-  normalizeMaterials,
   sumMaterials,
-  normalizeMiningSnapshot,
+  createEmptyMiningSnapshot,
+  parseMiningMaterials,
+  parseMiningSnapshot,
   isMiningMaterials,
   isMiningSnapshot,
   isMineRockResponse,
@@ -121,7 +122,6 @@ export {
   createDeterministicDrops,
   createDropsForMiningEvent,
   isMaterialName,
-  normalizeCount,
   applyMaterialDeltas,
   applyMaterialDeltasWithCap,
   computeAvailableCount,

@@ -3,7 +3,6 @@ import {
   eventState,
   eventParticipantEntries,
   eventParticipantState,
-  eventParticipantProjectionState,
 } from "./documents.js";
 
 import "@mons/shared/navigation";
@@ -87,26 +86,16 @@ const getListSortAtMs = (eventData: EventData, status: string) => {
 
 const buildPreviewParticipants = (
   participants: EventParticipants | null | undefined,
-) => {
-  return eventParticipantEntries(participants)
-    .map(([, value]) => value)
-    .filter((participant) => participant && typeof participant === "object")
-    .sort((left, right) => {
-      const leftJoined = eventParticipantState(left).joinedAtMs ?? 0;
-      const rightJoined = eventParticipantState(right).joinedAtMs ?? 0;
-      return leftJoined - rightJoined;
-    })
+) =>
+  eventParticipantEntries(participants)
+    .map(([, participant]) => participant)
+    .sort((left, right) => left.joinedAtMs - right.joinedAtMs)
     .map((participant) => ({
-      profileId: normalizeString(eventParticipantState(participant).profileId),
-      displayName: normalizeString(
-        eventParticipantState(participant).displayName,
-      ),
-      emojiId: normalizeFiniteNumberOrNull(
-        eventParticipantProjectionState(participant).emojiId,
-      ),
-      aura: normalizeString(eventParticipantState(participant).aura),
+      profileId: participant.profileId,
+      displayName: participant.displayName,
+      emojiId: participant.emojiId,
+      aura: participant.aura,
     }));
-};
 
 const getOwnerProfileIds = (
   participants: EventParticipants | null | undefined,

@@ -44,16 +44,20 @@
   "telegramTasks": [
     {
       "payload": {
+        "schemaVersion": 1,
+        "dataEpoch": 1,
         "messageKey": "event:event-é:upcoming",
         "revision": "revision-1",
         "taskKind": "desired",
         "retrySequence": 0,
         "generation": "event-a-1"
       },
-      "taskId": "tg_9bb9d6c56c96ff0ab3333b736c9a5c5c8b0db3dd"
+      "taskId": "data1_tg_9bb9d6c56c96ff0ab3333b736c9a5c5c8b0db3dd"
     },
     {
       "payload": {
+        "schemaVersion": 1,
+        "dataEpoch": 1,
         "messageKey": "event:event-é:upcoming",
         "revision": "revision-1",
         "taskKind": "rate-limit-proof",
@@ -67,7 +71,7 @@
         "apiGateReclaimOwner": "gate-1",
         "apiGateSettleOwner": "gate-2"
       },
-      "taskId": "tg_4e15483394055a5c64cca61a64ff5ab164910523"
+      "taskId": "data1_tg_4e15483394055a5c64cca61a64ff5ab164910523"
     }
   ]
 }

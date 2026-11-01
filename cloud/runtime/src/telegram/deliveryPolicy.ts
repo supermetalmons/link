@@ -7,22 +7,6 @@ import type {
 const TELEGRAM_SAFE_RETRY_WINDOW_MS = 10 * 60 * 1000;
 const TELEGRAM_SAFE_RETRY_MAX_DELAY_MS = 60_000;
 
-const asObject = (value: unknown): Record<string, unknown> =>
-  value && typeof value === "object" && !Array.isArray(value)
-    ? (value as Record<string, unknown>)
-    : {};
-
-const omitKeys = (
-  value: unknown,
-  keys: readonly string[],
-): Record<string, unknown> => {
-  const output = { ...asObject(value) };
-  for (const key of keys) {
-    delete output[key];
-  }
-  return output;
-};
-
 const normalizeString = (value: unknown): string =>
   typeof value === "string" && value.trim() !== "" ? value.trim() : "";
 
@@ -66,8 +50,9 @@ const normalizeRetrySequence = (value: unknown) =>
     ? value
     : 0;
 
-const resolveRetryDeadlineAtMs = (value: unknown) => {
-  const state = asObject(value);
+const resolveRetryDeadlineAtMs = (
+  state: Partial<TelegramRetryState> & { apiGateStartedAtMs?: number },
+) => {
   const retryDeadlineAtMs = normalizeTimestamp(state.retryDeadlineAtMs);
   if (retryDeadlineAtMs) {
     return retryDeadlineAtMs;
@@ -83,11 +68,11 @@ const buildSafeRetryState = ({
   result,
   nowMs,
 }: {
-  current: unknown;
+  current: Partial<TelegramRetryState> & { apiGateStartedAtMs?: number };
   result?: TelegramRetryFailure | null;
   nowMs: number;
 }): TelegramRetryState => {
-  const value = asObject(current);
+  const value = current;
   const retryStartedAtMs =
     normalizeTimestamp(value.retryStartedAtMs) ||
     normalizeTimestamp(value.apiGateStartedAtMs) ||
@@ -136,13 +121,19 @@ const buildRateLimitBarrierAtMs = ({
   );
 };
 
-const omitRetryState = (value: unknown) =>
-  omitKeys(value, [
+const omitRetryState = <T extends object>(
+  value: T,
+): Omit<T, keyof TelegramRetryState> => {
+  const output = { ...value };
+  for (const key of [
     "retryStartedAtMs",
     "retryDeadlineAtMs",
     "retryAtMs",
     "retrySequence",
-  ]);
+  ])
+    Reflect.deleteProperty(output, key);
+  return output;
+};
 
 const buildErrorState = (
   result: TelegramRetryFailure | null | undefined,

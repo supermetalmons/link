@@ -11,11 +11,11 @@ export async function readRatingCompletion(
     const row = await db
       .prepare(
         `SELECT EXISTS (
-            SELECT 1 FROM rating_updates
+            SELECT 1 FROM rating_updates_canonical
             WHERE operation_id = ? AND invite_id = ? AND match_id = ?
               AND status = 'done'
           ) OR EXISTS (
-            SELECT 1 FROM legacy_rating_completions
+            SELECT 1 FROM rating_completions_canonical
             WHERE invite_id = ? AND match_id = ?
           ) AS completed`,
       )
@@ -47,11 +47,11 @@ export async function readRatingLeaseSnapshot(
     row = await db
       .prepare(
         `SELECT rating.*, EXISTS (
-           SELECT 1 FROM legacy_rating_completions
+           SELECT 1 FROM rating_completions_canonical
            WHERE invite_id = ? AND match_id = ?
          ) AS legacy_completed
          FROM (SELECT ? AS operation_id) requested
-         LEFT JOIN rating_updates rating
+         LEFT JOIN rating_updates_canonical rating
            ON rating.operation_id = requested.operation_id`,
       )
       .bind(inviteId, matchId, `${inviteId}__${matchId}`)

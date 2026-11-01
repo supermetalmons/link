@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { decodeAutomatchEntry } from "../../../runtime/automatchRecords.js";
+import { canonicalAutomatchFixture } from "./automatchRecordFixture.ts";
 import { AuthApiFailure } from "../src/authErrors.ts";
 import { selectAutomatchAttempt } from "../src/automatch/selection.ts";
 import type { GameplayProfile } from "../src/gameplayRepository.ts";
@@ -12,7 +12,7 @@ import type {
 const requesterUid = "requester-uid";
 const hostUid = "host-uid";
 const profile: GameplayProfile = {
-  aura: "blue",
+  aura: "rainbow",
   emoji: 7,
   eth: "",
   profileId: "requester-profile",
@@ -67,17 +67,17 @@ function queueFixture(
   inviteId = "auto-selected",
   fields: Record<string, unknown> = {},
 ) {
-  const entry = decodeAutomatchEntry({
+  const entry = canonicalAutomatchFixture("automatch", {
     uid,
     timestamp: 100,
     hostColor: "white",
     password: "original-password",
     ...fields,
   });
-  assert.ok(entry.record);
+  assert.ok(entry);
   return {
     head: { [inviteId]: entry },
-    queued: { inviteId, data: entry.record },
+    queued: { inviteId, data: entry },
   };
 }
 
@@ -91,7 +91,7 @@ function fixture(
     request: {
       operationId: "00000000-0000-4000-8000-000000000001",
       emojiId: 0,
-      aura: "request-aura",
+      aura: "rainbow",
     },
     requester: { loginUids: [requesterUid], profile },
     signal: new AbortController().signal,
@@ -130,10 +130,10 @@ test("an empty queue creates pending selection with the requester fallback", asy
   if (selection.kind !== "create-pending") assert.fail("expected-pending");
   assert.equal(selection.profile.profileId, "");
   assert.equal(selection.profile.emoji, 0);
-  assert.equal(selection.profile.aura, "request-aura");
+  assert.equal(selection.profile.aura, "rainbow");
   assert.deepEqual(selection.display, {
     emojiId: 0,
-    aura: "request-aura",
+    aura: "rainbow",
     name: "anon",
   });
   assert.deepEqual(calls, ["queue"]);
@@ -188,7 +188,7 @@ test("a same-ID survivor retains the original queue data and uses the pair profi
   const original = queueFixture();
   const currentProfile = {
     ...profile,
-    aura: "",
+    aura: "none" as const,
     emoji: 0,
     username: "Updated requester",
     rating: 1700,
@@ -214,7 +214,7 @@ test("a same-ID survivor retains the original queue data and uses the pair profi
   assert.equal(selection.existingUid, hostUid);
   assert.deepEqual(selection.display, {
     emojiId: 0,
-    aura: null,
+    aura: "none",
     name: "Updated requester (1700)",
   });
   assert.deepEqual(calls, ["queue", "ownership", "converge"]);
@@ -229,7 +229,7 @@ test("a missing requester in the pair snapshot uses request appearance instead o
   if (selection.kind !== "match") assert.fail("expected-match");
   assert.deepEqual(selection.display, {
     emojiId: 0,
-    aura: "request-aura",
+    aura: "rainbow",
     name: "anon",
   });
   assert.deepEqual(calls, ["queue", "ownership", "converge"]);

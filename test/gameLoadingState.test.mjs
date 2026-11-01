@@ -29,7 +29,11 @@ const {
 
 function createFrames() {
   let nextId = 0;
+  /** @type {Map<number, FrameRequestCallback>} */
   const pending = new Map();
+  /**
+   * @type {string[]}
+   */
   const marks = [];
   const state = createMainGameLoadState({
     requestFrame(callback) {
@@ -85,11 +89,13 @@ test("route preparation cannot release optional work; game input does not wait f
 });
 
 test("waiting, spectator, finished, and error views settle without reporting playable", () => {
-  for (const resolve of [
+  /** @type {Array<(state: ReturnType<typeof createMainGameLoadState>) => void>} */
+  const resolvers = [
     (state) => state.markWaiting(),
     (state) => state.markContentReady(false),
     (state) => state.markError(),
-  ]) {
+  ];
+  for (const resolve of resolvers) {
     const h = createFrames();
     resolve(h.state);
     h.frame();
@@ -108,6 +114,7 @@ test("teardown cancels old frame callbacks while subscriptions follow the next g
   h.state.markContentReady(true);
   h.frame();
   const staleFrame = [...h.pending.values()][0];
+  assert.ok(staleFrame);
   h.state.reset();
   staleFrame(0);
   assert.equal(h.state.isLoaded(), false);
@@ -126,6 +133,7 @@ test("teardown cancels old frame callbacks while subscriptions follow the next g
 
 test("wager readiness distinguishes unknown from confirmed-empty and resets with the match", () => {
   resetWagerStore();
+  /** @type {boolean[]} */
   const changes = [];
   const unsubscribe = subscribeToWagerState(() => {
     changes.push(hasConfirmedWagerSnapshot());

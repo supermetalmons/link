@@ -566,8 +566,8 @@ const BoardComponent: React.FC = () => {
       blurry,
       svgElement,
       withConfirmAndCancelButtons,
-      ok,
-      cancel,
+      ...(ok ? { ok } : {}),
+      ...(cancel ? { cancel } : {}),
     });
   };
 

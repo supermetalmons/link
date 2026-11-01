@@ -1,3 +1,14 @@
+import { applyCanonicalTestMigrations } from "./canonicalTestMigrations.ts";
+import { runCanonicalMatchAlarm as runDurableObjectAlarm } from "./canonicalMatchTestFixture.ts";
+import { activateCanonicalApplicationFixture } from "./applicationRoomFixture.ts";
+import { createStoredPlayerProfile } from "../src/profileCanonical/contracts.ts";
+import { createDefaultProfileAppearance } from "@mons/shared/appearance";
+import { eventDocumentFixture } from "../test/eventCompatibilityFixture.ts";
+import { canonicalMatchEnvironment } from "./canonicalMatchTestFixture.ts";
+import {
+  runInCanonicalMatchRoom as runInDurableObject,
+  canonicalMatchRpc as getMatchStateRpc,
+} from "./canonicalMatchTestFixture.ts";
 import { unwrapMatchStateWireFixture } from "../test/matchRecordFixture.ts";
 import { commitEventCompatibilityFixture } from "../test/eventCompatibilityFixture.ts";
 import {
@@ -5,30 +16,23 @@ import {
   type ReadMatchSnapshotResponse,
 } from "@mons/shared/game-sessions";
 import { createEmptyMaterials } from "@mons/shared/mining";
-import type { CompletePlayerProfile } from "@mons/shared/profiles";
 import {
   MATCH_TIMER_TERMINAL,
   parseStrictMatchTimer,
 } from "@mons/shared/timers";
-import {
-  applyD1Migrations,
-  runDurableObjectAlarm,
-  runInDurableObject,
-  type D1Migration,
-} from "cloudflare:test";
+import type { D1Migration } from "cloudflare:test";
 import { env } from "cloudflare:workers";
 import { Game } from "mons-rules";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
-import { decodeEventUpdates } from "../src/eventCompatibilityCodec.ts";
+import { decodeEventUpdates } from "../test/eventLegacyFixtureCodec.ts";
 import { readEventSnapshot } from "../src/eventD1.ts";
 import { createEventGameplayRepository } from "../src/eventRepository.ts";
 import { createGameplayRepository } from "../src/gameplayRepository.ts";
 import { handleGameplayRoute } from "../src/gameplayRoute.ts";
 import { readHistoricalMatch } from "../src/historicalMatchRoute.ts";
-import { parseNewMatchTimerStorage } from "../src/localMatchTimerStore.ts";
 import { handleMatchSnapshotRoute } from "../src/matchSnapshotRoute.ts";
 import { readMatchStateRoutes } from "../src/matchStateD1.ts";
-import { getMatchStateRpc } from "../src/matchStateRpc.ts";
+
 import { resolveMatchTimerGame } from "../src/matchTimer.ts";
 import {
   commitCanonicalPlan,
@@ -60,6 +64,7 @@ function runtime() {
   const workerEnv = new Proxy(
     {
       ...env,
+      INVITE_REACTIONS: canonicalMatchEnvironment(env).INVITE_REACTIONS,
       AUTH_RATE_LIMITER: TELEGRAM_TEST_ENV.AUTH_RATE_LIMITER,
       MOVE_RATE_LIMITER: TELEGRAM_TEST_ENV.MOVE_RATE_LIMITER,
       PROFILE_GAME_PROJECTION_QUEUE:
@@ -112,23 +117,30 @@ function runtime() {
 }
 
 function mutation(inviteId: string) {
-  return { inviteId, operationId: crypto.randomUUID(), emojiId: 1, aura: "" };
+  return {
+    inviteId,
+    operationId: crypto.randomUUID(),
+    emojiId: 1,
+    aura: "none" as const,
+  };
 }
 
 async function insertProfile(loginUid: string) {
-  const profile: CompletePlayerProfile = {
-    id: `profile-${loginUid}`,
-    nonce: 1,
-    rating: 1500,
-    totalManaPoints: 0,
-    win: false,
-    emoji: 1,
-    username: null,
-    eth: null,
-    sol: null,
-    feb2026UniqueOpponentsCount: 0,
-    mining: { lastRockDate: "2026-09-11", materials: createEmptyMaterials() },
-  };
+  const profile = createStoredPlayerProfile(
+    `profile-${loginUid}`,
+    { ...createDefaultProfileAppearance(), emoji: 1 },
+    {
+      nonce: 1,
+      rating: 1500,
+      totalManaPoints: 0,
+      win: false,
+      username: null,
+      eth: null,
+      sol: null,
+      feb2026UniqueOpponentsCount: 0,
+      mining: { lastRockDate: "2026-09-11", materials: createEmptyMaterials() },
+    },
+  );
   await commitCanonicalPlan(env.PROFILE_DB, {
     expectations: [
       { kind: "profile-absent", profileId: profile.id },
@@ -192,7 +204,7 @@ async function snapshot(workerEnv: Env, playerId: string, matchId: string) {
 }
 
 beforeAll(async () => {
-  await applyD1Migrations(db, testEnv.TEST_D1_MIGRATIONS);
+  await applyCanonicalTestMigrations(db, testEnv.TEST_D1_MIGRATIONS);
   await applyRetiredProfileMigrations(
     env.PROFILE_DB,
     testEnv.TEST_PROFILE_D1_MIGRATIONS,
@@ -251,7 +263,7 @@ describe("gameplay with canonical Durable Object storage", () => {
     const created = await post(
       host,
       `/automatch/start?operationId=${crypto.randomUUID()}`,
-      { emojiId: 1, aura: "" },
+      { emojiId: 1, aura: "none" as const },
     );
     const inviteId = String(created.inviteId);
     expect(inviteId).toMatch(/^auto_/);
@@ -259,7 +271,7 @@ describe("gameplay with canonical Durable Object storage", () => {
     const joined = await post(
       guest,
       `/automatch/start?operationId=${crypto.randomUUID()}`,
-      { emojiId: 2, aura: "" },
+      { emojiId: 2, aura: "none" as const },
     );
     expect(joined.inviteId).toBe(inviteId);
     await post(guest, "/matches/surrender", {
@@ -275,7 +287,7 @@ describe("gameplay with canonical Durable Object storage", () => {
       opponentId: guest,
     });
     expect(await snapshot(workerEnv, host, inviteId)).toMatchObject({
-      aura: "",
+      aura: "none" as const,
       fen: expect.any(String),
     });
     await post(host, "/ratings/update", {
@@ -414,7 +426,7 @@ describe("gameplay with canonical Durable Object storage", () => {
     });
     expect(
       await snapshot(workerEnv, guest, String(proposed.matchId)),
-    ).toMatchObject({ status: "", flatMovesString: "" });
+    ).toMatchObject({ status: "active", flatMovesString: "" });
     expect(await snapshot(workerEnv, host, inviteId)).toMatchObject({
       fen: move.fen,
     });
@@ -451,12 +463,12 @@ describe("gameplay with canonical Durable Object storage", () => {
     const request = { inviteId, matchId: inviteId, playerId, opponentId };
     const started = await post(playerId, "/matches/timer/start", request);
     const timer = parseStrictMatchTimer(started.timer)!;
-    expect(timer.targetTimestamp).toBeGreaterThan(now);
+    expect(timer.deadlineAtMs).toBeGreaterThan(now);
     clock.mockReturnValue(now + 1_000);
-    expect((await post(playerId, "/matches/timer/start", request)).timer).toBe(
-      started.timer,
-    );
-    clock.mockReturnValue(timer.targetTimestamp + 1);
+    expect(
+      (await post(playerId, "/matches/timer/start", request)).timer,
+    ).toEqual(started.timer);
+    clock.mockReturnValue(timer.deadlineAtMs + 1);
     expect(await post(playerId, "/matches/timer/claim", request)).toEqual({
       ok: true,
     });
@@ -471,26 +483,23 @@ describe("gameplay with canonical Durable Object storage", () => {
       timer: started.timer,
     });
     const room = workerEnv.INVITE_REACTIONS.getByName(inviteId);
-    const timerStorage = parseNewMatchTimerStorage(
-      workerEnv.NEW_MATCH_TIMER_STORAGE,
-    );
     await runInDurableObject(room, (_instance, durableState) => {
       expect(
         durableState.storage.sql
           .exec<{ mode: string }>(
-            "SELECT mode FROM match_state_timer_cohorts WHERE match_id = ?",
+            "SELECT mode FROM match_state_timer_cohorts_canonical WHERE match_id = ?",
             inviteId,
           )
           .one().mode,
-      ).toBe(timerStorage);
+      ).toBe("local");
       expect(
         durableState.storage.sql
           .exec<{ count: number }>(
-            "SELECT COUNT(*) AS count FROM match_state_timer_starts WHERE match_id = ?",
+            "SELECT COUNT(*) AS count FROM match_state_timer_starts_canonical WHERE match_id = ?",
             inviteId,
           )
           .one().count,
-      ).toBe(timerStorage === "local" ? 1 : 0);
+      ).toBe(1);
     });
     const pendingEffects = () =>
       runInDurableObject(
@@ -498,29 +507,23 @@ describe("gameplay with canonical Durable Object storage", () => {
         (_instance, durableState) =>
           durableState.storage.sql
             .exec<{ count: number }>(
-              "SELECT COUNT(*) AS count FROM match_state_effects WHERE completed_at_ms IS NULL",
+              "SELECT COUNT(*) AS count FROM match_state_effects_canonical WHERE completed_at_ms IS NULL",
             )
             .one().count,
       );
     expect(await pendingEffects()).toBe(1);
-    expect(
-      await db
-        .prepare(
-          "SELECT COUNT(*) AS count FROM match_timer_starts WHERE match_id = ?",
-        )
-        .bind(inviteId)
-        .first("count"),
-    ).toBe(timerStorage === "local" ? 0 : 1);
     expect(await runDurableObjectAlarm(room)).toBe(true);
     expect(await pendingEffects()).toBe(0);
-    expect(
-      await db
-        .prepare(
-          "SELECT COUNT(*) AS count FROM match_timer_starts WHERE match_id = ?",
-        )
-        .bind(inviteId)
-        .first("count"),
-    ).toBe(0);
+    await runInDurableObject(room, (_instance, durableState) => {
+      expect(
+        durableState.storage.sql
+          .exec<{ count: number }>(
+            "SELECT COUNT(*) AS count FROM match_state_timer_starts_canonical WHERE match_id = ?",
+            inviteId,
+          )
+          .one().count,
+      ).toBe(1);
+    });
     expect(
       await db
         .prepare("SELECT COUNT(*) AS count FROM match_state_write_admissions")
@@ -541,8 +544,8 @@ describe("gameplay with canonical Durable Object storage", () => {
     await commitEventCompatibilityFixture(
       repository,
       decodeEventUpdates({
-        [`events/${eventId}`]: {
-          schemaVersion: 2,
+        [`events/${eventId}`]: eventDocumentFixture({
+          schemaVersion: 3,
           eventId,
           status: "scheduled",
           createdAtMs: 100,
@@ -553,15 +556,54 @@ describe("gameplay with canonical Durable Object storage", () => {
           createdByUsername: "ivan",
           participants: {},
           rounds: {},
-        },
+        }),
       }),
     );
     const fen = new Game().toFen();
     await commitEventCompatibilityFixture(
       repository,
       decodeEventUpdates({
-        [`events/${eventId}/status`]: "active",
-        [`events/${eventId}/updatedAtMs`]: 200,
+        [`events/${eventId}`]: eventDocumentFixture({
+          eventId,
+          status: "active",
+          createdAtMs: 100,
+          updatedAtMs: 200,
+          startAtMs: 1000,
+          startedAtMs: 200,
+          createdByProfileId: "profile-one",
+          createdByLoginUid: host,
+          createdByUsername: "ivan",
+          bracketSize: 2,
+          roundCount: 1,
+          participants: {
+            "host-profile": { loginUid: host, displayName: "host" },
+            "guest-profile": { loginUid: guest, displayName: "guest" },
+          },
+          rounds: {
+            "0": {
+              roundIndex: 0,
+              status: "active",
+              createdAtMs: 200,
+              matches: {
+                "0_0": {
+                  matchKey: "0_0",
+                  inviteId,
+                  status: "pending",
+                  hostProfileId: "host-profile",
+                  hostLoginUid: host,
+                  hostDisplayName: "host",
+                  hostEmojiId: 1,
+                  hostAura: "none",
+                  guestProfileId: "guest-profile",
+                  guestLoginUid: guest,
+                  guestDisplayName: "guest",
+                  guestEmojiId: 2,
+                  guestAura: "none",
+                },
+              },
+            },
+          },
+        }),
         [`invites/${inviteId}`]: {
           eventId,
           eventOwned: true,
@@ -573,14 +615,14 @@ describe("gameplay with canonical Durable Object storage", () => {
           flatMovesString: "",
           color: "white",
           emojiId: 1,
-          aura: "",
+          aura: "none" as const,
         },
         [`players/${guest}/matches/${inviteId}`]: {
           fen,
           flatMovesString: "",
           color: "black",
           emojiId: 2,
-          aura: "",
+          aura: "none" as const,
         },
       }),
     );
@@ -633,3 +675,5 @@ describe("gameplay with canonical Durable Object storage", () => {
     expect(network).not.toHaveBeenCalled();
   });
 });
+
+beforeAll(activateCanonicalApplicationFixture);

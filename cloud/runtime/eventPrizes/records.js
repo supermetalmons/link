@@ -26,141 +26,281 @@ exports.writeReacquiredSubmittedWithdrawal = writeReacquiredSubmittedWithdrawal;
 exports.writeBlockedWithdrawal = writeBlockedWithdrawal;
 exports.writeSubmittedWithdrawal = writeSubmittedWithdrawal;
 exports.writeCompletedWithdrawal = writeCompletedWithdrawal;
-const source = (value) => value ?? {};
-const trimmed = (value) =>
-  typeof value === "string" && value.trim() !== "" ? value.trim() : "";
+const event_prizes_js_1 = require("../shared/event-prizes.js");
+const solana_js_1 = require("../shared/solana.js");
+const KEYS = [
+  "schemaVersion",
+  "eventId",
+  "prizeId",
+  "assetAddress",
+  "assetStandard",
+  "entitledProfileId",
+  "profileId",
+  "place",
+  "recipientAddress",
+  "requesterUid",
+  "startedAtMs",
+  "updatedAtMs",
+  "status",
+  "leaseId",
+  "leaseExpiresAtMs",
+  "transactionSignature",
+  "signedTransactionBase64",
+  "blockhash",
+  "lastValidBlockHeight",
+  "submittedAtMs",
+  "completedAtMs",
+  "observedOwner",
+  "blockReason",
+  "blockedAtMs",
+  "sourceDigest",
+];
+const text = (value) =>
+  typeof value === "string" &&
+  value.length > 0 &&
+  value.trim() === value &&
+  !Array.from(value).some((character) => {
+    const code = character.charCodeAt(0);
+    return code < 32 || code === 127;
+  });
+const key = (value) => text(value) && !value.includes("/");
+const integer = (value) =>
+  typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
+const address = (value) =>
+  text(value) && (0, solana_js_1.isValidSolanaAddress)(value);
+const base64 = (value) =>
+  text(value) &&
+  value.length <= 2_000_000 &&
+  /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(
+    value,
+  );
+function isWithdrawalDocument(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const row = value;
+  if (
+    Object.keys(row).length !== KEYS.length ||
+    !KEYS.every((key) => Object.hasOwn(row, key)) ||
+    row.schemaVersion !== 1 ||
+    !key(row.eventId) ||
+    !key(row.prizeId) ||
+    !address(row.assetAddress) ||
+    !(0, event_prizes_js_1.isEventPrizeStandard)(row.assetStandard) ||
+    !key(row.entitledProfileId) ||
+    !key(row.profileId) ||
+    (row.place !== 1 && row.place !== 2 && row.place !== 3) ||
+    !address(row.recipientAddress) ||
+    !key(row.requesterUid) ||
+    !integer(row.startedAtMs) ||
+    !integer(row.updatedAtMs) ||
+    row.updatedAtMs < row.startedAtMs
+  )
+    return false;
+  const noSubmission =
+    row.transactionSignature === null &&
+    row.signedTransactionBase64 === null &&
+    row.blockhash === null &&
+    row.lastValidBlockHeight === null &&
+    row.submittedAtMs === null;
+  const signature = text(row.transactionSignature);
+  const submittedTime =
+    integer(row.submittedAtMs) &&
+    row.submittedAtMs >= row.startedAtMs &&
+    row.submittedAtMs <= row.updatedAtMs;
+  const signedEvidence =
+    base64(row.signedTransactionBase64) &&
+    address(row.blockhash) &&
+    integer(row.lastValidBlockHeight);
+  const noSignedEvidence =
+    row.signedTransactionBase64 === null &&
+    row.blockhash === null &&
+    row.lastValidBlockHeight === null;
+  const noBlock =
+    row.observedOwner === null &&
+    row.blockReason === null &&
+    row.blockedAtMs === null &&
+    row.sourceDigest === null;
+  if (row.status === "processing" || row.status === "submitted") {
+    if (
+      !text(row.leaseId) ||
+      !integer(row.leaseExpiresAtMs) ||
+      row.leaseExpiresAtMs < row.startedAtMs ||
+      row.completedAtMs !== null ||
+      !noBlock
+    )
+      return false;
+    return row.status === "processing"
+      ? noSubmission
+      : signature && submittedTime && signedEvidence;
+  }
+  if (row.leaseId !== null || row.leaseExpiresAtMs !== null) return false;
+  if (row.status === "completed")
+    return (
+      noBlock &&
+      signature &&
+      submittedTime &&
+      (signedEvidence || noSignedEvidence) &&
+      integer(row.completedAtMs) &&
+      integer(row.submittedAtMs) &&
+      row.completedAtMs >= row.submittedAtMs &&
+      row.completedAtMs <= row.updatedAtMs
+    );
+  if (
+    row.status !== "blocked" ||
+    row.completedAtMs !== null ||
+    !integer(row.blockedAtMs) ||
+    row.blockedAtMs < row.startedAtMs ||
+    row.blockedAtMs > row.updatedAtMs ||
+    (row.observedOwner !== null && !address(row.observedOwner)) ||
+    !(
+      noSubmission ||
+      (signature && submittedTime && (signedEvidence || noSignedEvidence))
+    )
+  )
+    return false;
+  return row.blockReason === "asset-owner-mismatch"
+    ? address(row.observedOwner) && row.sourceDigest === null
+    : row.blockReason === "canonical-data-cutover" &&
+        typeof row.sourceDigest === "string" &&
+        /^[a-f0-9]{64}$/.test(row.sourceDigest);
+}
 function readWithdrawalDocument(value) {
-  return value !== null && typeof value === "object" ? value : null;
+  return isWithdrawalDocument(value) ? value : null;
 }
 function readStoredWithdrawalDocument(value) {
-  return Array.isArray(value) ? null : readWithdrawalDocument(value);
+  return readWithdrawalDocument(value);
+}
+function requireDocument(value) {
+  const document = readWithdrawalDocument(value);
+  if (!document) throw new TypeError("invalid-canonical-withdrawal");
+  return document;
 }
 function storedWithdrawalMatchesIdentity(value, eventId, prizeId) {
-  const record = source(value);
-  return (
-    record.eventId === eventId &&
-    record.prizeId === prizeId &&
-    ["blocked", "completed", "processing", "submitted"].includes(
-      String(record.status),
-    )
-  );
+  return value.eventId === eventId && value.prizeId === prizeId;
 }
 function withdrawalStatus(value) {
-  const status = source(value).status;
-  return status === "blocked" ||
-    status === "completed" ||
-    status === "processing" ||
-    status === "submitted"
-    ? status
-    : null;
+  return value?.status ?? null;
 }
 function withdrawalExecutionStatus(value) {
-  return trimmed(source(value).status);
+  return value?.status ?? "";
 }
 function withdrawalIdentity(value) {
-  const record = source(value);
   return {
-    eventId: trimmed(record.eventId),
-    prizeId: trimmed(record.prizeId),
-    assetAddress: trimmed(record.assetAddress),
-    assetStandard: trimmed(record.assetStandard),
+    eventId: value?.eventId ?? "",
+    prizeId: value?.prizeId ?? "",
+    assetAddress: value?.assetAddress ?? "",
+    assetStandard: value?.assetStandard ?? "",
   };
 }
 function withdrawalOwnership(value) {
-  const record = source(value);
   return {
-    profileId: trimmed(record.profileId),
-    entitledProfileId: trimmed(record.entitledProfileId),
-    requesterUid: trimmed(record.requesterUid),
+    profileId: value?.profileId ?? "",
+    entitledProfileId: value?.entitledProfileId ?? "",
+    requesterUid: value?.requesterUid ?? "",
   };
 }
 function withdrawalRecipientAddress(value) {
-  return trimmed(source(value).recipientAddress);
+  return value?.recipientAddress ?? "";
 }
 function withdrawalLeaseId(value) {
-  return trimmed(source(value).leaseId);
+  return value?.leaseId ?? "";
 }
 function withdrawalLeaseExpiresAtMs(value) {
-  return Number(source(value).leaseExpiresAtMs) || 0;
+  return value?.leaseExpiresAtMs ?? 0;
 }
 function withdrawalPlace(value) {
-  return Number(source(value).place);
+  return value?.place ?? 0;
 }
 function withdrawalStartedAtForClaim(value, nowMs) {
-  const startedAtMs = source(value).startedAtMs;
-  return Number.isFinite(startedAtMs) ? Math.floor(startedAtMs) : nowMs;
+  return value?.startedAtMs ?? nowMs;
 }
 function withdrawalSubmittedAtForPersistence(value, now) {
-  const submittedAtMs = source(value).submittedAtMs;
-  return Number.isFinite(submittedAtMs) && submittedAtMs > 0
-    ? Math.floor(submittedAtMs)
-    : now();
+  return value.submittedAtMs ?? now();
 }
-function withdrawalStartedAtForCompletion(value, completedAtMs) {
-  return Number(source(value).startedAtMs) || completedAtMs;
+function withdrawalStartedAtForCompletion(value, _completedAtMs) {
+  return value.startedAtMs;
 }
 function withdrawalSubmittedAtForCompletion(value, completedAtMs) {
-  return Number(source(value).submittedAtMs) || completedAtMs;
+  return value.submittedAtMs ?? completedAtMs;
 }
 function withdrawalStorageUpdatedAtMs(value) {
-  return Number(source(value).updatedAtMs);
+  return value.updatedAtMs;
 }
 function withdrawalSubmissionStrings(value) {
-  const record = source(value);
   return {
-    signedTransactionBase64: trimmed(record.signedTransactionBase64),
-    transactionSignature: trimmed(record.transactionSignature),
-    blockhash: trimmed(record.blockhash),
+    signedTransactionBase64: value?.signedTransactionBase64 ?? "",
+    transactionSignature: value?.transactionSignature ?? "",
+    blockhash: value?.blockhash ?? "",
   };
 }
 function withdrawalLastValidBlockHeight(value) {
-  return Number(source(value).lastValidBlockHeight);
+  return value?.lastValidBlockHeight ?? null;
 }
 function withdrawalResponseFields(value) {
-  const identity = withdrawalIdentity(value);
+  if (value.status !== "completed")
+    throw new TypeError("withdrawal-not-completed");
   return {
-    eventId: identity.eventId,
-    prizeId: identity.prizeId,
-    assetAddress: identity.assetAddress,
-    recipientAddress: withdrawalRecipientAddress(value),
-    transactionSignature:
-      withdrawalSubmissionStrings(value).transactionSignature,
-  };
-}
-function writeWithdrawalClaim(previous, value, status) {
-  return readWithdrawalDocument({
-    ...(previous ? source(previous) : {}),
     eventId: value.eventId,
     prizeId: value.prizeId,
     assetAddress: value.assetAddress,
-    ...(value.assetStandard ? { assetStandard: value.assetStandard } : {}),
-    entitledProfileId: value.entitledProfileId,
-    profileId: value.profileId,
-    place: value.place,
     recipientAddress: value.recipientAddress,
-    requesterUid: value.requesterUid,
-    status,
-    leaseId: value.leaseId,
-    leaseExpiresAtMs: value.leaseExpiresAtMs,
-    startedAtMs: value.startedAtMs,
-    updatedAtMs: value.updatedAtMs,
-  });
+    transactionSignature: value.transactionSignature,
+  };
 }
+const noSubmission = {
+  transactionSignature: null,
+  signedTransactionBase64: null,
+  blockhash: null,
+  lastValidBlockHeight: null,
+  submittedAtMs: null,
+};
+const noBlock = {
+  observedOwner: null,
+  blockReason: null,
+  blockedAtMs: null,
+  sourceDigest: null,
+};
 function writeProcessingWithdrawal(value) {
-  return writeWithdrawalClaim(null, value, "processing");
+  const result = requireDocument({
+    ...value,
+    ...noSubmission,
+    ...noBlock,
+    schemaVersion: 1,
+    status: "processing",
+    completedAtMs: null,
+  });
+  if (result.status !== "processing")
+    throw new TypeError("invalid-canonical-withdrawal");
+  return result;
 }
 function writeReacquiredSubmittedWithdrawal(previous, value) {
-  return writeWithdrawalClaim(previous, value, "submitted");
+  if (previous.status !== "submitted")
+    throw new TypeError("withdrawal-not-submitted");
+  const result = requireDocument({
+    ...previous,
+    ...value,
+    schemaVersion: 1,
+    status: "submitted",
+  });
+  if (result.status !== "submitted")
+    throw new TypeError("invalid-canonical-withdrawal");
+  return result;
 }
 function writeBlockedWithdrawal(current, observedOwner, updatedAtMs) {
-  return readWithdrawalDocument({
-    ...source(current),
+  const result = requireDocument({
+    ...current,
     status: "blocked",
     observedOwner,
     updatedAtMs,
     leaseId: null,
     leaseExpiresAtMs: null,
+    completedAtMs: null,
+    blockReason: "asset-owner-mismatch",
+    blockedAtMs: updatedAtMs,
+    sourceDigest: null,
   });
+  if (result.status !== "blocked")
+    throw new TypeError("invalid-canonical-withdrawal");
+  return result;
 }
 function writeSubmittedWithdrawal(
   current,
@@ -168,17 +308,28 @@ function writeSubmittedWithdrawal(
   submittedAtMs,
   updatedAtMs,
 ) {
-  return readWithdrawalDocument({
-    ...source(current),
+  if (current.status !== "processing" && current.status !== "submitted")
+    throw new TypeError("withdrawal-not-processing");
+  const result = requireDocument({
+    ...current,
+    ...evidence,
     status: "submitted",
-    transactionSignature: evidence.transactionSignature,
-    signedTransactionBase64: evidence.signedTransactionBase64,
-    blockhash: evidence.blockhash,
-    lastValidBlockHeight: evidence.lastValidBlockHeight,
     submittedAtMs,
     updatedAtMs,
   });
+  if (result.status !== "submitted")
+    throw new TypeError("invalid-canonical-withdrawal");
+  return result;
 }
 function writeCompletedWithdrawal(value) {
-  return value;
+  const result = requireDocument({
+    ...value,
+    ...noBlock,
+    schemaVersion: 1,
+    leaseId: null,
+    leaseExpiresAtMs: null,
+  });
+  if (result.status !== "completed")
+    throw new TypeError("invalid-canonical-withdrawal");
+  return result;
 }

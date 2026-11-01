@@ -65,7 +65,7 @@ test("default failure logs retain original causes without changing custom callba
   };
   assert.deepEqual(await response.json(), expectedBody);
   assert.equal(logged.mock.callCount(), 1);
-  const [entry] = logged.mock.calls[0].arguments;
+  const [entry] = logged.mock.calls[0]!.arguments;
   assert.equal(typeof entry, "string");
   assert.deepEqual(JSON.parse(entry), {
     event: "profile_route_failure",
@@ -93,7 +93,7 @@ test("default failure logs retain original causes without changing custom callba
   assert.deepEqual(await customResponse.json(), expectedBody);
   assert.equal(logged.mock.callCount(), 1);
   assert.equal(logFailure.mock.callCount(), 1);
-  assert.deepEqual(logFailure.mock.calls[0].arguments, [
+  assert.deepEqual(logFailure.mock.calls[0]!.arguments, [
     "profile-service-unavailable",
   ]);
 });
@@ -147,8 +147,12 @@ for (const route of routes) {
 
   test(`${route.domain} preserves structured auth errors and sanitizes unknown failures`, async () => {
     for (const error of [
-      new AuthApiFailure(401, "unauthenticated", "authentication-required", {
-        reason: "expired",
+      new AuthApiFailure(409, "failed-precondition", "method-reuse-cooldown", {
+        reason: "method-reuse-cooldown",
+        scope: "method",
+        method: "eth",
+        retryAtMs: 1_000,
+        cooldownMs: 1_000,
       }),
       new Error("private-provider-detail"),
     ]) {
@@ -173,16 +177,22 @@ for (const route of routes) {
       assert.equal(response.headers.get("X-Content-Type-Options"), "nosniff");
       assert.equal(
         response.status,
-        error instanceof AuthApiFailure ? 401 : 503,
+        error instanceof AuthApiFailure ? 409 : 503,
       );
       assert.deepEqual(
         await response.json(),
         error instanceof AuthApiFailure
           ? {
               ok: false,
-              error: "unauthenticated",
-              message: "authentication-required",
-              details: { reason: "expired" },
+              error: "failed-precondition",
+              message: "method-reuse-cooldown",
+              details: {
+                reason: "method-reuse-cooldown",
+                scope: "method",
+                method: "eth",
+                retryAtMs: 1_000,
+                cooldownMs: 1_000,
+              },
             }
           : {
               ok: false,

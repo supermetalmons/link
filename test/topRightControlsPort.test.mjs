@@ -35,6 +35,7 @@ test("top-right controls forward dismissals and read live visibility", () => {
 });
 
 test("an older top-right registration cannot clear its replacement", () => {
+  /** @type {string[]} */
   const calls = [];
   const disposeFirst = registerTopRightControlsApi({
     close: () => calls.push("first"),

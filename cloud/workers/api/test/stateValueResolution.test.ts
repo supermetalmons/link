@@ -1,60 +1,63 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { resolveAutomatchServerValues } from "../src/automatchD1.ts";
+import type {
+  SessionCounter,
+  SessionTimestamp,
+} from "../../../runtime/automatchRecords.js";
 import {
-  GameSessionTransitionFailure,
-  resolveValue as resolveSessionValue,
-} from "../src/gameSessionCodec.ts";
+  SESSION_TIMESTAMP,
+  resolveSessionCounter,
+  resolveSessionTimestamp,
+  sessionIncrement,
+} from "../src/sessionValueOperations.ts";
 
-test("session and automatch resolution preserve nested markers and array baselines", () => {
-  const current = { count: 3, values: [4, "unknown"] };
-  const value = {
-    count: { ".sv": { increment: 2 } },
-    values: [{ ".sv": { increment: -0.5 } }, { ".sv": { increment: 2 } }],
-    updatedAtMs: { ".sv": "timestamp" },
-  };
-  const expected = { count: 5, values: [3.5, 2], updatedAtMs: 123 };
-  assert.deepEqual(resolveSessionValue(value, current, 123), expected);
-  assert.deepEqual(resolveAutomatchServerValues(value, current, 123), expected);
-  assert.deepEqual(current, { count: 3, values: [4, "unknown"] });
+test("typed session operations preserve numeric timestamps and increment baselines", () => {
+  assert.deepEqual(SESSION_TIMESTAMP, { kind: "timestamp" });
+  assert.deepEqual(sessionIncrement(-0.5), { kind: "increment", delta: -0.5 });
+  assert.equal(resolveSessionTimestamp(SESSION_TIMESTAMP, 123), 123);
+  assert.equal(resolveSessionTimestamp(45, 123), 45);
+  assert.equal(resolveSessionCounter(sessionIncrement(-0.5), 2), 1.5);
+  assert.equal(resolveSessionCounter(45, 2), 45);
+  for (const current of [null, undefined, "2", false, NaN, Infinity])
+    assert.equal(resolveSessionCounter(sessionIncrement(2), current), 2);
+  assert.throws(() => sessionIncrement(Infinity), TypeError);
+  assert.throws(() => sessionIncrement(NaN), TypeError);
 });
 
-test("marker failures retain each caller's published error", () => {
+test("typed fields reject retired markers, wrong operations and extra fields", () => {
   for (const value of [
-    { ".sv": { increment: "1" } },
-    { ".sv": "timestamp", extra: true },
-    { ".sv": { increment: Number.MAX_VALUE } },
-  ]) {
-    assert.throws(() => resolveSessionValue(value, Number.MAX_VALUE, 123), {
-      constructor: GameSessionTransitionFailure,
-      message: "game-session-transition-invalid-server-value",
+    null,
+    [],
+    {},
+    { ".sv": "timestamp" },
+    { kind: "increment", delta: 1 },
+    { kind: "timestamp", extra: true },
+  ])
+    assert.throws(
+      () => resolveSessionTimestamp(value as SessionTimestamp, 123),
+      { constructor: TypeError, message: "invalid-automatch-server-value" },
+    );
+  for (const value of [
+    null,
+    [],
+    {},
+    { ".sv": { increment: 1 } },
+    { kind: "timestamp" },
+    { kind: "increment", delta: "1" },
+    { kind: "increment", delta: NaN },
+    { kind: "increment", delta: Infinity },
+    { kind: "increment", delta: 1, extra: true },
+  ])
+    assert.throws(() => resolveSessionCounter(value as SessionCounter, 2), {
+      constructor: TypeError,
+      message: "invalid-automatch-server-value",
     });
-  }
-  assert.throws(
-    () => resolveAutomatchServerValues({ ".sv": { increment: "1" } }, 2, 123),
-    { constructor: TypeError, message: "invalid-automatch-server-value" },
-  );
   assert.throws(
     () =>
-      resolveAutomatchServerValues({ ".sv": "timestamp", extra: true }, 2, 123),
-    { constructor: TypeError, message: "invalid-automatch-server-value" },
-  );
-  assert.throws(
-    () =>
-      resolveAutomatchServerValues(
-        { ".sv": { increment: Number.MAX_VALUE } },
+      resolveSessionCounter(
+        sessionIncrement(Number.MAX_VALUE),
         Number.MAX_VALUE,
-        123,
       ),
     { constructor: TypeError, message: "invalid-automatch-increment" },
   );
-});
-
-test("caller-specific current-value lookup remains unchanged", () => {
-  const current = Object.create({ count: 7 });
-  const value = { count: { ".sv": { increment: 1 } } };
-  assert.deepEqual(resolveSessionValue(value, current, 123), { count: 8 });
-  assert.deepEqual(resolveAutomatchServerValues(value, current, 123), {
-    count: 1,
-  });
 });

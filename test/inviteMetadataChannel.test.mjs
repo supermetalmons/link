@@ -1,3 +1,5 @@
+import { createTimerHandle } from "./fixtures/timerHandle.mjs";
+import { required } from "./fixtures/canonicalData.mjs";
 import assert from "node:assert/strict";
 import { registerHooks } from "node:module";
 import test from "node:test";
@@ -20,19 +22,21 @@ const { InviteMetadataChannel } =
   await import("../src/connection/inviteMetadataChannel.ts");
 const { InviteMetadataApiError } =
   await import("../src/services/inviteMetadataApi.ts");
+/** @param {number} [revision] @param {Partial<import("@mons/shared/invite-metadata").InviteMetadataSnapshot>} [changes] @returns {import("@mons/shared/invite-metadata").InviteMetadataSnapshot} */
 const snapshot = (revision = 1, changes = {}) => ({
   inviteId: "invite",
   revision,
   hostId: "host",
   guestId: null,
   hostColor: "white",
-  hostRematches: "",
-  guestRematches: "",
+  hostRematches: { state: "open", indices: [] },
+  guestRematches: { state: "open", indices: [] },
   automatchStateHint: null,
   eventId: null,
   eventOwned: false,
   ...changes,
 });
+/** @param {number} [revision] @param {Partial<import("@mons/shared/invite-metadata").InviteMetadataSnapshot>} [changes] @param {Partial<import("@mons/shared/invite-metadata").InviteMetadataViewer>} [viewer] @returns {import("@mons/shared/invite-metadata").ReadInviteMetadataResponse} */
 const response = (revision = 1, changes = {}, viewer = {}) => ({
   ok: true,
   snapshot: snapshot(revision, changes),
@@ -49,16 +53,25 @@ const frame = (revision = 1, changes = {}) => ({
   snapshot: snapshot(revision, changes),
 });
 const flush = () => new Promise((resolve) => setImmediate(resolve));
+/**
+ * @template [T=import("@mons/shared/invite-metadata").ReadInviteMetadataResponse]
+ * @returns {PromiseWithResolvers<T>}
+ */
 const deferred = () => {
-  let resolve;
-  let reject;
-  const promise = new Promise((yes, no) => {
-    resolve = yes;
-    reject = no;
-  });
-  return { promise, resolve, reject };
+  return Promise.withResolvers();
 };
 
+/**
+ * @typedef {{
+ *   url: string; protocols: string[] | undefined; readyState: 0 | 1 | 2 | 3;
+ *   onopen: (() => void) | null; onmessage: ((event: {data: unknown}) => void) | null;
+ *   onclose: (() => void) | null; onerror: (() => void) | null;
+ *   closes: number; sent: Array<Parameters<WebSocket["send"]>[0]>;
+ *   send(value: Parameters<WebSocket["send"]>[0]): void; close(): void;
+ *   receive(value: unknown): void; fail(): void;
+ * }} HarnessSocket
+ */
+/** @param {Partial<Pick<ConstructorParameters<typeof InviteMetadataChannel>[0], "initialSnapshot" | "getProtocols" | "readMetadata" | "onSnapshot">> & {online?: boolean; visible?: boolean; createError?: boolean; paired?: boolean}} [options] */
 function harness({
   initialSnapshot,
   getProtocols,
@@ -70,18 +83,30 @@ function harness({
 } = {}) {
   let now = 0;
   let active = true;
-  let nextTimer = 1;
+  /**
+   * @type {(() => void) | null}
+   */
   let wake;
+  /** @type {Map<ReturnType<typeof createTimerHandle>, { callback: () => void; at: number }>} */
   const timers = new Map();
+  /** @type {HarnessSocket[]} */
   const sockets = [];
+  /**
+   * @type {{ snapshot: import("@mons/shared/invite-metadata").InviteMetadataSnapshot; viewer: import("@mons/shared/invite-metadata").InviteMetadataViewer | undefined; }[]}
+   */
   const snapshots = [];
+  /** @type {Array<InstanceType<typeof InviteMetadataApiError>>} */
   const errors = [];
+  /**
+   * @type {{ now: number; signal: AbortSignal; }[]}
+   */
   const reads = [];
   const channel = new InviteMetadataChannel({
     inviteId: "invite",
-    initialSnapshot,
+    ...(initialSnapshot === undefined ? {} : { initialSnapshot }),
     createSocket(url, protocols) {
       if (createError) throw new Error("secret-token-in-error");
+      /** @type {HarnessSocket} */
       const socket = {
         url,
         protocols,
@@ -113,7 +138,7 @@ function harness({
       sockets.push(socket);
       return socket;
     },
-    getProtocols,
+    ...(getProtocols === undefined ? {} : { getProtocols }),
     readMetadata(signal) {
       reads.push({ now, signal });
       return readMetadata(signal);
@@ -131,9 +156,12 @@ function harness({
       snapshots.push({ snapshot: value, viewer });
       onSnapshot?.(value, viewer);
     },
-    onError: (error) => errors.push(error),
+    onError: (error) => {
+      assert.ok(error instanceof InviteMetadataApiError);
+      errors.push(error);
+    },
     setTimer(callback, delayMs) {
-      const id = nextTimer++;
+      const id = createTimerHandle();
       timers.set(id, { callback, at: now + delayMs });
       return id;
     },
@@ -150,16 +178,16 @@ function harness({
     reads,
     wake: () => wake?.(),
     listenerCount: () => (wake ? 1 : 0),
-    setActive: (value) => {
+    setActive: (/** @type {boolean} */ value) => {
       active = value;
     },
-    setOnline: (value) => {
+    setOnline: (/** @type {boolean} */ value) => {
       online = value;
     },
-    setVisible: (value) => {
+    setVisible: (/** @type {boolean} */ value) => {
       visible = value;
     },
-    elapseWithoutTimers: (ms) => {
+    elapseWithoutTimers: (/** @type {number} */ ms) => {
       now += ms;
     },
     async tick(ms = 0) {
@@ -187,17 +215,20 @@ test("starts pending-lobby HTTP and metadata sockets asynchronously and delivers
   assert.equal(h.snapshots.length, 0);
   await h.tick();
   assert.equal(h.reads.length, 1);
-  assert.deepEqual(h.sockets[0].protocols, ["mons-invite-metadata-v1"]);
+  assert.deepEqual(required(h.sockets[0]).protocols, [
+    "mons-invite-metadata-v1",
+    "mons-data-v1",
+  ]);
   assert.equal(
-    h.sockets[0].url,
+    required(h.sockets[0]).url,
     "wss://api.mons.link/invites/invite/metadata/socket",
   );
-  h.sockets[0].receive(frame());
+  required(h.sockets[0]).receive(frame());
   assert.equal(h.snapshots.length, 1);
   h.channel.requestRefresh();
   await flush();
   assert.equal(h.snapshots.length, 2);
-  assert.deepEqual(h.snapshots[1].viewer, response().viewer);
+  assert.deepEqual(required(h.snapshots[1]).viewer, response().viewer);
   await h.tick(5_000);
   assert.equal(h.reads.length, 2);
   h.channel.stop();
@@ -208,13 +239,13 @@ test("bootstrap metadata seeds its revision without a duplicate read or callback
   await h.tick();
   assert.equal(h.reads.length, 0);
   assert.equal(h.snapshots.length, 0);
-  h.sockets[0].receive(frame(2));
-  h.sockets[0].receive(frame(3));
+  required(h.sockets[0]).receive(frame(2));
+  required(h.sockets[0]).receive(frame(3));
   await h.tick(5_000);
   assert.equal(h.reads.length, 0);
   assert.equal(h.snapshots.length, 0);
-  h.sockets[0].receive(frame(4));
-  assert.equal(h.snapshots[0].snapshot.revision, 4);
+  required(h.sockets[0]).receive(frame(4));
+  assert.equal(required(h.snapshots[0]).snapshot.revision, 4);
   h.channel.stop();
 });
 
@@ -224,7 +255,7 @@ test("seeded metadata refreshes when the socket stays silent or the page wakes",
   assert.equal(h.reads.length, 0);
   await h.tick(1);
   assert.equal(h.reads.length, 1);
-  h.sockets[0].receive(frame());
+  required(h.sockets[0]).receive(frame());
   h.wake();
   await flush();
   assert.equal(h.reads.length, 2);
@@ -246,7 +277,7 @@ test("coalesces reads while retaining a refresh requested during a read", async 
   assert.equal(calls, 2);
   second.resolve(response(2, { guestId: "guest" }));
   await flush();
-  assert.equal(h.snapshots.at(-1).snapshot.guestId, "guest");
+  assert.equal(required(h.snapshots.at(-1)).snapshot.guestId, "guest");
   assert.equal(calls, 2);
   h.channel.stop();
 });
@@ -255,14 +286,18 @@ test("drops stale HTTP and socket snapshots while preserving newer full metadata
   const read = deferred();
   const h = harness({ readMetadata: () => read.promise });
   await h.tick();
-  h.sockets[0].receive(
-    frame(3, { guestId: "guest", hostRematches: "1;2", guestRematches: "1;2" }),
+  required(h.sockets[0]).receive(
+    frame(3, {
+      guestId: "guest",
+      hostRematches: { state: "open", indices: [1, 2] },
+      guestRematches: { state: "open", indices: [1, 2] },
+    }),
   );
   read.resolve(response(2));
   await flush();
-  h.sockets[0].receive(frame(1));
+  required(h.sockets[0]).receive(frame(1));
   assert.equal(h.snapshots.length, 1);
-  assert.equal(h.snapshots[0].snapshot.revision, 3);
+  assert.equal(required(h.snapshots[0]).snapshot.revision, 3);
   assert.equal(h.errors.length, 0);
   h.channel.stop();
 });
@@ -274,14 +309,14 @@ test("fallback reads every five seconds only until a valid socket snapshot", asy
     h.reads.map((read) => read.now),
     [0, 5_000],
   );
-  h.sockets[0].receive(frame(2));
+  required(h.sockets[0]).receive(frame(2));
   await h.tick(10_000);
   assert.equal(h.reads.length, 2);
-  h.sockets[0].fail();
+  required(h.sockets[0]).fail();
   await flush();
   assert.equal(h.reads.length, 3);
   await h.tick(500);
-  h.sockets[1].receive(frame(2));
+  required(h.sockets[1]).receive(frame(2));
   await h.tick(5_000);
   assert.equal(h.reads.length, 3);
   h.channel.stop();
@@ -320,20 +355,20 @@ test("honors Retry-After across wake and reconnect then resumes ordinary recover
   assert.equal(h.reads.length, 1);
   await h.tick(1);
   assert.equal(h.reads.length, 2);
-  assert.equal(h.snapshots[0].snapshot.revision, 2);
+  assert.equal(required(h.snapshots[0]).snapshot.revision, 2);
   h.channel.stop();
 });
 
 test("hidden and offline pages suspend fallback and wake refreshes even a healthy socket", async () => {
   const h = harness();
   await h.tick();
-  h.sockets[0].receive(frame());
+  required(h.sockets[0]).receive(frame());
   h.wake();
   await flush();
   assert.equal(h.reads.length, 2);
   h.setVisible(false);
   h.wake();
-  h.sockets[0].fail();
+  required(h.sockets[0]).fail();
   await flush();
   const before = h.reads.length;
   await h.tick(35_000);
@@ -352,7 +387,9 @@ test("hidden and offline pages suspend fallback and wake refreshes even a health
 });
 
 test("reconnects with refreshed auth and bounds token acquisition plus initial snapshot to ten seconds", async () => {
+  /** @type {PromiseWithResolvers<string[]>} */
   const first = deferred();
+  /** @type {Array<boolean>} */
   const refreshes = [];
   const h = harness({
     getProtocols: (force) => {
@@ -362,6 +399,7 @@ test("reconnects with refreshed auth and bounds token acquisition plus initial s
         : Promise.resolve([
             "mons-invite-metadata-v1",
             "bearer.fresh.payload.signature",
+            "mons-data-v1",
           ]);
     },
   });
@@ -370,10 +408,14 @@ test("reconnects with refreshed auth and bounds token acquisition plus initial s
   await h.tick(500);
   assert.deepEqual(refreshes, [false, true]);
   assert.equal(h.sockets.length, 1);
-  first.resolve(["mons-invite-metadata-v1", "bearer.stale.payload.signature"]);
+  first.resolve([
+    "mons-invite-metadata-v1",
+    "bearer.stale.payload.signature",
+    "mons-data-v1",
+  ]);
   await flush();
   assert.equal(h.sockets.length, 1);
-  h.sockets[0].receive(frame());
+  required(h.sockets[0]).receive(frame());
   assert.equal(
     h.errors.filter((error) => error.code === "metadata-channel-unavailable")
       .length,
@@ -386,15 +428,15 @@ test("heartbeats ping every thirty seconds, require pong within ten and recover 
   const h = harness();
   await h.tick();
   const socket = h.sockets[0];
-  socket.receive(frame());
+  required(socket).receive(frame());
   await h.tick(30_000);
-  assert.deepEqual(socket.sent, ["ping"]);
-  socket.receive("pong");
+  assert.deepEqual(required(socket).sent, ["ping"]);
+  required(socket).receive("pong");
   await h.tick(30_000);
-  assert.deepEqual(socket.sent, ["ping", "ping"]);
-  socket.receive(frame(2));
+  assert.deepEqual(required(socket).sent, ["ping", "ping"]);
+  required(socket).receive(frame(2));
   await h.tick(10_000);
-  assert.equal(socket.closes, 1);
+  assert.equal(required(socket).closes, 1);
   assert.equal(h.reads.length, 2);
   h.channel.stop();
 });
@@ -403,10 +445,10 @@ test("rejects a first snapshot received after its deadline before delayed timeou
   const h = harness({ readMetadata: () => new Promise(() => {}) });
   await h.tick();
   h.elapseWithoutTimers(10_000);
-  h.sockets[0].receive(frame());
+  required(h.sockets[0]).receive(frame());
   assert.equal(h.snapshots.length, 0);
-  assert.equal(h.sockets[0].closes, 1);
-  assert.equal(h.errors[0].code, "metadata-channel-unavailable");
+  assert.equal(required(h.sockets[0]).closes, 1);
+  assert.equal(required(h.errors[0]).code, "metadata-channel-unavailable");
   h.channel.stop();
 });
 
@@ -420,57 +462,58 @@ test("rejects malformed, oversized, foreign and caller-specific frames without e
   ]) {
     const h = harness({ readMetadata: () => new Promise(() => {}) });
     await h.tick();
-    h.sockets[0].receive(bad);
+    required(h.sockets[0]).receive(bad);
     assert.equal(h.snapshots.length, 0);
-    assert.equal(h.sockets[0].closes, 1);
-    assert.equal(h.errors[0].message, "metadata-channel-unavailable");
+    assert.equal(required(h.sockets[0]).closes, 1);
+    assert.equal(required(h.errors[0]).message, "metadata-channel-unavailable");
     h.channel.stop();
   }
   const h = harness({
     getProtocols: () => Promise.reject(new Error("secret-bearer-token")),
   });
   await h.tick();
-  assert.equal(h.errors[0].message, "metadata-channel-unavailable");
+  assert.equal(required(h.errors[0]).message, "metadata-channel-unavailable");
   h.channel.stop();
 });
 
 test("context replacement or stop releases requests, callbacks, sockets, timers and listeners", async () => {
   for (const invalidate of [
-    (h) => h.channel.stop(),
-    (h) => h.setActive(false),
+    (/** @type {ReturnType<typeof harness>} */ h) => h.channel.stop(),
+    (/** @type {ReturnType<typeof harness>} */ h) => h.setActive(false),
   ]) {
     const request = deferred();
     const h = harness({ readMetadata: () => request.promise });
     await h.tick();
     const socket = h.sockets[0];
-    const lateMessage = socket.onmessage;
-    const lateClose = socket.onclose;
+    const lateMessage = required(socket).onmessage;
+    const lateClose = required(socket).onclose;
     invalidate(h);
-    lateMessage({ data: JSON.stringify(frame()) });
-    lateClose();
+    required(lateMessage)({ data: JSON.stringify(frame()) });
+    required(lateClose)();
     request.resolve(response());
     await flush();
     assert.equal(h.snapshots.length, 0);
     assert.equal(h.errors.length, 0);
     h.channel.stop();
     h.channel.stop();
-    assert.equal(h.reads[0].signal.aborted, true);
+    assert.equal(required(h.reads[0]).signal.aborted, true);
     assert.equal(h.timers.size, 0);
     assert.equal(h.listenerCount(), 0);
-    assert.equal(socket.closes, 1);
-    assert.equal(socket.onmessage, null);
+    assert.equal(required(socket).closes, 1);
+    assert.equal(required(socket).onmessage, null);
   }
 });
 
 test("synchronous navigation during a snapshot callback cannot restart timers or apply late HTTP", async () => {
   const request = deferred();
+  /** @type {ReturnType<typeof harness> | undefined} */
   let h;
   h = harness({
     readMetadata: () => request.promise,
-    onSnapshot: () => h.channel.stop(),
+    onSnapshot: () => required(h).channel.stop(),
   });
   await h.tick();
-  h.sockets[0].receive(frame(2));
+  required(h.sockets[0]).receive(frame(2));
   request.resolve(response(3));
   await flush();
   assert.equal(h.snapshots.length, 1);

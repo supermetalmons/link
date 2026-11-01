@@ -103,8 +103,12 @@ export async function handleProfileRoute(
     {
       failureMessage: "profile-service-unavailable",
       failureEvent: "profile_route_failure",
-      logFailure: dependencies.logFailure,
-      verifyIdentity: dependencies.verifyIdentity,
+      ...(dependencies.logFailure === undefined
+        ? {}
+        : { logFailure: dependencies.logFailure }),
+      ...(dependencies.verifyIdentity === undefined
+        ? {}
+        : { verifyIdentity: dependencies.verifyIdentity }),
     },
     async ({ pathname, corsHeaders, authenticate }) => {
       const identity = await authenticate();

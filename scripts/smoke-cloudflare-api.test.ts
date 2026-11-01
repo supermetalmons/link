@@ -1,3 +1,9 @@
+const {
+  canonicalEvent,
+}: typeof import("../test/fixtures/canonicalData.mjs") = require("../test/fixtures/canonicalData.mjs");
+const {
+  createDefaultProfileAppearance,
+}: typeof import("@mons/shared/appearance") = require("@mons/shared/appearance");
 const assert: typeof import("node:assert/strict") = require("node:assert/strict");
 const {
   chmodSync,
@@ -220,15 +226,16 @@ const SMOKE_PROFILE_WITH_HISTORY = {
   historicalMatch: HISTORICAL_MATCH,
 };
 const HISTORICAL_MATCH_RECORD = {
+  schemaVersion: 1,
   version: 2,
   color: "white" as const,
   emojiId: 1,
-  aura: "",
+  aura: "none",
   gameVariant: "Classic",
   fen: "fen",
   status: "surrendered",
   flatMovesString: "move",
-  timer: "",
+  timer: { state: "idle" as const },
 };
 const HISTORICAL_MATCH_PAIR = {
   matchId: HISTORICAL_MATCH.matchId,
@@ -263,7 +270,7 @@ const PROFILE = {
   rating: 1500,
   totalManaPoints: 0,
   win: true,
-  emoji: 1,
+  ...createDefaultProfileAppearance(1),
   username: null,
   eth: null,
   sol: null,
@@ -816,7 +823,7 @@ test("smokes public, unauthenticated, and internal routes", async (t) => {
     ) {
       assert.deepEqual(JSON.parse(String(init?.body)), {
         emojiId: 1,
-        aura: "",
+        aura: "none",
       });
       if (new URL(url).searchParams.has("operationId")) {
         assert.equal(
@@ -880,8 +887,8 @@ test("smokes public, unauthenticated, and internal routes", async (t) => {
           eventId: requestedEventId,
           revision: fixtureStatus ? 1 : 0,
           event: fixtureStatus
-            ? {
-                eventId: requestedEventId,
+            ? canonicalEvent({
+                eventId: requestedEventId!,
                 status: fixtureStatus,
                 ...(fixtureStatus === "ended"
                   ? {
@@ -889,14 +896,14 @@ test("smokes public, unauthenticated, and internal routes", async (t) => {
                         1: {
                           eventId: SMOKE_EVENTS.endedId,
                           profileId: SMOKE_PROFILE.profileId,
-                          place: 1,
+                          place: 1 as const,
                           prizeId: SMOKE_EVENTS.assignedPrizeId,
                           assignedAtMs: 1,
                         },
                       },
                     }
                   : {}),
-              }
+              })
             : null,
           prizeSelections:
             requestedEventId === SMOKE_EVENTS.currentId
@@ -938,7 +945,7 @@ test("smokes public, unauthenticated, and internal routes", async (t) => {
                   [SMOKE_EVENTS.endedId]: {
                     eventId: SMOKE_EVENTS.endedId,
                     profileId: SMOKE_PROFILE.profileId,
-                    place: 1,
+                    place: 1 as const,
                     prizeId: SMOKE_EVENTS.assignedPrizeId,
                     assignedAtMs: 1,
                   },
@@ -1572,7 +1579,7 @@ test("allows live prize changes but requires a stable cutover prize read", async
           [SMOKE_EVENTS.endedId]: {
             eventId: SMOKE_EVENTS.endedId,
             profileId: SMOKE_PROFILE.profileId,
-            place: 1,
+            place: 1 as const,
             prizeId: SMOKE_EVENTS.assignedPrizeId,
             assignedAtMs: 1,
           },
@@ -1617,7 +1624,7 @@ test("verifies an ended selection while still requiring a current snapshot", asy
   const assignment = {
     eventId: events.endedId,
     profileId: SMOKE_PROFILE.profileId,
-    place: 1,
+    place: 1 as const,
     prizeId: events.assignedPrizeId,
     assignedAtMs: 1,
   };
@@ -1635,14 +1642,18 @@ test("verifies an ended selection while still requiring a current snapshot", asy
   for (const scenario of [
     {
       selection: events.selectionPrizeId,
-      currentStatus: "active",
+      currentStatus: "active" as const,
       valid: true,
     },
-    { selection: "wrong-prize", currentStatus: "active", valid: false },
-    { selection: null, currentStatus: "active", valid: false },
+    {
+      selection: "wrong-prize",
+      currentStatus: "active" as const,
+      valid: false,
+    },
+    { selection: null, currentStatus: "active" as const, valid: false },
     {
       selection: events.selectionPrizeId,
-      currentStatus: "ended",
+      currentStatus: "ended" as const,
       valid: false,
     },
   ]) {
@@ -1703,13 +1714,13 @@ test("verifies an ended selection while still requiring a current snapshot", asy
           requestedEvents.push(eventId);
           const event =
             eventId === events.currentId
-              ? { eventId, status: scenario.currentStatus }
+              ? canonicalEvent({ eventId, status: scenario.currentStatus })
               : eventId === events.endedId
-                ? {
+                ? canonicalEvent({
                     eventId,
                     status: "ended",
                     prizeAssignments: { 1: assignment },
-                  }
+                  })
                 : null;
           return json(
             {
@@ -1757,7 +1768,7 @@ test("rejects invalid conditional reads of the required ended event", async () =
   const assignment = {
     eventId: SMOKE_EVENTS.endedId,
     profileId: SMOKE_PROFILE.profileId,
-    place: 1,
+    place: 1 as const,
     prizeId: SMOKE_EVENTS.assignedPrizeId,
     assignedAtMs: 1,
   };
@@ -1838,13 +1849,13 @@ test("rejects invalid conditional reads of the required ended event", async () =
             }
             const event =
               eventId === SMOKE_EVENTS.currentId
-                ? { eventId, status: "active" }
+                ? canonicalEvent({ eventId, status: "active" })
                 : eventId === SMOKE_EVENTS.endedId
-                  ? {
+                  ? canonicalEvent({
                       eventId,
                       status: "ended",
                       prizeAssignments: { 1: assignment },
-                    }
+                    })
                   : null;
             return json(
               {
@@ -1914,7 +1925,7 @@ test("requires the ended event aggregate to contain the profile prize", async ()
           [SMOKE_EVENTS.endedId]: {
             eventId: SMOKE_EVENTS.endedId,
             profileId: SMOKE_PROFILE.profileId,
-            place: 1,
+            place: 1 as const,
             prizeId: SMOKE_EVENTS.assignedPrizeId,
             assignedAtMs: 1,
           },
@@ -1932,7 +1943,10 @@ test("requires the ended event aggregate to contain the profile prize", async ()
         ok: true,
         eventId: SMOKE_EVENTS.currentId,
         revision: 1,
-        event: { eventId: SMOKE_EVENTS.currentId, status: "active" },
+        event: canonicalEvent({
+          eventId: SMOKE_EVENTS.currentId,
+          status: "active",
+        }),
         prizeSelections: {
           [SMOKE_PROFILE.profileId]: SMOKE_EVENTS.selectionPrizeId,
         },
@@ -1945,7 +1959,10 @@ test("requires the ended event aggregate to contain the profile prize", async ()
         ok: true,
         eventId: SMOKE_EVENTS.endedId,
         revision: 1,
-        event: { eventId: SMOKE_EVENTS.endedId, status: "ended" },
+        event: canonicalEvent({
+          eventId: SMOKE_EVENTS.endedId,
+          status: "ended",
+        }),
         prizeSelections: {},
       },
       200,
@@ -2029,7 +2046,7 @@ test("validates frozen automatch operation-ID behavior safely", async () => {
       assert.equal(automatchUrl.pathname, "/automatch/start");
       assert.deepEqual(JSON.parse(String(init?.body)), {
         emojiId: 1,
-        aura: "",
+        aura: "none",
       });
       if (automatchUrl.searchParams.has("operationId")) {
         assert.equal(

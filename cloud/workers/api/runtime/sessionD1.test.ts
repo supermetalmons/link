@@ -1,6 +1,7 @@
+import { applyCanonicalTestMigrations } from "./canonicalTestMigrations.ts";
 import { beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { env } from "cloudflare:workers";
-import { applyD1Migrations, type D1Migration } from "cloudflare:test";
+import type { D1Migration } from "cloudflare:test";
 import { type SessionCreateRequest } from "@mons/shared/session-auth";
 import { AuthApiFailure } from "../src/authErrors.ts";
 import { sweepExpiredAuthState } from "../src/authStateD1.ts";
@@ -32,7 +33,7 @@ const environment: Env = {
 
 describe("persistent anonymous sessions in D1", () => {
   beforeAll(async () => {
-    await applyD1Migrations(
+    await applyCanonicalTestMigrations(
       testEnv.AUTH_STATE_DB,
       testEnv.TEST_AUTH_STATE_D1_MIGRATIONS,
     );
@@ -48,8 +49,8 @@ describe("persistent anonymous sessions in D1", () => {
       Array.from({ length: 5 }, () => repository.create(input, NOW_MS)),
     );
     expect(new Set(results.map(({ uid }) => uid)).size).toBe(1);
-    expect(results[0].uid).toMatch(/^[A-Za-z0-9]{28}$/);
-    expect(await repository.refresh(refresh)).toEqual(results[0]);
+    expect(results[0]!.uid).toMatch(/^[A-Za-z0-9]{28}$/);
+    expect(await repository.refresh(refresh)).toEqual(results[0]!);
     const row = await testEnv.AUTH_STATE_DB.prepare(
       "SELECT * FROM anonymous_sessions WHERE session_id = ?",
     )

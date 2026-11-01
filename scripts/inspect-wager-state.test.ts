@@ -45,7 +45,6 @@ test("wager status preserves activation, maintenance and row-count diagnostics u
         row_count: 3,
         wager_count: 2,
         marker_count: 1,
-        non_initial_revisions: 2,
       },
     ];
   };
@@ -54,14 +53,13 @@ test("wager status preserves activation, maintenance and row-count diagnostics u
   deps.log = (value) => logs.push(value);
   await inspectWagers(deps);
   assert.equal(queries.length, 4);
-  assert.deepEqual(logs[0].destination, {
+  assert.deepEqual(logs[0]!.current, {
     rowCount: 3,
     wagerCount: 2,
     markerCount: 1,
-    nonInitialRevisions: 2,
   });
   assert.equal(
-    (logs[0].activation as { activatedAtMs: number }).activatedAtMs,
+    (logs[0]!.activation as { activatedAtMs: number }).activatedAtMs,
     10,
   );
 });

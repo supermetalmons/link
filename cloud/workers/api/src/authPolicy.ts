@@ -1,7 +1,6 @@
 import {
   AUTH_COOLDOWN_REASONS,
   AUTH_METHOD_REUSE_COOLDOWN_MS,
-  getAuthCooldownScope,
   type AuthMethodKey,
 } from "@mons/shared/auth";
 import { createHash } from "node:crypto";
@@ -116,9 +115,9 @@ export function throwMethodCooldown(
   const reason = AUTH_COOLDOWN_REASONS.method;
   throw new AuthApiFailure(409, "failed-precondition", reason, {
     reason,
-    scope: getAuthCooldownScope(reason),
+    scope: "method",
     method,
-    retryAtMs: Math.max(finiteNumber(retryAtMs, 0), 0),
+    retryAtMs: Math.max(Math.floor(finiteNumber(retryAtMs, 0)), 0),
     cooldownMs: AUTH_METHOD_REUSE_COOLDOWN_MS,
   });
 }
@@ -131,9 +130,9 @@ export function throwProfileMethodCooldown(
   const reason = AUTH_COOLDOWN_REASONS.profileMethod;
   throw new AuthApiFailure(409, "failed-precondition", reason, {
     reason,
-    scope: getAuthCooldownScope(reason),
+    scope: "profile-method",
     method,
-    retryAtMs: Math.max(finiteNumber(retryAtMs, 0), 0),
+    retryAtMs: Math.max(Math.floor(finiteNumber(retryAtMs, 0)), 0),
     cooldownMs: AUTH_METHOD_REUSE_COOLDOWN_MS,
     profileId: cleanString(profileId) || null,
   });

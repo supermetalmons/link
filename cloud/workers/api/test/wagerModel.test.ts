@@ -1,28 +1,32 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  createEmptyWager,
   decodeWager,
+  isWagerRecord,
   lineageFingerprint,
-  readStoredSettlement,
-  readWagerCount,
-  readWagerProposal,
+  parseWagerRecord,
   wagerReferencesReservationOperation,
+  type WagerRecord,
 } from "../src/wagerModel.ts";
 import {
   acceptProposalDecision,
   claimSettlementDecision,
   completeSettlementDecision,
+  markLineageReadyDecision,
   removeProposalDecision,
   sendProposalDecision,
   type AcceptWagerProposalCommand,
   type SendWagerProposalCommand,
 } from "../src/wagerStateCommands.ts";
-
-const operationId = "a".repeat(64);
-const reservationOperationId = "b".repeat(64);
-const opponentOperationId = "c".repeat(64);
-const opponentReservationOperationId = "d".repeat(64);
-
+import {
+  classifyWagerSettlementRetry,
+  resumeWagerSettlement,
+} from "../src/wagerOutcome.ts";
+const operationId = "a".repeat(64),
+  reservationOperationId = "b".repeat(64),
+  opponentOperationId = "c".repeat(64),
+  opponentReservationOperationId = "d".repeat(64);
 const send: SendWagerProposalCommand = {
   playerUid: "host",
   opponentUid: "guest",
@@ -40,7 +44,6 @@ const send: SendWagerProposalCommand = {
   },
   reservedCount: 2,
 };
-
 const accept: AcceptWagerProposalCommand = {
   playerUid: "host",
   opponentUid: "guest",
@@ -59,362 +62,217 @@ const accept: AcceptWagerProposalCommand = {
   proposerAdjustmentOperationId: "e".repeat(64),
   reservationOperationId,
 };
-
-function pendingSettlement() {
+const claim = {
+  resolution: {
+    winnerUid: "host",
+    loserUid: "guest",
+    winnerProfileId: "profile-host",
+    loserProfileId: "profile-guest",
+  },
+  operationId,
+  now: 200,
+  acceptReservationOperationIdByUid: {
+    host: reservationOperationId,
+    guest: opponentReservationOperationId,
+  },
+};
+function proposed(): WagerRecord {
   return {
-    version: 2,
-    state: "pending",
-    kind: "proposals",
-    operationId,
-    fingerprint: "retained-fingerprint",
-    claimedAtMs: 10,
-    completedAtMs: null,
-    releases: [
-      {
-        uid: " host ",
-        reservationOperationIds: [` ${reservationOperationId} `],
+    ...createEmptyWager(),
+    proposals: {
+      guest: {
+        material: "dust",
+        count: 2,
+        createdAt: 50,
+        operationId: opponentOperationId,
+        reservationOperationId: opponentReservationOperationId,
       },
-    ],
-    extension: { retained: null },
+    },
+    proposedBy: { guest: true },
   };
 }
-
-test("decoding retains nonrecord payloads without presenting them as records", () => {
+function agreed(): WagerRecord {
+  const decision = acceptProposalDecision(proposed(), accept);
+  if ("commit" in decision || !decision.value)
+    throw new Error("agreement-required");
+  return decision.value;
+}
+function blocked(): WagerRecord {
+  return parseWagerRecord({
+    ...createEmptyWager(),
+    agreed: agreed().agreed,
+    state: "blocked",
+    blocked: {
+      reason: "legacy-agreement-unsettled",
+      requiresManualReview: true,
+      detectedAtMs: 300,
+      sourceDigest: "e".repeat(64),
+      knownResolution: null,
+      operationIds: [],
+    },
+  });
+}
+test("runtime accepts only exact canonical records and explicit null absence", () => {
   assert.equal(decodeWager(null), null);
-  assert.equal(decodeWager(undefined), null);
-  for (const raw of [false, 0, "retained", ["retained", null]]) {
-    const decoded = decodeWager(raw);
-    assert.ok(decoded);
-    assert.strictEqual(decoded.raw, raw);
-    assert.equal(decoded.record, null);
-    assert.deepEqual(
-      claimSettlementDecision(decoded, {
-        resolution: {
-          winnerUid: "host",
-          loserUid: "guest",
-          winnerProfileId: "profile-host",
-          loserProfileId: "profile-guest",
-        },
-        operationId,
-        now: 100,
-        acceptReservationOperationIdByUid: {},
-      }),
-      { commit: false, decision: "no-wager" },
-    );
-  }
-});
-
-test("settlement views distinguish missing, null, malformed, and valid data without throwing", () => {
-  assert.equal(decodeWager({})?.settlement.kind, "absent");
-  assert.equal(decodeWager({ settlement: null })?.settlement.kind, "null");
-  for (const settlement of [
+  for (const invalid of [
+    undefined,
+    {},
     false,
-    "pending",
-    { version: 2, state: "pending" },
+    [],
+    { proposals: {} },
+    { ...createEmptyWager(), future: true },
+    { ...createEmptyWager(), schemaVersion: 0 },
+    { ...createEmptyWager(), agreed: {} },
   ]) {
-    const decoded = decodeWager({ settlement });
-    assert.equal(decoded?.settlement.kind, "malformed");
-    assert.strictEqual(decoded?.settlement.raw, settlement);
-    assert.equal(decoded?.settlement.value, null);
-    assert.throws(
-      () => readStoredSettlement(decoded),
-      /wager-settlement-malformed/,
-    );
+    assert.throws(() => decodeWager(invalid), /invalid-canonical-wager/);
   }
-  const raw = pendingSettlement();
-  const decoded = decodeWager({ settlement: raw });
-  assert.equal(decoded?.settlement.kind, "valid");
-  assert.strictEqual(decoded?.settlement.raw, raw);
-  assert.deepEqual(decoded?.settlement.value?.releases, [
-    { uid: "host", reservationOperationIds: [reservationOperationId] },
-  ]);
-  assert.equal(raw.releases[0].uid, " host ");
+  assert.strictEqual(parseWagerRecord(proposed()).state, "proposed");
 });
-
-test("decoding does not accept an unsupported legacy settlement version", () => {
-  const raw = { settlement: { ...pendingSettlement(), version: 1 } };
-  const decoded = decodeWager(raw);
-  assert.equal(decoded?.settlement.kind, "malformed");
-  assert.strictEqual(decoded?.raw, raw);
-  assert.throws(
-    () => readStoredSettlement(decoded),
-    /wager-settlement-malformed/,
+test("malformed money, identities, duplicate references, and state combinations reject", () => {
+  const record = agreed();
+  for (const invalid of [
+    { ...record, agreed: { ...record.agreed, count: 2.3 } },
+    { ...record, agreed: { ...record.agreed, total: 3 } },
+    { ...record, agreed: { ...record.agreed, proposerId: " guest " } },
+    {
+      ...record,
+      agreementOperation: {
+        ...record.agreementOperation,
+        proposerReservationOperationIds: [operationId, operationId],
+      },
+    },
+    { ...record, state: "proposed" },
+    { ...record, blocked: { reason: "unknown" } },
+  ])
+    assert.equal(isWagerRecord(invalid), false);
+});
+test("new send and accept lifecycle constructs canonical records and preserves replay identities", () => {
+  const sent = sendProposalDecision(null, send);
+  assert.ok("value" in sent && sent.value);
+  assert.ok(isWagerRecord(sent.value));
+  assert.equal(
+    sent.value.proposals.host?.reservationOperationId,
+    reservationOperationId,
+  );
+  assert.deepEqual(sendProposalDecision(sent.value, send), {
+    commit: false,
+    decision: "replayed",
+  });
+  const accepted = agreed();
+  assert.equal(accepted.state, "agreed");
+  assert.deepEqual(accepted.proposals, {});
+  assert.deepEqual(accepted.agreementOperation?.reservationAdjustments, []);
+  assert.deepEqual(acceptProposalDecision(accepted, accept), {
+    commit: false,
+    decision: "replayed",
+  });
+});
+test("settlement completion preserves its idempotency fingerprint and cannot be paid twice", () => {
+  const claimed = claimSettlementDecision(agreed(), claim);
+  assert.ok("value" in claimed && claimed.value?.settlement);
+  assert.equal(claimed.value.state, "settling");
+  const settlement = claimed.value.settlement;
+  const completed = completeSettlementDecision(claimed.value, {
+    settlement,
+    completedAtMs: 220,
+    insufficientMaterials: false,
+  });
+  assert.ok("value" in completed && completed.value?.settlement);
+  assert.equal(completed.value.state, "settled");
+  assert.equal(completed.value.settlement.fingerprint, settlement.fingerprint);
+  assert.equal(completed.value.resolved?.winnerId, "host");
+  assert.deepEqual(claimSettlementDecision(completed.value, claim), {
+    commit: false,
+    decision: "already-resolved",
+  });
+  assert.deepEqual(
+    completeSettlementDecision(completed.value, {
+      settlement,
+      completedAtMs: 230,
+      insufficientMaterials: false,
+    }),
+    { commit: false, decision: "completed" },
   );
 });
-
-test("incomplete settlement data still blocks proposal cancellation without parsing failure", () => {
-  const wager = decodeWager({
-    proposals: {
-      host: { material: "dust", count: 2, operationId, reservationOperationId },
-    },
-    settlement: { version: 2, state: "pending" },
+test("failed transfer settles without a winner and clears the agreement", () => {
+  const claimed = claimSettlementDecision(agreed(), claim);
+  assert.ok("value" in claimed && claimed.value?.settlement);
+  const result = completeSettlementDecision(claimed.value, {
+    settlement: claimed.value.settlement,
+    completedAtMs: 220,
+    insufficientMaterials: true,
+  });
+  assert.ok("value" in result && result.value);
+  assert.equal(result.value.state, "settled");
+  assert.equal(result.value.resolved, null);
+  assert.equal(result.value.agreed, null);
+  assert.equal(
+    result.value.settlement?.failureReason,
+    "insufficient-materials",
+  );
+});
+test("blocked records reject every mutation and retain all reservations", async () => {
+  const wager = blocked();
+  const before = structuredClone(wager);
+  assert.deepEqual(sendProposalDecision(wager, send), {
+    commit: false,
+    decision: "unavailable",
+  });
+  assert.deepEqual(acceptProposalDecision(wager, accept), {
+    commit: false,
+    decision: "proposal-unavailable",
   });
   assert.deepEqual(
     removeProposalDecision(wager, {
-      proposalUid: "host",
-      operationId: "remove",
-      expectedReservationOperationId: reservationOperationId,
+      proposalUid: "guest",
+      operationId,
+      expectedReservationOperationId: opponentReservationOperationId,
     }),
     { commit: false, decision: "proposal-missing" },
   );
-});
-
-test("proposal admission preserves truthiness of malformed blocking fields", () => {
-  for (const field of ["agreed", "resolved", "settlement"]) {
-    for (const value of [undefined, null, false, 0, ""]) {
-      assert.ok(
-        "value" in sendProposalDecision(decodeWager({ [field]: value }), send),
-      );
-    }
-    for (const value of [true, 1, "retained", [], {}]) {
-      assert.deepEqual(
-        sendProposalDecision(decodeWager({ [field]: value }), send),
-        { commit: false, decision: "unavailable" },
-      );
-    }
-  }
-});
-
-test("send replay and opponent matching continue to require exact stored operation IDs", () => {
   assert.deepEqual(
-    sendProposalDecision(
-      decodeWager({ proposals: { host: { operationId: ` ${operationId} ` } } }),
-      send,
-    ),
-    { commit: false, decision: "unavailable" },
+    markLineageReadyDecision(wager, {
+      operationId,
+      fingerprint: lineageFingerprint(wager),
+    }),
+    { commit: false, decision: "agreement-missing" },
   );
-  for (const field of ["operationId", "reservationOperationId"] as const) {
-    const proposal = {
-      material: "dust",
-      count: 2,
-      operationId: opponentOperationId,
-      reservationOperationId: opponentReservationOperationId,
-    };
-    proposal[field] = ` ${proposal[field]} `;
-    assert.deepEqual(
-      sendProposalDecision(
-        decodeWager({ proposals: { guest: proposal } }),
-        send,
-      ),
-      { commit: false, decision: "unavailable" },
-    );
-  }
-});
-
-test("accept preserves normalized ID matching and exact material matching", () => {
-  const proposal = {
-    material: "dust",
-    count: 2,
-    operationId: ` ${opponentOperationId} `,
-    reservationOperationId: ` ${opponentReservationOperationId} `,
-  };
-  const accepted = acceptProposalDecision(
-    decodeWager({ proposals: { guest: proposal } }),
-    accept,
-  );
-  assert.ok("value" in accepted);
-  assert.deepEqual(accepted.value?.agreed, {
-    material: "dust",
-    count: 2,
-    total: 4,
-    proposerId: "guest",
-    accepterId: "host",
-    acceptedAt: 100,
+  assert.deepEqual(claimSettlementDecision(wager, claim), {
+    commit: false,
+    decision: "manual-required",
   });
-  assert.deepEqual(
-    acceptProposalDecision(
-      decodeWager({
-        proposals: { guest: { ...proposal, material: " dust " } },
-      }),
-      accept,
-    ),
-    { commit: false, decision: "proposal-unavailable" },
-  );
-});
-
-test("completion preserves raw extensions and normalized settlement values never rewrite retained fields", () => {
-  const raw = {
-    retained: { ids: ["first", "second"] },
-    proposals: { host: { material: "dust", count: 2 } },
-    settlement: pendingSettlement(),
-  };
-  const decoded = decodeWager(raw);
-  const settlement = readStoredSettlement(decoded);
-  assert.ok(settlement);
-  const completed = completeSettlementDecision(decoded, {
-    settlement,
-    completedAtMs: 200,
-    insufficientMaterials: false,
-  });
-  assert.ok("value" in completed);
-  assert.deepEqual(completed.value, {
-    retained: raw.retained,
-    settlement: { ...raw.settlement, state: "completed", completedAtMs: 200 },
-  });
-  assert.equal(raw.settlement.state, "pending");
-  assert.equal(raw.settlement.releases[0].uid, " host ");
-  assert.ok(raw.proposals);
-});
-
-test("lineage fingerprints preserve raw key order, extensions, and null values", () => {
-  const raw = {
-    agreed: { count: 2, material: "dust", extension: null },
-    agreementOperation: {
-      retained: { ids: ["second", "first"] },
-      reservationLineageReady: true,
-      id: operationId,
-    },
-  };
-  const expected = JSON.stringify([
-    raw.agreed,
-    { retained: raw.agreementOperation.retained, id: operationId },
-  ]);
-  assert.equal(lineageFingerprint(decodeWager(raw)), expected);
-  assert.equal(
-    lineageFingerprint(
-      decodeWager({
-        ...raw,
-        agreementOperation: {
-          ...raw.agreementOperation,
-          reservationLineageReady: false,
-        },
-      }),
-    ),
-    expected,
-  );
-});
-
-test("malformed settlement releases still retain conservative reservation references", () => {
-  const raw = {
-    settlement: {
-      version: 1,
-      releases: [
-        {
-          uid: " host ",
-          reservationOperationIds: [
-            ` ${reservationOperationId} `,
-            reservationOperationId,
-          ],
-          retained: true,
-        },
-      ],
-    },
-  };
-  const decoded = decodeWager(raw);
-  assert.equal(decoded?.settlement.kind, "malformed");
   assert.equal(
     wagerReferencesReservationOperation(
-      decoded,
-      "host",
-      reservationOperationId,
+      wager,
+      "guest",
+      opponentReservationOperationId,
     ),
     true,
   );
   assert.equal(
-    wagerReferencesReservationOperation(
-      decoded,
-      "guest",
-      reservationOperationId,
-    ),
-    false,
+    wagerReferencesReservationOperation(wager, "host", "f".repeat(64)),
+    true,
   );
-});
-
-test("resolved wagers do not coerce unread proposal counts", () => {
-  const raw = {
-    resolved: true,
-    proposals: { host: { count: { toString: 1 } } },
+  assert.deepEqual(wager, before);
+  const repository = {
+    wagers: { readWager: async () => wager },
   };
-  const decoded = decodeWager(raw);
-  assert.strictEqual(decoded?.raw, raw);
-  assert.deepEqual(
-    claimSettlementDecision(decoded, {
-      resolution: {
-        winnerUid: "host",
-        loserUid: "guest",
-        winnerProfileId: "profile-host",
-        loserProfileId: "profile-guest",
-      },
-      operationId,
-      now: 100,
-      acceptReservationOperationIdByUid: {},
-    }),
-    { commit: false, decision: "already-resolved" },
+  const task = {
+    kind: "wager-settlement" as const,
+    inviteId: "invite",
+    matchId: "invite",
+    operationId,
+    resolution: claim.resolution,
+  };
+  assert.equal(
+    await Reflect.apply(classifyWagerSettlementRetry, undefined, [
+      task,
+      repository,
+    ]),
+    "stale",
   );
-  assert.throws(
-    () => readWagerCount(readWagerProposal(decoded, "host")),
-    TypeError,
-  );
-});
-
-test("cancelling a proposal preserves unrelated uncoercible counts", () => {
-  const retainedProposal = { count: { toString: false } };
-  const raw = {
-    proposals: {
-      host: { count: 2, operationId, reservationOperationId },
-      guest: retainedProposal,
-    },
-  };
-  const result = removeProposalDecision(decodeWager(raw), {
-    proposalUid: "host",
-    operationId: "remove",
-    expectedReservationOperationId: reservationOperationId,
-  });
-  assert.ok("value" in result);
-  assert.deepEqual(result.value?.proposals, { guest: retainedProposal });
-  assert.strictEqual(raw.proposals.guest, retainedProposal);
-});
-
-test("accept only raises stored count coercion failures after the material guard matches", () => {
-  const proposal = {
-    material: "slime",
-    count: { toString: 1 },
-    operationId: opponentOperationId,
-    reservationOperationId: opponentReservationOperationId,
-  };
-  assert.deepEqual(
-    acceptProposalDecision(
-      decodeWager({ proposals: { guest: proposal } }),
-      accept,
-    ),
-    { commit: false, decision: "proposal-unavailable" },
-  );
-  const matching = decodeWager({
-    proposals: { guest: { ...proposal, material: "dust" } },
-  });
-  assert.throws(() => acceptProposalDecision(matching, accept), TypeError);
-});
-
-test("uncoercible settlement counts are retained until settlement is consumed", () => {
-  const raw = {
-    settlement: {
-      ...pendingSettlement(),
-      kind: "agreed",
-      winnerUid: "host",
-      loserUid: "guest",
-      winnerProfileId: "profile-host",
-      loserProfileId: "profile-guest",
-      material: "dust",
-      count: { toString: false },
-      releases: [
-        { uid: "host", reservationOperationIds: [reservationOperationId] },
-        {
-          uid: "guest",
-          reservationOperationIds: [opponentReservationOperationId],
-        },
-      ],
-    },
-  };
-  const decoded = decodeWager(raw);
-  assert.strictEqual(decoded?.raw, raw);
-  assert.equal(decoded?.settlement.kind, "malformed");
-  assert.throws(() => readStoredSettlement(decoded), TypeError);
-  assert.deepEqual(
-    removeProposalDecision(decoded, {
-      proposalUid: "host",
-      operationId: "remove",
-      expectedReservationOperationId: reservationOperationId,
-    }),
-    { commit: false, decision: "proposal-missing" },
+  assert.equal(
+    await Reflect.apply(resumeWagerSettlement, undefined, [task, repository]),
+    "stale",
   );
 });

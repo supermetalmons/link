@@ -16,6 +16,7 @@ import {
   getLatestRematchIndex,
   parseRematchIndices,
   rematchSeriesEnded,
+  type RematchSeries,
 } from "@mons/shared/rematches";
 import { AuthApiFailure } from "./authErrors.ts";
 import type { GameSessionChange } from "./gameSessionContracts.ts";
@@ -48,10 +49,6 @@ export type RematchPlan<Response extends RematchResponse> = {
   projectReason?: string;
   history?: RematchHistoryDraft;
 };
-
-function normalizeString(value: unknown): string {
-  return typeof value === "string" ? value.trim() : "";
-}
 
 function failedPrecondition(message: string): AuthApiFailure {
   return new AuthApiFailure(409, "failed-precondition", message);
@@ -104,8 +101,10 @@ function rematchHistoryDraft(
   invite: InviteDocument,
   matchId: string,
 ): RematchHistoryDraft {
+  const guestPlayerId = inviteHistoricalParticipants(invite).guestId;
+  if (!guestPlayerId) throw failedPrecondition("missing-opponent");
   return {
-    guestPlayerId: inviteHistoricalParticipants(invite).guestId,
+    guestPlayerId,
     hostPlayerId: inviteHistoricalParticipants(invite).hostId,
     matchId,
     source: "transition",
@@ -182,8 +181,11 @@ export function finalizeRematchProposal(
   const firstProposal = !parseRematchIndices(
     inviteRematchState(invite)[opponentField],
   ).includes(index);
-  const current = normalizeString(inviteRematchState(invite)[field]);
-  const rematches = current ? `${current};${index}` : String(index);
+  const current = inviteRematchState(invite)[field];
+  const rematches: RematchSeries = {
+    state: "open",
+    indices: [...current.indices, index],
+  };
   return {
     response: {
       ok: true,
@@ -233,18 +235,18 @@ export function planRematchEnd({
   actor: RematchActor;
 }): RematchPlan<EndRematchResponse> {
   const field = actor.role === "host" ? "hostRematches" : "guestRematches";
-  const current = normalizeString(inviteRematchState(invite)[field]);
+  const current = inviteRematchState(invite)[field];
   if (rematchSeriesEnded(inviteRematchState(invite))) {
     return {
       response: {
         ok: true,
         inviteId,
         actorUid: actor.actorUid,
-        rematches: current.endsWith("x") ? current : `${current}x`,
+        rematches: { ...current, state: "ended" },
       },
     };
   }
-  const rematches = `${current}x`;
+  const rematches: RematchSeries = { ...current, state: "ended" };
   const latestApprovedIndex = getLatestApprovedRematchIndex(
     inviteRematchState(invite),
   );

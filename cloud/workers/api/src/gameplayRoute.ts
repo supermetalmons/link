@@ -3,10 +3,7 @@ import { AuthApiFailure, authErrorResponse } from "./authErrors.ts";
 import { authJsonResponse, getAuthCorsHeaders } from "./authHttp.ts";
 import { authenticatedPost } from "./authenticatedPost.ts";
 import { measureAutomatchPhase } from "./automatchTelemetry.ts";
-import {
-  GameSessionMutationLockFailure,
-  MatchTimerStartStoreFailure,
-} from "./gameplayCoordinationD1.ts";
+import { GameSessionMutationLockFailure } from "./gameplayCoordinationD1.ts";
 import { createGameplayRepository } from "./gameplayRepository.ts";
 import { automatchRoutes } from "./gameplayRoutes/automatch.ts";
 import {
@@ -113,8 +110,12 @@ async function handleGameplayRequest(
     {
       failureMessage: "gameplay-service-unavailable",
       failureEvent: "gameplay_route_failure",
-      logFailure: dependencies.logFailure,
-      verifyIdentity: dependencies.verifyIdentity,
+      ...(dependencies.logFailure === undefined
+        ? {}
+        : { logFailure: dependencies.logFailure }),
+      ...(dependencies.verifyIdentity === undefined
+        ? {}
+        : { verifyIdentity: dependencies.verifyIdentity }),
       errorResponse: (error, corsHeaders) => {
         if (error instanceof WagerClientUpdateRequired) {
           return authJsonResponse(
@@ -127,10 +128,7 @@ async function handleGameplayRequest(
             corsHeaders,
           );
         }
-        if (
-          error instanceof GameSessionMutationLockFailure ||
-          error instanceof MatchTimerStartStoreFailure
-        ) {
+        if (error instanceof GameSessionMutationLockFailure) {
           (
             dependencies.logCoordinationFailure ||
             ((record) =>
@@ -142,10 +140,7 @@ async function handleGameplayRequest(
               ))
           )({
             operation: error.operation,
-            store:
-              error instanceof GameSessionMutationLockFailure
-                ? "mutation-lock"
-                : "timer-start",
+            store: "mutation-lock",
           });
         }
         return null;
@@ -167,7 +162,7 @@ async function handleGameplayRequest(
         pathname,
         identity,
         repository,
-        admittedMatchEpoch,
+        ...(admittedMatchEpoch === undefined ? {} : { admittedMatchEpoch }),
       });
       if (!route.readOnly) {
         await assertProfileMutationAllowed(env);

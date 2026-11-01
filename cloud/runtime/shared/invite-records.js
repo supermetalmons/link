@@ -6,8 +6,11 @@ exports.createInviteFieldDocument =
   exports.createMatchedAutomatchInviteDocument =
   exports.createPendingAutomatchInviteDocument =
   exports.createManualInviteDocument =
+  exports.readInviteDocument =
     void 0;
-exports.readInviteDocument = readInviteDocument;
+exports.isInviteTransitionEvidence = isInviteTransitionEvidence;
+exports.isInviteAutomatchMessage = isInviteAutomatchMessage;
+exports.isInviteDocument = isInviteDocument;
 exports.readCanonicalInviteParticipants = readCanonicalInviteParticipants;
 exports.inviteMutationParticipants = inviteMutationParticipants;
 exports.inviteTrimmedParticipants = inviteTrimmedParticipants;
@@ -23,192 +26,275 @@ exports.inviteSourceEventState = inviteSourceEventState;
 exports.inviteTelegramFingerprint = inviteTelegramFingerprint;
 exports.inviteHistoricalParticipants = inviteHistoricalParticipants;
 exports.mergeInviteAutomatchOperation = mergeInviteAutomatchOperation;
-exports.inviteRatingWager = inviteRatingWager;
 const ids_js_1 = require("./ids.js");
-const fields = (value) => value ?? {};
-const string = (value) => (typeof value === "string" ? value : "");
-function readInviteDocument(value) {
-  return value !== null && typeof value === "object" && !Array.isArray(value)
-    ? value
-    : null;
+const rematches_js_1 = require("./rematches.js");
+const FIELDS = [
+  "schemaVersion",
+  "version",
+  "kind",
+  "hostId",
+  "guestId",
+  "hostColor",
+  "hostRematches",
+  "guestRematches",
+  "sessionTransition",
+  "automatchMessage",
+  "automatchOperationIds",
+  "password",
+  "automatchStateHint",
+  "automatchCanceledAt",
+  "telegramDeliveryVersion",
+  "eventOwned",
+  "eventId",
+  "eventRoundIndex",
+  "eventMatchKey",
+];
+const record = (value) =>
+  value !== null && typeof value === "object" && !Array.isArray(value);
+const exact = (value, fields) =>
+  record(value) &&
+  Object.keys(value).length === fields.length &&
+  fields.every((field) => Object.hasOwn(value, field));
+const key = (value) =>
+  typeof value === "string" &&
+  value.trim() === value &&
+  (0, ids_js_1.isSafeRecordKey)(value);
+const integer = (value, minimum = 0) =>
+  typeof value === "number" && Number.isSafeInteger(value) && value >= minimum;
+const operationIds = (value) =>
+  record(value) &&
+  Object.entries(value).every(
+    ([uid, operation]) =>
+      (0, ids_js_1.isCanonicalLoginUid)(uid) && key(operation),
+  );
+function isInviteTransitionEvidence(value) {
+  return (
+    exact(value, ["transitionId", "sequence", "digest"]) &&
+    key(value.transitionId) &&
+    integer(value.sequence) &&
+    typeof value.digest === "string" &&
+    /^[a-f0-9]{64}$/.test(value.digest)
+  );
 }
+function isInviteAutomatchMessage(value) {
+  return (
+    exact(value, ["name", "text", "telegramMessageId"]) &&
+    typeof value.name === "string" &&
+    typeof value.text === "string" &&
+    integer(value.telegramMessageId, 1)
+  );
+}
+function isInviteDocument(value) {
+  if (
+    !exact(value, FIELDS) ||
+    value.schemaVersion !== 1 ||
+    value.version !== 2 ||
+    !(0, ids_js_1.isCanonicalLoginUid)(value.hostId) ||
+    !(
+      value.guestId === null ||
+      ((0, ids_js_1.isCanonicalLoginUid)(value.guestId) &&
+        value.guestId !== value.hostId)
+    ) ||
+    (value.hostColor !== "white" && value.hostColor !== "black") ||
+    !(0, rematches_js_1.isRematchSeries)(value.hostRematches) ||
+    !(0, rematches_js_1.isRematchSeries)(value.guestRematches) ||
+    !(
+      value.sessionTransition === null ||
+      isInviteTransitionEvidence(value.sessionTransition)
+    ) ||
+    !(
+      value.automatchMessage === null ||
+      isInviteAutomatchMessage(value.automatchMessage)
+    ) ||
+    !operationIds(value.automatchOperationIds)
+  )
+    return false;
+  if (value.kind === "event")
+    return (
+      value.password === null &&
+      value.automatchStateHint === null &&
+      value.automatchCanceledAt === null &&
+      value.telegramDeliveryVersion === null &&
+      value.eventOwned === true &&
+      key(value.eventId) &&
+      (value.eventRoundIndex === null ||
+        (integer(value.eventRoundIndex) && value.eventRoundIndex < 5)) &&
+      key(value.eventMatchKey) &&
+      value.guestId !== null &&
+      value.automatchMessage === null &&
+      Object.keys(value.automatchOperationIds).length === 0
+    );
+  if (
+    value.eventOwned !== false ||
+    value.eventId !== null ||
+    value.eventRoundIndex !== null ||
+    value.eventMatchKey !== null
+  )
+    return false;
+  if (value.kind === "manual")
+    return (
+      value.password === null &&
+      value.automatchStateHint === null &&
+      value.automatchCanceledAt === null &&
+      value.telegramDeliveryVersion === null &&
+      value.automatchMessage === null &&
+      Object.keys(value.automatchOperationIds).length === 0
+    );
+  return (
+    value.kind === "automatch" &&
+    typeof value.password === "string" &&
+    value.password !== "" &&
+    (value.automatchStateHint === null ||
+      value.automatchStateHint === "pending" ||
+      value.automatchStateHint === "matched" ||
+      value.automatchStateHint === "canceled") &&
+    (value.automatchCanceledAt === null ||
+      integer(value.automatchCanceledAt)) &&
+    (value.telegramDeliveryVersion === null ||
+      value.telegramDeliveryVersion === 2) &&
+    (value.automatchStateHint === "canceled"
+      ? value.automatchCanceledAt !== null
+      : value.automatchCanceledAt === null)
+  );
+}
+const readInviteDocument = (value) => (isInviteDocument(value) ? value : null);
+exports.readInviteDocument = readInviteDocument;
 function readCanonicalInviteParticipants(value) {
   if (value === null || value === undefined) return { status: "missing" };
-  const source = readInviteDocument(value);
-  if (!source) return { status: "invalid" };
-  const invite = fields(source);
-  const hostId = invite.hostId;
-  const guestId = invite.guestId ?? null;
-  if (
-    !(0, ids_js_1.isCanonicalLoginUid)(hostId) ||
-    (guestId !== null &&
-      (!(0, ids_js_1.isCanonicalLoginUid)(guestId) || guestId === hostId))
-  ) {
-    return { status: "invalid" };
-  }
-  return {
-    status: "ok",
-    source,
-    hostId,
-    guestId,
-    passwordProtected: Object.hasOwn(source, "password"),
-  };
+  const invite = (0, exports.readInviteDocument)(value);
+  return invite === null
+    ? { status: "invalid" }
+    : {
+        status: "ok",
+        source: invite,
+        hostId: invite.hostId,
+        guestId: invite.guestId,
+        passwordProtected: invite.password !== null,
+      };
 }
 function inviteMutationParticipants(value) {
-  const invite = fields(value);
-  return { hostId: string(invite.hostId), guestId: string(invite.guestId) };
+  return { hostId: value.hostId, guestId: value.guestId ?? "" };
 }
 function inviteTrimmedParticipants(value) {
-  const invite = fields(value);
-  return {
-    hostId: string(invite.hostId).trim(),
-    guestId: string(invite.guestId).trim(),
-  };
+  return { hostId: value?.hostId ?? "", guestId: value?.guestId ?? "" };
 }
 function inviteRematchState(value) {
-  const invite = fields(value);
   return {
-    hostRematches:
-      typeof invite.hostRematches === "string"
-        ? invite.hostRematches
-        : undefined,
-    guestRematches:
-      typeof invite.guestRematches === "string"
-        ? invite.guestRematches
-        : undefined,
-    hostColor: invite.hostColor === "black" ? "black" : "white",
+    hostRematches: value.hostRematches,
+    guestRematches: value.guestRematches,
+    hostColor: value.hostColor,
   };
 }
 function presentationInviteView(value) {
-  const rematches = inviteRematchState(value.source);
   return {
-    ...value.source,
     hostId: value.hostId,
     guestId: value.guestId,
-    hostRematches: rematches.hostRematches,
-    guestRematches: rematches.guestRematches,
+    hostRematches: value.source.hostRematches,
+    guestRematches: value.source.guestRematches,
   };
 }
 function inviteOpponent(value, playerId) {
-  const invite = fields(value);
-  const opponentId =
-    invite.hostId === playerId
-      ? invite.guestId
-      : invite.guestId === playerId
-        ? invite.hostId
-        : null;
-  return typeof opponentId === "string" ? opponentId : null;
+  return value?.hostId === playerId
+    ? value.guestId
+    : value?.guestId === playerId
+      ? value.hostId
+      : null;
 }
 function inviteIsEventOwned(value) {
-  const invite = fields(value);
-  return (
-    invite.eventOwned === true ||
-    (typeof invite.eventId === "string" && invite.eventId.trim() !== "")
-  );
+  return value?.kind === "event";
 }
 function inviteTimerEventId(value) {
-  const invite = fields(value);
-  return invite.eventOwned === true && typeof invite.eventId === "string"
-    ? invite.eventId
-    : null;
+  return value?.kind === "event" ? value.eventId : null;
 }
 function inviteRatingEvent(value) {
-  const invite = fields(value);
-  const eventId =
-    typeof invite.eventId === "string" && invite.eventId.trim() !== ""
-      ? invite.eventId.trim()
-      : null;
   return {
-    isEventMatch: invite.eventOwned === true || eventId !== null,
-    eventOwned: invite.eventOwned === true,
-    eventId,
+    isEventMatch: value?.kind === "event",
+    eventOwned: value?.kind === "event",
+    eventId: value?.eventId ?? null,
   };
 }
 function inviteMatchesParticipants(value, playerId, opponentId) {
-  if (!value) return false;
-  const invite = fields(value);
   return (
-    (invite.hostId === playerId && invite.guestId === opponentId) ||
-    (invite.hostId === opponentId && invite.guestId === playerId)
+    value !== null &&
+    ((value.hostId === playerId && value.guestId === opponentId) ||
+      (value.hostId === opponentId && value.guestId === playerId))
   );
 }
 function inviteProjectionState(value) {
-  const invite = fields(value);
   return {
-    hostId: string(invite.hostId),
-    guestId: string(invite.guestId),
-    automatchStateHint:
-      typeof invite.automatchStateHint === "string"
-        ? invite.automatchStateHint
-        : null,
-    automatchCanceledAt:
-      typeof invite.automatchCanceledAt === "number"
-        ? invite.automatchCanceledAt
-        : null,
-    telegramDeliveryVersion: invite.telegramDeliveryVersion === 2 ? 2 : null,
+    hostId: value?.hostId ?? "",
+    guestId: value?.guestId ?? "",
+    automatchStateHint: value?.automatchStateHint ?? null,
+    automatchCanceledAt: value?.automatchCanceledAt ?? null,
+    telegramDeliveryVersion: value?.telegramDeliveryVersion ?? null,
   };
 }
 function inviteSourceEventState(value) {
-  const invite = fields(value);
   return {
-    hostId: typeof invite.hostId === "string" ? invite.hostId : undefined,
-    guestId: typeof invite.guestId === "string" ? invite.guestId : undefined,
-    eventId: typeof invite.eventId === "string" ? invite.eventId : undefined,
-    eventOwned: invite.eventOwned === true,
+    hostId: value?.hostId,
+    guestId: value?.guestId ?? undefined,
+    eventId: value?.eventId ?? undefined,
+    eventOwned: value?.eventOwned ?? false,
   };
 }
 function inviteTelegramFingerprint(source, value) {
-  return JSON.stringify({ source, guestId: fields(value).guestId || null });
+  return JSON.stringify({ source, guestId: value?.guestId ?? null });
 }
-const createManualInviteDocument = (value) => readInviteDocument(value);
+function base(value) {
+  return {
+    schemaVersion: 1,
+    ...value,
+    hostRematches: { state: "open", indices: [] },
+    guestRematches: { state: "open", indices: [] },
+    sessionTransition: null,
+    automatchMessage: null,
+    automatchOperationIds: {},
+    password: null,
+    automatchStateHint: null,
+    automatchCanceledAt: null,
+    telegramDeliveryVersion: null,
+    eventOwned: false,
+    eventId: null,
+    eventRoundIndex: null,
+    eventMatchKey: null,
+  };
+}
+function requireInvite(value) {
+  const invite = (0, exports.readInviteDocument)(value);
+  if (!invite) throw new TypeError("invalid-invite-document");
+  return invite;
+}
+const createManualInviteDocument = (value) =>
+  requireInvite({ ...base(value), ...value, kind: "manual" });
 exports.createManualInviteDocument = createManualInviteDocument;
 const createPendingAutomatchInviteDocument = (value) =>
-  readInviteDocument(value);
+  requireInvite({ ...base(value), ...value, kind: "automatch" });
 exports.createPendingAutomatchInviteDocument =
   createPendingAutomatchInviteDocument;
 const createMatchedAutomatchInviteDocument = (value) =>
-  readInviteDocument(value);
+  requireInvite({ ...base(value), ...value, kind: "automatch" });
 exports.createMatchedAutomatchInviteDocument =
   createMatchedAutomatchInviteDocument;
-const createEventInviteDocument = (value) => readInviteDocument(value);
+const createEventInviteDocument = (value) =>
+  requireInvite({ ...base(value), ...value, kind: "event" });
 exports.createEventInviteDocument = createEventInviteDocument;
-const createInviteFieldDocument = (value) => readInviteDocument(value);
+const createInviteFieldDocument = (value) => structuredClone(value);
 exports.createInviteFieldDocument = createInviteFieldDocument;
 function inviteHistoricalParticipants(value) {
-  const invite = fields(value);
-  return { hostId: String(invite.hostId), guestId: String(invite.guestId) };
-}
-function record(value) {
-  return value && typeof value === "object" && !Array.isArray(value)
-    ? value
-    : null;
+  return { hostId: value.hostId, guestId: value.guestId };
 }
 function mergeInviteAutomatchOperation(value, current, uid, operationId) {
-  const operationIds = record(fields(current).automatchOperationIds);
-  const valid = [];
-  for (const [ownerUid, storedOperationId] of Object.entries(
-    operationIds || {},
-  )) {
-    if (
-      (0, ids_js_1.isSafeRecordKey)(ownerUid) &&
-      typeof storedOperationId === "string" &&
-      (0, ids_js_1.isSafeRecordKey)(storedOperationId)
-    ) {
-      valid.push([ownerUid, storedOperationId]);
-    }
-  }
-  return readInviteDocument({
-    ...value,
-    automatchOperationIds: { ...Object.fromEntries(valid), [uid]: operationId },
-  });
-}
-function inviteRatingWager(value, matchId) {
-  const wagers = record(fields(value).wagers);
-  const wager = record(wagers?.[matchId]);
-  const agreed = record(wager?.agreed);
+  if (
+    value.kind !== "automatch" ||
+    !(0, ids_js_1.isCanonicalLoginUid)(uid) ||
+    !key(operationId)
+  )
+    throw new TypeError("invalid-invite-operation");
   return {
-    material:
-      typeof agreed?.material === "string" ? agreed.material.trim() : "",
-    count: Number(agreed?.count),
+    ...value,
+    automatchOperationIds: {
+      ...current?.automatchOperationIds,
+      [uid]: operationId,
+    },
   };
 }

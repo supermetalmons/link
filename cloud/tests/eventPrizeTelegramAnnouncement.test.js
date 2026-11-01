@@ -27,7 +27,9 @@ const SCHEDULED_EVENT = Object.freeze({
   telegramAnnouncements: { invite: false, matches: false, results: false },
 });
 const CONFIG = prizeCatalog.getEventPrizeConfig(EVENT_ID);
+assert.ok(CONFIG);
 
+/** @param {import("node:test").TestContext} context @param {unknown} config @returns {typeof import("../runtime/telegram/eventPrizeAnnouncement")} */
 const withPrizeConfig = (context, config) => {
   const modulePath =
     require.resolve("../runtime/telegram/eventPrizeAnnouncement");
@@ -78,10 +80,10 @@ test("uses Mi Note Cards JPGs for Telegram while retaining website WebPs", () =>
     parseMode: "HTML",
     text: 'sunday mons treats — <tg-spoiler>mi note cards</tg-spoiler>\n\nstarting in 1 hour\n\nhttps://mons.link/event/vMBZ6dI1dQ5 <tg-emoji emoji-id="5355002036817525409">&#11088;</tg-emoji>',
   });
+  const config = prizeCatalog.getEventPrizeConfig(eventId);
+  assert.ok(config);
   assert.deepEqual(
-    prizeCatalog
-      .getEventPrizeConfig(eventId)
-      .prizes.map((prize) => prize.imageUrl),
+    config.prizes.map((prize) => prize.imageUrl),
     [
       "https://cdn.lil.org/nft/mi_note_cards/clean/561.webp",
       "https://cdn.lil.org/nft/mi_note_cards/clean/1025.webp",
@@ -92,6 +94,7 @@ test("uses Mi Note Cards JPGs for Telegram while retaining website WebPs", () =>
 });
 
 test("chooses each Telegram image override and falls back to the website image", (t) => {
+  assert.ok(CONFIG.prizes[0] && CONFIG.prizes[1] && CONFIG.prizes[2]);
   const renderer = withPrizeConfig(t, {
     ...CONFIG,
     prizes: [
@@ -134,15 +137,16 @@ test("uses approved catalog names in lowercase and trims event IDs", () => {
     [prizeCatalog.PICKME_PORTS_PRIZES_EVENT_ID, "pick-me ports"],
     [prizeCatalog.AAHNGEEZ_PRIZES_EVENT_ID, "aahngeez!"],
   ]) {
+    assert.ok(eventId !== undefined);
+    const config = prizeCatalog.getEventPrizeConfig(eventId);
+    assert.ok(config);
     const result = buildEventPrizeAnnouncement({ eventId: ` ${eventId} ` });
     assert.equal(result.collectionName, collectionName);
     assert.equal(result.eventId, eventId);
     assert.equal(isEventPrizeAnnouncementEvent(eventId, SCHEDULED_EVENT), true);
     assert.deepEqual(
       result.imageUrls,
-      prizeCatalog
-        .getEventPrizeConfig(eventId)
-        .prizes.map((prize) => prize.imageUrl),
+      config.prizes.map((prize) => prize.imageUrl),
     );
     assert.ok(
       result.text.includes(`<tg-spoiler>${collectionName}</tg-spoiler>`),
@@ -151,6 +155,7 @@ test("uses approved catalog names in lowercase and trims event IDs", () => {
 });
 
 test("lowercases and escapes catalog names before embedding Telegram HTML", (t) => {
+  assert.ok(CONFIG.prizes[0] && CONFIG.prizes[1] && CONFIG.prizes[2]);
   const renderer = withPrizeConfig(t, {
     ...CONFIG,
     collectionName: `  Rare <Weitsmans> & "Friends"'  `,
@@ -201,6 +206,7 @@ test("rejects invalid catalog metadata and album sizes", (t) => {
     );
   }
   for (const length of [2, 10]) {
+    assert.ok(CONFIG.prizes[0] && CONFIG.prizes[1] && CONFIG.prizes[2]);
     const renderer = withPrizeConfig(t, {
       ...CONFIG,
       prizes: Array(length).fill(CONFIG.prizes[0]),

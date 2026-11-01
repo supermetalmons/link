@@ -1,3 +1,16 @@
+import { applyCanonicalTestMigrations } from "./canonicalTestMigrations.ts";
+import {
+  APPLICATION_DATA_HEADER,
+  APPLICATION_DATA_EPOCH,
+  APPLICATION_DATA_SOCKET_PROTOCOL,
+} from "@mons/shared/data-contract";
+import { inviteDocumentFixture } from "../test/inviteDocumentFixture.ts";
+import { activateCanonicalApplicationFixture } from "./applicationRoomFixture.ts";
+import {
+  canonicalMatchEnvironment,
+  runInCanonicalMatchRoom,
+  evictCanonicalMatchRoom,
+} from "./canonicalMatchTestFixture.ts";
 import {
   REACTION_AUTH_PROTOCOL_PREFIX,
   REACTION_HEARTBEAT_REQUEST,
@@ -6,13 +19,8 @@ import {
   isInviteRoomMessage,
   type InviteReaction,
 } from "@mons/shared/reactions";
-import {
-  applyD1Migrations,
-  evictDurableObject,
-  runInDurableObject,
-  type D1Migration,
-} from "cloudflare:test";
-import { env } from "cloudflare:workers";
+import type { D1Migration } from "cloudflare:test";
+import { env as rawEnv } from "cloudflare:workers";
 import {
   afterEach,
   beforeAll,
@@ -45,12 +53,17 @@ import { activateDurableMatchPresentationTestState } from "./matchPresentationTe
 import { applyRetiredProfileMigrations } from "./profileTestMigrations.ts";
 import { reactionSocketTestHeaders } from "./presentationStorageFixture.ts";
 
+const env = canonicalMatchEnvironment(rawEnv);
+
 beforeAll(async () => {
   const testEnv = env as Env & {
     TEST_PROFILE_D1_MIGRATIONS: D1Migration[];
     TEST_D1_MIGRATIONS: D1Migration[];
   };
-  await applyD1Migrations(env.PROFILE_GAMES_DB, testEnv.TEST_D1_MIGRATIONS);
+  await applyCanonicalTestMigrations(
+    env.PROFILE_GAMES_DB,
+    testEnv.TEST_D1_MIGRATIONS,
+  );
   await env.PROFILE_GAMES_DB.batch([
     env.PROFILE_GAMES_DB.prepare(
       "UPDATE automatch_runtime_control SET backend = 'd1' WHERE singleton = 1",
@@ -65,6 +78,7 @@ beforeAll(async () => {
     testEnv.TEST_PROFILE_D1_MIGRATIONS,
     "a".repeat(64),
   );
+  await activateCanonicalApplicationFixture();
 });
 
 const sockets: WebSocket[] = [];
@@ -102,6 +116,7 @@ async function connect(
   }
   const response = await stub.fetch("https://reactions.internal/socket", {
     headers: {
+      [APPLICATION_DATA_HEADER]: String(APPLICATION_DATA_EPOCH),
       ...(await headersReady),
       Upgrade: "websocket",
       ...socketTestSessionHeaders(),
@@ -158,10 +173,15 @@ describe("invite reaction rooms", () => {
     await env.PROFILE_GAMES_DB.batch(
       [inviteId, otherInviteId].map((id) =>
         env.PROFILE_GAMES_DB.prepare(
-          "INSERT INTO invite_sources (invite_id, source_json, revision, updated_at_ms) VALUES (?, ?, 1, 1)",
+          "INSERT INTO invite_sources_canonical (invite_id, source_json, revision, updated_at_ms) VALUES (?, ?, 1, 1)",
         ).bind(
           id,
-          JSON.stringify({ hostId: "host-login", guestId: "guest-login" }),
+          JSON.stringify(
+            inviteDocumentFixture({
+              hostId: "host-login",
+              guestId: "guest-login",
+            }),
+          ),
         ),
       ),
     );
@@ -173,7 +193,7 @@ describe("invite reaction rooms", () => {
           matchId: id,
           actorUid,
           emojiId: 1,
-          aura: "",
+          aura: "none" as const,
           sourceId: "test-creation",
         })),
       );
@@ -210,6 +230,7 @@ describe("invite reaction rooms", () => {
         {
           method: payload ? "POST" : "GET",
           headers: {
+            [APPLICATION_DATA_HEADER]: String(APPLICATION_DATA_EPOCH),
             Origin: "https://mons.link",
             "CF-Connecting-IP": "198.51.100.18",
             ...(payload
@@ -219,10 +240,10 @@ describe("invite reaction rooms", () => {
                 }
               : {
                   Upgrade: "websocket",
-                  "Sec-WebSocket-Protocol": REACTION_SOCKET_PROTOCOL,
+                  "Sec-WebSocket-Protocol": `${REACTION_SOCKET_PROTOCOL}, ${APPLICATION_DATA_SOCKET_PROTOCOL}`,
                   ...(uid
                     ? {
-                        "Sec-WebSocket-Protocol": `${REACTION_SOCKET_PROTOCOL}, ${REACTION_AUTH_PROTOCOL_PREFIX}${uid}.payload.signature`,
+                        "Sec-WebSocket-Protocol": `${REACTION_SOCKET_PROTOCOL}, ${APPLICATION_DATA_SOCKET_PROTOCOL}, ${REACTION_AUTH_PROTOCOL_PREFIX}${uid}.payload.signature`,
                       }
                     : {}),
                 }),
@@ -353,12 +374,12 @@ describe("invite reaction rooms", () => {
       "participant-limit",
     );
     expect(
-      await runInDurableObject(
+      await runInCanonicalMatchRoom(
         stub,
         (_instance, state) =>
           state.storage.sql
             .exec<{ count: number }>(
-              "SELECT COUNT(*) AS count FROM latest_reactions",
+              "SELECT COUNT(*) AS count FROM latest_reactions_canonical",
             )
             .one().count,
       ),
@@ -409,7 +430,7 @@ describe("invite reaction rooms", () => {
     const first = reaction();
     await stub.publish("host-login", first);
     await client.read();
-    await evictDurableObject(stub);
+    await evictCanonicalMatchRoom(stub);
     const second = reaction();
     await stub.publish("guest-login", second);
     expect(JSON.parse(await client.read()).reaction).toEqual(second);
@@ -424,7 +445,7 @@ describe("invite reaction rooms", () => {
     const stub = room();
     const client = await connect(stub);
     await client.read();
-    await evictDurableObject(stub);
+    await evictCanonicalMatchRoom(stub);
     client.socket.send(REACTION_HEARTBEAT_REQUEST);
     expect(await client.read()).toBe(REACTION_HEARTBEAT_RESPONSE);
     const closed = new Promise<number>((resolve) =>
@@ -462,6 +483,7 @@ describe("invite reaction rooms", () => {
     await Promise.all(connected.map((client) => client.read()));
     const response = await stub.fetch("https://reactions.internal/socket", {
       headers: {
+        [APPLICATION_DATA_HEADER]: String(APPLICATION_DATA_EPOCH),
         "Sec-WebSocket-Protocol": "mons-reactions-v2",
         "X-Mons-Presentation-Match": matchId,
         "X-Mons-Presentation-Canonical": "1",
@@ -484,7 +506,7 @@ describe("invite reaction rooms", () => {
     );
     await Promise.all(participants.map((client) => client.read()));
     expect(
-      await runInDurableObject(
+      await runInCanonicalMatchRoom(
         stub,
         (_instance, state) => state.getWebSockets().length,
       ),
@@ -499,62 +521,68 @@ describe("invite reaction rooms", () => {
       ),
     );
     await Promise.all(connected.map((client) => client.read()));
-    const result = await runInDurableObject(stub, async (instance, state) => {
-      const spectators = state.getWebSockets("spectator-ip:192.0.2.1");
-      const target = instance as unknown as {
-        presentations: Pick<MatchPresentationStore, "readPresentations">;
-      };
-      const readPresentations = target.presentations.readPresentations.bind(
-        target.presentations,
-      );
-      const getWebSockets = state.getWebSockets.bind(state);
-      let reads = 0;
-      let snapshotPending = false;
-      let closing = false;
-      const presentations = vi
-        .spyOn(target.presentations, "readPresentations")
-        .mockImplementation((selectedMatchId) => {
-          const result = readPresentations(selectedMatchId);
-          if (++reads === 2) {
-            for (const socket of spectators)
-              socket.close(1000, "Close pending");
-            snapshotPending = true;
-          }
-          return result;
-        });
-      const sockets = vi
-        .spyOn(state, "getWebSockets")
-        .mockImplementation((tag) => {
-          const result = getWebSockets(tag);
-          if (snapshotPending && tag === undefined) {
-            snapshotPending = false;
-            closing =
-              result.length === spectators.length &&
-              result.every((socket) => socket.readyState === WebSocket.CLOSING);
-          }
-          return result;
-        });
-      try {
-        const response = await instance.fetch(
-          new Request("https://reactions.internal/socket", {
-            headers: {
-              "Sec-WebSocket-Protocol": REACTION_SOCKET_PROTOCOL,
-              "X-Mons-Presentation-Match": matchId,
-              "X-Mons-Presentation-Canonical": "1",
-              "X-Mons-Presentation-Actors": encodeURIComponent(
-                JSON.stringify(["host-login", "guest-login"]),
-              ),
-              Upgrade: "websocket",
-              "X-Mons-Reaction-IP": "192.0.2.1",
-            },
-          }),
+    const result = await runInCanonicalMatchRoom(
+      stub,
+      async (instance, state) => {
+        const spectators = state.getWebSockets("spectator-ip:192.0.2.1");
+        const target = instance as unknown as {
+          presentations: Pick<MatchPresentationStore, "readPresentations">;
+        };
+        const readPresentations = target.presentations.readPresentations.bind(
+          target.presentations,
         );
-        return { closing, status: response.status };
-      } finally {
-        presentations.mockRestore();
-        sockets.mockRestore();
-      }
-    });
+        const getWebSockets = state.getWebSockets.bind(state);
+        let reads = 0;
+        let snapshotPending = false;
+        let closing = false;
+        const presentations = vi
+          .spyOn(target.presentations, "readPresentations")
+          .mockImplementation((selectedMatchId) => {
+            const result = readPresentations(selectedMatchId);
+            if (++reads === 2) {
+              for (const socket of spectators)
+                socket.close(1000, "Close pending");
+              snapshotPending = true;
+            }
+            return result;
+          });
+        const sockets = vi
+          .spyOn(state, "getWebSockets")
+          .mockImplementation((tag) => {
+            const result = getWebSockets(tag);
+            if (snapshotPending && tag === undefined) {
+              snapshotPending = false;
+              closing =
+                result.length === spectators.length &&
+                result.every(
+                  (socket) => socket.readyState === WebSocket.CLOSING,
+                );
+            }
+            return result;
+          });
+        try {
+          const response = await instance.fetch(
+            new Request("https://reactions.internal/socket", {
+              headers: {
+                [APPLICATION_DATA_HEADER]: String(APPLICATION_DATA_EPOCH),
+                "Sec-WebSocket-Protocol": REACTION_SOCKET_PROTOCOL,
+                "X-Mons-Presentation-Match": matchId,
+                "X-Mons-Presentation-Canonical": "1",
+                "X-Mons-Presentation-Actors": encodeURIComponent(
+                  JSON.stringify(["host-login", "guest-login"]),
+                ),
+                Upgrade: "websocket",
+                "X-Mons-Reaction-IP": "192.0.2.1",
+              },
+            }),
+          );
+          return { closing, status: response.status };
+        } finally {
+          presentations.mockRestore();
+          sockets.mockRestore();
+        }
+      },
+    );
     expect(result).toEqual({ closing: true, status: 429 });
   });
 
@@ -587,6 +615,7 @@ describe("invite reaction rooms", () => {
     const expectFull = async (headers: Record<string, string>) => {
       const response = await stub.fetch("https://reactions.internal/socket", {
         headers: {
+          [APPLICATION_DATA_HEADER]: String(APPLICATION_DATA_EPOCH),
           "Sec-WebSocket-Protocol": "mons-reactions-v2",
           "X-Mons-Presentation-Match": matchId,
           "X-Mons-Presentation-Canonical": "1",
@@ -602,7 +631,7 @@ describe("invite reaction rooms", () => {
       await response.text();
     };
     const counts = () =>
-      runInDurableObject(stub, (_instance, state) => ({
+      runInCanonicalMatchRoom(stub, (_instance, state) => ({
         spectators: state.getWebSockets("role:spectator").length,
         sameIp: state.getWebSockets("spectator-ip:192.0.2.1").length,
         host: state.getWebSockets("role:host").length,
@@ -611,7 +640,7 @@ describe("invite reaction rooms", () => {
     for (const headers of [spectatorHeaders, hostHeaders, guestHeaders]) {
       await expectFull(headers);
     }
-    await evictDurableObject(stub);
+    await evictCanonicalMatchRoom(stub);
     expect(await counts()).toEqual({
       spectators: 8,
       sameIp: 8,
@@ -622,7 +651,7 @@ describe("invite reaction rooms", () => {
       await expectFull(headers);
     }
     await Promise.all(
-      [spectators[0], hosts[0], guests[0]].map(
+      [spectators[0]!, hosts[0]!, guests[0]!].map(
         ({ socket }) =>
           new Promise<void>((resolve) => {
             socket.addEventListener("close", () => resolve(), { once: true });
@@ -630,7 +659,7 @@ describe("invite reaction rooms", () => {
           }),
       ),
     );
-    for (const { socket } of [spectators[0], hosts[0], guests[0]]) {
+    for (const { socket } of [spectators[0]!, hosts[0]!, guests[0]!]) {
       expect(socket.readyState).toBe(WebSocket.CLOSED);
     }
     expect(await counts()).toEqual({

@@ -1,3 +1,4 @@
+import type { Aura } from "@mons/shared/appearance";
 import type { InputModifier, Location } from "../utils/gameModels";
 
 export type GameInputRuntime = {
@@ -9,10 +10,10 @@ export type GameInputRuntime = {
   didClickOutsideBoard(): void;
   didSelectInputModifier(inputModifier: InputModifier): void;
   canChangeEmoji(opponents: boolean): boolean;
-  sendPlayerEmojiUpdate(newId: number, aura?: string): void;
+  sendPlayerEmojiUpdate(newId: number, aura?: Aura): void;
   getDisplayedMatchPresentation(actorUid: string): {
     emojiId: number;
-    aura: string;
+    aura: Aura;
   } | null;
   showItemsAfterChangingAssetsStyle(): void;
   cleanupCurrentInputs(): void;

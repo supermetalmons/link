@@ -1,33 +1,24 @@
 import type { InviteDocument } from "@mons/shared/invite-records";
+import type { WagerRecord } from "./wagerModel.ts";
 import type { WagerStateSnapshot } from "./wagerStateD1.ts";
 
-declare const inviteWagerDocument: unique symbol;
-export type InviteWagerDocument = { readonly [inviteWagerDocument]: true };
+export type InviteWagerDocument = {
+  invite: InviteDocument;
+  wagers: Record<string, WagerRecord>;
+  resolutionMarkers: Record<string, boolean>;
+};
 
 export function composeInviteWagerSource(
-  source: InviteDocument | null,
+  invite: InviteDocument | null,
   states: readonly WagerStateSnapshot[],
-  shallow = false,
 ): InviteWagerDocument | null {
-  if (source === null || typeof source !== "object" || Array.isArray(source)) {
-    return source as null;
+  if (invite === null) return null;
+  const wagers: Record<string, WagerRecord> = {};
+  const resolutionMarkers: Record<string, boolean> = {};
+  for (const state of states) {
+    if (state.wager !== null) wagers[state.matchId] = state.wager;
+    if (state.resolutionMarker !== null)
+      resolutionMarkers[state.matchId] = state.resolutionMarker;
   }
-  const invite: Record<string, unknown> = { ...source };
-  delete invite.wagers;
-  delete invite.matchesWagerResolutions;
-  const wagers = Object.fromEntries(
-    states
-      .filter((state) => state.wager !== null)
-      .map((state) => [state.matchId, state.wager]),
-  );
-  const markers = Object.fromEntries(
-    states
-      .filter((state) => state.resolutionMarker !== null)
-      .map((state) => [state.matchId, state.resolutionMarker]),
-  );
-  if (Object.keys(wagers).length) invite.wagers = shallow ? true : wagers;
-  if (Object.keys(markers).length) {
-    invite.matchesWagerResolutions = shallow ? true : markers;
-  }
-  return invite as InviteWagerDocument;
+  return { invite, wagers, resolutionMarkers };
 }

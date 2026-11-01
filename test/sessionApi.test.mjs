@@ -1,3 +1,4 @@
+import { required, canonicalEvent } from "./fixtures/canonicalData.mjs";
 import assert from "node:assert/strict";
 import { registerHooks } from "node:module";
 import test from "node:test";
@@ -46,6 +47,7 @@ const response = (
   accessToken: `header.${Buffer.from(JSON.stringify({ iat: issuedAt, exp: issuedAt + lifetime })).toString("base64url")}.signature`,
   accessExpiresAtMs: (issuedAt + lifetime) * 1000,
 });
+/** @param {unknown} body */
 const json = (body, status = 200) =>
   new Response(JSON.stringify(body), {
     status,
@@ -53,10 +55,11 @@ const json = (body, status = 200) =>
   });
 
 test("session endpoints send exact independent capabilities without ambient cookies", async () => {
+  /** @type {{ url: Parameters<typeof fetch>[0], options: RequestInit }[]} */
   const calls = [];
   globalThis.fetch = async (url, options) => {
-    calls.push({ url, options });
-    return url.endsWith("/logout")
+    calls.push({ url, options: required(options) });
+    return String(url).endsWith("/logout")
       ? new Response(null, { status: 204 })
       : json(response());
   };
@@ -71,17 +74,17 @@ test("session endpoints send exact independent capabilities without ambient cook
       "https://api.mons.link/auth/session/logout",
     ],
   );
-  assert.deepEqual(JSON.parse(calls[0].options.body), {
+  assert.deepEqual(JSON.parse(String(required(calls[0]).options.body)), {
     sessionId: session.sessionId,
     refreshSecret: session.refreshSecret,
     revokeSecret: session.revokeSecret,
   });
   assert.equal(
-    new Headers(calls[1].options.headers).get("Authorization"),
+    new Headers(required(calls[1]).options.headers).get("Authorization"),
     `Bearer mrs1.${session.sessionId}.${session.refreshSecret}`,
   );
   assert.equal(
-    new Headers(calls[2].options.headers).get("Authorization"),
+    new Headers(required(calls[2]).options.headers).get("Authorization"),
     `Bearer mrv1.${session.sessionId}.${session.revokeSecret}`,
   );
   for (const call of calls) {
@@ -93,11 +96,13 @@ test("session endpoints send exact independent capabilities without ambient cook
 });
 
 test("optional bootstrap uses only validated query parameters on session create and refresh", async () => {
+  /** @type {NonNullable<Parameters<typeof sessionApi.create>[1]>} */
   const target = { inviteId: "game-a", selection: "approved" };
   const gameBootstrap = { ...target, result: { ok: false, status: 404 } };
+  /** @type {{ url: Parameters<typeof fetch>[0], options: RequestInit }[]} */
   const calls = [];
   globalThis.fetch = async (url, options) => {
-    calls.push({ url, options });
+    calls.push({ url, options: required(options) });
     return json({ ...response(), gameBootstrap });
   };
   for (const operation of [sessionApi.create, sessionApi.refresh]) {
@@ -106,7 +111,7 @@ test("optional bootstrap uses only validated query parameters on session create 
     assert.equal(result.uid, response().uid);
   }
   for (const call of calls) {
-    const url = new URL(call.url);
+    const url = new URL(String(call.url));
     assert.equal(
       url.search,
       "?bootstrapInviteId=game-a&bootstrapSelection=approved",
@@ -114,13 +119,16 @@ test("optional bootstrap uses only validated query parameters on session create 
     assert.equal(url.href.includes(session.refreshSecret), false);
     assert.equal(url.href.includes(session.revokeSecret), false);
   }
-  assert.deepEqual(JSON.parse(calls[0].options.body), {
+  assert.deepEqual(JSON.parse(String(required(calls[0]).options.body)), {
     sessionId: session.sessionId,
     refreshSecret: session.refreshSecret,
     revokeSecret: session.revokeSecret,
   });
-  assert.equal(calls[1].options.body, undefined);
-  assert.equal(new Headers(calls[1].options.headers).get("Content-Type"), null);
+  assert.equal(required(calls[1]).options.body, undefined);
+  assert.equal(
+    new Headers(required(calls[1]).options.headers).get("Content-Type"),
+    null,
+  );
   await assert.rejects(
     sessionApi.create(session, { ...target, inviteId: "bad/invite" }),
     { code: "unavailable" },
@@ -129,6 +137,7 @@ test("optional bootstrap uses only validated query parameters on session create 
 });
 
 test("missing or malformed optional games preserve valid tokens while legacy validation stays strict", async () => {
+  /** @type {NonNullable<Parameters<typeof sessionApi.create>[1]>} */
   const target = { inviteId: "game-a", selection: "current" };
   for (const gameBootstrap of [
     undefined,
@@ -166,7 +175,7 @@ const eventSeed = (eventId = "event-a") => ({
     ok: true,
     eventId,
     revision: 1,
-    event: { eventId, status: "scheduled" },
+    event: canonicalEvent({ eventId }),
     prizeSelections: {},
   },
   etag: eventSnapshotEtag(eventId, 1),
@@ -176,9 +185,10 @@ const eventSeed = (eventId = "event-a") => ({
 test("event-only bootstrap keeps session capabilities out of its query and validates its seed", async () => {
   const target = { eventId: "event-a" };
   const eventBootstrap = { ...target, result: eventSeed() };
+  /** @type {{ url: Parameters<typeof fetch>[0], options: RequestInit }[]} */
   const calls = [];
   globalThis.fetch = async (url, options) => {
-    calls.push({ url, options });
+    calls.push({ url, options: required(options) });
     return json({ ...response(), eventBootstrap });
   };
   for (const operation of [sessionApi.create, sessionApi.refresh]) {
@@ -188,8 +198,8 @@ test("event-only bootstrap keeps session capabilities out of its query and valid
     assert.equal(result.uid, response().uid);
   }
   for (const { url } of calls)
-    assert.equal(new URL(url).search, "?bootstrapEventId=event-a");
-  assert.deepEqual(JSON.parse(calls[0].options.body), {
+    assert.equal(new URL(String(url)).search, "?bootstrapEventId=event-a");
+  assert.deepEqual(JSON.parse(String(required(calls[0]).options.body)), {
     sessionId: session.sessionId,
     refreshSecret: session.refreshSecret,
     revokeSecret: session.revokeSecret,
@@ -240,11 +250,22 @@ test("event enrichment failures and malformed optional data preserve the session
 test("event bootstrap has a separate bounded response budget", async () => {
   const target = { eventId: "event-a" };
   const seed = eventSeed();
-  seed.snapshot.event.description = "a".repeat(64 * 1024);
+  seed.snapshot.event = canonicalEvent({
+    eventId: "event-a",
+    status: "active",
+    bracketSize: 32,
+    participants: Object.fromEntries(
+      Array.from({ length: 32 }, (_, index) => [
+        `profile-${index}`,
+        { displayName: "a".repeat(256), username: "b".repeat(256) },
+      ]),
+    ),
+  });
+  assert.ok(JSON.stringify(seed).length > 16_384);
   globalThis.fetch = async () =>
     json({ ...response(), eventBootstrap: { ...target, result: seed } });
   assert.deepEqual(
-    (await sessionApi.refresh(session, target)).eventBootstrap.result,
+    required((await sessionApi.refresh(session, target)).eventBootstrap).result,
     seed,
   );
   let canceled = false;
@@ -268,17 +289,19 @@ test("event bootstrap has a separate bounded response budget", async () => {
 });
 
 test("combined responses accept a validated game larger than the legacy token response cap", async () => {
+  /** @type {NonNullable<Parameters<typeof sessionApi.create>[1]>} */
   const target = { inviteId: "game-a", selection: "current" };
-  const match = (color) => ({
+  const match = (/** @type {string} */ color) => ({
+    schemaVersion: 1,
     version: 2,
     color,
     emojiId: 1,
-    aura: "",
+    aura: "none",
     gameVariant: "Classic",
     fen: "a".repeat(9000),
-    status: "",
+    status: "active",
     flatMovesString: "",
-    timer: "",
+    timer: { state: "idle" },
   });
   const result = {
     ok: true,
@@ -290,8 +313,8 @@ test("combined responses accept a validated game larger than the legacy token re
       hostId: "host",
       guestId: "guest",
       hostColor: "white",
-      hostRematches: "",
-      guestRematches: "",
+      hostRematches: { state: "open", indices: [] },
+      guestRematches: { state: "open", indices: [] },
       automatchStateHint: null,
       eventId: null,
       eventOwned: false,
@@ -318,6 +341,7 @@ test("combined responses accept a validated game larger than the legacy token re
 });
 
 test("combined response size is bounded and its single deadline spans network and body", async (t) => {
+  /** @type {NonNullable<Parameters<typeof sessionApi.create>[1]>} */
   const target = { inviteId: "game-a", selection: "current" };
   let canceled = 0;
   for (const headers of [
@@ -344,15 +368,14 @@ test("combined response size is bounded and its single deadline spans network an
   }
   assert.equal(canceled, 2);
   t.mock.timers.enable({ apis: ["setTimeout"] });
-  let resolveNetwork;
-  globalThis.fetch = () =>
-    new Promise((resolve) => {
-      resolveNetwork = resolve;
-    });
+  /** @type {PromiseWithResolvers<Response>} */
+  const { promise: networkResponse, resolve: resolveNetwork } =
+    Promise.withResolvers();
+  globalThis.fetch = () => networkResponse;
   const pending = sessionApi.refresh(session, target);
   const rejected = assert.rejects(pending, { code: "unavailable" });
   t.mock.timers.tick(20_000);
-  resolveNetwork(
+  required(resolveNetwork)(
     new Response(
       new ReadableStream({
         cancel() {
@@ -372,7 +395,8 @@ test("logout only acknowledges the exact 204 response contract", async () => {
     globalThis.fetch = async () => new Response("unexpected", { status });
     await assert.rejects(
       sessionApi.revoke(session),
-      (error) => error.code === "unavailable",
+      (error) =>
+        error instanceof SessionApiError && error.code === "unavailable",
     );
   }
 });
@@ -395,6 +419,7 @@ test("revocation is distinguished from unavailable service and errors never echo
   await assert.rejects(
     sessionApi.create(session),
     (error) =>
+      error instanceof SessionApiError &&
       error.code === "unavailable" &&
       !error.message.includes(session.refreshSecret),
   );
@@ -414,7 +439,8 @@ test("session response validation rejects another session, malformed identities,
     globalThis.fetch = async () => json(value);
     await assert.rejects(
       sessionApi.create(session),
-      (error) => error.code === "unavailable",
+      (error) =>
+        error instanceof SessionApiError && error.code === "unavailable",
     );
   }
 });
@@ -487,11 +513,11 @@ test("network and body time consume token lifetime without depending on later wa
 });
 
 test("identity opt-in composes with route seeds and preserves strict token parsing", async () => {
-  for (const target of [
+  for (const target of /** @type {Parameters<typeof sessionApi.create>[1][]} */ ([
     undefined,
     { inviteId: "game-a", selection: "current" },
     { eventId: "event-a" },
-  ]) {
+  ])) {
     const route = !target
       ? {}
       : "eventId" in target
@@ -499,7 +525,10 @@ test("identity opt-in composes with route seeds and preserves strict token parsi
         : { gameBootstrap: { ...target, result: { ok: false, status: 404 } } };
     for (const operation of [sessionApi.create, sessionApi.refresh]) {
       globalThis.fetch = async (url) => {
-        assert.equal(new URL(url).searchParams.get("bootstrapIdentity"), "1");
+        assert.equal(
+          new URL(String(url)).searchParams.get("bootstrapIdentity"),
+          "1",
+        );
         assert.equal(String(url).includes(session.refreshSecret), false);
         return json({
           ...response(),
@@ -547,9 +576,10 @@ test("missing or malformed identity remains absent while explicit repair and out
 
 test("a rejected combined identity request fails without downgrading its query", async () => {
   for (const target of [{ eventId: "event-a" }, undefined]) {
+    /** @type {URL[]} */
     const calls = [];
     globalThis.fetch = async (url) => {
-      calls.push(new URL(url));
+      calls.push(new URL(String(url)));
       return json({}, 400);
     };
     await assert.rejects(sessionApi.refresh(session, target, true), {
@@ -557,10 +587,10 @@ test("a rejected combined identity request fails without downgrading its query",
       status: 400,
     });
     assert.equal(calls.length, 1);
-    assert.equal(calls[0].searchParams.get("bootstrapIdentity"), "1");
+    assert.equal(required(calls[0]).searchParams.get("bootstrapIdentity"), "1");
     if (target)
       assert.equal(
-        calls[0].searchParams.get("bootstrapEventId"),
+        required(calls[0]).searchParams.get("bootstrapEventId"),
         target.eventId,
       );
   }
@@ -589,9 +619,11 @@ test("identity response bytes remain bounded separately from the base token", as
 test("identity allowance cannot be borrowed by an oversized route payload", async () => {
   const target = { eventId: "event-a" };
   const seed = eventSeed();
-  seed.snapshot.event.description = "a".repeat(
-    SESSION_EVENT_BOOTSTRAP_MAX_RESPONSE_BYTES,
-  );
+  const oversizedEvent = {
+    ...seed.snapshot.event,
+    description: "a".repeat(SESSION_EVENT_BOOTSTRAP_MAX_RESPONSE_BYTES),
+  };
+  seed.snapshot.event = oversizedEvent;
   globalThis.fetch = async () =>
     json({
       ...response(),

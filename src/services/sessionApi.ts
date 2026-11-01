@@ -1,3 +1,4 @@
+import { fetchApplicationData } from "./applicationTransport.ts";
 import type {
   ApiQuery,
   ApiRequest,
@@ -51,7 +52,7 @@ const hasNumericTokenTimestamps = (
 
 export class SessionApiError extends Error {
   readonly code: string;
-  readonly status?: number;
+  readonly status: number | undefined;
   constructor(code: string, message: string, status?: number) {
     super(message);
     this.name = "SessionApiError";
@@ -79,14 +80,17 @@ async function request<const Path extends SessionPath>(
   const controller = new AbortController();
   const timer = signal ? null : setTimeout(() => controller.abort(), 15_000);
   try {
-    const response = await fetch(`https://api.mons.link${path}`, {
-      ...options,
-      method: "POST",
-      credentials: "omit",
-      cache: "no-store",
-      redirect: "error",
-      signal: signal ?? controller.signal,
-    });
+    const response = await fetchApplicationData(
+      `https://api.mons.link${path}`,
+      {
+        ...options,
+        method: "POST",
+        credentials: "omit",
+        cache: "no-store",
+        redirect: "error",
+        signal: signal ?? controller.signal,
+      },
+    );
     if (!response.ok) {
       void response.body?.cancel().catch(() => undefined);
       throw new SessionApiError(
@@ -216,10 +220,9 @@ async function tokenResponse(
       }
       if (!isSessionTokenResponse(token) || token.sessionId !== sessionId)
         throw new Error();
-      const encodedClaims = token.accessToken
-        .split(".")[1]
-        .replace(/-/g, "+")
-        .replace(/_/g, "/");
+      const claimsPart = token.accessToken.split(".")[1];
+      if (!claimsPart) throw new Error();
+      const encodedClaims = claimsPart.replace(/-/g, "+").replace(/_/g, "/");
       const claims: unknown = JSON.parse(atob(encodedClaims));
       if (
         !hasNumericTokenTimestamps(claims) ||

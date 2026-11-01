@@ -1,11 +1,5 @@
 import type { CanonicalMutation } from "./types.ts";
-import {
-  canonicalRatingProjectionFields,
-  ratingProjectionColumns,
-  ratingProjectionWriteRow,
-  ratingProjectionFieldJson,
-  ratingWriteRow,
-} from "./accounting.ts";
+import { ratingProjectionWriteRow, ratingWriteRow } from "./accounting.ts";
 import { canonicalRowMutationStatement } from "./rowStatements.ts";
 
 type AccountingMutation = Extract<
@@ -17,7 +11,6 @@ type AccountingMutation = Extract<
       | "insert-rating-update"
       | "update-rating-update"
       | "update-rating-projection"
-      | "patch-rating-projection"
       | "delete-rating-update"
       | "insert-wager-settlement";
   }
@@ -31,7 +24,7 @@ function accountingMutationStatement(
     case "insert-february-opponent":
       return db
         .prepare(
-          `INSERT INTO profile_february_opponents (
+          `INSERT INTO profile_february_opponents_canonical (
              profile_id, opponent_profile_id, recorded_at_ms
            ) VALUES (?, ?, ?)`,
         )
@@ -43,7 +36,7 @@ function accountingMutationStatement(
     case "delete-february-opponent":
       return db
         .prepare(
-          `DELETE FROM profile_february_opponents
+          `DELETE FROM profile_february_opponents_canonical
            WHERE profile_id = ? AND opponent_profile_id = ?`,
         )
         .bind(mutation.profileId, mutation.opponentProfileId);
@@ -51,7 +44,7 @@ function accountingMutationStatement(
     case "update-rating-update":
       return canonicalRowMutationStatement(
         db,
-        "rating_updates",
+        "rating_updates_canonical",
         "operation_id",
         ratingWriteRow(mutation.value),
         mutation.kind === "insert-rating-update",
@@ -59,46 +52,19 @@ function accountingMutationStatement(
     case "update-rating-projection":
       return canonicalRowMutationStatement(
         db,
-        "rating_updates",
+        "rating_updates_canonical",
         "operation_id",
         ratingProjectionWriteRow(mutation.value, mutation.projection),
         false,
       );
-    case "patch-rating-projection": {
-      const { operation_id, ...columns } = ratingProjectionColumns(
-        mutation.value,
-        mutation.projection,
-      );
-      const { state, updated, reason } = canonicalRatingProjectionFields(
-        mutation.projection,
-      );
-      const fields = [state, updated, reason];
-      return db
-        .prepare(
-          `UPDATE rating_updates
-           SET payload_json = json_set(payload_json, ${fields.map((field) => `'$.${field}', json(?)`).join(", ")}),
-               ${Object.keys(columns)
-                 .map((column) => `${column} = ?`)
-                 .join(", ")},
-               revision = revision + 1
-           WHERE operation_id = ?`,
-        )
-        .bind(
-          ...fields.map((field) =>
-            ratingProjectionFieldJson(mutation.value, field),
-          ),
-          ...Object.values(columns),
-          operation_id,
-        );
-    }
     case "delete-rating-update":
       return db
-        .prepare("DELETE FROM rating_updates WHERE operation_id = ?")
+        .prepare("DELETE FROM rating_updates_canonical WHERE operation_id = ?")
         .bind(mutation.operationId);
     case "insert-wager-settlement":
       return db
         .prepare(
-          `INSERT INTO wager_settlements (
+          `INSERT INTO wager_settlements_canonical (
              operation_id, fingerprint, winner_profile_id, loser_profile_id,
              material, count, applied_at_ms, outcome, revision
            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1)`,

@@ -28,17 +28,7 @@ export type CanonicalAuthReadSnapshot =
 function parseAuthReadProfileRow(
   value: unknown,
 ): CanonicalProfileFieldsSnapshot {
-  const snapshot = parseMutableProfileRow(value);
-  if (snapshot.storageShape === "full") {
-    const {
-      storageShape: _storageShape,
-      legacyFields: _legacyFields,
-      ...profile
-    } = snapshot;
-    return profile;
-  }
-  const { storageShape: _storageShape, ...profile } = snapshot;
-  return profile;
+  return parseMutableProfileRow(value);
 }
 
 export function readCanonicalAuthProfileByLogin(
@@ -86,8 +76,8 @@ async function readCanonicalAuthSnapshot<
               method.raw_value, method.apple_email_masked, method.x_username,
               method.linked_at_ms, method.consent_at_ms, method.consent_source,
               method.revision, method.created_at_ms, method.updated_at_ms
-       FROM profile_auth_methods AS method
-       JOIN profile_login_owners AS owner
+       FROM profile_auth_methods_canonical AS method
+       JOIN profile_login_owners_canonical AS owner
          ON method.profile_id = owner.profile_id
        WHERE owner.login_uid = ?
        ORDER BY method.method ASC`,
@@ -99,22 +89,23 @@ async function readCanonicalAuthSnapshot<
     results.some(
       (result) => !result?.success || !Array.isArray(result.results),
     ) ||
-    results[0].results.length > 1
+    results[0]!.results.length > 1
   ) {
     throw new CanonicalProfileCorruption();
   }
   const snapshot = parseCanonicalOwnedProfileRowWith(
-    results[0].results[0],
+    results[0]!.results[0],
     loginUid,
     parseProfile,
   );
   if (!snapshot) {
-    if (results[1].results.length !== 0) throw new CanonicalProfileCorruption();
+    if (results[1]!.results.length !== 0)
+      throw new CanonicalProfileCorruption();
     return null;
   }
   const { profile } = snapshot;
   const authMethods: CanonicalAuthMethodSnapshot[] = [];
-  for (const methodRow of results[1].results) {
+  for (const methodRow of results[1]!.results) {
     const method = parseCanonicalAuthMethodRow(methodRow);
     if (method.profileId !== profile.profileId) {
       throw new CanonicalProfileCorruption();

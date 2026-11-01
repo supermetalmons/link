@@ -38,7 +38,9 @@ exports.isProposeRematchResponse =
   exports.MANUAL_INVITE_ID_PATTERN =
   exports.GAME_SESSION_OPERATION_ID_PATTERN =
     void 0;
-const auth_js_1 = require("./auth.js");
+const reactions_js_1 = require("./reactions.js");
+const timers_js_1 = require("./timers.js");
+const appearance_js_1 = require("./appearance.js");
 const ids_js_1 = require("./ids.js");
 const rematches_js_1 = require("./rematches.js");
 const match_protocol_js_1 = require("./match-protocol.js");
@@ -77,16 +79,11 @@ const hasExactKeys = (value, expected) => {
 };
 const isOperationId = (value) =>
   typeof value === "string" && GAME_SESSION_OPERATION_ID_PATTERN.test(value);
-const isPresentation = (value) => {
-  if (typeof value.aura !== "string") {
-    return false;
-  }
-  const normalized = (0, auth_js_1.normalizeAuthPresentation)(
-    value.emojiId,
-    value.aura,
-  );
-  return normalized.emoji === value.emojiId && normalized.aura === value.aura;
-};
+const isPresentation = (value) =>
+  (0, appearance_js_1.isEmojiAppearance)({
+    emoji: value.emojiId,
+    aura: value.aura,
+  });
 const isBaseRequest = (value, keys) =>
   isRecord(value) &&
   hasExactKeys(value, keys) &&
@@ -257,6 +254,7 @@ const isSubmitMoveResponse = (value) => {
 };
 exports.isSubmitMoveResponse = isSubmitMoveResponse;
 const MATCH_RECORD_KEYS = [
+  "schemaVersion",
   "version",
   "color",
   "emojiId",
@@ -270,70 +268,45 @@ const MATCH_RECORD_KEYS = [
 const isCanonicalMatchRecord = (value) =>
   isRecord(value) &&
   hasExactKeys(value, MATCH_RECORD_KEYS) &&
-  Number.isSafeInteger(value.version) &&
+  value.schemaVersion === 1 &&
+  (value.version === 1 ||
+    value.version === match_protocol_js_1.CONTROLLER_VERSION) &&
   (value.color === "white" || value.color === "black") &&
-  Number.isSafeInteger(value.emojiId) &&
-  typeof value.aura === "string" &&
-  value.aura.length <= 32 &&
+  (0, appearance_js_1.isEmojiId)(value.emojiId) &&
+  (0, appearance_js_1.isAura)(value.aura) &&
   typeof value.gameVariant === "string" &&
   value.gameVariant !== "" &&
   isBoundedString(value.gameVariant, MAX_GAME_SESSION_GAME_VARIANT_BYTES) &&
   typeof value.fen === "string" &&
   (0, match_protocol_js_1.isMatchFenWithinLimit)(value.fen) &&
-  isBoundedString(value.status, MAX_GAME_SESSION_STATUS_BYTES) &&
+  (value.status === "active" || value.status === "surrendered") &&
   (0, match_protocol_js_1.isMatchHistoryWithinLimits)(value.flatMovesString) &&
-  isBoundedString(value.timer, MAX_GAME_SESSION_TIMER_BYTES);
+  (0, timers_js_1.isMatchTimer)(value.timer);
 const isMatchRecord = (value) =>
-  isCanonicalMatchRecord(value) && value.fen !== "";
+  isCanonicalMatchRecord(value) && value.fen.trim() !== "";
 exports.isGameSessionMatch = isMatchRecord;
 const normalizeHistoricalMatchRecord = (value) => {
-  if (!isRecord(value)) {
-    return null;
-  }
-  const rawEmojiId =
-    typeof value.emojiId === "number" || typeof value.emojiId === "string"
-      ? Number(value.emojiId)
-      : 0;
-  const emojiId = Number.isSafeInteger(rawEmojiId) ? rawEmojiId : 0;
-  const fen = typeof value.fen === "string" ? value.fen : "";
-  const flatMovesString =
-    typeof value.flatMovesString === "string" ? value.flatMovesString : "";
+  if (isCanonicalMatchRecord(value)) return structuredClone(value);
   if (
-    (value.color !== "white" && value.color !== "black") ||
-    !(0, match_protocol_js_1.isMatchFenWithinLimit)(fen) ||
-    !(0, match_protocol_js_1.isMatchHistoryWithinLimits)(flatMovesString)
-  ) {
+    !isRecord(value) ||
+    !hasExactKeys(value, [
+      ...MATCH_RECORD_KEYS,
+      "sessionCreation",
+      "reaction",
+    ]) ||
+    !(
+      value.sessionCreation === null ||
+      (0, ids_js_1.isSafeRecordKey)(value.sessionCreation)
+    ) ||
+    !(value.reaction === null || (0, reactions_js_1.isReaction)(value.reaction))
+  )
     return null;
-  }
-  const rawGameVariant =
-    typeof value.gameVariant === "string" && value.gameVariant.trim()
-      ? value.gameVariant.trim()
-      : "Classic";
-  return {
-    version: Number.isSafeInteger(value.version)
-      ? Number(value.version)
-      : match_protocol_js_1.CONTROLLER_VERSION,
-    color: value.color,
-    emojiId,
-    aura:
-      typeof value.aura === "string" && value.aura.length <= 32
-        ? value.aura
-        : "",
-    gameVariant: isBoundedString(
-      rawGameVariant,
-      MAX_GAME_SESSION_GAME_VARIANT_BYTES,
-    )
-      ? rawGameVariant
-      : "Classic",
-    fen,
-    status: isBoundedString(value.status, MAX_GAME_SESSION_STATUS_BYTES)
-      ? value.status
-      : "",
-    flatMovesString,
-    timer: isBoundedString(value.timer, MAX_GAME_SESSION_TIMER_BYTES)
-      ? value.timer
-      : "",
-  };
+  const {
+    sessionCreation: _sessionCreation,
+    reaction: _reaction,
+    ...snapshot
+  } = value;
+  return isCanonicalMatchRecord(snapshot) ? structuredClone(snapshot) : null;
 };
 exports.normalizeHistoricalMatchRecord = normalizeHistoricalMatchRecord;
 const isMatchSnapshotKey = (value) => {
@@ -353,35 +326,6 @@ const isReadMatchSnapshotRequest = (value) =>
   isMatchSnapshotKey(value.matchId);
 exports.isReadMatchSnapshotRequest = isReadMatchSnapshotRequest;
 const normalizeMatchSnapshot = (value) => {
-  if (
-    !isRecord(value) ||
-    typeof value.fen !== "string" ||
-    value.fen === "" ||
-    (Object.hasOwn(value, "version") && !Number.isSafeInteger(value.version)) ||
-    (Object.hasOwn(value, "emojiId") &&
-      !(
-        (typeof value.emojiId === "number" ||
-          (typeof value.emojiId === "string" && value.emojiId.trim() !== "")) &&
-        Number.isSafeInteger(Number(value.emojiId))
-      )) ||
-    (Object.hasOwn(value, "aura") &&
-      (typeof value.aura !== "string" || value.aura.length > 32)) ||
-    (Object.hasOwn(value, "gameVariant") &&
-      !isBoundedString(
-        value.gameVariant,
-        MAX_GAME_SESSION_GAME_VARIANT_BYTES,
-      )) ||
-    (Object.hasOwn(value, "status") &&
-      !isBoundedString(value.status, MAX_GAME_SESSION_STATUS_BYTES)) ||
-    (Object.hasOwn(value, "flatMovesString") &&
-      !(0, match_protocol_js_1.isMatchHistoryWithinLimits)(
-        value.flatMovesString,
-      )) ||
-    (Object.hasOwn(value, "timer") &&
-      !isBoundedString(value.timer, MAX_GAME_SESSION_TIMER_BYTES))
-  ) {
-    return null;
-  }
   const match = normalizeHistoricalMatchRecord(value);
   return isMatchRecord(match) ? match : null;
 };
@@ -503,7 +447,7 @@ const isProposeRematchResponse = (value) =>
   value.actorUid !== "" &&
   typeof value.matchId === "string" &&
   value.matchId !== "" &&
-  typeof value.rematches === "string" &&
+  (0, rematches_js_1.isRematchSeries)(value.rematches) &&
   isMatchRecord(value.match);
 exports.isProposeRematchResponse = isProposeRematchResponse;
 const isEndRematchResponse = (value) =>
@@ -514,8 +458,8 @@ const isEndRematchResponse = (value) =>
   value.inviteId !== "" &&
   typeof value.actorUid === "string" &&
   value.actorUid !== "" &&
-  typeof value.rematches === "string" &&
-  value.rematches.endsWith("x");
+  (0, rematches_js_1.isRematchSeries)(value.rematches) &&
+  value.rematches.state === "ended";
 exports.isEndRematchResponse = isEndRematchResponse;
 const isEnsureMatchResponse = (value) =>
   isRecord(value) &&

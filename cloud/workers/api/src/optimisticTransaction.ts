@@ -32,7 +32,9 @@ export async function runOptimisticTransaction<
     if ("commit" in decision) {
       return {
         committed: false,
-        decision: decision.decision,
+        ...(decision.decision === undefined
+          ? {}
+          : { decision: decision.decision }),
         value,
       };
     }
@@ -40,7 +42,9 @@ export async function runOptimisticTransaction<
     if (written.applied) {
       return {
         committed: true,
-        decision: decision.decision,
+        ...(decision.decision === undefined
+          ? {}
+          : { decision: decision.decision }),
         value: written.value,
       };
     }

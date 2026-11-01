@@ -95,8 +95,9 @@ export function eventTransitionFixture(
         return {
           committed: false,
           value: current,
-          decision:
-            typeof result.decision === "string" ? result.decision : undefined,
+          ...(typeof result.decision === "string"
+            ? { decision: result.decision }
+            : {}),
         };
       }
       await beforeWrite?.({ current, proposed: result.value, etag: "fixture" });
@@ -106,8 +107,9 @@ export function eventTransitionFixture(
       return {
         committed: true,
         value: result.value,
-        decision:
-          typeof result.decision === "string" ? result.decision : undefined,
+        ...(typeof result.decision === "string"
+          ? { decision: result.decision }
+          : {}),
       };
     },
   };

@@ -1,16 +1,17 @@
 // Generated from src/telegram/records.ts. Run npm run generate:runtime.
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.AppliedMessageSnapshot = void 0;
-exports.readTelegramMessageDocument = readTelegramMessageDocument;
-exports.readTelegramControlDocument = readTelegramControlDocument;
+exports.AppliedMessageSnapshot =
+  exports.readTelegramControlDocument =
+  exports.readTelegramMessageDocument =
+    void 0;
 exports.messageDocument = messageDocument;
 exports.controlDocument = controlDocument;
 exports.apiGateDocument = apiGateDocument;
 exports.appliedDocument = appliedDocument;
 exports.desiredDocument = desiredDocument;
-exports.updateTelegramApplied = updateTelegramApplied;
 exports.sendEvidenceDocument = sendEvidenceDocument;
+exports.updateTelegramApplied = updateTelegramApplied;
 exports.messageDeliveryDocument = messageDeliveryDocument;
 exports.messageDesiredDocument = messageDesiredDocument;
 exports.messageDesiredRevision = messageDesiredRevision;
@@ -22,58 +23,54 @@ exports.updateTelegramMessage = updateTelegramMessage;
 exports.omitTelegramMessageFields = omitTelegramMessageFields;
 exports.updateTelegramControl = updateTelegramControl;
 exports.clearTelegramApiGate = clearTelegramApiGate;
-const record = (value) =>
-  value !== null && typeof value === "object" && !Array.isArray(value)
-    ? value
-    : null;
-function readTelegramMessageDocument(value) {
-  const source = record(value);
-  return source;
-}
-function readTelegramControlDocument(value) {
-  const source = record(value);
-  return source;
-}
+var recordCodec_js_1 = require("./recordCodec.js");
+Object.defineProperty(exports, "readTelegramMessageDocument", {
+  enumerable: true,
+  get: function () {
+    return recordCodec_js_1.readTelegramMessageDocument;
+  },
+});
+Object.defineProperty(exports, "readTelegramControlDocument", {
+  enumerable: true,
+  get: function () {
+    return recordCodec_js_1.readTelegramControlDocument;
+  },
+});
 function messageDocument(value) {
-  return record(value) || {};
+  return value ?? { schemaVersion: 1 };
 }
 function controlDocument(value) {
-  return record(value) || {};
+  return value ?? { schemaVersion: 1 };
 }
 function apiGateDocument(value) {
-  return record(value) || {};
+  return value;
 }
 function appliedDocument(value) {
-  return record(value) || {};
+  return value;
 }
 function desiredDocument(value) {
-  return record(value) || {};
-}
-function updateTelegramApplied(current, fields) {
-  const value = { ...current, ...fields };
   return value;
 }
 function sendEvidenceDocument(value) {
   return value;
 }
+function updateTelegramApplied(current, fields) {
+  return { ...current, ...fields };
+}
 function messageDeliveryDocument(value) {
-  return record(record(value)?.delivery) || {};
+  return value?.delivery ?? {};
 }
 function messageDesiredDocument(value) {
-  return record(record(value)?.desired) || {};
+  return value?.desired;
 }
 function messageDesiredRevision(value) {
-  const desired = record(value)?.desired;
-  const revision = desired?.revision;
-  return typeof revision === "string" && revision.trim() !== ""
-    ? revision.trim()
-    : "";
+  return value?.desired?.revision ?? "";
 }
 function messageAppliedDocument(value) {
-  return record(record(value)?.applied) || {};
+  return value?.applied;
 }
 function messageRecoveryResultDocument(value) {
-  return record(record(value)?.manualRecoveryResult) || {};
+  return value?.manualRecoveryResult;
 }
 class AppliedMessageSnapshot {
   document;
@@ -81,38 +78,28 @@ class AppliedMessageSnapshot {
     this.document = document;
   }
   get chatId() {
-    const value = record(this.document)?.chatId;
-    return typeof value === "string" && value.trim() !== "" ? value.trim() : "";
+    return this.document?.chatId ?? "";
   }
   get messageId() {
-    const value = record(this.document)?.messageId;
-    return typeof value === "number" ? value : undefined;
+    return this.document?.messageId;
   }
   hasMessageId() {
-    const source = record(this.document);
-    return (
-      typeof source.messageId === "number" &&
-      Number.isInteger(source.messageId) &&
-      source.messageId > 0
-    );
+    return this.document !== undefined;
   }
   retainedDocument() {
+    if (!this.document) throw new TypeError("telegram-applied-message-missing");
     return this.document;
   }
 }
 exports.AppliedMessageSnapshot = AppliedMessageSnapshot;
 function readMessageApplied(value) {
-  return new AppliedMessageSnapshot(messageAppliedDocument(value));
+  return new AppliedMessageSnapshot(value.applied);
 }
 function telegramApiGateOwner(value) {
-  const retained = value;
-  const evidence = retained;
-  const owner = evidence?.owner;
-  return typeof owner === "string" && owner.trim() !== "" ? owner.trim() : "";
+  return value?.owner ?? "";
 }
 function updateTelegramMessage(current, fields) {
-  const value = { ...current, ...fields };
-  return value;
+  return { ...current, ...fields };
 }
 function omitTelegramMessageFields(current, fields) {
   const output = { ...current };
@@ -120,8 +107,7 @@ function omitTelegramMessageFields(current, fields) {
   return output;
 }
 function updateTelegramControl(current, fields) {
-  const value = { ...current, ...fields };
-  return value;
+  return { ...current, ...fields };
 }
 function clearTelegramApiGate(current) {
   const output = { ...current };

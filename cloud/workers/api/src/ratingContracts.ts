@@ -1,54 +1,24 @@
-import type { HistoricalMatchPair } from "@mons/shared/game-sessions";
+import type { WagerAgreement } from "@mons/shared/wagers";
+import type {
+  RatingProfile,
+  RatingUpdateData,
+  RatingLeaseInput,
+  RatingProfilePatch,
+  RatingCompletionPatch,
+} from "./ratingStateContracts.ts";
 import type { EventProgressOutboxRecord } from "../../../runtime/events.js";
 import type { GameSessionPort } from "./gameSessionContracts.ts";
 import type { MatchStatePort } from "./repositoryContracts.ts";
 import type { RecoveryRowObservation } from "./recoveryObservation.ts";
 import type { RecoveryScanPage } from "./recoveryScanPage.ts";
-import type {
-  ProfileOwnershipProfile,
-  ProfileOwnershipReader,
-} from "./profileOwnership.ts";
-
-export type RatingProfile = ProfileOwnershipProfile & {
-  nonce: number;
-  totalManaPoints: number;
-};
-
-export type RatingUpdateData = {
-  completedAtMs?: number;
-  eventId?: string;
-  eventOwned?: boolean;
-  eventProgressReason?: string;
-  eventProgressState?: string;
-  eventProgressUpdatedAtMs?: number;
-  eventProgressVersion?: number;
-  historicalMatchArchiveVersion?: number;
-  inviteId: string;
-  historicalMatchPair?: HistoricalMatchPair;
-  isEventMatch?: boolean;
-  leaseExpiresAtMs: number;
-  matchId: string;
-  opponentId: string;
-  opponentManaPoints?: number;
-  opponentProfileId: string;
-  ownerToken: string;
-  playerId: string;
-  playerManaPoints?: number;
-  playerProfileId: string;
-  profileGameProjectionReason?: string;
-  profileGameProjectionState?: string;
-  profileGameProjectionUpdatedAtMs?: number;
-  profileGameProjectionVersion?: number;
-  shouldUpdateFebruaryChallenge: boolean;
-  startedAtMs: number;
-  status: string;
-  telegramDeliveryVersion?: number | null;
-  telegramProjectionReason?: string;
-  telegramProjectionState?: string;
-  telegramProjectionUpdatedAtMs?: number;
-  telegramProjectionVersion?: number;
-  updateRatingMessage?: string;
-};
+import type { ProfileOwnershipReader } from "./profileOwnership.ts";
+export type {
+  RatingProfile,
+  RatingUpdateData,
+  RatingLeaseInput,
+  RatingProfilePatch,
+  RatingCompletionPatch,
+} from "./ratingStateContracts.ts";
 
 export type PendingRatingTelegramProjection = {
   operationId: string;
@@ -104,68 +74,9 @@ type RatingRecoveryRepository = {
   ) => Promise<RatingRecoveryQuarantineResult | null>;
 };
 
-export type RatingLeaseInput = {
-  inviteId: string;
-  matchId: string;
-  opponentId: string;
-  ownerToken: string;
-  ownerUid: string;
-  playerId: string;
-  leaseMs: number;
-};
-
 export type RatingLeaseResult = {
   data: RatingUpdateData | null;
-  status: "acquired" | "busy" | "done";
-};
-
-export type RatingProfilePatch = {
-  rating?: number;
-  nonce?: number;
-  win?: boolean;
-  totalManaPoints?: number;
-};
-
-export type RatingCompletionPatch = {
-  status: "done";
-  completedAtMs: number;
-  updatedAtMs: number;
-  leaseExpiresAtMs: number;
-  inviteId?: string;
-  matchId?: string;
-  playerId?: string;
-  opponentId?: string;
-  playerProfileId?: string;
-  opponentProfileId?: string;
-  historicalMatchArchiveVersion?: 1;
-  historicalMatchPair?: HistoricalMatchPair;
-  result?: "gg" | "win";
-  canUpdateRatings?: boolean;
-  didApplyRatingDelta?: boolean;
-  winnerDisplayName?: string;
-  loserDisplayName?: string;
-  winnerNewRating?: number | null;
-  loserNewRating?: number | null;
-  playerManaPoints?: number;
-  opponentManaPoints?: number;
-  shouldUpdateFebruaryChallenge?: boolean;
-  updateRatingMessage?: string;
-  telegramDeliveryVersion?: 2 | null;
-  isEventMatch?: boolean;
-  eventOwned?: boolean;
-  eventId?: string | null;
-  profileGameProjectionVersion?: 1;
-  profileGameProjectionState?: "pending";
-  profileGameProjectionUpdatedAtMs?: number;
-  profileGameProjectionReason?: string | null;
-  telegramProjectionVersion?: 1;
-  telegramProjectionState?: "pending";
-  telegramProjectionUpdatedAtMs?: number;
-  telegramProjectionReason?: string | null;
-  eventProgressVersion?: 1;
-  eventProgressState?: "pending";
-  eventProgressUpdatedAtMs?: number;
-  eventProgressReason?: string | null;
+  status: "acquired" | "busy" | "done" | "blocked";
 };
 
 export type RatingCommitPlan = {
@@ -199,6 +110,10 @@ export type RatingGameplayReader = Pick<GameSessionPort, "readInviteMetadata"> &
   ProfileOwnershipReader;
 
 export type RatingRepository = RatingGameplayReader & {
+  readWagerAgreement(
+    inviteId: string,
+    matchId: string,
+  ): Promise<Pick<WagerAgreement, "material" | "count"> | null>;
   putEventProgressOutbox(
     outboxId: string,
     record: EventProgressOutboxRecord,

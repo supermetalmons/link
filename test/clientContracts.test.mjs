@@ -1,3 +1,4 @@
+import { applicationStorageKey } from "../src/session/applicationDataStorage.ts";
 import assert from "node:assert/strict";
 import { registerHooks } from "node:module";
 import test from "node:test";
@@ -35,6 +36,8 @@ const { compareNavigationItems } =
   await import("../src/services/navigationItemOrdering.ts");
 const { shouldPreserveStorageKeyOnLogout } =
   await import("../src/utils/storage.ts");
+const { buildGameFromMoveStreams, getHistoricalPairGameVariant } =
+  await import("../src/game/historicalMatchModels.ts");
 
 const GAME_VARIANTS = [
   "Classic",
@@ -54,6 +57,7 @@ const GAME_VARIANTS = [
 const CLASSIC_FEN =
   "0 0 w 0 0 0 0 0 1 n03y0xs0xd0xa0xe0xn03/n11/n11/n04xxmn01xxmn04/n03xxmn01xxmn01xxmn03/xxQn04xxUn04xxQ/n03xxMn01xxMn01xxMn03/n04xxMn01xxMn04/n11/n11/n03E0xA0xD0xS0xY0xn03";
 
+/** @param {import("../src/navigation/routeState.ts").RouteState["mode"]} mode @param {Partial<import("../src/navigation/routeState.ts").RouteState>} [values] @returns {import("../src/navigation/routeState.ts").RouteState} */
 const routeTarget = (mode, values = {}) => ({
   mode,
   path: "",
@@ -64,6 +68,7 @@ const routeTarget = (mode, values = {}) => ({
   ...values,
 });
 
+/** @template T @param {string} path @param {() => T} read @returns {T} */
 const withLocation = (path, read) => {
   const previousWindow = Object.getOwnPropertyDescriptor(globalThis, "window");
   Object.defineProperty(globalThis, "window", {
@@ -76,12 +81,13 @@ const withLocation = (path, read) => {
     if (previousWindow) {
       Object.defineProperty(globalThis, "window", previousWindow);
     } else {
-      delete globalThis.window;
+      Reflect.deleteProperty(globalThis, "window");
     }
   }
 };
 
-const readRoute = (path) => withLocation(path, getCurrentRouteState);
+const readRoute = (/** @type {string} */ path) =>
+  withLocation(path, getCurrentRouteState);
 
 test("parses canonical client routes and auto-invite intent", () => {
   assert.deepEqual(readRoute("/"), routeTarget("home"));
@@ -121,6 +127,7 @@ test("parses canonical client routes and auto-invite intent", () => {
 });
 
 test("builds canonical route paths and safely rejects malformed snapshots", () => {
+  /** @type {Array<[import("../src/navigation/routeState.ts").RouteState, string]>} */
   const targets = [
     [routeTarget("home"), "/"],
     [routeTarget("watch"), "/watch"],
@@ -315,7 +322,7 @@ test("share URLs restore the current overlay and exact background without callba
   }
 });
 
-test("keeps stored game-variant normalization and persistence compatible", () => {
+test("preserves variant strings and rendering choices without defaulting invalid stored values", () => {
   assert.equal(legacyDefaultGameVariant, "Classic");
   assert.deepEqual(getAllGameVariantNames(), GAME_VARIANTS);
   assert.equal(
@@ -323,13 +330,25 @@ test("keeps stored game-variant normalization and persistence compatible", () =>
     "OuterWedgeManaRows",
   );
   assert.equal(normalizeStoredGameVariant("future-variant"), "Classic");
-  assert.equal(normalizeStoredGameVariant(null), "Classic");
   assert.equal(
     getStoredGameVariantForPersistence("  future-variant  "),
-    "future-variant",
+    "  future-variant  ",
   );
-  assert.equal(getStoredGameVariantForPersistence("  "), "Classic");
-  assert.equal(getStoredGameVariantForPersistence(null), "Classic");
+  assert.equal(getStoredGameVariantForPersistence("  "), "  ");
+  for (const value of [null, undefined, "", 1, false, {}, []]) {
+    assert.throws(
+      () => getStoredGameVariantForPersistence(value),
+      /invalid-game-variant/,
+    );
+    assert.throws(
+      () => normalizeStoredGameVariant(value),
+      /invalid-game-variant/,
+    );
+    assert.throws(
+      () => buildGameSeedForStoredVariant(value),
+      /invalid-game-variant/,
+    );
+  }
 });
 
 test("builds stable deterministic and random game seeds", () => {
@@ -352,7 +371,26 @@ test("builds stable deterministic and random game seeds", () => {
   assert.equal(randomSeed.gameVariant, "OuterWedgeManaRows");
 });
 
+test("historical absence has an explicit default while unknown stored variants retain Classic rendering", () => {
+  assert.equal(
+    getHistoricalPairGameVariant({
+      matchId: "invite",
+      hostPlayerId: "host",
+      guestPlayerId: "guest",
+      hostMatch: null,
+      guestMatch: null,
+    }),
+    "Classic",
+  );
+  const unknown = buildGameFromMoveStreams("future-variant", "", "");
+  assert.ok(unknown);
+  assert.equal(unknown.toFen(), CLASSIC_FEN);
+  for (const value of [undefined, null, "", 1, {}])
+    assert.equal(buildGameFromMoveStreams(value, "", ""), null);
+});
+
 test("orders navigation items by status, bucket, recency, then id", () => {
+  /** @type {import("@mons/shared/navigation").NavigationOrderingItem[]} */
   const items = [
     { id: "ended", status: "ended", sortBucket: 0, listSortAtMs: 999 },
     { id: "active", status: "active", sortBucket: 0, listSortAtMs: 999 },
@@ -382,7 +420,10 @@ test("orders navigation items by status, bucket, recency, then id", () => {
 });
 
 test("preserves only the mute preference during logout", () => {
-  assert.equal(shouldPreserveStorageKeyOnLogout("isMuted"), true);
+  assert.equal(
+    shouldPreserveStorageKeyOnLogout(applicationStorageKey("isMuted")),
+    true,
+  );
   for (const key of [
     "profileId",
     "preferredAssetsSet",

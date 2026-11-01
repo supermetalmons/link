@@ -4,10 +4,7 @@ import {
   inviteProjectionState,
   mergeInviteAutomatchOperation,
 } from "@mons/shared/invite-records";
-import {
-  emptyAutomatchEntryFields,
-  type AutomatchEntryRead,
-} from "../../../runtime/automatchRecords.js";
+import { type AutomatchEntryRead } from "../../../runtime/automatchRecords.js";
 import type { RandomSource } from "@mons/shared/ids";
 import type { StartAutomatchResponse } from "@mons/shared/navigation";
 import {
@@ -129,13 +126,11 @@ function getQueuedAutomatchesForUid(
   const queue = value;
   if (!queue) return [];
   return Object.entries(queue)
-    .filter(([, data]) => normalizeString(data.record?.uid) === expectedUid)
-    .sort(([left], [right]) => compareStrings(left, right))
-    .slice(0, AUTOMATCH_UID_LOOKUP_LIMIT)
-    .map(([inviteId, data]) => ({
-      inviteId,
-      data: data.record || emptyAutomatchEntryFields(),
-    }));
+    .flatMap(([inviteId, data]) =>
+      data?.uid === expectedUid ? [{ inviteId, data }] : [],
+    )
+    .sort((left, right) => compareStrings(left.inviteId, right.inviteId))
+    .slice(0, AUTOMATCH_UID_LOOKUP_LIMIT);
 }
 
 async function readQueuedAutomatchesByUid(
@@ -234,7 +229,7 @@ function automatchOperationLockId(operationId: string): string {
 function secureRandom(): number {
   const values = new Uint32Array(1);
   crypto.getRandomValues(values);
-  return values[0] / 0x1_0000_0000;
+  return values[0]! / 0x1_0000_0000;
 }
 
 async function replayAutomatchReceipt(
@@ -487,7 +482,7 @@ async function persistExistingAutomatchReceipt(
           repository.readAutomatchEntry(inviteId, signal),
           repository.readInviteMetadata(inviteId, signal),
         ]);
-        const queueUid = normalizeString(queueValue.record?.uid);
+        const queueUid = normalizeString(queueValue?.uid);
         const invite = readInviteDocument(inviteValue);
         const { hostId, guestId } = inviteTrimmedParticipants(invite);
         if (!invite || !owned.has(hostId)) return null;
@@ -656,7 +651,7 @@ async function runAutomatchCandidateAttempts(
           const currentInvite = readInviteDocument(currentInviteValue);
           const participants = inviteTrimmedParticipants(currentInvite);
           if (
-            normalizeString(currentQueueValue.record?.uid) !== existingUid ||
+            normalizeString(currentQueueValue?.uid) !== existingUid ||
             participants.hostId !== existingUid ||
             participants.guestId
           ) {

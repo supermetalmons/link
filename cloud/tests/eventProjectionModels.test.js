@@ -17,6 +17,52 @@ const {
   shouldProjectInvite,
 } = require("../runtime/events/gameProjectionModel");
 
+/** @param {{eventOwned?: boolean, guestId?: string | null}} [fields] @returns {import("../runtime/shared/invite-records").InviteDocument} */
+function invite(fields = {}) {
+  const common = {
+    schemaVersion: /** @type {const} */ (1),
+    version: /** @type {const} */ (2),
+    hostId: "host",
+    hostColor: /** @type {const} */ ("white"),
+    guestId: fields.eventOwned ? "guest" : null,
+    password: null,
+    automatchStateHint: null,
+    automatchCanceledAt: null,
+    telegramDeliveryVersion: null,
+    automatchOperationIds: {},
+    automatchMessage: null,
+    sessionTransition: null,
+    hostRematches: { state: /** @type {const} */ ("open"), indices: [] },
+    guestRematches: { state: /** @type {const} */ ("open"), indices: [] },
+    ...fields,
+  };
+  return fields.eventOwned
+    ? {
+        ...common,
+        kind: "event",
+        eventOwned: true,
+        eventId: "event",
+        eventRoundIndex: 0,
+        eventMatchKey: "0_0",
+      }
+    : {
+        ...common,
+        kind: "manual",
+        eventOwned: false,
+        eventId: null,
+        eventRoundIndex: null,
+        eventMatchKey: null,
+      };
+}
+/** @param {Partial<{username: string | null, eth: string | null, sol: string | null, emoji: number | null}>} [fields] */
+const profile = (fields = {}) => ({
+  username: null,
+  eth: null,
+  sol: null,
+  emoji: null,
+  ...fields,
+});
+
 test("event projection previews normalize ordering and limits", () => {
   const participants = Object.fromEntries(
     Array.from({ length: 7 }, (_, index) => {
@@ -26,26 +72,33 @@ test("event projection previews normalize ordering and limits", () => {
         {
           profileId: `p${position}`,
           displayName: `Player ${position}`,
-          emojiId: String(position),
+          emojiId: position,
+          aura: "none",
           joinedAtMs: position,
         },
       ];
     }),
   );
-  const preview = buildPreviewParticipants(participants);
+  /** @type {ReturnType<typeof buildPreviewParticipants>} */
+  const preview = Reflect.apply(buildPreviewParticipants, undefined, [
+    participants,
+  ]);
   assert.deepEqual(
     preview.map(({ profileId }) => profileId),
     ["p1", "p2", "p3", "p4", "p5", "p6", "p7"],
   );
   assert.equal(mapEventStatusToNavigationStatus("active"), "active");
-  assert.equal(getListSortAtMs({ startedAtMs: 300 }, "active"), 300);
+  assert.equal(
+    Reflect.apply(getListSortAtMs, undefined, [{ startedAtMs: 300 }, "active"]),
+    300,
+  );
 });
 
 test("game projection status keeps automatch, event rating, and rematch precedence", () => {
   assert.equal(
     deriveProjectionStatus({
       inviteId: "regular",
-      inviteData: {},
+      inviteData: invite(),
       automatchStateHint: null,
       latestMatchRatingCompleted: false,
     }),
@@ -54,7 +107,7 @@ test("game projection status keeps automatch, event rating, and rematch preceden
   assert.equal(
     deriveProjectionStatus({
       inviteId: "auto_example",
-      inviteData: {},
+      inviteData: invite(),
       automatchStateHint: "pending",
       latestMatchRatingCompleted: false,
     }),
@@ -63,7 +116,7 @@ test("game projection status keeps automatch, event rating, and rematch preceden
   assert.equal(
     deriveProjectionStatus({
       inviteId: "regular",
-      inviteData: { guestId: "guest" },
+      inviteData: invite({ guestId: "guest" }),
       automatchStateHint: null,
       latestMatchRatingCompleted: false,
     }),
@@ -72,7 +125,7 @@ test("game projection status keeps automatch, event rating, and rematch preceden
   assert.equal(
     deriveProjectionStatus({
       inviteId: "event-match",
-      inviteData: { eventOwned: true },
+      inviteData: invite({ eventOwned: true }),
       automatchStateHint: null,
       latestMatchRatingCompleted: true,
     }),
@@ -81,7 +134,7 @@ test("game projection status keeps automatch, event rating, and rematch preceden
   assert.equal(
     shouldProjectInvite({
       inviteId: "auto_example",
-      inviteData: {},
+      inviteData: invite(),
       automatchStateHint: null,
     }),
     false,
@@ -100,7 +153,7 @@ test("game projection ignores legacy rating markers and keeps ordinary games act
     assert.equal(
       deriveProjectionStatus({
         inviteId: "regular",
-        inviteData,
+        inviteData: invite(inviteData),
         automatchStateHint: null,
         latestMatchRatingCompleted: !inviteData.eventOwned,
       }),
@@ -112,13 +165,28 @@ test("game projection ignores legacy rating markers and keeps ordinary games act
 test("game projection normalization preserves timestamps, identity display, and list order", () => {
   assert.equal(readTimestampMillis(12_500.9), 12_500);
   assert.equal(readTimestampMillis({ milliseconds: 12_500 }), null);
-  assert.equal(getProfileDisplayName({ username: " player " }), "player");
   assert.equal(
-    getProfileDisplayName({ eth: "0x1234567890abcdef" }),
+    Reflect.apply(getProfileDisplayName, undefined, [
+      profile({ username: " player " }),
+    ]),
+    "player",
+  );
+  assert.equal(
+    Reflect.apply(getProfileDisplayName, undefined, [
+      profile({ eth: "0x1234567890abcdef" }),
+    ]),
     "0x12...cdef",
   );
-  assert.equal(getProfileDisplayName({ sol: "short" }), "anon");
-  assert.equal(getProfileEmoji({ custom: { emoji: "7" }, emoji: 3 }), 7);
+  assert.equal(
+    Reflect.apply(getProfileDisplayName, undefined, [
+      profile({ sol: "short" }),
+    ]),
+    "anon",
+  );
+  assert.equal(
+    Reflect.apply(getProfileEmoji, undefined, [profile({ emoji: 3 })]),
+    3,
+  );
   assert.deepEqual(
     getOwnerContext({
       ownerProfileId: "guest-profile",

@@ -1,23 +1,25 @@
+import { applyCanonicalTestMigrations } from "./canonicalTestMigrations.ts";
+import { publicMatchFixture } from "../test/matchRecordFixture.ts";
 import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { env } from "cloudflare:workers";
-import { applyD1Migrations, type D1Migration } from "cloudflare:test";
+import type { D1Migration } from "cloudflare:test";
 import { handleHistoricalMatchRoute } from "../src/historicalMatchRoute.ts";
 import { writeHistoricalMatchSnapshot } from "../src/historicalMatchesD1.ts";
 
 const testEnv = env as Env & { TEST_D1_MIGRATIONS: D1Migration[] };
 
 function match(color: "black" | "white") {
-  return {
+  return publicMatchFixture({
     version: 2,
     color,
     emojiId: color === "white" ? 1 : 2,
-    aura: "",
+    aura: "none" as const,
     gameVariant: "Classic",
     fen: "fen",
     status: "surrendered",
     flatMovesString: "move",
     timer: "",
-  };
+  });
 }
 
 function pair(matchId = "invite-1") {
@@ -38,7 +40,7 @@ function request(query = "inviteId=invite-1&matchId=invite-1", method = "GET") {
 
 describe("historical match public route", () => {
   beforeAll(async () => {
-    await applyD1Migrations(
+    await applyCanonicalTestMigrations(
       testEnv.PROFILE_GAMES_DB,
       testEnv.TEST_D1_MIGRATIONS,
     );
@@ -46,7 +48,7 @@ describe("historical match public route", () => {
 
   beforeEach(async () => {
     await env.PROFILE_GAMES_DB.prepare(
-      "DELETE FROM historical_match_pairs",
+      "DELETE FROM historical_match_pairs_canonical",
     ).run();
   });
 

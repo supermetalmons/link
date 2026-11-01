@@ -1,10 +1,14 @@
+import { applyCanonicalTestMigrations } from "./canonicalTestMigrations.ts";
+import { canonicalWithdrawalFixture } from "../test/canonicalWithdrawalFixture.ts";
+import { canonicalQueuePayloadFixture } from "../test/canonicalQueueFixture.ts";
+import { eventDocumentFixture } from "../test/eventCompatibilityFixture.ts";
 import { projectionDocumentFixture } from "../test/profileDataBoundaryFixture.ts";
 import {
   createWithdrawalStorageFixture as createD1EventPrizeWithdrawalStore,
   withdrawalFixture,
 } from "../test/withdrawalStorageFixture.ts";
 import { getEventPrizeDefinition } from "@mons/shared/event-prizes";
-import { applyD1Migrations, type D1Migration } from "cloudflare:test";
+import type { D1Migration } from "cloudflare:test";
 import { env } from "cloudflare:workers";
 import {
   afterEach,
@@ -46,7 +50,9 @@ const testEnv = env as Env & {
 const eventId = "NN3eRzoZo80";
 const sourceProfileId = "recovery-source-profile";
 const credentialReads: string[] = [];
-const queueTransport = { async send() {} };
+const queueTransport = {
+  async send(_body: unknown, _options?: QueueSendOptions) {},
+};
 const outboundFetch = vi.fn<typeof fetch>(async () => {
   throw new Error("auth-recovery-must-not-use-network");
 });
@@ -111,7 +117,7 @@ function observeTargetReads(
         const member = Reflect.get(target, property, target);
         if (
           (property === "all" || property === "first") &&
-          query.includes("profile_game_projections") &&
+          query.includes("profile_game_projections_canonical") &&
           bindings[0] === profileId
         ) {
           return (...args: unknown[]) => {
@@ -157,11 +163,11 @@ async function fixture(prizeId = "retired-prize") {
     normalizedMethodValue: wallet,
     opId: `recovery-target-operation-${fixtureSequence}`,
     requestEmoji: 1,
-    requestAura: null,
+    requestAura: "none",
   });
   const nowMs = Date.now();
   await testEnv.PROFILE_DB.prepare(
-    `INSERT INTO profile_auth_recovery_jobs (
+    `INSERT INTO profile_auth_recovery_jobs_canonical (
       profile_id, login_uids_json, source_profile_ids_json, source_phase,
       prize_cursor, phase_started_at_ms, last_enqueued_at_ms, created_at_ms,
       updated_at_ms, revision
@@ -179,8 +185,8 @@ async function fixture(prizeId = "retired-prize") {
       nowMs,
     )
     .run();
-  const record = {
-    schemaVersion: 2,
+  const record = eventDocumentFixture({
+    schemaVersion: 3,
     eventId,
     status: "scheduled",
     createdAtMs: 100,
@@ -191,22 +197,21 @@ async function fixture(prizeId = "retired-prize") {
     createdByUsername: "Source",
     participants: {},
     rounds: {},
-  };
+  });
   const assignment = {
     eventId,
     profileId: sourceProfileId,
     place: 1,
     prizeId,
     assignedAtMs: 100,
-    archivedMetadata: { edition: 2 },
   };
   await testEnv.EVENT_DB.batch([
     testEnv.EVENT_DB.prepare(
-      `INSERT INTO event_records (event_id, status, start_at_ms, updated_at_ms, record_json)
+      `INSERT INTO event_records_canonical (event_id, status, start_at_ms, updated_at_ms, record_json)
        VALUES (?, 'scheduled', 1000, 100, ?)`,
     ).bind(eventId, JSON.stringify(record)),
     testEnv.EVENT_DB.prepare(
-      `INSERT INTO profile_event_prizes (profile_id, event_id, assignment_json, updated_at_ms)
+      `INSERT INTO profile_event_prizes_canonical (profile_id, event_id, assignment_json, updated_at_ms)
        VALUES (?, ?, ?, 100)`,
     ).bind(sourceProfileId, eventId, JSON.stringify(assignment)),
   ]);
@@ -217,19 +222,19 @@ async function fixture(prizeId = "retired-prize") {
     targetPath: `profileEventPrizes/${target.profileId}/${eventId}`,
     readJob: () =>
       testEnv.PROFILE_DB.prepare(
-        "SELECT * FROM profile_auth_recovery_jobs WHERE profile_id = ?",
+        "SELECT * FROM profile_auth_recovery_jobs_canonical WHERE profile_id = ?",
       )
         .bind(target.profileId)
         .first(),
     resetPrizePhase: () =>
       testEnv.PROFILE_DB.prepare(
-        "UPDATE profile_auth_recovery_jobs SET source_phase = 'prizes', prize_cursor = NULL WHERE profile_id = ?",
+        "UPDATE profile_auth_recovery_jobs_canonical SET source_phase = 'prizes', prize_cursor = NULL WHERE profile_id = ?",
       )
         .bind(target.profileId)
         .run(),
     startGamePhase: () =>
       testEnv.PROFILE_DB.prepare(
-        "UPDATE profile_auth_recovery_jobs SET source_phase = 'games' WHERE profile_id = ?",
+        "UPDATE profile_auth_recovery_jobs_canonical SET source_phase = 'games' WHERE profile_id = ?",
       )
         .bind(target.profileId)
         .run(),
@@ -238,7 +243,7 @@ async function fixture(prizeId = "retired-prize") {
 
 describe("canonical auth recovery with D1 storage", () => {
   beforeAll(async () => {
-    await applyD1Migrations(
+    await applyCanonicalTestMigrations(
       testEnv.PROFILE_GAMES_DB,
       testEnv.TEST_D1_MIGRATIONS,
     );
@@ -251,7 +256,7 @@ describe("canonical auth recovery with D1 storage", () => {
       testEnv.EVENT_DB,
       testEnv.TEST_EVENT_D1_MIGRATIONS,
     );
-    await applyD1Migrations(
+    await applyCanonicalTestMigrations(
       testEnv.EVENT_PRIZE_WITHDRAWALS_DB,
       testEnv.TEST_EVENT_PRIZE_WITHDRAWAL_D1_MIGRATIONS,
     );
@@ -262,16 +267,18 @@ describe("canonical auth recovery with D1 storage", () => {
     outboundFetch.mockClear();
     vi.stubGlobal("fetch", outboundFetch);
     await testEnv.PROFILE_GAMES_DB.prepare(
-      "DELETE FROM profile_game_projections",
+      "DELETE FROM profile_game_projections_canonical",
     ).run();
     await testEnv.EVENT_DB.batch([
       testEnv.EVENT_DB.prepare("DELETE FROM event_leases"),
       testEnv.EVENT_DB.prepare("DELETE FROM event_write_admissions"),
-      testEnv.EVENT_DB.prepare("DELETE FROM event_records"),
-      testEnv.EVENT_DB.prepare("DELETE FROM profile_event_prize_revisions"),
+      testEnv.EVENT_DB.prepare("DELETE FROM event_records_canonical"),
+      testEnv.EVENT_DB.prepare(
+        "DELETE FROM profile_event_prize_revisions_canonical",
+      ),
     ]);
     await testEnv.EVENT_PRIZE_WITHDRAWALS_DB.prepare(
-      "DELETE FROM event_prize_withdrawals",
+      "DELETE FROM event_prize_withdrawals_canonical WHERE json_extract(record_json, '$.status') != 'completed'",
     ).run();
   });
 
@@ -314,9 +321,9 @@ describe("canonical auth recovery with D1 storage", () => {
       [1_000, 3_000, 4_000].map((listSortAt, index) => ({
         type: "merge" as const,
         profileId: f.targetProfileId,
-        projectionId: projectionIds[index + 1],
+        projectionId: projectionIds[index + 1]!,
         data: {
-          ...gameData(projectionIds[index + 1], f.targetProfileId),
+          ...gameData(projectionIds[index + 1]!, f.targetProfileId),
           listSortAt,
           updatedAt: 1_000,
         },
@@ -325,8 +332,8 @@ describe("canonical auth recovery with D1 storage", () => {
     const newerTarget = await getProfileGameProjections(
       testEnv.PROFILE_GAMES_DB,
       f.targetProfileId,
-      [projectionIds[3]],
-    ).then((rows) => rows.get(projectionIds[3]) ?? null);
+      [projectionIds[3]!],
+    ).then((rows) => rows.get(projectionIds[3]!) ?? null);
     const targetRead = vi.fn();
     let nowMs = Date.now() + 1_000;
     const service = createAuthRecoveryService(d1Env, {
@@ -364,15 +371,15 @@ describe("canonical auth recovery with D1 storage", () => {
       await getProfileGameProjections(
         testEnv.PROFILE_GAMES_DB,
         f.targetProfileId,
-        [projectionIds[3]],
-      ).then((rows) => rows.get(projectionIds[3]) ?? null),
+        [projectionIds[3]!],
+      ).then((rows) => rows.get(projectionIds[3]!) ?? null),
     ).toEqual(newerTarget);
     expect(
       await getProfileGameProjections(
         testEnv.PROFILE_GAMES_DB,
         f.targetProfileId,
-        [projectionIds[100]],
-      ).then((rows) => rows.get(projectionIds[100]) ?? null),
+        [projectionIds[100]!],
+      ).then((rows) => rows.get(projectionIds[100]!) ?? null),
     ).toBeNull();
     expect(await f.readJob()).toMatchObject({ source_phase: "games" });
 
@@ -390,9 +397,9 @@ describe("canonical auth recovery with D1 storage", () => {
       await getProfileGameProjections(
         testEnv.PROFILE_GAMES_DB,
         f.targetProfileId,
-        [projectionIds[100]],
-      ).then((rows) => rows.get(projectionIds[100]) ?? null),
-    ).toMatchObject({ data: gameData(projectionIds[100], f.targetProfileId) });
+        [projectionIds[100]!],
+      ).then((rows) => rows.get(projectionIds[100]!) ?? null),
+    ).toMatchObject({ data: gameData(projectionIds[100]!, f.targetProfileId) });
     const completedPage = await f.readJob();
     expect(completedPage).toMatchObject({
       phase_started_at_ms: nowMs,
@@ -447,9 +454,11 @@ describe("canonical auth recovery with D1 storage", () => {
         service.recoverProfile,
         logger,
       );
-      expect(send).toHaveBeenCalledExactlyOnceWith(message.body, {
-        delaySeconds: 0,
-      });
+      expect(send).toHaveBeenCalledOnce();
+      expect(canonicalQueuePayloadFixture(send.mock.calls[0]![0])).toEqual(
+        message.body,
+      );
+      expect(send.mock.calls[0]![1]).toEqual({ delaySeconds: 0 });
       expect(message.ack).toHaveBeenCalledOnce();
       expect(message.retry).not.toHaveBeenCalled();
       const job = await f.readJob();
@@ -542,7 +551,7 @@ describe("canonical auth recovery with D1 storage", () => {
     async (column) => {
       const f = await fixture();
       await testEnv.PROFILE_DB.prepare(
-        "UPDATE profile_auth_recovery_jobs SET login_uids_json = ? WHERE profile_id = ?",
+        "UPDATE profile_auth_recovery_jobs_canonical SET login_uids_json = ? WHERE profile_id = ?",
       )
         .bind(JSON.stringify([f.loginUid]), f.targetProfileId)
         .run();
@@ -554,7 +563,7 @@ describe("canonical auth recovery with D1 storage", () => {
           ...catchupStore,
           async readForOwner() {
             await testEnv.PROFILE_DB.prepare(
-              `UPDATE profile_auth_recovery_jobs SET ${column} = ${column} + 1 WHERE profile_id = ?`,
+              `UPDATE profile_auth_recovery_jobs_canonical SET ${column} = ${column} + 1 WHERE profile_id = ?`,
             )
               .bind(f.targetProfileId)
               .run();
@@ -579,7 +588,7 @@ describe("canonical auth recovery with D1 storage", () => {
       (_, index) => `recovery-login-${index}`,
     );
     await testEnv.PROFILE_DB.prepare(
-      "UPDATE profile_auth_recovery_jobs SET login_uids_json = ?, source_profile_ids_json = '[]' WHERE profile_id = ?",
+      "UPDATE profile_auth_recovery_jobs_canonical SET login_uids_json = ?, source_profile_ids_json = '[]' WHERE profile_id = ?",
     )
       .bind(JSON.stringify(loginUids), f.targetProfileId)
       .run();
@@ -740,22 +749,26 @@ describe("canonical auth recovery with D1 storage", () => {
         },
       ]);
       if (failure === "malformed-target") {
-        await testEnv.PROFILE_GAMES_DB.prepare(
-          "UPDATE profile_game_projections SET payload_json = '[]' WHERE profile_id = ? AND projection_id = ?",
-        )
-          .bind(f.targetProfileId, projectionId)
-          .run();
+        await expect(
+          testEnv.PROFILE_GAMES_DB.prepare(
+            "UPDATE profile_game_projections_canonical SET payload_json = '[]' WHERE profile_id = ? AND projection_id = ?",
+          )
+            .bind(f.targetProfileId, projectionId)
+            .run(),
+        ).rejects.toThrow("CHECK constraint failed");
       }
       const before = await f.readJob();
       const readRows = () =>
         testEnv.PROFILE_GAMES_DB.prepare(
-          "SELECT * FROM profile_game_projections ORDER BY profile_id, projection_id",
+          "SELECT * FROM profile_game_projections_canonical ORDER BY profile_id, projection_id",
         ).all();
       const rowsBefore = (await readRows()).results;
       const targetRead = vi.fn(() => {
-        if (failure === "target-read-failed") {
-          throw new Error("simulated-target-read-failure");
-        }
+        throw new Error(
+          failure === "target-read-failed"
+            ? "simulated-target-read-failure"
+            : "invalid-profile-game-projection",
+        );
       });
       await expect(
         createAuthRecoveryService(d1Env, {
@@ -776,14 +789,14 @@ describe("canonical auth recovery with D1 storage", () => {
   it("reports completion when the recovery job is deleted during login processing", async () => {
     const f = await fixture();
     await testEnv.PROFILE_DB.prepare(
-      "UPDATE profile_auth_recovery_jobs SET login_uids_json = ? WHERE profile_id = ?",
+      "UPDATE profile_auth_recovery_jobs_canonical SET login_uids_json = ? WHERE profile_id = ?",
     )
       .bind(JSON.stringify([f.loginUid]), f.targetProfileId)
       .run();
     const catchupStore = createProfileLinkCatchupStore(testEnv.PROFILE_DB);
     const readForOwner = vi.fn(async (loginUid: string, profileId: string) => {
       await testEnv.PROFILE_DB.prepare(
-        "DELETE FROM profile_auth_recovery_jobs WHERE profile_id = ?",
+        "DELETE FROM profile_auth_recovery_jobs_canonical WHERE profile_id = ?",
       )
         .bind(profileId)
         .run();
@@ -809,7 +822,7 @@ describe("canonical auth recovery with D1 storage", () => {
     async (operation) => {
       const f = await fixture();
       await testEnv.PROFILE_DB.prepare(
-        `UPDATE profile_auth_recovery_jobs
+        `UPDATE profile_auth_recovery_jobs_canonical
          SET login_uids_json = ?, source_profile_ids_json = '[]', source_phase = 'finalize'
          WHERE profile_id = ?`,
       )
@@ -826,7 +839,7 @@ describe("canonical auth recovery with D1 storage", () => {
             return async (statements: D1PreparedStatement[]) => {
               await target
                 .prepare(
-                  `UPDATE profile_auth_recovery_jobs
+                  `UPDATE profile_auth_recovery_jobs_canonical
                    SET login_uids_json = ?, source_profile_ids_json = ?, source_phase = 'prizes',
                      updated_at_ms = ?, revision = revision + 1
                    WHERE profile_id = ?`,
@@ -884,7 +897,7 @@ describe("canonical auth recovery with D1 storage", () => {
       prize_cursor: eventId,
     });
     const revision = await testEnv.EVENT_DB.prepare(
-      "SELECT revision FROM profile_event_prize_revisions WHERE profile_id = ?",
+      "SELECT revision FROM profile_event_prize_revisions_canonical WHERE profile_id = ?",
     )
       .bind(f.targetProfileId)
       .first<number>("revision");
@@ -894,7 +907,7 @@ describe("canonical auth recovery with D1 storage", () => {
     );
     expect(
       await testEnv.EVENT_DB.prepare(
-        "SELECT revision FROM profile_event_prize_revisions WHERE profile_id = ?",
+        "SELECT revision FROM profile_event_prize_revisions_canonical WHERE profile_id = ?",
       )
         .bind(f.targetProfileId)
         .first<number>("revision"),
@@ -934,7 +947,7 @@ describe("canonical auth recovery with D1 storage", () => {
         });
       } else {
         await testEnv.EVENT_DB.prepare(
-          `CREATE TRIGGER reject_recovery_prize_write BEFORE INSERT ON profile_event_prizes
+          `CREATE TRIGGER reject_recovery_prize_write BEFORE INSERT ON profile_event_prizes_canonical
          WHEN NEW.profile_id != 'recovery-source-profile'
          BEGIN SELECT RAISE(ABORT, 'simulated-d1-prize-write-failure'); END`,
         ).run();
@@ -993,7 +1006,7 @@ describe("canonical auth recovery with D1 storage", () => {
   it.each(["before", "during"])(
     "does not restore a prize whose withdrawal completes %s recovery",
     async (timing) => {
-      const prizeId = "1092";
+      const prizeId = timing === "before" ? "1092" : "1111";
       const definition = getEventPrizeDefinition(eventId, prizeId);
       if (!definition) throw new Error("missing-test-prize-definition");
       const f = await fixture(prizeId);
@@ -1002,14 +1015,14 @@ describe("canonical auth recovery with D1 storage", () => {
       );
       const complete = () =>
         withdrawals.record(eventId, prizeId).transaction(() => ({
-          value: {
+          value: canonicalWithdrawalFixture({
             eventId,
             prizeId,
             status: "completed",
             assetAddress: definition.assetAddress,
             assetStandard: definition.standard,
             updatedAtMs: Date.now(),
-          },
+          }),
         }));
       if (timing === "before") await complete();
       let reads = 0;

@@ -1,8 +1,27 @@
 import type { AssetsSet, BoardStyleSet } from "../content/boardStyleModels";
-import type { EmojiId } from "../content/emojis";
+import {
+  isAura,
+  isCardBackgroundId,
+  isCardSubtitleId,
+  isEmojiId,
+  isProfileCounter,
+  isSelectedMons,
+  isStickerMap,
+  type Aura,
+  type CardBackgroundId,
+  type CardSubtitleId,
+  type EmojiId,
+  type ProfileCounter,
+  type SelectedMons,
+  type StickerMap,
+} from "@mons/shared/appearance";
 import { GAME_SESSION_OPERATION_ID_PATTERN } from "@mons/shared/game-sessions";
 import { isSafeRecordKey } from "@mons/shared/ids";
-import { isRetiredSessionStorageKey } from "./sessionStorageCompatibility.js";
+import { isMiningMaterials, type MiningMaterials } from "@mons/shared/mining";
+import {
+  applicationStorageKey,
+  isRetiredApplicationStorageKey,
+} from "../session/applicationDataStorage.ts";
 import {
   isStartAutomatchRequest,
   type StartAutomatchRequest,
@@ -83,7 +102,9 @@ const SESSION_RESET_PRESERVED_STORAGE_KEYS = new Set<string>([
 ]);
 
 export const shouldPreserveStorageKeyOnLogout = (key: string): boolean => {
-  return LOGOUT_PRESERVED_STORAGE_KEYS.has(key);
+  return [...LOGOUT_PRESERVED_STORAGE_KEYS].some(
+    (preserved) => key === applicationStorageKey(preserved),
+  );
 };
 
 const EXTERNAL_USER_STORAGE_KEY_PREFIXES = [
@@ -131,7 +152,7 @@ type StorageReadValues = {
   boardColorSetsByTheme: BoardColorSetsByTheme;
   isExperimentingWithSprites: boolean;
   playerEmojiId: EmojiId;
-  playerEmojiAura: string;
+  playerEmojiAura: Aura;
   loginId: string;
   profileId: string;
   ethAddress: string;
@@ -140,11 +161,12 @@ type StorageReadValues = {
   playerRating: number;
   playerTotalManaPoints: number;
   playerMiningLastRockDate: string | null;
-  playerMiningMaterials: Record<string, number>;
-  cardBackgroundId: number;
-  cardSubtitleId: number;
-  profileMons: string;
-  profileCounter: string;
+  playerMiningMaterials: MiningMaterials;
+  cardBackgroundId: CardBackgroundId;
+  cardSubtitleId: CardSubtitleId;
+  profileMons: SelectedMons | null;
+  profileCounter: ProfileCounter;
+  cardStickers: StickerMap;
   playerNonce: number;
   completedProblems: string[];
   tutorialCompleted: boolean;
@@ -160,13 +182,14 @@ type NullableStorageWriteKey =
   | "cardSubtitleId"
   | "profileMons"
   | "profileCounter"
+  | "cardStickers"
   | "playerNonce";
 type PendingAutomatchStorageKey =
   `${typeof PENDING_AUTOMATCH_OPERATION_PREFIX}${string}`;
 type StorageWriteValues = Omit<StorageReadValues, NullableStorageWriteKey> & {
   [Key in NullableStorageWriteKey]: StorageReadValues[Key] | null;
 } & {
-  cardStickers: string | null;
+  cardStickers: StickerMap | null;
   reactionExtraStickerCache: ReactionExtraStickerCache | null;
   reactionExtraStickerIds: number[];
   reactionExtraStickerProfileId: string;
@@ -174,18 +197,18 @@ type StorageWriteValues = Omit<StorageReadValues, NullableStorageWriteKey> & {
   [Key in PendingAutomatchStorageKey]: PendingAutomatchOperation | null;
 };
 
-type StoredItem = { raw: string; value: unknown };
+type StoredItem = { value: unknown };
 
 function readStoredItem(
   key: StorageKey | PendingAutomatchStorageKey,
 ): StoredItem | undefined {
-  const item = localStorage.getItem(key);
-  if (item === null || item === "null") return undefined;
+  const item = localStorage.getItem(applicationStorageKey(key));
+  if (item === null) return undefined;
   try {
     const value: unknown = JSON.parse(item);
-    return { raw: item, value };
+    return { value };
   } catch {
-    return { raw: item, value: item };
+    return undefined;
   }
 }
 
@@ -197,14 +220,10 @@ function readStoredValue(
   return stored === undefined ? defaultValue : stored.value;
 }
 
-const textValue = (value: unknown, raw: string): string | undefined =>
-  typeof value === "string"
-    ? value
-    : typeof value === "number" || typeof value === "boolean"
-      ? raw
-      : undefined;
+const textValue = (value: unknown): string | undefined =>
+  typeof value === "string" ? value : undefined;
 const numberValue = (value: unknown): number | undefined =>
-  typeof value === "number" ? value : undefined;
+  typeof value === "number" && Number.isFinite(value) ? value : undefined;
 const booleanValue = (value: unknown): boolean | undefined =>
   typeof value === "boolean" ? value : undefined;
 const isAssetsSet = (value: unknown): value is AssetsSet =>
@@ -216,23 +235,29 @@ const isNullableString = (value: unknown): value is string | null =>
 const isBoardColorSetsByTheme = (
   value: unknown,
 ): value is BoardColorSetsByTheme => {
-  if (!value || typeof value !== "object") return false;
+  if (
+    !value ||
+    typeof value !== "object" ||
+    Array.isArray(value) ||
+    Object.keys(value).length !== 2
+  )
+    return false;
   const fields = value as { light?: unknown; dark?: unknown };
   return isNullableString(fields.light) && isNullableString(fields.dark);
 };
-const isNumberRecord = (value: unknown): value is Record<string, number> =>
-  value !== null &&
-  typeof value === "object" &&
-  !Array.isArray(value) &&
-  Object.values(value).every((entry) => typeof entry === "number");
 const isStringArray = (value: unknown): value is string[] =>
   Array.isArray(value) &&
   value.every((entry: unknown) => typeof entry === "string");
+const isIntegerArray = (value: unknown): value is number[] =>
+  Array.isArray(value) &&
+  value.every(
+    (entry: unknown) =>
+      typeof entry === "number" && Number.isSafeInteger(entry),
+  );
 
 const storageDecoders: {
   [Key in keyof StorageReadValues]: (
     value: unknown,
-    raw: string,
   ) => StorageReadValues[Key] | undefined;
 } = {
   isMuted: booleanValue,
@@ -243,9 +268,8 @@ const storageDecoders: {
   boardColorSetsByTheme: (value) =>
     isBoardColorSetsByTheme(value) ? value : undefined,
   isExperimentingWithSprites: booleanValue,
-  playerEmojiId: (value) =>
-    typeof value === "string" || typeof value === "number" ? value : undefined,
-  playerEmojiAura: textValue,
+  playerEmojiId: (value) => (isEmojiId(value) ? value : undefined),
+  playerEmojiAura: (value) => (isAura(value) ? value : undefined),
   loginId: textValue,
   profileId: textValue,
   ethAddress: textValue,
@@ -253,13 +277,16 @@ const storageDecoders: {
   username: textValue,
   playerRating: numberValue,
   playerTotalManaPoints: numberValue,
-  playerMiningLastRockDate: (value, raw) =>
-    value === null ? null : textValue(value, raw),
-  playerMiningMaterials: (value) => (isNumberRecord(value) ? value : undefined),
-  cardBackgroundId: numberValue,
-  cardSubtitleId: numberValue,
-  profileMons: textValue,
-  profileCounter: textValue,
+  playerMiningLastRockDate: (value) =>
+    value === null ? null : textValue(value),
+  playerMiningMaterials: (value) =>
+    isMiningMaterials(value) ? value : undefined,
+  cardBackgroundId: (value) => (isCardBackgroundId(value) ? value : undefined),
+  cardSubtitleId: (value) => (isCardSubtitleId(value) ? value : undefined),
+  profileMons: (value) =>
+    value === null || isSelectedMons(value) ? value : undefined,
+  profileCounter: (value) => (isProfileCounter(value) ? value : undefined),
+  cardStickers: (value) => (isStickerMap(value) ? value : undefined),
   playerNonce: numberValue,
   completedProblems: (value) => (isStringArray(value) ? value : undefined),
   tutorialCompleted: booleanValue,
@@ -275,7 +302,7 @@ function getItem<Key extends keyof StorageReadValues>(
 ): StorageReadValues[Key] {
   const stored = readStoredItem(key);
   if (stored === undefined) return defaultValue;
-  const decoded = storageDecoders[key](stored.value, stored.raw);
+  const decoded = storageDecoders[key](stored.value);
   return decoded === undefined ? defaultValue : decoded;
 }
 
@@ -284,13 +311,24 @@ function setItem<Key extends keyof StorageWriteValues>(
   value: NoInfer<StorageWriteValues[Key]>,
 ): void {
   if (value === null) {
-    localStorage.removeItem(key);
+    localStorage.removeItem(applicationStorageKey(key));
     return;
   }
-  localStorage.setItem(
-    key,
-    typeof value === "string" ? value : JSON.stringify(value),
-  );
+  if (isStorageReadKey(key) && storageDecoders[key](value) === undefined) {
+    throw new TypeError("invalid-application-storage-value");
+  }
+  localStorage.setItem(applicationStorageKey(key), JSON.stringify(value));
+}
+
+function isStorageReadKey(key: string): key is keyof StorageReadValues {
+  return Object.hasOwn(storageDecoders, key);
+}
+
+function getStoredEmojiId(defaultValue: EmojiId): EmojiId;
+function getStoredEmojiId(defaultValue: null): EmojiId | null;
+function getStoredEmojiId(defaultValue: EmojiId | null): EmojiId | null {
+  const stored = readStoredItem(STORAGE_KEYS.PLAYER_EMOJI_ID);
+  return stored && isEmojiId(stored.value) ? stored.value : defaultValue;
 }
 
 export const storage = {
@@ -301,7 +339,12 @@ export const storage = {
       `${PENDING_AUTOMATCH_OPERATION_PREFIX}${uid}`,
       null,
     );
-    if (!value || typeof value !== "object" || Array.isArray(value)) {
+    if (
+      !value ||
+      typeof value !== "object" ||
+      Array.isArray(value) ||
+      Object.keys(value).length !== 5
+    ) {
       return null;
     }
     const operation = value as Record<string, unknown>;
@@ -315,14 +358,15 @@ export const storage = {
         (typeof operation.resolvedInviteId === "string" &&
           isSafeRecordKey(operation.resolvedInviteId))
       ) ||
+      typeof operation.createdAtMs !== "number" ||
       !Number.isSafeInteger(operation.createdAtMs) ||
-      Number(operation.createdAtMs) <= 0 ||
+      operation.createdAtMs <= 0 ||
       !isStartAutomatchRequest(operation.request)
     ) {
       return null;
     }
     return {
-      createdAtMs: Number(operation.createdAtMs),
+      createdAtMs: operation.createdAtMs,
       operationId: operation.operationId,
       request: { ...operation.request },
       resolvedInviteId: operation.resolvedInviteId,
@@ -404,19 +448,17 @@ export const storage = {
     setItem(STORAGE_KEYS.IS_EXPERIMENTING_WITH_SPRITES, value);
   },
 
-  getPlayerEmojiId: (defaultValue: string): EmojiId => {
-    return getItem(STORAGE_KEYS.PLAYER_EMOJI_ID, defaultValue);
-  },
+  getPlayerEmojiId: getStoredEmojiId,
 
   setPlayerEmojiId: (value: EmojiId): void => {
     setItem(STORAGE_KEYS.PLAYER_EMOJI_ID, value);
   },
 
-  getPlayerEmojiAura: (defaultValue: string): string => {
+  getPlayerEmojiAura: (defaultValue: Aura): Aura => {
     return getItem(STORAGE_KEYS.PLAYER_EMOJI_AURA, defaultValue);
   },
 
-  setPlayerEmojiAura: (value: string): void => {
+  setPlayerEmojiAura: (value: Aura): void => {
     setItem(STORAGE_KEYS.PLAYER_EMOJI_AURA, value);
   },
 
@@ -484,47 +526,43 @@ export const storage = {
     setItem(STORAGE_KEYS.PLAYER_MINING_LAST_ROCK_DATE, value);
   },
 
-  getMiningMaterials: (
-    defaultValue: Record<string, number>,
-  ): Record<string, number> => {
+  getMiningMaterials: (defaultValue: MiningMaterials): MiningMaterials => {
     return getItem(STORAGE_KEYS.PLAYER_MINING_MATERIALS, defaultValue);
   },
 
-  setMiningMaterials: (value: Record<string, number>): void => {
+  setMiningMaterials: (value: MiningMaterials): void => {
     setItem(STORAGE_KEYS.PLAYER_MINING_MATERIALS, value);
   },
 
-  getCardBackgroundId: (defaultValue: number): number => {
+  getCardBackgroundId: (defaultValue: CardBackgroundId): CardBackgroundId => {
     return getItem(STORAGE_KEYS.CARD_BACKGROUND_ID, defaultValue);
   },
 
-  setCardBackgroundId: (value: number | null): void => {
+  setCardBackgroundId: (value: CardBackgroundId | null): void => {
     setItem(STORAGE_KEYS.CARD_BACKGROUND_ID, value);
   },
 
-  getCardSubtitleId: (defaultValue: number): number => {
+  getCardSubtitleId: (defaultValue: CardSubtitleId): CardSubtitleId => {
     return getItem(STORAGE_KEYS.CARD_SUBTITLE_ID, defaultValue);
   },
 
-  setCardSubtitleId: (value: number | null): void => {
+  setCardSubtitleId: (value: CardSubtitleId | null): void => {
     setItem(STORAGE_KEYS.CARD_SUBTITLE_ID, value);
   },
 
-  getProfileCounter: (defaultValue: string): string => {
+  getProfileCounter: (defaultValue: ProfileCounter): ProfileCounter => {
     return getItem(STORAGE_KEYS.PROFILE_COUNTER, defaultValue);
   },
 
-  setProfileCounter: (value: string | null): void => {
+  setProfileCounter: (value: ProfileCounter | null): void => {
     setItem(STORAGE_KEYS.PROFILE_COUNTER, value);
   },
 
-  getCardStickers: (defaultValue: string): string => {
-    return JSON.stringify(
-      readStoredValue(STORAGE_KEYS.CARD_STICKERS, defaultValue),
-    );
+  getCardStickers: (defaultValue: StickerMap): StickerMap => {
+    return getItem(STORAGE_KEYS.CARD_STICKERS, defaultValue);
   },
 
-  setCardStickers: (value: string | null): void => {
+  setCardStickers: (value: StickerMap | null): void => {
     setItem(STORAGE_KEYS.CARD_STICKERS, value);
   },
 
@@ -535,7 +573,12 @@ export const storage = {
       STORAGE_KEYS.REACTION_EXTRA_STICKER_CACHE,
       defaultValue,
     );
-    if (typeof value !== "object" || value === null) {
+    if (
+      typeof value !== "object" ||
+      value === null ||
+      Array.isArray(value) ||
+      Object.keys(value).length !== 5
+    ) {
       return defaultValue;
     }
     const cache = value as Record<string, unknown>;
@@ -543,7 +586,7 @@ export const storage = {
       typeof cache.profileId !== "string" ||
       typeof cache.ethAddress !== "string" ||
       typeof cache.solAddress !== "string" ||
-      !Array.isArray(cache.extraIds) ||
+      !isIntegerArray(cache.extraIds) ||
       typeof cache.expiresAtMs !== "number" ||
       !Number.isFinite(cache.expiresAtMs)
     ) {
@@ -553,10 +596,7 @@ export const storage = {
       profileId: cache.profileId,
       ethAddress: cache.ethAddress,
       solAddress: cache.solAddress,
-      extraIds: cache.extraIds.filter(
-        (id): id is number =>
-          typeof id === "number" && Number.isSafeInteger(id),
-      ),
+      extraIds: [...cache.extraIds],
       expiresAtMs: cache.expiresAtMs,
     };
   },
@@ -567,11 +607,11 @@ export const storage = {
     setItem(STORAGE_KEYS.REACTION_EXTRA_STICKER_CACHE, value);
   },
 
-  getProfileMons: (defaultValue: string): string => {
+  getProfileMons: (defaultValue: SelectedMons | null): SelectedMons | null => {
     return getItem(STORAGE_KEYS.PROFILE_MONS, defaultValue);
   },
 
-  setProfileMons: (value: string | null): void => {
+  setProfileMons: (value: SelectedMons | null): void => {
     setItem(STORAGE_KEYS.PROFILE_MONS, value);
   },
 
@@ -642,17 +682,19 @@ export const storage = {
   resetSessionIdentity: (): void => {
     Object.values(STORAGE_KEYS).forEach((key) => {
       if (!SESSION_RESET_PRESERVED_STORAGE_KEYS.has(key))
-        localStorage.removeItem(key);
+        localStorage.removeItem(applicationStorageKey(key));
     });
     for (const store of [localStorage, sessionStorage]) {
       removeMatchingStorageKeys(
         store,
         (key) =>
-          key === "appleIntentByStateV1" ||
-          isRetiredSessionStorageKey(key) ||
-          key.startsWith("mons:pending-moves:v1:") ||
-          key.startsWith("mons:pending-rematch-ends:v1:") ||
-          key.startsWith(PENDING_AUTOMATCH_OPERATION_PREFIX) ||
+          key === applicationStorageKey("appleIntentByStateV1") ||
+          isRetiredApplicationStorageKey(key) ||
+          key.startsWith(applicationStorageKey("pending-moves:")) ||
+          key.startsWith(applicationStorageKey("pending-rematch-ends:")) ||
+          key.startsWith(
+            applicationStorageKey(PENDING_AUTOMATCH_OPERATION_PREFIX),
+          ) ||
           shouldClearExternalUserStorageKey(key),
       );
     }
@@ -660,12 +702,12 @@ export const storage = {
 
   signOut: (): void => {
     Object.values(STORAGE_KEYS).forEach((key) => {
-      if (!shouldPreserveStorageKeyOnLogout(key)) {
-        localStorage.removeItem(key);
+      if (!LOGOUT_PRESERVED_STORAGE_KEYS.has(key)) {
+        localStorage.removeItem(applicationStorageKey(key));
       }
     });
     removeMatchingStorageKeys(localStorage, (key) =>
-      key.startsWith(PENDING_AUTOMATCH_OPERATION_PREFIX),
+      key.startsWith(applicationStorageKey(PENDING_AUTOMATCH_OPERATION_PREFIX)),
     );
     removeMatchingStorageKeys(localStorage, shouldClearExternalUserStorageKey);
     removeMatchingStorageKeys(

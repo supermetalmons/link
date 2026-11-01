@@ -42,6 +42,7 @@ import {
 import {
   buildCompletedResponse,
   buildEventPrizeWithdrawalOperationId,
+  withdrawalWorkflowInstanceId,
   cleanString,
   terminalWorkflowFailure,
   toEventPrizeApiFailure,
@@ -72,12 +73,16 @@ async function ensureWorkflow(
     instance = instances[0] || null;
   } catch (error) {
     try {
-      instance = await workflow.get(params.operationId);
+      instance = await workflow.get(
+        withdrawalWorkflowInstanceId(params.operationId),
+      );
     } catch {
       throw error;
     }
   }
-  instance ||= await workflow.get(params.operationId);
+  instance ||= await workflow.get(
+    withdrawalWorkflowInstanceId(params.operationId),
+  );
   const status = await instance.status();
   if (
     status.status === "errored" ||
@@ -110,7 +115,7 @@ function workflowCreateOptions(
   params: EventPrizeWithdrawalWorkflowParams,
 ): WorkflowInstanceCreateOptions<EventPrizeWithdrawalWorkflowInput> {
   return {
-    id: params.operationId,
+    id: withdrawalWorkflowInstanceId(params.operationId),
     params,
     retention: { successRetention: "1 day", errorRetention: "30 days" },
   };
@@ -297,7 +302,8 @@ async function admitWithdrawal(
     });
   }
   const params: EventPrizeWithdrawalWorkflowParams = {
-    schemaVersion: 1,
+    schemaVersion: 2,
+    dataEpoch: 1,
     kind: "withdrawal",
     eventId: request.eventId,
     operationId,
@@ -428,7 +434,8 @@ async function resolveWithdrawalWorkflowRecovery(
     throw terminalWorkflowFailure();
   }
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
+    dataEpoch: 1,
     kind: "withdrawal",
     eventId: request.eventId,
     operationId: request.operationId,
@@ -526,7 +533,9 @@ export async function getEventPrizeWithdrawalStatus(
   }
   let instance: WorkflowInstance | null = null;
   try {
-    instance = await workflow.get(request.operationId);
+    instance = await workflow.get(
+      withdrawalWorkflowInstanceId(request.operationId),
+    );
   } catch {
     owned = await refreshOwnedWithdrawal(
       request.eventId,
@@ -548,7 +557,9 @@ export async function getEventPrizeWithdrawalStatus(
     }
     if (!created) {
       try {
-        instance = await workflow.get(request.operationId);
+        instance = await workflow.get(
+          withdrawalWorkflowInstanceId(request.operationId),
+        );
       } catch {
         throw new AuthApiFailure(
           503,

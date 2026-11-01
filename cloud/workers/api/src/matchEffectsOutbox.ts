@@ -38,7 +38,7 @@ export class MatchEffectsOutbox {
     const effectId = effect.effectId;
     const [existing] = this.storage.sql
       .exec<{ payload_json: string; next_at_ms: number | null }>(
-        "SELECT payload_json, next_at_ms FROM match_state_effects WHERE effect_id = ?",
+        "SELECT payload_json, next_at_ms FROM match_state_effects_canonical WHERE effect_id = ?",
         effectId,
       )
       .toArray();
@@ -54,7 +54,7 @@ export class MatchEffectsOutbox {
     const nowMs = this.options.now();
     validTimestamp(nowMs);
     this.storage.sql.exec(
-      "INSERT INTO match_state_effects(effect_id, payload_json, next_at_ms) VALUES (?, ?, ?)",
+      "INSERT INTO match_state_effects_canonical(effect_id, payload_json, state, next_at_ms, attempts) VALUES (?, ?, 'pending', ?, 0)",
       effectId,
       canonicalMatchStateJson(effect),
       nowMs,
@@ -68,7 +68,7 @@ export class MatchEffectsOutbox {
       throw new TypeError("match-state-invalid-effect-limit");
     return this.storage.sql
       .exec<{ payload_json: string; next_at_ms: number; attempts: number }>(
-        "SELECT payload_json, next_at_ms, attempts FROM match_state_effects WHERE next_at_ms <= ? ORDER BY next_at_ms, effect_id LIMIT ?",
+        "SELECT payload_json, next_at_ms, attempts FROM match_state_effects_canonical WHERE next_at_ms <= ? ORDER BY next_at_ms, effect_id LIMIT ?",
         nowMs,
         limit,
       )
@@ -79,7 +79,7 @@ export class MatchEffectsOutbox {
   nextEffectAt(): number | null {
     return this.storage.sql
       .exec<{ next_at_ms: number | null }>(
-        "SELECT MIN(next_at_ms) AS next_at_ms FROM match_state_effects",
+        "SELECT MIN(next_at_ms) AS next_at_ms FROM match_state_effects_canonical",
       )
       .one().next_at_ms;
   }
@@ -88,7 +88,7 @@ export class MatchEffectsOutbox {
     const nowMs = this.options.now();
     validTimestamp(nowMs);
     this.storage.sql.exec(
-      "UPDATE match_state_effects SET next_at_ms = NULL, completed_at_ms = ? WHERE effect_id = ? AND completed_at_ms IS NULL",
+      "UPDATE match_state_effects_canonical SET state = 'completed', next_at_ms = NULL, completed_at_ms = ? WHERE effect_id = ? AND completed_at_ms IS NULL",
       nowMs,
       matchEffectStorageKey(target),
     );
@@ -98,7 +98,7 @@ export class MatchEffectsOutbox {
     validTimestamp(atMs);
     await this.storage.transaction(async (transaction) => {
       this.storage.sql.exec(
-        "UPDATE match_state_effects SET next_at_ms = ?, attempts = attempts + 1 WHERE effect_id = ? AND completed_at_ms IS NULL",
+        "UPDATE match_state_effects_canonical SET next_at_ms = ?, attempts = attempts + 1 WHERE effect_id = ? AND completed_at_ms IS NULL",
         atMs,
         matchEffectStorageKey(target),
       );

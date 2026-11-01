@@ -1,3 +1,4 @@
+import { isEmojiId } from "../shared/appearance.js";
 import type { NavigationGameStatus } from "@mons/shared/navigation";
 import type { ProjectionProfileDocument } from "../profileGameProjectionRecords.js";
 import {
@@ -13,19 +14,6 @@ import { getNavigationSortBucket } from "@mons/shared/navigation";
 import { cropAddress } from "@mons/shared/profiles";
 import { isAutoInviteId } from "@mons/shared/ids";
 export type ProjectionProfile = ProjectionProfileDocument;
-type ProfileEvidence = {
-  username?: unknown;
-  eth?: unknown;
-  sol?: unknown;
-  emoji?: unknown;
-  custom?: { emoji?: unknown };
-};
-const profileEvidence = (
-  value: ProjectionProfile | null | undefined,
-): ProfileEvidence | null | undefined => {
-  const retained: unknown = value;
-  return retained as ProfileEvidence | null | undefined;
-};
 export type ProjectionInvite = InviteDocument;
 type InviteProjectionInput = {
   inviteId: string;
@@ -34,7 +22,7 @@ type InviteProjectionInput = {
   latestMatchRatingCompleted?: boolean;
 };
 
-const PROJECTOR_SCHEMA_VERSION = 2;
+const PROJECTOR_SCHEMA_VERSION = 3;
 
 const normalizeString = (value: unknown) =>
   typeof value === "string" && value.trim() !== "" ? value.trim() : null;
@@ -56,7 +44,7 @@ const truncateAddress = (address: unknown) => {
 const getProfileDisplayName = (
   source: ProjectionProfile | null | undefined,
 ) => {
-  const profileData = profileEvidence(source);
+  const profileData = source;
   if (!profileData || typeof profileData !== "object") {
     return "anon";
   }
@@ -75,41 +63,9 @@ const getProfileDisplayName = (
   return "anon";
 };
 
-const getProfileEmoji = (document: ProjectionProfile | null | undefined) => {
-  const profileData = profileEvidence(document);
-  if (!profileData || typeof profileData !== "object") {
-    return null;
-  }
-  const customEmoji =
-    profileData.custom && typeof profileData.custom === "object"
-      ? profileData.custom.emoji
-      : undefined;
-  const fallbackEmoji = profileData.emoji;
-  const source = customEmoji !== undefined ? customEmoji : fallbackEmoji;
-  if (typeof source === "number" && Number.isFinite(source)) {
-    return Math.floor(source);
-  }
-  if (typeof source === "string" && source.trim() !== "") {
-    const parsed = Number(source);
-    if (Number.isFinite(parsed)) {
-      return Math.floor(parsed);
-    }
-  }
-  return null;
-};
-
-const getEmojiId = (value: unknown) => {
-  if (typeof value === "number" && Number.isFinite(value)) {
-    return Math.floor(value);
-  }
-  if (typeof value === "string" && value.trim() !== "") {
-    const parsed = Number(value);
-    if (Number.isFinite(parsed)) {
-      return Math.floor(parsed);
-    }
-  }
-  return null;
-};
+const getProfileEmoji = (document: ProjectionProfile | null | undefined) =>
+  document?.emoji ?? null;
+const getEmojiId = (value: unknown) => (isEmojiId(value) ? value : null);
 
 const deriveProjectionStatus = ({
   inviteId,

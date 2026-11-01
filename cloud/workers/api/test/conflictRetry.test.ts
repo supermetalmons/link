@@ -46,7 +46,7 @@ test("exhausts at the supplied limit with the final conflict", async () => {
   await assert.rejects(
     runConflictRetry({
       maxAttempts: conflicts.length,
-      attempt: async () => ({ conflict: conflicts[attempts++] }),
+      attempt: async () => ({ conflict: conflicts[attempts++]! }),
       exhausted: (lastConflict) => {
         exhaustions++;
         assert.equal(lastConflict, conflicts.at(-1));

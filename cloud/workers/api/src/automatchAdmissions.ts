@@ -32,7 +32,7 @@ function decodeAdmission(
   admissionId: string,
   kind: string,
   createdAtMs: number,
-): InviteSourceAdmission | null {
+): AutomatchWriteAdmission | null {
   if (!value) return null;
   const row = value as AdmissionRow;
   if (
@@ -133,13 +133,13 @@ export async function acquireAutomatchAdmissions(
       ]),
     written(acquiredRows) {
       const automatch = decodeAdmission(
-        acquiredRows[6].results[0],
+        acquiredRows[6]!.results[0],
         admissionId,
         kind,
         createdAtMs,
       );
       const invite = decodeAdmission(
-        acquiredRows[7].results[0],
+        acquiredRows[7]!.results[0],
         admissionId,
         kind,
         createdAtMs,
@@ -148,20 +148,20 @@ export async function acquireAutomatchAdmissions(
         throw new Error("automatch-admission-unconfirmed");
       return validateControls(
         { automatch, invite },
-        acquiredRows[4].results[0],
-        acquiredRows[5].results[0],
+        acquiredRows[4]!.results[0],
+        acquiredRows[5]!.results[0],
       );
     },
     readback: () => db.withSession("first-primary").batch(reads),
     confirmed(rows) {
       const automatch = decodeAdmission(
-        rows[2].results[0],
+        rows[2]!.results[0],
         admissionId,
         kind,
         createdAtMs,
       );
       const invite = decodeAdmission(
-        rows[3].results[0],
+        rows[3]!.results[0],
         admissionId,
         kind,
         createdAtMs,
@@ -169,12 +169,12 @@ export async function acquireAutomatchAdmissions(
       if (automatch && invite)
         return validateControls(
           { automatch, invite },
-          rows[0].results[0],
-          rows[1].results[0],
+          rows[0]!.results[0],
+          rows[1]!.results[0],
         );
       if (automatch || invite) throw new Error("automatch-admission-partial");
-      const mode = parseAutomatchRuntimeControlRow(rows[0].results[0]);
-      const control = parseInviteSourceControlRow(rows[1].results[0]);
+      const mode = parseAutomatchRuntimeControlRow(rows[0]!.results[0]);
+      const control = parseInviteSourceControlRow(rows[1]!.results[0]);
       assertAutomatchBackend(mode);
       if (mode.state !== "active")
         throw new AutomatchD1Failure("automatch-writes-frozen");

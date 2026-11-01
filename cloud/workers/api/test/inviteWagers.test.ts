@@ -1,38 +1,40 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import {
-  INVITE_WAGERS_MAX_MESSAGE_BYTES,
-  isInviteWagersSnapshot,
-} from "@mons/shared/invite-wagers";
+import { isInviteWagersSnapshot } from "@mons/shared/invite-wagers";
+import { createEmptyWager, type WagerRecord } from "../src/wagerModel.ts";
 import { normalizeInviteMetadata } from "../src/inviteMetadata.ts";
 import { normalizeInviteWagers } from "../src/inviteWagers.ts";
+import { composeInviteWagerSource } from "../src/inviteWagerSource.ts";
+import { inviteDocumentFixture } from "./inviteDocumentFixture.ts";
+import {
+  agreedWagerFixture,
+  settledWagerFixture,
+} from "./wagerRecordFixture.ts";
 
 const inviteId = "wagers-invite";
-const invite = {
-  hostId: "host-login",
-  hostColor: "white",
-  guestId: "guest-login",
-};
-const proposal = { material: "dust", count: 2 };
-const agreement = {
-  material: "dust",
+const invite = inviteDocumentFixture({ hostId: "host", guestId: "guest" });
+const proposal = {
+  material: "dust" as const,
   count: 2,
-  proposerId: invite.hostId,
-  accepterId: invite.guestId,
+  createdAt: 10,
+  operationId: "a".repeat(64),
+  reservationOperationId: "b".repeat(64),
 };
-const resolution = {
-  material: "dust",
-  count: 2,
-  winnerId: invite.hostId,
-  loserId: invite.guestId,
+const proposed: WagerRecord = {
+  ...createEmptyWager(),
+  proposals: { host: proposal },
 };
-
+const source = (wagers: unknown = { match: proposed }) => ({
+  invite,
+  wagers,
+  resolutionMarkers: {},
+});
 async function success(value: unknown) {
   const result = await normalizeInviteWagers(inviteId, value);
-  assert.ok(result.status === "ok");
+  assert.equal(result.status, "ok");
+  if (result.status !== "ok") throw new Error("expected-valid-wager");
   return result;
 }
-
 function reverseKeys(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(reverseKeys);
   if (value === null || typeof value !== "object") return value;
@@ -43,297 +45,210 @@ function reverseKeys(value: unknown): unknown {
   );
 }
 
-test("wager normalization exposes only explicitly allowed fields at each level", async () => {
-  const value = {
-    ...invite,
-    password: "private-password",
-    automatchOperationIds: { [invite.hostId]: crypto.randomUUID() },
-    matchesWagerResolutions: { "match-1": true },
-    wagers: {
-      "match-1": {
-        proposals: {
-          [invite.hostId]: {
-            ...proposal,
-            createdAt: 10,
-            operationId: "private-proposal-operation",
-            reservationOperationId: "private-reservation-operation",
-            credentials: { token: "private-token" },
-          },
-        },
-        proposedBy: { [invite.hostId]: true, [invite.guestId]: false },
-        agreed: {
-          ...agreement,
-          total: 4,
-          acceptedAt: 20,
-          operationId: "private-agreement-operation",
-        },
-        resolved: {
-          ...resolution,
-          total: 4,
-          resolvedAt: 30,
-          optimistic: true,
-          retryToken: "private-retry-token",
-        },
-        agreementOperation: { operationId: "private-lineage" },
-        proposalRemovalOperations: { operation: "private-removal" },
-        settlement: { state: "completed", operationId: "private-settlement" },
-        unknown: "private-unknown",
-      },
-    },
-  };
-  const original = structuredClone(value);
-  const result = await success(value);
-  assert.deepEqual(result.snapshot, {
-    inviteId,
-    revision: 0,
-    wagers: {
-      "match-1": {
-        proposals: { [invite.hostId]: { ...proposal, createdAt: 10 } },
-        proposedBy: { [invite.guestId]: false, [invite.hostId]: true },
-        agreed: { ...agreement, total: 4, acceptedAt: 20 },
-        resolved: { ...resolution, total: 4, resolvedAt: 30 },
-      },
-    },
+test("canonical wager projection exposes public fields and preserves private reservation evidence", async () => {
+  const input = source({
+    proposed,
+    agreed: agreedWagerFixture(),
+    settled: settledWagerFixture(),
   });
+  const original = structuredClone(input);
+  const result = await success(input);
   assert.ok(isInviteWagersSnapshot(result.snapshot));
-  assert.equal(result.metadata.passwordProtected, true);
-  assert.equal(JSON.stringify(result.snapshot).includes("private"), false);
-  assert.equal(JSON.stringify(result.snapshot).includes("optimistic"), false);
+  assert.deepEqual(result.snapshot.wagers.proposed, {
+    schemaVersion: 1,
+    state: "proposed",
+    proposals: { host: { material: "dust", count: 2, createdAt: 10 } },
+    proposedBy: {},
+    agreed: null,
+    resolved: null,
+    blocked: null,
+  });
+  assert.equal(result.snapshot.wagers.agreed?.state, "agreed");
+  assert.equal(result.snapshot.wagers.settled?.state, "settled");
+  assert.equal(result.metadata.passwordProtected, false);
+  assert.equal(JSON.stringify(result.snapshot).includes("Operation"), false);
+  assert.equal(JSON.stringify(result.snapshot).includes("reservation"), false);
   assert.match(result.fingerprint, /^[a-f0-9]{64}$/);
-  assert.deepEqual(value, original);
+  assert.deepEqual(input, original);
 });
 
-test("wager normalization preserves missing optional fields without inventing values", async () => {
-  const wagers = {
-    "match-1": {
-      proposals: { [invite.hostId]: proposal },
-      agreed: agreement,
-      resolved: resolution,
-    },
-    "match-2": { proposedBy: { [invite.hostId]: false } },
-    "match-3": { settlement: { state: "pending" } },
-  };
-  const result = await success({ ...invite, wagers });
-  assert.deepEqual(result.snapshot.wagers, { ...wagers, "match-3": {} });
-});
-
-test("missing invites remain missing and absent or null wagers produce empty snapshots", async () => {
-  for (const value of [null, undefined]) {
+test("only a missing source is missing and an explicit empty wager map remains empty", async () => {
+  for (const value of [null, undefined])
     assert.deepEqual(await normalizeInviteWagers(inviteId, value), {
       status: "missing",
     });
-  }
-  const results = await Promise.all(
-    [invite, { ...invite, wagers: null }, { ...invite, wagers: {} }].map(
-      success,
-    ),
-  );
-  for (const result of results) {
-    assert.deepEqual(result.snapshot, { inviteId, revision: 0, wagers: {} });
-    assert.equal(result.fingerprint, results[0].fingerprint);
-  }
+  const result = await success(source({}));
+  assert.deepEqual(result.snapshot, { inviteId, revision: 0, wagers: {} });
+  for (const value of [
+    invite,
+    { ...invite, wagers: {} },
+    source(null),
+    { ...source(), wagers: undefined },
+  ])
+    assert.deepEqual(await normalizeInviteWagers(inviteId, value), {
+      status: "invalid",
+    });
 });
 
-test("malformed invite roots and access metadata never normalize to empty success", async () => {
+test("source roots and canonical invite metadata reject unknown or malformed fields", async () => {
   for (const value of [
     [],
     false,
     "invite",
     {},
-    { ...invite, hostId: "invalid/uid" },
-    { ...invite, guestId: invite.hostId },
-    { ...invite, guestId: 1 },
-    { ...invite, hostColor: "red" },
-  ]) {
+    { ...source(), extra: true },
+    ...[
+      { hostId: "invalid/uid" },
+      { guestId: "host" },
+      { guestId: 1 },
+      { hostColor: "red" },
+      { password: "private" },
+      { unknown: true },
+    ].map((change) => ({ ...source(), invite: { ...invite, ...change } })),
+    { ...source(), resolutionMarkers: { match: "true" } },
+    { ...source(), resolutionMarkers: { "bad/key": true } },
+  ])
     assert.deepEqual(await normalizeInviteWagers(inviteId, value), {
       status: "invalid",
     });
-  }
-  const metadata = normalizeInviteMetadata(inviteId, invite);
-  assert.deepEqual(
-    await normalizeInviteWagers(
-      inviteId,
-      { ...invite, hostId: "different-host" },
-      metadata,
-    ),
-    { status: "invalid" },
-  );
-  assert.deepEqual(
-    await normalizeInviteWagers(
-      inviteId,
-      { ...invite, password: "private-password" },
-      metadata,
-    ),
-    { status: "invalid" },
-  );
 });
 
-test("malformed wager maps and known public fields invalidate the whole source", async () => {
-  const malformedStates = [
+test("cached access metadata must match the canonical source identity and password policy", async () => {
+  const metadata = normalizeInviteMetadata(inviteId, invite);
+  for (const changed of [
+    inviteDocumentFixture({ ...invite, hostId: "different-host" }),
+    inviteDocumentFixture({
+      ...invite,
+      kind: "automatch",
+      password: "private",
+    }),
+    inviteDocumentFixture({ ...invite, guestId: null }),
+  ])
+    assert.deepEqual(
+      await normalizeInviteWagers(
+        inviteId,
+        { ...source(), invite: changed },
+        metadata,
+      ),
+      { status: "invalid" },
+    );
+  const privateSource = {
+    ...source(),
+    invite: inviteDocumentFixture({
+      ...invite,
+      kind: "automatch",
+      password: "private",
+    }),
+  };
+  assert.equal((await success(privateSource)).metadata.passwordProtected, true);
+});
+
+test("malformed maps and any invalid wager invalidate the whole projection", async () => {
+  const malformed = [
     null,
     [],
     1,
-    { proposals: null },
-    { proposals: [] },
-    { proposals: { [invite.hostId]: null } },
-    { proposals: { [invite.hostId]: { ...proposal, count: 0 } } },
-    { proposals: { [invite.hostId]: { ...proposal, material: "unknown" } } },
-    { proposals: { [invite.hostId]: { ...proposal, createdAt: "10" } } },
-    { proposals: { "invalid/uid": proposal } },
-    { proposedBy: null },
-    { proposedBy: { [invite.hostId]: "true" } },
-    { agreed: null },
-    { agreed: { ...agreement, proposerId: invite.guestId } },
-    { agreed: { ...agreement, total: -1 } },
-    { agreed: { ...agreement, acceptedAt: null } },
-    { resolved: null },
-    { resolved: { ...resolution, loserId: "invalid/uid" } },
-    { resolved: { ...resolution, resolvedAt: -1 } },
+    {},
+    { ...proposed, state: "agreed" },
+    { ...proposed, extra: "unknown" },
+    { ...proposed, proposals: null },
+    { ...proposed, proposedBy: { host: "true" } },
+    ...[
+      { count: 0 },
+      { material: "unknown" },
+      { createdAt: "10" },
+      { reservationOperationId: "private-id" },
+      { credentials: { token: "secret" } },
+    ].map((change) => ({
+      ...proposed,
+      proposals: { host: { ...proposal, ...change } },
+    })),
+    { ...settledWagerFixture(), resolved: null },
+    {
+      ...settledWagerFixture(),
+      resolved: { ...settledWagerFixture().resolved, resolvedAt: -1 },
+    },
   ];
   for (const wagers of [
     false,
     1,
     "wagers",
     [],
-    { "invalid/match": {} },
-    ...malformedStates.map((state) => ({
-      "valid-match": {},
-      "bad-match": state,
-    })),
-  ]) {
-    assert.deepEqual(
-      await normalizeInviteWagers(inviteId, { ...invite, wagers }),
-      {
-        status: "invalid",
-      },
-    );
-  }
+    { "invalid/match": proposed },
+    ...malformed.map((value) => ({ valid: proposed, invalid: value })),
+  ])
+    assert.deepEqual(await normalizeInviteWagers(inviteId, source(wagers)), {
+      status: "invalid",
+    });
 });
 
-test("private-only source changes advance fingerprints while preserving public snapshots", async () => {
-  const before = await success({
-    ...invite,
-    wagers: {
+test("private operation changes alter fingerprints while preserving public snapshots", async () => {
+  const before = await success(source());
+  const after = await success(
+    source({
       match: {
-        proposals: { [invite.hostId]: proposal },
-        settlement: { state: "pending" },
+        ...proposed,
+        proposals: {
+          host: { ...proposal, reservationOperationId: "c".repeat(64) },
+        },
       },
-    },
-  });
-  const after = await success({
-    ...invite,
-    wagers: {
-      match: {
-        proposals: { [invite.hostId]: proposal },
-        settlement: { state: "completed" },
-      },
-    },
-  });
+    }),
+  );
   assert.deepEqual(before.snapshot, after.snapshot);
   assert.notEqual(before.fingerprint, after.fingerprint);
 });
 
 test("key order cannot change source fingerprints or serialized public snapshots", async () => {
-  const value = {
-    ...invite,
-    wagers: {
-      "match-2": {
-        agreed: { ...agreement, total: 4 },
-        settlement: {
-          releases: [{ uid: invite.hostId, amount: 2 }],
-          state: "pending",
-        },
-      },
-      "match-1": {
-        proposals: {
-          [invite.hostId]: proposal,
-          [invite.guestId]: { ...proposal, createdAt: 10 },
-        },
-        proposedBy: { [invite.hostId]: true, [invite.guestId]: false },
-      },
-    },
-  };
-  const before = await success(value);
-  const after = await success(reverseKeys(value));
-  assert.equal(before.fingerprint, after.fingerprint);
+  const input = source({
+    "match-2": proposed,
+    "match-1": agreedWagerFixture(),
+  });
+  const before = await success(input);
+  const after = await success(reverseKeys(input));
   assert.equal(JSON.stringify(before.snapshot), JSON.stringify(after.snapshot));
+  assert.equal(before.fingerprint, after.fingerprint);
 });
 
-test("fingerprints include participant access and password presence without password contents", async () => {
-  const initial = await success(invite);
-  for (const value of [
-    { ...invite, hostId: "new-host" },
-    { ...invite, guestId: "new-guest" },
-    { ...invite, guestId: null },
-    { ...invite, password: "first-password" },
-  ]) {
-    const changed = await success(value);
-    assert.deepEqual(initial.snapshot, changed.snapshot);
-    assert.notEqual(initial.fingerprint, changed.fingerprint);
-  }
-  const firstPassword = await success({
-    ...invite,
-    password: "first-password",
-  });
-  const changedPassword = await success({
-    ...invite,
-    password: "second-password",
-  });
-  assert.equal(firstPassword.fingerprint, changedPassword.fingerprint);
-  const unrelated = await success({
-    ...invite,
-    hostRematches: "1;2",
-    privateToken: "ignored",
-  });
-  assert.equal(initial.fingerprint, unrelated.fingerprint);
-});
-
-test("source normalization enforces UTF-8 size bounds even for stripped private metadata", async () => {
-  const valid = await success({
-    ...invite,
-    wagers: { match: { settlement: { hidden: "x".repeat(512 * 1024) } } },
-  });
-  assert.deepEqual(valid.snapshot.wagers, { match: {} });
-  for (const hidden of ["x".repeat(1024 * 1024), "😀".repeat(256 * 1024)]) {
-    assert.deepEqual(
-      await normalizeInviteWagers(inviteId, {
-        ...invite,
-        wagers: { match: { settlement: { hidden } } },
-      }),
-      { status: "invalid" },
-    );
-  }
-  assert.ok(
-    new TextEncoder().encode(
-      JSON.stringify({
-        schemaVersion: 1,
-        type: "snapshot",
-        snapshot: valid.snapshot,
-      }),
-    ).byteLength <= INVITE_WAGERS_MAX_MESSAGE_BYTES,
-  );
-});
-
-test("non-JSON and deeply nested private sources fail without publishing partial data", async () => {
+test("oversized, deeply nested, cyclic, non-finite, and unsupported private values fail closed", async () => {
+  let nested: unknown = "leaf";
+  for (let i = 0; i < 70; i++) nested = { next: nested };
   const cycle: Record<string, unknown> = {};
   cycle.self = cycle;
-  let deep: unknown = {};
-  for (let index = 0; index < 70; index++) deep = { next: deep };
   for (const hidden of [
+    "x".repeat(1024 * 1024),
+    "🦊".repeat(300_000),
+    nested,
     cycle,
-    deep,
     NaN,
     Infinity,
     1n,
+    () => null,
     undefined,
-    new Date(0),
-  ]) {
+  ])
     assert.deepEqual(
-      await normalizeInviteWagers(inviteId, {
-        ...invite,
-        wagers: { match: { settlement: { hidden } } },
-      }),
+      await normalizeInviteWagers(
+        inviteId,
+        source({ match: { ...proposed, hidden } }),
+      ),
       { status: "invalid" },
     );
-  }
+});
+
+test("composition retains typed wagers and resolution markers without flattening invite fields", () => {
+  const composed = composeInviteWagerSource(invite, [
+    {
+      inviteId,
+      matchId: "match",
+      wager: proposed,
+      resolutionMarker: true,
+      revision: 1,
+    },
+  ]);
+  assert.deepEqual(composed, {
+    invite,
+    wagers: { match: proposed },
+    resolutionMarkers: { match: true },
+  });
+  assert.deepEqual(composeInviteWagerSource(invite, []), source({}));
+  assert.equal(composeInviteWagerSource(null, []), null);
 });

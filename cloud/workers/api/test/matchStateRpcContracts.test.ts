@@ -1,3 +1,4 @@
+import { matchDocumentFixture } from "./matchRecordFixture.ts";
 import assert from "node:assert/strict";
 import test from "node:test";
 import { AuthApiFailure } from "../src/authErrors.ts";
@@ -77,10 +78,13 @@ test("routed record decoding rejects every missing or sparse slot before returni
       /match-state-record-unavailable/,
     );
   }
-  const retained = [false, 0, "legacy", [], { fen: "initial" }];
+  const retained = [
+    matchDocumentFixture({ fen: "initial" }),
+    matchDocumentFixture({ fen: "second" }),
+  ];
   const decoded = decodeRoutedMatchRecords(retained, retained.length);
   assert.deepEqual(decoded, retained);
-  retained.forEach((value, index) => assert.strictEqual(decoded[index], value));
+  retained.forEach((value, index) => assert.deepEqual(decoded[index], value));
 });
 
 test("creation result decoding rejects holes in records and changed IDs", () => {
@@ -107,9 +111,8 @@ test("creation result decoding rejects holes in records and changed IDs", () => 
   }
 });
 
-test("pair and creation result decoders retain minimal records and arbitrary imported values", () => {
+test("pair and creation result decoders reject noncanonical imported values", () => {
   for (const value of [
-    null,
     false,
     0,
     "legacy",
@@ -117,26 +120,39 @@ test("pair and creation result decoders retain minimal records and arbitrary imp
     { fen: "initial" },
     { sessionCreation: "marker", malformed: true },
   ]) {
-    const decoded = decodeMatchStatePair({
-      ...pair,
-      playerMatch: value,
-      opponentMatch: value,
-    });
-    assert.strictEqual(decoded.playerMatch, value);
-    assert.strictEqual(decoded.opponentMatch, value);
-    const created = decodeMatchStateCreateResult({
-      records: [
-        {
-          matchId: pair.matchId,
-          playerId: pair.playerId,
-          outcome: "already-created",
-          value,
-        },
-      ],
-      changedMatchIds: [],
-    });
-    assert.strictEqual(created.records[0].value, value);
+    assert.throws(
+      () =>
+        decodeMatchStatePair({
+          ...pair,
+          playerMatch: value,
+          opponentMatch: value,
+        }),
+      /invalid-record/,
+    );
+    assert.throws(
+      () =>
+        decodeMatchStateCreateResult({
+          records: [
+            {
+              matchId: pair.matchId,
+              playerId: pair.playerId,
+              outcome: "already-created",
+              value,
+            },
+          ],
+          changedMatchIds: [],
+        }),
+      /invalid-record/,
+    );
   }
+  const value = matchDocumentFixture({ sessionCreation: "marker" });
+  const decoded = decodeMatchStatePair({
+    ...pair,
+    playerMatch: value,
+    opponentMatch: null,
+  });
+  assert.deepEqual(decoded.playerMatch, value);
+  assert.equal(decoded.opponentMatch, null);
 });
 
 test("RPC errors retain their exact domain status, code and message without running the success decoder", () => {

@@ -20,7 +20,7 @@ export function validateTelegramTransactionDecision(
     if (hasValue) {
       throw new TypeError("Telegram logical abort must not include value");
     }
-    return { commit: false, decision };
+    return { commit: false, ...(decision === undefined ? {} : { decision }) };
   }
   if (Object.hasOwn(output, "commit")) {
     throw new TypeError("Telegram write decision must omit commit");
@@ -28,5 +28,9 @@ export function validateTelegramTransactionDecision(
   if (!hasValue || candidate.value === undefined) {
     throw new TypeError("Telegram write decision requires a defined value");
   }
-  return { commit: true, value: candidate.value, decision };
+  return {
+    commit: true,
+    value: candidate.value,
+    ...(decision === undefined ? {} : { decision }),
+  };
 }

@@ -5,10 +5,11 @@ const previousLocalStorage = Object.getOwnPropertyDescriptor(
   globalThis,
   "localStorage",
 );
+/** @type {Map<string, string>} */
 const values = new Map();
 Object.defineProperty(globalThis, "localStorage", {
   configurable: true,
-  value: {
+  value: /** @satisfies {Storage} */ ({
     clear: () => values.clear(),
     getItem: (key) => values.get(key) ?? null,
     key: (index) => Array.from(values.keys())[index] ?? null,
@@ -17,7 +18,7 @@ Object.defineProperty(globalThis, "localStorage", {
     },
     removeItem: (key) => values.delete(key),
     setItem: (key, value) => values.set(key, String(value)),
-  },
+  }),
 });
 
 const { storage } = await import("../src/utils/storage.ts");
@@ -26,7 +27,7 @@ test.after(() => {
   if (previousLocalStorage) {
     Object.defineProperty(globalThis, "localStorage", previousLocalStorage);
   } else {
-    delete globalThis.localStorage;
+    Reflect.deleteProperty(globalThis, "localStorage");
   }
 });
 
@@ -36,9 +37,15 @@ test("nullable profile setters remove previous identity values", () => {
   storage.setPlayerTotalManaPoints(20);
   storage.setCardBackgroundId(2);
   storage.setCardSubtitleId(3);
-  storage.setCardStickers("stickers");
-  storage.setProfileCounter("wins");
-  storage.setProfileMons("mons");
+  storage.setCardStickers({ mana: "blue-mana" });
+  storage.setProfileCounter("gp");
+  storage.setProfileMons({
+    demon: 0,
+    angel: 0,
+    drainer: 0,
+    spirit: 0,
+    mystic: 0,
+  });
 
   storage.setPlayerRating(null);
   storage.setPlayerNonce(null);
@@ -55,6 +62,6 @@ test("nullable profile setters remove previous identity values", () => {
   assert.equal(storage.getPlayerTotalManaPoints(0), 0);
   assert.equal(storage.getCardBackgroundId(0), 0);
   assert.equal(storage.getCardSubtitleId(0), 0);
-  assert.equal(storage.getProfileCounter(""), "");
-  assert.equal(storage.getProfileMons(""), "");
+  assert.equal(storage.getProfileCounter("gp"), "gp");
+  assert.equal(storage.getProfileMons(null), null);
 });

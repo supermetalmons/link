@@ -1,3 +1,5 @@
+import { canonicalMatch, required } from "./fixtures/canonicalData.mjs";
+import { Game, Color } from "mons-rules";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { registerHooks } from "node:module";
@@ -59,23 +61,41 @@ const declarations = names.map((name) => {
   return declaration.getText(source).replace(/^export /, "");
 });
 
-const problem = { id: "lesson", fen: "puzzle", description: "Learn a move" };
-const makeGame = (id) => ({
-  id,
-  winner: undefined,
-  scores: { white: 3, black: 2 },
-});
-const match = (fen = "recovered", color = "white") => ({
-  fen,
-  color,
-  emojiId: 1,
-  aura: "",
-  status: "",
-  gameVariant: "Classic",
-  flatMovesString: "",
-});
+/**
+ * @typedef {import("../src/content/problems.ts").Problem} Problem
+ * @typedef {import("@mons/shared/game-sessions").GameSessionMatch} Match
+ * @typedef {import("../src/game/gameControlsModel.ts").GameControlsSnapshot} ControlsSnapshot
+ * @typedef {ControlsSnapshot["presentation"]} Presentation
+ * @typedef {Game & {id: string}} FixtureGame
+ * @typedef {{isOnlineGame: boolean; isWatchOnly: boolean; isGameWithBot: boolean; isWaitingForRematchResponse: boolean; pendingRematchNavigationToLiveBoard: boolean; puzzleMode: boolean; selectedProblem: Problem | null; didStartLocalGame: boolean; isGameOver: boolean; isReconnect: boolean; didConnect: boolean; isWaitingForInviteToGetAccepted: boolean; boardViewMode: ControlsSnapshot["context"]["boardViewMode"]; flashbackMode: boolean; currentInputs: string[]; resignedColor: Color | undefined; winnerByTimerColor: Color | undefined; playerSideColor: Color; lastReactionTime: number; game: FixtureGame; watchOnlyListeners: Set<(value: boolean) => void>}} ResetState
+ * @typedef {Pick<typeof import("../src/game/gameController.ts"), "didSelectPuzzle" | "playSameCompletedPuzzleAgain" | "didJustCreateRematchProposalSuccessfully" | "didDiscoverExistingRematchProposalWaitingForResponse" | "failedToCreateRematchProposal" | "didUpdateRematchSeriesMetadata" | "didReceiveRematchesSeriesEndIndicator" | "didRecoverMyMatch" | "didReceiveMatchUpdate" | "didReceiveMatchUpdates" | "didFailToLoadGame"> & {resetToTheStartOfThePuzzle(): void; publishGameControlsContext(): void; setWatchOnlyState(value: boolean): void; resetMatchConnectionFlags(waiting: boolean): void; tryRestoreLiveViewAfterRematchAcceptance(): void; state(): ResetState; setState(values: Partial<ResetState>): void; onReady?: () => void}} ResetApi
+ */
+/** @type {Problem} */
+const problem = {
+  id: "lesson",
+  icon: "",
+  label: "Lesson",
+  fen: "puzzle",
+  description: "Learn a move",
+};
+/** @param {string} id @returns {FixtureGame} */
+const makeGame = (id) => {
+  const game = Object.assign(new Game(), { id });
+  /** @type {Pick<Game, "winner" | "scores">} */
+  const view = { winner: undefined, scores: { white: 3, black: 2 } };
+  Object.defineProperties(game, {
+    winner: { value: view.winner },
+    scores: { value: view.scores },
+  });
+  return game;
+};
+/** @param {string} [fen] @param {Match["color"]} [color] @returns {Match} */
+const match = (fen = "recovered", color = "white") =>
+  canonicalMatch({ fen, color });
 
+/** @param {Partial<ResetState>} [overrides] @param {{presentation?: Partial<Presentation>; hydration?: boolean}} [options] */
 function harness(overrides = {}, { presentation = {}, hydration = true } = {}) {
+  /** @type {ResetState} */
   const initial = {
     isOnlineGame: true,
     isWatchOnly: false,
@@ -92,9 +112,9 @@ function harness(overrides = {}, { presentation = {}, hydration = true } = {}) {
     boardViewMode: "activeLive",
     flashbackMode: false,
     currentInputs: ["selected"],
-    resignedColor: "white",
-    winnerByTimerColor: "black",
-    playerSideColor: "white",
+    resignedColor: Color.White,
+    winnerByTimerColor: Color.Black,
+    playerSideColor: Color.White,
     lastReactionTime: 123,
     game: makeGame("old"),
     watchOnlyListeners: new Set(),
@@ -111,42 +131,50 @@ function harness(overrides = {}, { presentation = {}, hydration = true } = {}) {
     replayPuzzleVisible: true,
     ...presentation,
   });
+  /** @type {Array<{name: string; args: unknown[]; state: ResetState; snapshot: ControlsSnapshot; notifications: number}>} */
   const events = [];
+  /**
+   * @type {import("../src/game/gameControlsModel.ts").GameControlsSnapshot[]}
+   */
   const notifications = [];
+  /** @type {ResetApi} */
   let api;
   let epoch = 0;
   let historicalSelection =
     initial.boardViewMode === "historicalView" ? { matchId: "previous" } : null;
-  const record = (name, ...args) => {
+  const record = (
+    /** @type {string} */ name,
+    /** @type {unknown[]} */ ...args
+  ) => {
     events.push({
       name,
       args,
-      state: api?.state(),
+      state: api.state(),
       snapshot: store.getSnapshot(),
       notifications: notifications.length,
     });
   };
   const effect =
-    (name) =>
-    (...args) =>
+    (/** @type {string} */ name) =>
+    (/** @type {unknown[]} */ ...args) =>
       record(name, ...args);
+  /** @template {keyof Presentation} K @param {K} key @returns {(value: Presentation[K]) => void} */
   const setPresentation = (key) => (value) => {
     store.updatePresentation({ [key]: value });
     record(key, value);
   };
-  const setControl = (type, key) => (value) => {
-    store.dispatchGameControls({ type, [key]: value });
-    record(type, value);
-  };
-  const setGame = (next) => {
+  const setGame = (/** @type {FixtureGame} */ next) => {
     api.setState({ game: next });
     record("install-game", next.id);
   };
-  const readGame = (fen) => {
+  const readGame = (/** @type {string} */ fen) => {
     record("parse-fen", fen);
     return fen === "invalid" ? null : makeGame(fen);
   };
-  const changeView = (mode, name) => {
+  const changeView = (
+    /** @type {ResetState["boardViewMode"]} */ mode,
+    /** @type {string} */ name,
+  ) => {
     api.setState({ boardViewMode: mode, flashbackMode: false });
     historicalSelection = null;
     api.publishGameControlsContext();
@@ -184,7 +212,12 @@ function harness(overrides = {}, { presentation = {}, hydration = true } = {}) {
         "setupPlayerId",
       ].map((name) => [name, effect(name)]),
     ),
-    showPrimaryAction: setControl("setPrimaryAction", "action"),
+    showPrimaryAction: (
+      /** @type {Parameters<typeof import("../src/ui/controls/bottomControlsPort.ts").showPrimaryAction>[0]} */ action,
+    ) => {
+      store.dispatchGameControls({ type: "setPrimaryAction", action });
+      record("setPrimaryAction", action);
+    },
     setPlaySamePuzzleAgainButtonVisible: setPresentation("replayPuzzleVisible"),
     setEndMatchVisible: setPresentation("endMatchVisible"),
     setEndMatchConfirmed: setPresentation("endMatchConfirmed"),
@@ -195,12 +228,20 @@ function harness(overrides = {}, { presentation = {}, hydration = true } = {}) {
     setInviteLinkActionVisible: setPresentation("inviteLinkVisible"),
     setBotGameOptionVisible: setPresentation("botGameVisible"),
     setNavigationListButtonVisible: setPresentation("navigationVisible"),
-    setAutomoveActionVisible: setControl("setAutomoveVisible", "visible"),
-    setAutomoveActionEnabled: setControl("setAutomoveEnabled", "enabled"),
+    setAutomoveActionVisible: (/** @type {boolean} */ visible) => {
+      store.dispatchGameControls({ type: "setAutomoveVisible", visible });
+      record("setAutomoveVisible", visible);
+    },
+    setAutomoveActionEnabled: (/** @type {boolean} */ enabled) => {
+      store.dispatchGameControls({ type: "setAutomoveEnabled", enabled });
+      record("setAutomoveEnabled", enabled);
+    },
     setAutomatchVisible: effect("automatch-visible"),
     disableAndHideUndoResignAndTimerControls: () =>
       store.dispatchGameControls({ type: "hideGameControls" }),
-    applyGameplayControlsPreset: (preset) => {
+    applyGameplayControlsPreset: (
+      /** @type {import("../src/game/sessionControls.ts").GameplayControlsPreset} */ preset,
+    ) => {
       assert.equal(preset, "puzzle");
       store.updatePresentation({ homeVisible: true, inviteLinkVisible: false });
       store.dispatchGameControls({ type: "setUndoVisible", visible: true });
@@ -219,7 +260,7 @@ function harness(overrides = {}, { presentation = {}, hydration = true } = {}) {
     showPuzzleInstructions: effect("instructions"),
     triggerMoveHistoryPopupReload: effect("history-reload"),
     playSounds: effect("sounds"),
-    loadCurrentGameFromFen: (fen) => {
+    loadCurrentGameFromFen: (/** @type {string} */ fen) => {
       const next = readGame(fen);
       if (!next) return false;
       setGame(next);
@@ -227,13 +268,16 @@ function harness(overrides = {}, { presentation = {}, hydration = true } = {}) {
     },
     gameModelFromFen: readGame,
     installCurrentGameModel: setGame,
-    buildGameSeedForStoredVariant: (variant) => ({ gameVariant: variant }),
-    applyGameSeedToCurrentGame: (seed) => setGame(makeGame(seed.gameVariant)),
+    buildGameSeedForStoredVariant: (/** @type {string} */ variant) => ({
+      gameVariant: variant,
+    }),
+    applyGameSeedToCurrentGame: (/** @type {{gameVariant: string}} */ seed) =>
+      setGame(makeGame(seed.gameVariant)),
     resetBotScoreReactionState: effect("reset-bot-reactions"),
     remoteMoveSync: {
       resetProgress: effect("reset-progress"),
       setProcessedCount: effect("processed-count"),
-      remember: (...args) => {
+      remember: (/** @type {unknown[]} */ ...args) => {
         record("remember", ...args);
         return true;
       },
@@ -259,7 +303,7 @@ function harness(overrides = {}, { presentation = {}, hydration = true } = {}) {
       activeMatchId: "live",
       matches: [{ matchId: "live", isPendingResponse: false }],
     }),
-    didSelectRematchSeriesMatch: async (id) => {
+    didSelectRematchSeriesMatch: async (/** @type {string} */ id) => {
       record("select-rematch", id);
       return true;
     },
@@ -281,19 +325,24 @@ function harness(overrides = {}, { presentation = {}, hydration = true } = {}) {
       const expected = epoch;
       return () => expected === epoch;
     },
-    prepareInitialGameHydration: (value) =>
+    prepareInitialGameHydration: (/** @type {Match} */ value) =>
       hydration
         ? { kind: "provisional", gameModel: makeGame(value.fen) }
         : null,
     resetOnlineReconnectRequestState: effect("reset-reconnect"),
-    didConnectTo: (_match, _playerId, _matchId, prepared) => {
+    didConnectTo: (
+      /** @type {Match} */ _match,
+      /** @type {string} */ _playerId,
+      /** @type {string} */ _matchId,
+      /** @type {{kind: "provisional"; gameModel: FixtureGame}} */ prepared,
+    ) => {
       setGame(prepared.gameModel);
       api.setState({ isOnlineGame: true });
       api.publishGameControlsContext();
       record("hydrate");
     },
     movesCountOfMatch: () => 0,
-    markMainGameContentReady: (...args) => {
+    markMainGameContentReady: (/** @type {unknown[]} */ ...args) => {
       record("content-ready", ...args);
       api.onReady?.();
     },
@@ -311,8 +360,10 @@ function harness(overrides = {}, { presentation = {}, hydration = true } = {}) {
      };`,
     { compilerOptions: { target: ts.ScriptTarget.ES2022 } },
   );
-  api = new Function(...Object.keys(dependencies), outputText)(
-    ...Object.values(dependencies),
+  api = /** @type {ResetApi} */ (
+    new Function(...Object.keys(dependencies), outputText)(
+      ...Object.values(dependencies),
+    )
   );
   api.publishGameControlsContext();
   store.subscribe(() => notifications.push(store.getSnapshot()));
@@ -326,9 +377,15 @@ function harness(overrides = {}, { presentation = {}, hydration = true } = {}) {
   });
 }
 
+/** @param {ReturnType<typeof harness>} h */
 function assertFinalNotification(h) {
   assert.deepEqual(h.notifications, [h.store.getSnapshot()]);
-  assert.ok(h.events.every((event) => event.notifications === 0));
+  assert.ok(
+    h.events.every(
+      (/** @type {{ notifications: number; }} */ event) =>
+        event.notifications === 0,
+    ),
+  );
 }
 
 test("puzzle selection publishes once after rendering with the existing mode and installing the selected lesson", () => {
@@ -337,10 +394,13 @@ test("puzzle selection publishes once after rendering with the existing mode and
   assertFinalNotification(h);
   const render = h.events.find(({ name }) => name === "render");
   const instructions = h.events.find(({ name }) => name === "instructions");
-  assert.equal(render.state.puzzleMode, false);
-  assert.equal(render.snapshot.context.isGameOver, false);
-  assert.equal(instructions.snapshot.context.puzzleMode, true);
-  assert.equal(instructions.snapshot.context.selectedPuzzleId, problem.id);
+  assert.equal(required(render).state.puzzleMode, false);
+  assert.equal(required(render).snapshot.context.isGameOver, false);
+  assert.equal(required(instructions).snapshot.context.puzzleMode, true);
+  assert.equal(
+    required(instructions).snapshot.context.selectedPuzzleId,
+    problem.id,
+  );
   assert.equal(h.state().game.id, problem.fen);
   assert.deepEqual(h.state().currentInputs, []);
   assert.equal(
@@ -352,7 +412,7 @@ test("puzzle selection publishes once after rendering with the existing mode and
 test("invalid puzzle selection publishes completed cleanup without replacing the game or selected lesson", () => {
   const h = harness({ puzzleMode: true, selectedProblem: problem });
   const previousGame = h.state().game;
-  h.didSelectPuzzle({ id: "invalid-lesson", fen: "invalid" });
+  h.didSelectPuzzle({ ...problem, id: "invalid-lesson", fen: "invalid" });
   assertFinalNotification(h);
   assert.equal(h.state().game, previousGame);
   assert.equal(h.state().selectedProblem, problem);
@@ -406,7 +466,13 @@ for (const historical of [false, true]) {
       flashbackMode: historical,
     });
     const selection = h.selection();
-    const pair = { hostMatch: {}, guestMatch: {} };
+    const pair = {
+      matchId: "previous",
+      hostPlayerId: "host",
+      guestPlayerId: "guest",
+      hostMatch: match(),
+      guestMatch: match("recovered", "black"),
+    };
     h.didJustCreateRematchProposalSuccessfully(
       "invite",
       match("invalid", "black"),
@@ -430,8 +496,8 @@ for (const historical of [false, true]) {
     assert.equal(h.selection(), selection);
     assert.equal(state.flashbackMode, historical);
     const connect = h.events.find(({ name }) => name === "connect");
-    assert.equal(connect.snapshot.context.isGameOver, false);
-    assert.equal(connect.state.isWaitingForRematchResponse, true);
+    assert.equal(required(connect).snapshot.context.isGameOver, false);
+    assert.equal(required(connect).state.isWaitingForRematchResponse, true);
     assert.deepEqual(
       h.events
         .filter(({ name }) =>
@@ -494,7 +560,7 @@ test("failed rematch clears pending navigation and publishes the restored action
     "rematch",
   );
   assert.equal(
-    h.events.find(({ name }) => name === "render").snapshot.context
+    required(h.events.find(({ name }) => name === "render")).snapshot.context
       .boardViewMode,
     "activeLive",
   );
@@ -519,7 +585,7 @@ test("rematch acceptance clears waiting but leaves historical selection until na
     false,
   );
   assert.deepEqual(
-    h.events.find(({ name }) => name === "select-rematch").args,
+    required(h.events.find(({ name }) => name === "select-rematch")).args,
     ["live"],
   );
 });
@@ -583,8 +649,8 @@ test("spectator rematch metadata resets only live progress while preserving its 
   assert.equal(h.state().resignedColor, undefined);
   assert.equal(h.state().winnerByTimerColor, undefined);
   assert.equal(
-    h.events.find(({ name }) => name === "reset-progress").snapshot.context
-      .isGameOver,
+    required(h.events.find(({ name }) => name === "reset-progress")).snapshot
+      .context.isGameOver,
     false,
   );
 });
@@ -606,8 +672,8 @@ test("own-match recovery preserves historical selection and synchronously publis
   assert.equal(h.state().didConnect, false);
   assert.equal(h.state().game.id, "recovered");
   const watcher = h.events.find(({ name }) => name === "watch-only-listener");
-  assert.equal(watcher.snapshot.context.isWatchOnly, false);
-  assert.equal(watcher.state.game.id, "old");
+  assert.equal(required(watcher).snapshot.context.isWatchOnly, false);
+  assert.equal(required(watcher).state.game.id, "old");
   assert.equal(
     h.events.some(({ name }) => name === "setBoardFlipped"),
     false,
@@ -667,9 +733,9 @@ test("first hydration publishes final controls only after the match becomes conn
   assert.equal(h.state().didConnect, true);
   assert.equal(h.state().isWaitingForInviteToGetAccepted, false);
   const ready = h.events.find(({ name }) => name === "content-ready");
-  assert.equal(ready.state.didConnect, true);
-  assert.equal(ready.state.game.id, "initial");
-  assert.equal(ready.snapshot.context.isOnlineGame, true);
+  assert.equal(required(ready).state.didConnect, true);
+  assert.equal(required(ready).state.game.id, "initial");
+  assert.equal(required(ready).snapshot.context.isOnlineGame, true);
   assert.deepEqual(
     h.events
       .filter(({ name }) =>
@@ -727,6 +793,9 @@ test("load failure publishes its error controls after resetting connection flags
   assert.equal(h.state().isReconnect, true);
   assert.equal(h.state().didConnect, false);
   const error = h.events.find(({ name }) => name === "mark-error");
-  assert.equal(error.snapshot.presentation.waitingText, "Game not found.");
-  assert.equal(error.snapshot.presentation.homeVisible, true);
+  assert.equal(
+    required(error).snapshot.presentation.waitingText,
+    "Game not found.",
+  );
+  assert.equal(required(error).snapshot.presentation.homeVisible, true);
 });

@@ -1,3 +1,4 @@
+import { createEmptyRatingPayload } from "../src/profileCanonical/contracts.ts";
 import { createEventProgressOutboxWriter } from "../src/eventRepository.ts";
 import { env } from "cloudflare:workers";
 import type { D1Migration } from "cloudflare:test";
@@ -51,13 +52,20 @@ async function insertRating(
 ) {
   await db
     .prepare(
-      `INSERT INTO rating_updates (
+      `INSERT INTO rating_updates_canonical (
        operation_id, payload_json, status, invite_id, match_id,
        player_id, opponent_id, owner_uid, owner_token,
        started_at_ms, updated_at_ms, lease_expires_at_ms, completed_at_ms
-     ) VALUES (?, '{}', ?, ?, ?, 'player', 'opponent', 'player', 'owner', 1, 2, 10, ?)`,
+     ) VALUES (?, ?, ?, ?, ?, 'player', 'opponent', 'player', 'owner', 1, 2, 10, ?)`,
     )
-    .bind(operationId, status, inviteId, matchId, status === "done" ? 2 : null)
+    .bind(
+      operationId,
+      JSON.stringify(createEmptyRatingPayload()),
+      status,
+      inviteId,
+      matchId,
+      status === "done" ? 2 : null,
+    )
     .run();
 }
 
@@ -67,15 +75,18 @@ describe("D1 rating completion evidence", () => {
       testEnv.PROFILE_DB,
       testEnv.TEST_PROFILE_D1_MIGRATIONS,
       "a".repeat(64),
-      {
-        legacyRatingCompletions: [
-          { inviteId: "legacy-invite", matchId: "legacy-match" },
-          { inviteId: "single-legacy", matchId: "match" },
-          { inviteId: "single-legacy-processing", matchId: "match" },
-          { inviteId: "legacy-mismatch", matchId: "match" },
-        ],
-      },
     );
+    for (const [inviteId, matchId] of [
+      ["legacy-invite", "legacy-match"],
+      ["single-legacy", "match"],
+      ["single-legacy-processing", "match"],
+      ["legacy-mismatch", "match"],
+    ] as const)
+      await testEnv.PROFILE_DB.prepare(
+        "INSERT INTO rating_completions_canonical (invite_id, match_id, imported_at_ms) VALUES (?, ?, 1)",
+      )
+        .bind(inviteId, matchId)
+        .run();
   });
 
   it("uses permanent completion data without migration controls", async () => {
@@ -162,7 +173,7 @@ describe("D1 rating completion evidence", () => {
       ).toHaveLength(1);
       expect(writeBatches).toBe(expected === "acquired" ? 1 : 0);
       const durable = await testEnv.PROFILE_DB.prepare(
-        "SELECT status, owner_token, revision FROM rating_updates WHERE operation_id = ?",
+        "SELECT status, owner_token, revision FROM rating_updates_canonical WHERE operation_id = ?",
       )
         .bind(`${inviteId}__match`)
         .first();
@@ -182,27 +193,38 @@ describe("D1 rating completion evidence", () => {
     },
   );
 
-  it("rejects mismatched rating identity even when legacy completion exists", async () => {
-    await insertRating(
-      "actual-invite",
-      "actual-match",
-      "processing",
-      "legacy-mismatch__match",
-    );
+  it("rejects mismatched rating identity while preserving imported completion evidence", async () => {
     await expect(
-      ratingRepository().tryAcquireRatingLease(
+      insertRating(
+        "actual-invite",
+        "actual-match",
+        "processing",
+        "legacy-mismatch__match",
+      ),
+    ).rejects.toThrow("CHECK constraint failed");
+    expect(
+      await readRatingCompletion(
+        testEnv.PROFILE_DB,
+        "legacy-mismatch",
+        "match",
+      ),
+    ).toBe(true);
+    expect(
+      await ratingRepository().tryAcquireRatingLease(
         leaseRequest("legacy-mismatch", "match"),
       ),
-    ).rejects.toThrow("gameplay-repository-unavailable");
+    ).toEqual({ status: "done", data: null });
   });
 
-  it("matches the operation, invite, and match together", async () => {
-    await insertRating(
-      "actual-invite",
-      "actual-match",
-      "done",
-      "requested-invite__requested-match",
-    );
+  it("requires operation, invite, and match identity to agree at storage", async () => {
+    await expect(
+      insertRating(
+        "actual-invite",
+        "actual-match",
+        "done",
+        "requested-invite__requested-match",
+      ),
+    ).rejects.toThrow("CHECK constraint failed");
     expect(
       await readRatingCompletion(
         testEnv.PROFILE_DB,
@@ -217,22 +239,6 @@ describe("D1 rating completion evidence", () => {
         "actual-match",
       ),
     ).toBe(false);
-    const rating = createRatingRepository(
-      testEnv.PROFILE_DB,
-      createGameplayRepository(testEnv),
-      createEventProgressOutboxWriter(testEnv.EVENT_DB),
-    );
-    await expect(
-      rating.tryAcquireRatingLease({
-        inviteId: "requested-invite",
-        matchId: "requested-match",
-        playerId: "player",
-        opponentId: "opponent",
-        ownerUid: "player",
-        ownerToken: "new-owner",
-        leaseMs: 30_000,
-      }),
-    ).rejects.toThrow("gameplay-repository-unavailable");
   });
 
   it("preserves marker-only legacy matches without allowing a new rating lease", async () => {
@@ -269,7 +275,7 @@ describe("D1 rating completion evidence", () => {
     ).resolves.toEqual({ status: "done", data: null });
     expect(
       await testEnv.PROFILE_DB.prepare(
-        "SELECT COUNT(*) AS count FROM rating_updates WHERE invite_id = 'legacy-invite'",
+        "SELECT COUNT(*) AS count FROM rating_updates_canonical WHERE invite_id = 'legacy-invite'",
       ).first("count"),
     ).toBe(0);
   });
@@ -281,19 +287,19 @@ describe("D1 rating completion evidence", () => {
     try {
       await expect(
         testEnv.PROFILE_DB.prepare(
-          "DELETE FROM legacy_rating_completions WHERE invite_id = 'legacy-invite'",
+          "DELETE FROM rating_completions_canonical WHERE invite_id = 'legacy-invite'",
         ).run(),
-      ).rejects.toThrow();
+      ).rejects.toThrow("rating-completion-evidence-immutable");
       await expect(
         testEnv.PROFILE_DB.prepare(
-          "INSERT INTO legacy_rating_completions (invite_id, match_id, imported_at_ms) VALUES ('extra', 'extra', 3)",
+          "UPDATE rating_completions_canonical SET imported_at_ms = 3 WHERE invite_id = 'legacy-invite'",
         ).run(),
-      ).rejects.toThrow();
-      await expect(
-        testEnv.PROFILE_DB.prepare(
-          "UPDATE legacy_rating_completions SET imported_at_ms = 3 WHERE invite_id = 'legacy-invite'",
-        ).run(),
-      ).rejects.toThrow();
+      ).rejects.toThrow("rating-completion-evidence-immutable");
+      expect(
+        await testEnv.PROFILE_DB.prepare(
+          "SELECT name FROM sqlite_schema WHERE name = 'legacy_rating_completions'",
+        ).first(),
+      ).toBeNull();
     } finally {
       await testEnv.PROFILE_DB.prepare(
         "UPDATE profile_canonical_control SET state = 'active' WHERE singleton = 1",
@@ -343,7 +349,7 @@ describe("D1 rating completion evidence", () => {
   it("preserves corruption failures when the stored rating cannot be decoded", async () => {
     await insertRating("corrupt-invite", "match", "processing");
     const row = await testEnv.PROFILE_DB.prepare(
-      "SELECT * FROM rating_updates WHERE operation_id = 'corrupt-invite__match'",
+      "SELECT * FROM rating_updates_canonical WHERE operation_id = 'corrupt-invite__match'",
     ).first<Record<string, unknown>>();
     const db = databaseReturningRow({
       ...row,

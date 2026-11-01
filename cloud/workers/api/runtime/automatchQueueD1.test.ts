@@ -1,10 +1,16 @@
+import { applyCanonicalTestMigrations } from "./canonicalTestMigrations.ts";
+import { canonicalAutomatchFixture } from "../test/automatchRecordFixture.ts";
+import { inviteDocumentFixture } from "../test/inviteDocumentFixture.ts";
+import {
+  parseGameSessionIntent,
+  serializeGameSessionIntent,
+} from "../src/gameSessionIntentRecords.ts";
 import { env } from "cloudflare:workers";
-import { applyD1Migrations, type D1Migration } from "cloudflare:test";
+import type { D1Migration } from "cloudflare:test";
 import { beforeAll, beforeEach, describe, expect, it } from "vitest";
 import {
   AUTOMATCH_QUEUE_HEAD_SQL,
   isAutomatchQueueSelectionConflict,
-  isFifoAutomatchQueue,
   readAutomatchQueueHead,
 } from "../src/automatchQueueD1.ts";
 import { AUTOMATCH_QUEUE_AUDIT_SQL } from "../src/automatchQueueSql.ts";
@@ -12,13 +18,22 @@ import { AUTOMATCH_QUEUE_AUDIT_SQL } from "../src/automatchQueueSql.ts";
 const db = env.PROFILE_GAMES_DB;
 const testEnv = env as Env & { TEST_D1_MIGRATIONS: D1Migration[] };
 
-function ticket(inviteId: string, timestamp: unknown = 10, uid = inviteId) {
+function ticket(inviteId: string, timestamp = 10, uid = inviteId) {
   return db
     .prepare(
-      `INSERT INTO automatch_entries (record_key, payload_json, revision, updated_at_ms)
+      `INSERT INTO automatch_entries_canonical (record_key, payload_json, revision, updated_at_ms)
        VALUES (?, ?, 1, 10)`,
     )
-    .bind(inviteId, JSON.stringify({ uid, timestamp, profileId: "hint" }));
+    .bind(
+      inviteId,
+      JSON.stringify(
+        canonicalAutomatchFixture("automatch", {
+          uid,
+          timestamp,
+          profileId: "hint",
+        }),
+      ),
+    );
 }
 
 function transition(
@@ -30,13 +45,35 @@ function transition(
     current: {
       root: "automatch",
       key: inviteId,
-      value: action === "enqueue" ? null : { uid: inviteId, timestamp: 10 },
+      value:
+        action === "enqueue"
+          ? null
+          : canonicalAutomatchFixture("automatch", {
+              uid: inviteId,
+              timestamp: 10,
+            }),
       revision: action === "enqueue" ? 0 : 1,
     },
-    value: action === "enqueue" ? { uid: inviteId, timestamp: 10 } : null,
+    value:
+      action === "enqueue"
+        ? canonicalAutomatchFixture("automatch", {
+            uid: inviteId,
+            timestamp: 10,
+          })
+        : null,
   };
   const payload = {
-    version: 2,
+    version: 3,
+    inviteSourceEpoch: 1,
+    operationDigest: "a".repeat(64),
+    resources: [inviteId],
+    creations: [],
+    inviteMutations: [
+      {
+        current: { inviteId, value: null, revision: 0 },
+        value: inviteDocumentFixture({ hostId: inviteId }),
+      },
+    ],
     transitionId,
     inviteId,
     createdAtMs: 10,
@@ -52,32 +89,68 @@ function transition(
                 value: null,
                 revision: 0,
               },
-              value: {
-                kind: action === "manual" ? "join-invite" : "automatch-start",
-                response: {
-                  mode:
-                    action === "enqueue" || action === "replay"
-                      ? "pending"
-                      : "matched",
-                },
-              },
+              value: canonicalAutomatchFixture(
+                "gameplayMutationReceipts",
+                action === "manual"
+                  ? {
+                      kind: "invite-join",
+                      completedAtMs: 10,
+                      fingerprint: "fixture",
+                      inviteId,
+                      operationId: transitionId,
+                      projectionRequestId: null,
+                      requesterUid: "actor",
+                      response: {
+                        ok: true,
+                        inviteId,
+                        guestId: "actor",
+                        joined: true,
+                        matchId: inviteId,
+                      },
+                    }
+                  : {
+                      kind: "automatch-start",
+                      completedAtMs: 10,
+                      inviteId,
+                      operationId: transitionId,
+                      profileProjectionRequestId: null,
+                      requesterUid: "actor",
+                      emojiId: 1,
+                      aura: "none",
+                      telegramProjection: false,
+                      response: {
+                        ok: true,
+                        inviteId,
+                        mode:
+                          action === "enqueue" || action === "replay"
+                            ? "pending"
+                            : "matched",
+                        matchedImmediately:
+                          action !== "enqueue" && action !== "replay",
+                      },
+                    },
+              ),
             },
           ]),
     ],
   };
   return db
     .prepare(
-      `INSERT INTO game_session_transitions
+      `INSERT INTO game_session_transitions_canonical
        (transition_id, invite_id, payload_json, status, created_at_ms, updated_at_ms)
        VALUES (?, ?, ?, 'pending', 10, 10)`,
     )
-    .bind(transitionId, inviteId, JSON.stringify(payload));
+    .bind(
+      transitionId,
+      inviteId,
+      serializeGameSessionIntent(parseGameSessionIntent(payload)),
+    );
 }
 
 function reserve(transitionId: string, inviteId: string) {
   return db
     .prepare(
-      "INSERT INTO game_session_transition_resources (resource_key, transition_id) VALUES (?, ?)",
+      "INSERT INTO game_session_transition_resources_canonical (resource_key, transition_id) VALUES (?, ?)",
     )
     .bind(inviteId, transitionId);
 }
@@ -85,21 +158,21 @@ function reserve(transitionId: string, inviteId: string) {
 function activate() {
   return db
     .prepare(
-      `UPDATE automatch_runtime_control SET metadata_json = '{"queueSelection":"fifo"}' WHERE singleton = 1`,
+      `UPDATE automatch_runtime_control SET metadata_json = NULL WHERE singleton = 1`,
     )
     .run();
 }
 
 describe("typed FIFO automatch queue", () => {
   beforeAll(async () => {
-    await applyD1Migrations(db, testEnv.TEST_D1_MIGRATIONS);
+    await applyCanonicalTestMigrations(db, testEnv.TEST_D1_MIGRATIONS);
   });
 
   beforeEach(async () => {
     await db.batch([
-      db.prepare("DELETE FROM game_session_transition_resources"),
-      db.prepare("DELETE FROM game_session_transitions"),
-      db.prepare("DELETE FROM automatch_entries"),
+      db.prepare("DELETE FROM game_session_transition_resources_canonical"),
+      db.prepare("DELETE FROM game_session_transitions_canonical"),
+      db.prepare("DELETE FROM automatch_entries_canonical"),
       db.prepare(
         "UPDATE automatch_runtime_control SET metadata_json = NULL WHERE singleton = 1",
       ),
@@ -124,15 +197,17 @@ describe("typed FIFO automatch queue", () => {
     expect(details).not.toContain("TEMP B-TREE");
   });
 
-  it("projects legacy writes, source updates and tombstones without losing source revisions", async () => {
+  it("projects canonical writes, source updates and tombstones without losing source revisions", async () => {
     await ticket("ticket").run();
     await db
       .prepare(
-        "UPDATE automatch_entries SET payload_json = json_set(payload_json, '$.timestamp', 20), revision = 2 WHERE record_key = 'ticket'",
+        "UPDATE automatch_entries_canonical SET payload_json = json_set(payload_json, '$.timestamp', 20), revision = 2 WHERE record_key = 'ticket'",
       )
       .run();
     expect(
-      await db.prepare("SELECT * FROM automatch_live_tickets").first(),
+      await db
+        .prepare("SELECT * FROM automatch_live_tickets_canonical")
+        .first(),
     ).toEqual({
       invite_id: "ticket",
       uid: "ticket",
@@ -142,42 +217,63 @@ describe("typed FIFO automatch queue", () => {
     });
     await db
       .prepare(
-        "UPDATE automatch_entries SET payload_json = NULL, revision = 3 WHERE record_key = 'ticket'",
+        "UPDATE automatch_entries_canonical SET payload_json = NULL, revision = 3 WHERE record_key = 'ticket'",
       )
       .run();
     expect(await readAutomatchQueueHead(db)).toBeNull();
     expect(
       await db
         .prepare(
-          "SELECT revision FROM automatch_entries WHERE record_key = 'ticket'",
+          "SELECT revision FROM automatch_entries_canonical WHERE record_key = 'ticket'",
         )
         .first("revision"),
     ).toBe(3);
     await db
       .prepare(
-        "UPDATE automatch_entries SET payload_json = json_object('uid', 'ticket', 'timestamp', 30), revision = 4 WHERE record_key = 'ticket'",
+        "UPDATE automatch_entries_canonical SET payload_json = ?, revision = 4 WHERE record_key = 'ticket'",
+      )
+      .bind(
+        JSON.stringify(
+          canonicalAutomatchFixture("automatch", {
+            uid: "ticket",
+            timestamp: 30,
+          }),
+        ),
       )
       .run();
     await db
-      .prepare("DELETE FROM automatch_entries WHERE record_key = 'ticket'")
+      .prepare(
+        "DELETE FROM automatch_entries_canonical WHERE record_key = 'ticket'",
+      )
       .run();
     expect(
       await db
-        .prepare("SELECT COUNT(*) AS count FROM automatch_live_tickets")
+        .prepare(
+          "SELECT COUNT(*) AS count FROM automatch_live_tickets_canonical",
+        )
         .first("count"),
     ).toBe(0);
   });
 
-  it("keeps malformed source data visible in the audit instead of silently dropping it", async () => {
-    await db.batch([
-      ticket("string", "10"),
-      ticket("negative", -1),
-      ticket("fractional", 1.5),
-      ticket("valid", 0),
-    ]);
+  it("rejects malformed queue sources before they can enter the FIFO projection", async () => {
+    for (const timestamp of ["10", -1, 1.5]) {
+      const value = {
+        ...canonicalAutomatchFixture("automatch", { uid: "invalid" }),
+        timestamp,
+      };
+      await expect(
+        db
+          .prepare(
+            "INSERT INTO automatch_entries_canonical(record_key,payload_json,revision,updated_at_ms) VALUES('invalid',?,1,10)",
+          )
+          .bind(JSON.stringify(value))
+          .run(),
+      ).rejects.toThrow();
+    }
+    await ticket("valid", 0).run();
     expect(await db.prepare(AUTOMATCH_QUEUE_AUDIT_SQL).first()).toMatchObject({
-      live_tickets: 4,
-      malformed_live_tickets: 3,
+      live_tickets: 1,
+      malformed_live_tickets: 0,
       live_mismatches: 0,
     });
   });
@@ -204,24 +300,28 @@ describe("typed FIFO automatch queue", () => {
     ).toBe(true);
     expect(
       await db
-        .prepare("SELECT COUNT(*) AS count FROM game_session_transitions")
-        .first("count"),
-    ).toBe(1);
-    expect(
-      await db
         .prepare(
-          "SELECT COUNT(*) AS count FROM game_session_transition_resources",
+          "SELECT COUNT(*) AS count FROM game_session_transitions_canonical",
         )
         .first("count"),
     ).toBe(1);
     expect(
       await db
-        .prepare("SELECT COUNT(*) AS count FROM automatch_pending_enqueues")
+        .prepare(
+          "SELECT COUNT(*) AS count FROM game_session_transition_resources_canonical",
+        )
+        .first("count"),
+    ).toBe(1);
+    expect(
+      await db
+        .prepare(
+          "SELECT COUNT(*) AS count FROM automatch_pending_enqueues_canonical",
+        )
         .first("count"),
     ).toBe(1);
   });
 
-  it("uses a pending enqueue only without ready candidates and old-v2 completion clears it atomically", async () => {
+  it("uses a pending enqueue only without ready candidates and canonical completion clears it atomically", async () => {
     await db.batch([
       transition("pending", "pending-invite", "enqueue"),
       reserve("pending", "pending-invite"),
@@ -239,10 +339,10 @@ describe("typed FIFO automatch queue", () => {
     await db.batch([
       ticket("pending-invite", 10),
       db.prepare(
-        "UPDATE game_session_transitions SET status = 'completed' WHERE transition_id = 'pending'",
+        "UPDATE game_session_transitions_canonical SET status = 'completed' WHERE transition_id = 'pending'",
       ),
       db.prepare(
-        "DELETE FROM game_session_transition_resources WHERE transition_id = 'pending'",
+        "DELETE FROM game_session_transition_resources_canonical WHERE transition_id = 'pending'",
       ),
     ]);
     expect(await readAutomatchQueueHead(db)).toMatchObject({
@@ -251,7 +351,9 @@ describe("typed FIFO automatch queue", () => {
     });
     expect(
       await db
-        .prepare("SELECT COUNT(*) AS count FROM automatch_pending_enqueues")
+        .prepare(
+          "SELECT COUNT(*) AS count FROM automatch_pending_enqueues_canonical",
+        )
         .first("count"),
     ).toBe(0);
   });
@@ -310,17 +412,19 @@ describe("typed FIFO automatch queue", () => {
       "automatch-selection-stale",
     );
     await db
-      .prepare("DELETE FROM automatch_entries WHERE record_key = 'new'")
+      .prepare(
+        "DELETE FROM automatch_entries_canonical WHERE record_key = 'new'",
+      )
       .run();
     await expect(
       transition("empty", "empty-invite", "enqueue").run(),
     ).rejects.toThrow("automatch-selection-stale");
     await db.batch([
       db.prepare(
-        "UPDATE game_session_transitions SET status = 'completed' WHERE transition_id = 'receipt'",
+        "UPDATE game_session_transitions_canonical SET status = 'completed' WHERE transition_id = 'receipt'",
       ),
       db.prepare(
-        "DELETE FROM game_session_transition_resources WHERE transition_id = 'receipt'",
+        "DELETE FROM game_session_transition_resources_canonical WHERE transition_id = 'receipt'",
       ),
     ]);
     expect(await readAutomatchQueueHead(db)).toMatchObject({
@@ -329,12 +433,8 @@ describe("typed FIFO automatch queue", () => {
     });
   });
 
-  it("keeps legacy behavior before activation and checks cancellation around reads", async () => {
-    await db.batch([ticket("ready"), transition("legacy", "new", "enqueue")]);
-    expect(isFifoAutomatchQueue({ metadata: null })).toBe(false);
-    expect(isFifoAutomatchQueue({ metadata: { queueSelection: "fifo" } })).toBe(
-      true,
-    );
+  it("checks cancellation around reads and recognizes nested selection conflicts", async () => {
+    await ticket("ready").run();
     const controller = new AbortController();
     controller.abort(new Error("cancelled"));
     await expect(readAutomatchQueueHead(db, controller.signal)).rejects.toThrow(
@@ -363,7 +463,7 @@ describe("typed FIFO automatch queue", () => {
     );
     await db
       .prepare(
-        "UPDATE game_session_transition_resources SET transition_id = 'orphan' WHERE resource_key = 'orphan-invite'",
+        "UPDATE game_session_transition_resources_canonical SET transition_id = 'orphan' WHERE resource_key = 'orphan-invite'",
       )
       .run();
     expect(await readAutomatchQueueHead(db)).toMatchObject({

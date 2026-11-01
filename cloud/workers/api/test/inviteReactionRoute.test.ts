@@ -1,3 +1,4 @@
+import { applicationRequest } from "./testEnv.ts";
 import { retainedInviteSourceFixture } from "./inviteDocumentFixture.ts";
 import {
   REACTION_AUTH_PROTOCOL_PREFIX,
@@ -38,7 +39,7 @@ function request(
     path?: string;
   } = {},
 ) {
-  return new Request(
+  return applicationRequest(
     `https://api.mons.link${options.path || `/invites/invite-one/reactions${socket ? "/socket?matchId=invite-one" : ""}`}`,
     {
       method: options.method || (socket ? "GET" : "POST"),
@@ -232,7 +233,7 @@ test("uses canonical linked-profile ownership and the original participant UID",
   const state = setup(undefined, "linked-login");
   const profile = {
     profileId: "profile-one",
-    aura: "",
+    aura: "none" as const,
     emoji: 1,
     eth: "",
     sol: "",
@@ -274,7 +275,7 @@ test("uses canonical linked-profile ownership and the original participant UID",
   );
   assert.equal(socketResponse.status, 200);
   assert.equal(
-    state.socketRequests[0].headers.get("X-Mons-Reaction-Role"),
+    state.socketRequests[0]!.headers.get("X-Mons-Reaction-Role"),
     "host",
   );
   assert.equal(
@@ -404,14 +405,14 @@ test("authenticates participant subprotocols and strips credentials from the roo
   );
   assert.equal(state.calls.auth, 1);
   assert.equal(
-    state.verifiedRequests[0].headers.get("Authorization"),
+    state.verifiedRequests[0]!.headers.get("Authorization"),
     `Bearer ${socketToken}`,
   );
   assert.equal(
-    state.verifiedRequests[0].headers.get("Sec-WebSocket-Protocol"),
+    state.verifiedRequests[0]!.headers.get("Sec-WebSocket-Protocol"),
     null,
   );
-  assert.deepEqual(Object.fromEntries(state.socketRequests[0].headers), {
+  assert.deepEqual(Object.fromEntries(state.socketRequests[0]!.headers), {
     "sec-websocket-protocol": REACTION_SOCKET_PROTOCOL,
     upgrade: "websocket",
     "x-mons-reaction-ip": "192.0.2.1",
@@ -441,11 +442,11 @@ test("authenticates participant subprotocols and strips credentials from the roo
     publicState.dependencies,
   );
   assert.equal(
-    publicState.socketRequests[0].headers.get("X-Mons-Reaction-Role"),
+    publicState.socketRequests[0]!.headers.get("X-Mons-Reaction-Role"),
     "spectator",
   );
   assert.equal(
-    publicState.socketRequests[0].headers.get("X-Mons-Reaction-IP"),
+    publicState.socketRequests[0]!.headers.get("X-Mons-Reaction-IP"),
     "192.0.2.1",
   );
   assert.equal(publicState.calls.auth, 0);
@@ -746,15 +747,15 @@ test("v2 sockets validate registered presentation and negotiate anonymous or par
     );
     assert.equal(state.calls.auth, authenticated ? 1 : 0);
     assert.equal(
-      state.socketRequests[0].headers.get("X-Mons-Presentation-Match"),
+      state.socketRequests[0]!.headers.get("X-Mons-Presentation-Match"),
       "invite-one",
     );
     assert.equal(
-      state.socketRequests[0].headers.get("X-Mons-Reaction-Role"),
+      state.socketRequests[0]!.headers.get("X-Mons-Reaction-Role"),
       authenticated ? "host" : "spectator",
     );
     assert.equal(
-      state.socketRequests[0].headers.get("X-Mons-Presentation-Canonical"),
+      state.socketRequests[0]!.headers.get("X-Mons-Presentation-Canonical"),
       "1",
     );
     assert.equal(
@@ -798,8 +799,8 @@ test("durable v2 admission includes an ensured registered guest before a rematch
   const state = setup({
     hostId: "host-login",
     guestId: "guest-login",
-    hostRematches: "1",
-    guestRematches: "",
+    hostRematches: { state: "open", indices: [1] },
+    guestRematches: { state: "open", indices: [] },
   });
   state.dependencies.readPresentationControl = async () => ({
     phase: "durable",
@@ -828,13 +829,13 @@ test("durable v2 admission includes an ensured registered guest before a rematch
   );
   assert.equal(response.status, 200);
   assert.equal(
-    state.socketRequests[0].headers.get("X-Mons-Presentation-Canonical"),
+    state.socketRequests[0]!.headers.get("X-Mons-Presentation-Canonical"),
     "1",
   );
   assert.deepEqual(
     JSON.parse(
       decodeURIComponent(
-        state.socketRequests[0].headers.get("X-Mons-Presentation-Actors")!,
+        state.socketRequests[0]!.headers.get("X-Mons-Presentation-Actors")!,
       ),
     ),
     ["host-login", "guest-login"],

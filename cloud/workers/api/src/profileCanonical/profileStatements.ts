@@ -48,7 +48,7 @@ function profileMutationStatement(
 ): D1PreparedStatement {
   return canonicalRowMutationStatement(
     db,
-    "profile_records",
+    "profile_records_canonical",
     "profile_id",
     profileWriteRow(value),
     insert,
@@ -62,17 +62,15 @@ function mergeTargetMutationStatement(
 ): D1PreparedStatement {
   return db
     .prepare(
-      `INSERT INTO profile_merge_targets (
-         source_profile_id, target_profile_id, merged_at_ms, op_id,
-         source_legacy_fields_json
-       ) VALUES (?, ?, ?, ?, ?)`,
+      `INSERT INTO profile_merge_targets_canonical (
+         source_profile_id, target_profile_id, merged_at_ms, op_id
+       ) VALUES (?, ?, ?, ?)`,
     )
     .bind(
       value.sourceProfileId,
       value.targetProfileId,
       value.mergedAtMs,
       value.opId,
-      JSON.stringify(value.sourceLegacyFields),
     );
 }
 
@@ -84,7 +82,7 @@ function loginOwnerMutationStatement(
     case "insert-login-owner":
       return db
         .prepare(
-          `INSERT INTO profile_login_owners (
+          `INSERT INTO profile_login_owners_canonical (
              login_uid, profile_id, revision, created_at_ms, updated_at_ms
            ) VALUES (?, ?, 1, ?, ?)`,
         )
@@ -97,7 +95,7 @@ function loginOwnerMutationStatement(
     case "update-login-owner":
       return db
         .prepare(
-          `UPDATE profile_login_owners SET
+          `UPDATE profile_login_owners_canonical SET
              profile_id = ?, updated_at_ms = ?, revision = revision + 1
            WHERE login_uid = ?`,
         )
@@ -109,7 +107,7 @@ function loginOwnerMutationStatement(
     case "move-login-owner-set":
       return db
         .prepare(
-          `UPDATE profile_login_owners SET
+          `UPDATE profile_login_owners_canonical SET
              profile_id = ?, updated_at_ms = ?, revision = revision + 1
            WHERE profile_id = ?`,
         )
@@ -120,7 +118,9 @@ function loginOwnerMutationStatement(
         );
     case "delete-login-owner":
       return db
-        .prepare("DELETE FROM profile_login_owners WHERE login_uid = ?")
+        .prepare(
+          "DELETE FROM profile_login_owners_canonical WHERE login_uid = ?",
+        )
         .bind(mutation.loginUid);
   }
 }
@@ -135,7 +135,7 @@ function profileLinkCatchupOwnerStatement(
   const byLogin = "loginUid" in source;
   return db
     .prepare(
-      `INSERT INTO profile_link_catchup_jobs (
+      `INSERT INTO profile_link_catchup_jobs_canonical (
          login_uid, request_id, profile_id, cleanup_profile_ids_json,
          match_cursor, source_updated_at_ms, last_queued_at_ms, revision
        )
@@ -152,8 +152,8 @@ function profileLinkCatchupOwnerStatement(
          ),
          NULL, MAX(?, COALESCE(job.source_updated_at_ms, 0)), ?,
          COALESCE(job.revision, 0) + 1
-       FROM profile_login_owners AS owner
-       LEFT JOIN profile_link_catchup_jobs AS job
+       FROM profile_login_owners_canonical AS owner
+       LEFT JOIN profile_link_catchup_jobs_canonical AS job
          ON job.login_uid = owner.login_uid
        WHERE owner.${byLogin ? "login_uid" : "profile_id"} = ?
          ${skipUnchangedOwner ? "AND owner.profile_id != ?" : ""}
@@ -223,7 +223,7 @@ export function buildProfileMutationStatements(
         guardStatement(
           db,
           `NOT EXISTS (
-             SELECT 1 FROM profile_records
+             SELECT 1 FROM profile_records_canonical
              WHERE profile_id = ? AND state = 'active'
            )`,
           [mutation.value.profile.id],
@@ -244,7 +244,7 @@ export function buildProfileMutationStatements(
         guardStatement(
           db,
           `NOT EXISTS (
-             SELECT 1 FROM profile_records
+             SELECT 1 FROM profile_records_canonical
              WHERE profile_id = ? AND state = 'active'
            )`,
           [mutation.value.profile.id],
@@ -252,7 +252,7 @@ export function buildProfileMutationStatements(
         ),
         canonicalRowMutationStatement(
           db,
-          "profile_records",
+          "profile_records_canonical",
           "profile_id",
           mutableProfileWriteRow({ ...mutation.current, ...mutation.value }),
           false,
@@ -264,7 +264,7 @@ export function buildProfileMutationStatements(
         guardStatement(
           db,
           `NOT EXISTS (
-             SELECT 1 FROM profile_records
+             SELECT 1 FROM profile_records_canonical
              WHERE profile_id = ? AND state = 'active'
            )`,
           [mutation.profile.profile.id],
@@ -278,7 +278,7 @@ export function buildProfileMutationStatements(
         guardStatement(
           db,
           `NOT EXISTS (
-             SELECT 1 FROM profile_records
+             SELECT 1 FROM profile_records_canonical
              WHERE profile_id = ? AND state = 'retiring'
                AND merged_into_profile_id = ?
            )`,
@@ -287,7 +287,7 @@ export function buildProfileMutationStatements(
         ),
         db
           .prepare(
-            `DELETE FROM profile_records
+            `DELETE FROM profile_records_canonical
              WHERE profile_id = ? AND state = 'retiring'
                AND merged_into_profile_id = ?`,
           )

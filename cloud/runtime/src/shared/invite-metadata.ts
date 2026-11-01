@@ -1,3 +1,4 @@
+import { isRematchSeries, type RematchSeries } from "./rematches.js";
 import type { InviteRole } from "./game-sessions.js";
 import { normalizeRecordKey } from "./ids.js";
 import { GAME_SESSION_OPERATION_ID_PATTERN } from "./game-sessions.js";
@@ -8,8 +9,8 @@ export type InviteMetadataSnapshot = {
   hostId: string;
   guestId: string | null;
   hostColor: "white" | "black";
-  hostRematches: string;
-  guestRematches: string;
+  hostRematches: RematchSeries;
+  guestRematches: RematchSeries;
   automatchStateHint: "pending" | "matched" | "canceled" | null;
   eventId: string | null;
   eventOwned: boolean;
@@ -71,10 +72,8 @@ function isInviteMetadataSnapshot(
     (value.guestId === null ||
       (isUid(value.guestId) && value.guestId !== value.hostId)) &&
     (value.hostColor === "white" || value.hostColor === "black") &&
-    typeof value.hostRematches === "string" &&
-    typeof value.guestRematches === "string" &&
-    value.hostRematches.length <= INVITE_METADATA_MAX_MESSAGE_BYTES &&
-    value.guestRematches.length <= INVITE_METADATA_MAX_MESSAGE_BYTES &&
+    isRematchSeries(value.hostRematches) &&
+    isRematchSeries(value.guestRematches) &&
     ([null, "pending", "matched", "canceled"] as readonly unknown[]).includes(
       value.automatchStateHint,
     ) &&

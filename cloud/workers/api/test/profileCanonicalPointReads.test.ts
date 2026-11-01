@@ -12,14 +12,17 @@ import { readCanonicalWagerSettlement } from "../src/profileCanonical/accounting
 import { TELEGRAM_TEST_ENV } from "./testEnv.ts";
 
 for (const [read, query] of [
-  [readCanonicalProfile, "SELECT * FROM profile_records WHERE profile_id = ?"],
+  [
+    readCanonicalProfile,
+    "SELECT * FROM profile_records_canonical WHERE profile_id = ?",
+  ],
   [
     readCanonicalMergeTarget,
-    "SELECT source_profile_id, target_profile_id, merged_at_ms, op_id FROM profile_merge_targets WHERE source_profile_id = ?",
+    "SELECT source_profile_id, target_profile_id, merged_at_ms, op_id FROM profile_merge_targets_canonical WHERE source_profile_id = ?",
   ],
   [
     readCanonicalWagerSettlement,
-    "SELECT * FROM wager_settlements WHERE operation_id = ?",
+    "SELECT * FROM wager_settlements_canonical WHERE operation_id = ?",
   ],
 ] as const) {
   test(`${read.name} keeps point-read metadata without changing its query or binding`, async () => {

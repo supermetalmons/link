@@ -9,7 +9,9 @@ import {
 } from "./taskKinds.js";
 export type TelegramTaskKind =
   "desired" | "manual-recovery" | "pending-delete" | "rate-limit-proof";
-type TelegramTaskFields = {
+export type TelegramTaskFields = {
+  schemaVersion: 1;
+  dataEpoch: 1;
   messageKey: string;
   revision: string;
   taskKind: TelegramTaskKind;
@@ -78,6 +80,8 @@ const normalizeTaskPayload: (input: unknown) => TelegramTaskPayload = (
     readProperty(input, "retrySequence") ?? 0,
   );
   const payload: TelegramTaskFields = {
+    schemaVersion: 1,
+    dataEpoch: 1,
     messageKey,
     revision,
     taskKind,
@@ -133,7 +137,7 @@ const buildTelegramDeliveryTaskId = (input: TelegramTaskPayload): string => {
   const payload = normalizeTaskPayload(input);
   const cleanupIdentity =
     payload.safeRejectedAttemptId || payload.pendingDeleteId || "none";
-  return `tg_${crypto
+  return `data1_tg_${crypto
     .createHash("sha256")
     .update(
       [
@@ -160,3 +164,81 @@ export {
   normalizeOptionalTimestamp,
   normalizeTaskPayload,
 };
+
+export function parseTelegramTaskPayload(
+  value: unknown,
+): TelegramTaskPayload | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const record = value as Record<string, unknown>;
+  const allowed = [
+    "schemaVersion",
+    "dataEpoch",
+    "messageKey",
+    "revision",
+    "taskKind",
+    "retrySequence",
+    "generation",
+    "retryStartedAtMs",
+    "retryDeadlineAtMs",
+    "retryAtMs",
+    "barrierRetryNotBeforeMs",
+    "safeRejectedAttemptId",
+    "pendingDeleteId",
+    "retryProofLeaseOwner",
+    "proofTaskKind",
+    "barrierProofOwner",
+    "apiGateReclaimOwner",
+    "apiGateSettleOwner",
+  ];
+  if (
+    record.schemaVersion !== 1 ||
+    record.dataEpoch !== 1 ||
+    Object.keys(record).some((key) => !allowed.includes(key)) ||
+    typeof record.retrySequence !== "number" ||
+    !Number.isSafeInteger(record.retrySequence) ||
+    record.retrySequence < 0 ||
+    typeof record.taskKind !== "string" ||
+    !TELEGRAM_TASK_KINDS.has(record.taskKind)
+  )
+    return null;
+  for (const key of ["messageKey", "revision", "generation"])
+    if (
+      typeof record[key] !== "string" ||
+      !record[key] ||
+      record[key].trim() !== record[key]
+    )
+      return null;
+  for (const key of [
+    "retryStartedAtMs",
+    "retryDeadlineAtMs",
+    "retryAtMs",
+    "barrierRetryNotBeforeMs",
+  ])
+    if (
+      Object.hasOwn(record, key) &&
+      (typeof record[key] !== "number" ||
+        !Number.isSafeInteger(record[key]) ||
+        record[key] <= 0)
+    )
+      return null;
+  for (const key of [
+    "safeRejectedAttemptId",
+    "pendingDeleteId",
+    "retryProofLeaseOwner",
+    "barrierProofOwner",
+    "apiGateReclaimOwner",
+    "apiGateSettleOwner",
+  ])
+    if (
+      Object.hasOwn(record, key) &&
+      (typeof record[key] !== "string" ||
+        !record[key] ||
+        record[key].trim() !== record[key])
+    )
+      return null;
+  try {
+    return normalizeTaskPayload(record);
+  } catch {
+    return null;
+  }
+}

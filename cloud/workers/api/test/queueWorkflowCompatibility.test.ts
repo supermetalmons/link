@@ -3,9 +3,14 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 import ts from "typescript";
 import { queueFor } from "../src/queueProducers.ts";
+import { parseQueueEnvelope } from "../src/queueEnvelope.ts";
 import { retainEventProgressRecord } from "../../../runtime/eventProgressRecords.js";
 import { validateEventProgressOutbox } from "../src/eventD1/validation.ts";
-import { parseEventProgressOutbox } from "../src/eventProgressCodec.ts";
+import {
+  buildEventProgressPlan,
+  buildRetainedEventProgressPlan,
+  parseEventProgressOutbox,
+} from "../src/eventProgressCodec.ts";
 
 function declarations(file: string, names: readonly string[]): string {
   const source = ts.createSourceFile(
@@ -34,7 +39,7 @@ function declarations(file: string, names: readonly string[]): string {
   ).outputText;
 }
 
-test("Queue producer access retains the binding, receiver, argument order, arity, and Promise", async () => {
+test("Queue producers preserve native delivery while adding the canonical envelope", async () => {
   const calls: unknown[] = [];
   const sent = Promise.resolve({ metrics: { retained: true } });
   const binding = {
@@ -67,7 +72,7 @@ test("Queue producer access retains the binding, receiver, argument order, arity
     calls.push("options");
     return { delaySeconds: 60 };
   };
-  assert.equal(queueFor(env, "AUTH_RECOVERY_QUEUE"), binding);
+  assert.notEqual(queueFor(env, "AUTH_RECOVERY_QUEUE"), binding);
   calls.length = 0;
   const result = queueFor(env, "AUTH_RECOVERY_QUEUE").send(body(), options());
   assert.equal(result, sent);
@@ -79,13 +84,16 @@ test("Queue producer access retains the binding, receiver, argument order, arity
   ]);
   const invocation = calls[4] as [unknown, unknown[]];
   assert.equal(invocation[0], binding);
-  assert.deepEqual(invocation[1], [
-    { kind: "auth-profile-recovery", profileId: "profile" },
-    { delaySeconds: 60 },
-  ]);
+  const envelope = parseQueueEnvelope(invocation[1][0], "AUTH_RECOVERY_QUEUE");
+  assert.ok(envelope);
+  assert.deepEqual(envelope.payload, {
+    kind: "auth-profile-recovery",
+    profileId: "profile",
+  });
+  assert.deepEqual(invocation[1][1], { delaySeconds: 60 });
   calls.length = 0;
   assert.equal(queueFor(env, "AUTH_RECOVERY_QUEUE").send(body()), sent);
-  assert.equal((calls[3] as [unknown, unknown[]])[1].length, 1);
+  assert.equal((calls[3] as [unknown, unknown[]])[1].length, 2);
   calls.length = 0;
   assert.equal(
     queueFor(env, "AUTH_RECOVERY_QUEUE").sendBatch([{ body: body() }]),
@@ -143,13 +151,11 @@ test("Queue binding and method failures stay synchronous and precede body evalua
 
 test("retained Workflow transport preserves receiver and callee-before-plan reads", async () => {
   const source = declarations("../src/eventProgressDispatch.ts", [
-    "retainedProgressWorkflow",
     "ensureEventProgressWorkflowInstance",
   ]);
   const helpers = new Function(
-    `${source}\nreturn { retainedProgressWorkflow, ensureEventProgressWorkflowInstance };`,
+    `${source}\nreturn { ensureEventProgressWorkflowInstance };`,
   )() as {
-    retainedProgressWorkflow: (value: unknown) => unknown;
     ensureEventProgressWorkflowInstance: (
       workflow: unknown,
       plan: unknown,
@@ -170,7 +176,6 @@ test("retained Workflow transport preserves receiver and callee-before-plan read
       assert.fail("fallback must not run");
     },
   };
-  assert.equal(helpers.retainedProgressWorkflow(workflow), workflow);
   const plan = {
     get workflowId() {
       calls.push("id");
@@ -218,38 +223,27 @@ test("retained Workflow transport preserves receiver and callee-before-plan read
   );
 });
 
-test("retained plan branding returns the assembler Promise without observing the input", async () => {
-  const source = declarations("../src/eventProgressCodec.ts", [
-    "buildRetainedEventProgressPlan",
-  ]);
-  const calls: unknown[] = [];
-  const promise = Promise.resolve({ retained: true });
-  const build = new Function(
-    "assembleEventProgressPlan",
-    `${source}\nreturn buildRetainedEventProgressPlan;`,
-  )((...args: unknown[]) => {
-    calls.push(args);
-    return promise;
-  }) as (input: unknown, now: unknown) => Promise<unknown>;
-  const input = {
-    get eventId() {
-      return assert.fail("branding must not observe fields");
+test("progress plans use concrete data-epoch-one identities", async () => {
+  assert.equal(buildRetainedEventProgressPlan, buildEventProgressPlan);
+  const plan = await buildEventProgressPlan(
+    {
+      eventId: "event",
+      sourceKey: "start:event:12",
+      reason: "scheduled-start",
+      runAtMs: 12,
     },
-  };
-  assert.equal(build(input, 7), promise);
-  assert.deepEqual(calls, [[input, 7]]);
-  assert.deepEqual(await promise, { retained: true });
-  const failure = new Error("assembler failure");
-  const failing = new Function(
-    "assembleEventProgressPlan",
-    `${source}\nreturn buildRetainedEventProgressPlan;`,
-  )(() => {
-    throw failure;
-  }) as (input: unknown, now: unknown) => Promise<unknown>;
-  await assert.rejects(failing(input, 7), (error) => error === failure);
+    7,
+  );
+  assert.equal(plan.outbox.schemaVersion, 2);
+  assert.equal(plan.outbox.dataEpoch, 1);
+  assert.match(plan.workflowId, /^data1_event-progress-[a-f0-9]{64}$/);
+  assert.deepEqual(
+    await parseEventProgressOutbox(plan.outboxId, plan.outbox),
+    plan,
+  );
 });
 
-test("retained progress records preserve raw identity and the partial storage validator", async () => {
+test("progress records reject opaque values and preserve complete canonical documents", async () => {
   for (const raw of [
     null,
     undefined,
@@ -259,25 +253,47 @@ test("retained progress records preserve raw identity and the partial storage va
     [1],
     { extension: true },
   ]) {
-    assert.equal(retainEventProgressRecord("pending", raw), raw);
-    assert.equal(retainEventProgressRecord("dead", raw), raw);
+    assert.throws(
+      () => retainEventProgressRecord("pending", raw),
+      /invalid-canonical-event-progress-record/,
+    );
+    assert.throws(
+      () => retainEventProgressRecord("dead", raw),
+      /invalid-canonical-event-progress-record/,
+    );
   }
-  const raw = {
-    schemaVersion: 1,
-    eventId: "event",
-    runAtMs: 12,
-    lastQueuedAtMs: 34,
-    reason: false,
-    firstQueuedAtMs: "56",
-    extension: { keep: true },
-  };
-  const stored = validateEventProgressOutbox("outbox", raw);
-  assert.deepEqual(stored, { ...raw, runAtMs: 12, lastQueuedAtMs: 34 });
-  assert.notEqual(stored, raw);
-  assert.deepEqual(Object.keys(stored), Object.keys(raw));
-  assert.equal(await parseEventProgressOutbox("outbox", stored), null);
-  assert.throws(
-    () => validateEventProgressOutbox("outbox", { ...raw, runAtMs: "12" }),
-    { message: "invalid-event-integer" },
+  const plan = await buildEventProgressPlan(
+    {
+      eventId: "event",
+      sourceKey: "start:event:12",
+      reason: "scheduled-start",
+      runAtMs: 12,
+    },
+    7,
   );
+  assert.deepEqual(
+    retainEventProgressRecord("pending", plan.outbox),
+    plan.outbox,
+  );
+  assert.deepEqual(
+    validateEventProgressOutbox(plan.outboxId, plan.outbox),
+    plan.outbox,
+  );
+  assert.throws(
+    () =>
+      validateEventProgressOutbox(plan.outboxId, {
+        ...plan.outbox,
+        runAtMs: "12",
+      }),
+    /invalid-event-progress-outbox/,
+  );
+  const dead = {
+    schemaVersion: 1,
+    dataEpoch: 1,
+    deadAtMs: 34,
+    sourceDigest: "a".repeat(64),
+    originalRecord: plan.outbox,
+    reason: "invalid-event-progress-outbox",
+  };
+  assert.deepEqual(retainEventProgressRecord("dead", dead), dead);
 });

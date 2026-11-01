@@ -68,8 +68,8 @@ export declare function createTelegramDesiredDelivery({
       }
     | {
         status: string;
-        retryAtMs?: undefined;
-        scheduled?: undefined;
+        retryAtMs?: never;
+        scheduled?: never;
       }
     | {
         status: string;

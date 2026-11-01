@@ -16,6 +16,11 @@ registerHooks({
 const { createRematchViewing } =
   await import("../../src/game/rematchViewing.ts");
 
+/**
+ * @param {Partial<Parameters<typeof createRematchViewing>[0]> & {
+ *   selection?: import("../../src/game/rematchViewing.ts").ViewedRematch | null
+ * }} [options]
+ */
 export function createRematchViewingHarness({
   selection = null,
   ...dependencies

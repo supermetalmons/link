@@ -9,7 +9,7 @@ export const RAINBOW_AURA_ROTATOR_SIZE_PERCENT = 240;
 const RAINBOW_AURA_MASK_CACHE_VARIANT = "mons-aura-mask=v1";
 
 export function getRainbowAuraGradient(): string {
-  const r: Record<string, string> = colors.rainbow as any;
+  const r = colors.rainbow;
   return `conic-gradient(${r[7]} 0deg, #0066ff 45deg, ${r[6]} 90deg, ${r[5]} 135deg, ${r[4]} 180deg, ${r[3]} 225deg, ${r[2]} 270deg, ${r[1]} 315deg, ${r[7]} 360deg)`;
 }
 

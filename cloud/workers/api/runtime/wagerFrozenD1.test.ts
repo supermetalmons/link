@@ -62,8 +62,8 @@ describe("D1 wager frozen reservations", () => {
 
   beforeEach(async () => {
     await db.batch([
-      db.prepare("DELETE FROM wager_frozen_operations"),
-      db.prepare("DELETE FROM wager_frozen_balances"),
+      db.prepare("DELETE FROM wager_frozen_operations_canonical"),
+      db.prepare("DELETE FROM wager_frozen_balances_canonical"),
     ]);
   });
 
@@ -79,7 +79,7 @@ describe("D1 wager frozen reservations", () => {
       await expect(
         db
           .prepare(
-            "INSERT INTO wager_frozen_balances (player_uid, frozen_json, revision, updated_at_ms) VALUES (?, ?, 1, 0)",
+            "INSERT INTO wager_frozen_balances_canonical (player_uid, frozen_json, revision, updated_at_ms) VALUES (?, ?, 1, 0)",
           )
           .bind("invalid", JSON.stringify(frozen))
           .run(),
@@ -282,7 +282,7 @@ describe("D1 wager frozen reservations", () => {
         ...statements,
         db
           .prepare(
-            "INSERT INTO wager_frozen_balances (player_uid, frozen_json, revision, updated_at_ms) VALUES ('conflict', ?, 0, 0)",
+            "INSERT INTO wager_frozen_balances_canonical (player_uid, frozen_json, revision, updated_at_ms) VALUES ('conflict', ?, 0, 0)",
           )
           .bind(JSON.stringify(materials())),
       ]),
@@ -396,14 +396,21 @@ describe("D1 wager frozen reservations", () => {
     );
     await db
       .prepare(
-        "UPDATE wager_frozen_operations SET record_json = ? WHERE player_uid = ? AND operation_id = ?",
+        "UPDATE wager_frozen_operations_canonical SET record_json = ? WHERE player_uid = ? AND operation_id = ?",
       )
       .bind(
         JSON.stringify({
-          appliedAtMs: 100,
-          count: 3,
-          fingerprint: operationFingerprint("send-reserve", "dust", 3),
-          deltas: {},
+          schemaVersion: 1,
+          status: "active",
+          operation: {
+            kind: "send-reserve",
+            material: "dust",
+            requestedCount: 3,
+            appliedAtMs: 100,
+            count: 3,
+            fingerprint: operationFingerprint("send-reserve", "dust", 3),
+            deltas: {},
+          },
         }),
         "host",
         "send",

@@ -3,7 +3,13 @@ import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { build, createServer, preview } from "vite";
+import {
+  build,
+  createServer,
+  preview,
+  type ViteDevServer,
+  type PreviewServer,
+} from "vite";
 import {
   eventSocialMetadata,
   withEventSocialImages,
@@ -47,84 +53,102 @@ test("event metadata replaces only images and supplies accessible JPEG metadata"
   );
 });
 
-test("built, development, and preview event pages preserve the app and other routes", async (t) => {
-  const directory = await mkdtemp(join(tmpdir(), "mons-event-social-"));
-  t.after(() => rm(directory, { recursive: true, force: true }));
-  await mkdir(join(directory, "public"));
-  await writeFile(
-    join(directory, "index.html"),
-    rootHtml
-      .replace("%VITE_APP_TITLE%", "Mons metadata fixture")
-      .replace("/src/bootstrap.ts", "/main.js"),
-  );
-  await writeFile(
-    join(directory, "main.js"),
-    "document.getElementById('root').textContent = 'Mons fixture';",
-  );
-  const redirects = await readFile(
-    new URL("../public/_redirects", import.meta.url),
-    "utf8",
-  );
-  await writeFile(join(directory, "public", "_redirects"), redirects);
-  const configuration = {
-    root: directory,
-    configFile: false as const,
-    logLevel: "silent" as const,
-    plugins: [eventSocialMetadata()],
-    build: { outDir: "build" },
-  };
-  await build(configuration);
-  const builtRoot = await readFile(join(directory, "build/index.html"), "utf8");
-  const builtEvent = await readFile(
-    join(directory, "build/_social/event.html"),
-    "utf8",
-  );
-  assertEventImages(builtEvent);
-  assert.match(builtRoot, /https:\/\/mons\.link\/og-card\.png/);
-  assert.match(builtEvent, /src="\/assets\/[^" ]+\.js"/);
-  assert.equal(builtEvent, withEventSocialImages(builtRoot));
-  assert.equal(
-    await readFile(join(directory, "build/_redirects"), "utf8"),
-    "/event/* /_social/event 200\n",
-  );
+test(
+  "built, development, and preview event pages preserve the app and other routes",
+  { timeout: 60_000 },
+  async (t) => {
+    const directory = await mkdtemp(join(tmpdir(), "mons-event-social-"));
+    let development: ViteDevServer | undefined,
+      productionPreview: PreviewServer | undefined;
+    t.after(async () => {
+      for (const server of [
+        development?.httpServer,
+        productionPreview?.httpServer,
+      ]) {
+        if (server && "closeAllConnections" in server)
+          server.closeAllConnections();
+      }
+      await Promise.all([development?.close(), productionPreview?.close()]);
+      await rm(directory, { recursive: true, force: true });
+    });
+    await mkdir(join(directory, "public"));
+    await writeFile(
+      join(directory, "index.html"),
+      rootHtml
+        .replace("%VITE_APP_TITLE%", "Mons metadata fixture")
+        .replace("/src/bootstrap.ts", "/main.js"),
+    );
+    await writeFile(
+      join(directory, "main.js"),
+      "document.getElementById('root').textContent = 'Mons fixture';",
+    );
+    const redirects = await readFile(
+      new URL("../public/_redirects", import.meta.url),
+      "utf8",
+    );
+    await writeFile(join(directory, "public", "_redirects"), redirects);
+    const configuration = {
+      root: directory,
+      configFile: false as const,
+      logLevel: "silent" as const,
+      plugins: [eventSocialMetadata()],
+      build: { outDir: "build" },
+    };
+    await build(configuration);
+    const builtRoot = await readFile(
+      join(directory, "build/index.html"),
+      "utf8",
+    );
+    const builtEvent = await readFile(
+      join(directory, "build/_social/event.html"),
+      "utf8",
+    );
+    assertEventImages(builtEvent);
+    assert.match(builtRoot, /https:\/\/mons\.link\/og-card\.png/);
+    assert.match(builtEvent, /src="\/assets\/[^" ]+\.js"/);
+    assert.equal(builtEvent, withEventSocialImages(builtRoot));
+    assert.equal(
+      await readFile(join(directory, "build/_redirects"), "utf8"),
+      "/event/* /_social/event 200\n",
+    );
 
-  const development = await createServer({
-    ...configuration,
-    server: { port: 0, host: "127.0.0.1" },
-  });
-  t.after(() => development.close());
-  await development.listen();
-  const productionPreview = await preview({
-    ...configuration,
-    preview: { port: 0, host: "127.0.0.1" },
-  });
-  t.after(() => productionPreview.close());
-  for (const server of [development, productionPreview]) {
-    const origin = server.resolvedUrls?.local[0];
-    assert.ok(origin);
-    for (const path of [
-      "event/test-id",
-      "event/test-id?source=shared",
-      "event/test-id/",
-      "event/encoded%2Fid",
-      "",
-      "event",
-      "exact-match?event=test-id",
-      "watch?event=test-id",
-      "snapshot/test-id?event=test-id",
-    ]) {
-      const response: Response = await fetch(new URL(path, origin), {
-        redirect: "manual",
-      });
-      assert.equal(response.status, 200, path);
-      assert.equal(response.headers.get("location"), null, path);
-      const html = await response.text();
-      if (path.startsWith("event/")) {
-        assertEventImages(html);
-      } else {
-        assert.match(html, /https:\/\/mons\.link\/og-card\.png/);
-        assert.doesNotMatch(html, /event-og-card-v1/);
+    development = await createServer({
+      ...configuration,
+      server: { port: 0, host: "127.0.0.1" },
+    });
+    await development.listen();
+    productionPreview = await preview({
+      ...configuration,
+      preview: { port: 0, host: "127.0.0.1" },
+    });
+    for (const server of [development, productionPreview]) {
+      const origin = server.resolvedUrls?.local[0];
+      assert.ok(origin);
+      for (const path of [
+        "event/test-id",
+        "event/test-id?source=shared",
+        "event/test-id/",
+        "event/encoded%2Fid",
+        "",
+        "event",
+        "exact-match?event=test-id",
+        "watch?event=test-id",
+        "snapshot/test-id?event=test-id",
+      ]) {
+        const response: Response = await fetch(new URL(path, origin), {
+          redirect: "manual",
+          signal: t.signal,
+        });
+        assert.equal(response.status, 200, path);
+        assert.equal(response.headers.get("location"), null, path);
+        const html = await response.text();
+        if (path.startsWith("event/")) {
+          assertEventImages(html);
+        } else {
+          assert.match(html, /https:\/\/mons\.link\/og-card\.png/);
+          assert.doesNotMatch(html, /event-og-card-v1/);
+        }
       }
     }
-  }
-});
+  },
+);

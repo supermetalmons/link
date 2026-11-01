@@ -199,7 +199,7 @@ const createEventProfileGameProjectionCore = ({
           profileId: ownerProfileId,
           eventId,
           data: (0, profileGameProjectionRecords_js_1.createEventProjection)({
-            schemaVersion: 1,
+            schemaVersion: 2,
             source: "event-projector",
             entityType: "event",
             id: `event_${eventId}`,

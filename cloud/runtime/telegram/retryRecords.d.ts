@@ -12,17 +12,12 @@ import {
   type TelegramDeliveryDocument,
   type TelegramRetryProofDocument,
 } from "./records.js";
-declare const retainedRetry: unique symbol;
-type RetainedRetry<Kind extends string> = {
-  readonly [retainedRetry]: Kind;
-};
-export type RetainedTelegramExactRetryInput = RetainedRetry<"exact-input">;
-export type RetainedTelegramRetrySchedule = RetainedRetry<"schedule">;
-export type RetainedTelegramProofInput = RetainedRetry<"proof-input">;
-export type TelegramProofApplicationDocument =
-  RetainedRetry<"proof-application">;
-export type RetainedTelegramBarrierInput = RetainedRetry<"barrier-input">;
-export type RetainedTelegramOwner = RetainedRetry<"owner">;
+export type RetainedTelegramExactRetryInput = TelegramExactRetryInput;
+export type RetainedTelegramRetrySchedule = TelegramRetrySchedule;
+export type RetainedTelegramProofInput = TelegramProofInput;
+export type TelegramProofApplicationDocument = TelegramProofInput;
+export type RetainedTelegramBarrierInput = TelegramBarrierInput;
+export type RetainedTelegramOwner = string;
 export type TelegramProofInput = Partial<
   TelegramReconcileInput & {
     requestedPendingDeleteId: string;
@@ -42,7 +37,7 @@ export declare function retainedRateLimitProof(
   value: unknown,
 ): TelegramRetryProofDocument;
 export declare function messageRateLimitProof(
-  value: TelegramDeliveryDocument,
+  value: Partial<TelegramDeliveryDocument>,
   pending?: boolean,
 ): TelegramRetryProofDocument;
 export declare function readRateLimitRetryState(
@@ -152,4 +147,3 @@ export declare function messageSettlementOwnerInput(
   message: TelegramMessageDocument | null | undefined,
   field: "apiGateSettleOwner" | "pendingDeleteApiGateSettleOwner",
 ): RetainedTelegramOwner;
-export {};

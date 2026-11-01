@@ -9,7 +9,7 @@ export function canonicalProfileRedirectCte(kind: "login" | "profile"): string {
            owner.created_at_ms AS owner_created_at_ms,
            owner.updated_at_ms AS owner_updated_at_ms
          FROM requested
-         LEFT JOIN profile_login_owners owner
+         LEFT JOIN profile_login_owners_canonical owner
            ON owner.login_uid = requested.request_key`
       : `SELECT
            request_index,
@@ -48,7 +48,7 @@ export function canonicalProfileRedirectCte(kind: "login" | "profile"): string {
            target.target_profile_id,
            chain.depth + 1
          FROM chain
-         JOIN profile_merge_targets target
+         JOIN profile_merge_targets_canonical target
            ON target.source_profile_id = chain.chain_profile_id
          WHERE chain.depth < ?
        )`;

@@ -12,6 +12,7 @@ test("auth timing records first stages and guards the visible-name frame without
   const originalRaf = globalThis.requestAnimationFrame;
   const originalCancel = globalThis.cancelAnimationFrame;
   const originalDocument = globalThis.document;
+  /** @type {Map<number, FrameRequestCallback>} */
   const frames = new Map();
   let next = 0;
   globalThis.requestAnimationFrame = (callback) => {
@@ -19,11 +20,15 @@ test("auth timing records first stages and guards the visible-name frame without
     return next;
   };
   globalThis.cancelAnimationFrame = (id) => frames.delete(id);
-  globalThis.document = { visibilityState: "visible" };
+  Object.defineProperty(globalThis, "document", {
+    configurable: true,
+    writable: true,
+    value: { visibilityState: "visible" },
+  });
   const frame = () => {
     const callbacks = [...frames.values()];
     frames.clear();
-    callbacks.forEach((callback) => callback());
+    callbacks.forEach((callback) => callback(0));
   };
   try {
     markAuthRestoreStart();
@@ -78,11 +83,14 @@ test("auth timing records first stages and guards the visible-name frame without
       1,
     );
   } finally {
-    if (originalRaf === undefined) delete globalThis.requestAnimationFrame;
+    if (originalRaf === undefined)
+      Reflect.deleteProperty(globalThis, "requestAnimationFrame");
     else globalThis.requestAnimationFrame = originalRaf;
-    if (originalCancel === undefined) delete globalThis.cancelAnimationFrame;
+    if (originalCancel === undefined)
+      Reflect.deleteProperty(globalThis, "cancelAnimationFrame");
     else globalThis.cancelAnimationFrame = originalCancel;
-    if (originalDocument === undefined) delete globalThis.document;
+    if (originalDocument === undefined)
+      Reflect.deleteProperty(globalThis, "document");
     else globalThis.document = originalDocument;
   }
 });

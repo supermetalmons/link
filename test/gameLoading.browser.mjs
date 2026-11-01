@@ -1,6 +1,7 @@
+import { browserServerOrigin } from "./browserViteServer.mjs";
 import assert from "node:assert/strict";
 import { createServer as createHttpServer } from "node:http";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { extname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -10,37 +11,66 @@ import { createBrowserViteServer as createViteServer } from "./browserViteServer
 import { Game } from "mons-rules";
 
 const require = createRequire(import.meta.url);
+/** @type {typeof import("playwright")} */
 const { chromium } = require(process.env.MONS_PLAYWRIGHT_PATH || "playwright");
+/** @template Value @param {Value} value @returns {NonNullable<Value>} */
+function present(value) {
+  assert.ok(value !== null && value !== undefined);
+  return value;
+}
+/** @param {unknown} value @returns {Record<string, unknown>} */
+function jsonRecord(value) {
+  assert.ok(
+    value !== null && typeof value === "object" && !Array.isArray(value),
+  );
+  return /** @type {Record<string, unknown>} */ (value);
+}
+/** @param {unknown} value @returns {string} */
+function stringValue(value) {
+  assert.ok(typeof value === "string");
+  return value;
+}
 const repository = fileURLToPath(new URL("../", import.meta.url));
+const cacheDirectory = resolve(
+  repository,
+  "node_modules/.vite-browser-tests",
+  `game-loading-${process.pid}`,
+);
+test.after(() => rm(cacheDirectory, { recursive: true, force: true }));
 const defaultInviteId = "FastLoadingGame";
 const inviteId = defaultInviteId;
 const hostId = "h".repeat(28);
 const guestId = "g".repeat(28);
 const fen = new Game({ variant: "Classic" }).toFen();
+/** @param {"white" | "black"} color @returns {import("@mons/shared/game-sessions").GameSessionMatch} */
 const record = (color) => ({
+  schemaVersion: 1,
   version: 2,
   color,
   emojiId: 1,
-  aura: "",
+  aura: "none",
   gameVariant: "Classic",
   fen,
-  status: "",
+  status: "active",
   flatMovesString: "",
-  timer: "",
+  timer: { state: "idle" },
 });
+/** @type {import("@mons/shared/invite-metadata").InviteMetadataSnapshot} */
 const metadata = {
   inviteId,
   revision: 1,
   hostId,
   guestId,
   hostColor: "white",
-  hostRematches: "",
-  guestRematches: "",
+  hostRematches: { state: "open", indices: [] },
+  guestRematches: { state: "open", indices: [] },
   automatchStateHint: null,
   eventId: null,
   eventOwned: false,
 };
+/** @type {import("@mons/shared/invite-metadata").InviteMetadataViewer} */
 const viewer = { role: "host", actorUid: hostId, automatchOperationId: null };
+/** @type {import("@mons/shared/match-sync").MatchSyncSnapshot} */
 const match = {
   inviteId,
   matchId: inviteId,
@@ -50,6 +80,7 @@ const match = {
   hostMatch: record("white"),
   guestMatch: record("black"),
 };
+/** @type {import("@mons/shared/game-bootstrap").ReadGameBootstrapResponse} */
 const bootstrap = {
   ok: true,
   schemaVersion: 1,
@@ -59,19 +90,24 @@ const bootstrap = {
   hasPendingProposal: false,
 };
 const benchmark = process.env.MONS_LOADING_BENCHMARK === "1";
+/** @returns {PromiseWithResolvers<void>} */
 const deferred = () => Promise.withResolvers();
 
+/** @template Value @param {Promise<Value>} promise @returns {Promise<Value>} */
 async function withinDeadline(promise) {
+  /** @type {ReturnType<typeof setTimeout> | undefined} */
   let timer;
   try {
     return await Promise.race([
       promise,
-      new Promise((_, reject) => {
-        timer = setTimeout(
-          () => reject(new Error("loading-fixture-timeout")),
-          30_000,
-        );
-      }),
+      /** @type {Promise<never>} */ (
+        new Promise((_, reject) => {
+          timer = setTimeout(
+            () => reject(new Error("loading-fixture-timeout")),
+            30_000,
+          );
+        })
+      ),
     ]);
   } finally {
     clearTimeout(timer);
@@ -82,6 +118,7 @@ async function serve() {
   if (!process.env.MONS_LOADING_BUILD) {
     const server = await createViteServer({
       root: repository,
+      cacheDir: cacheDirectory,
       logLevel: "error",
       optimizeDeps: { force: true },
       server: {
@@ -94,13 +131,13 @@ async function serve() {
     });
     await server.listen();
     return {
-      origin: `http://127.0.0.1:${server.httpServer.address().port}`,
+      origin: browserServerOrigin(server),
       close: () => server.close(),
     };
   }
   const root = resolve(process.env.MONS_LOADING_BUILD);
   const server = createHttpServer(async (request, response) => {
-    const pathname = new URL(request.url, "http://localhost").pathname;
+    const pathname = new URL(request.url ?? "/", "http://localhost").pathname;
     const relative = pathname.startsWith("/assets/")
       ? pathname.slice(1)
       : "index.html";
@@ -120,13 +157,29 @@ async function serve() {
       response.end();
     }
   });
-  await new Promise((done) => server.listen(0, "127.0.0.1", done));
+  await /** @type {Promise<void>} */ (
+    new Promise((done) => server.listen(0, "127.0.0.1", done))
+  );
+  const address = server.address();
+  assert.ok(address && typeof address !== "string");
   return {
-    origin: `http://127.0.0.1:${server.address().port}`,
-    close: () => new Promise((done) => server.close(done)),
+    origin: `http://127.0.0.1:${address.port}`,
+    close: () =>
+      /** @type {Promise<void>} */ (
+        new Promise((done) => server.close(() => done()))
+      ),
   };
 }
 
+/**
+ * @typedef {import("@mons/shared/invite-metadata").InviteMetadataSnapshot} Metadata
+ * @typedef {import("@mons/shared/match-sync").MatchSyncSnapshot} MatchSnapshot
+ * @typedef {import("@mons/shared/invite-wagers").InviteWagersSnapshot} WagersSnapshot
+ * @typedef {{path: string, query: string, method: string, at: number}} LoadingRequest
+ * @typedef {{page: import("playwright").Page, context: import("playwright").BrowserContext, sessions: Set<string>, registerSession(sessionId: string, uid: string): void, requests: LoadingRequest[], sockets: string[], coreSocketsReady: Promise<[void, void]>, publishMetadata(update: Partial<Metadata>): void, publishMatch(update: Partial<MatchSnapshot>): void, publishWagers(update: Partial<WagersSnapshot>): Promise<void>, resources: string[], assetsGate: PromiseWithResolvers<void>, bootstrapGate: PromiseWithResolvers<void>, sessionBootstrapGate: PromiseWithResolvers<void>, extrasGate: PromiseWithResolvers<void>, bootstrapRequested: PromiseWithResolvers<void>, selectedAssetsRequested: PromiseWithResolvers<void>, wagersRequested: PromiseWithResolvers<void>, profilesRequested: PromiseWithResolvers<void>}} LoadingFixtureContext
+ * @typedef {{inviteId?: string, startFromHome?: boolean, inlineAutomatchBootstrap?: boolean, holdMatchSnapshots?: boolean, apiDelayMs?: number, holdAssets?: boolean, holdBootstrap?: boolean, holdExtras?: boolean, spectator?: boolean, paired?: boolean, pendingRematch?: boolean, healthyCoreSockets?: boolean, sessionMode?: "fresh" | "restored", sessionBootstrapResult?: unknown, holdSessionBootstrap?: boolean, initialSessionUid?: string, initialSessionStatus?: number, initialSessionGame?: unknown, initialMetadata?: Partial<Metadata>, initialMatch?: Partial<MatchSnapshot>, historicalPairs?: import("@mons/shared/game-sessions").HistoricalMatchPair[], initialWagers?: WagersSnapshot["wagers"] | null}} LoadingOptions
+ */
+/** @param {(context: LoadingFixtureContext) => Promise<void>} run @param {LoadingOptions} [options] */
 async function fixture(
   run,
   {
@@ -154,11 +207,14 @@ async function fixture(
     initialWagers = null,
   } = {},
 ) {
+  /** @type {Metadata} */
   const currentMetadata = {
     ...metadata,
     inviteId,
     guestId: paired ? guestId : null,
-    hostRematches: pendingRematch ? "1" : "",
+    hostRematches: pendingRematch
+      ? { state: "open", indices: [1] }
+      : { state: "open", indices: [] },
     automatchStateHint: inviteId.startsWith("auto_")
       ? paired
         ? "matched"
@@ -166,9 +222,11 @@ async function fixture(
       : null,
     ...initialMetadata,
   };
+  /** @type {import("@mons/shared/invite-metadata").InviteMetadataViewer} */
   const currentViewer = spectator
     ? { role: "watch", actorUid: null, automatchOperationId: null }
     : { ...viewer };
+  /** @type {MatchSnapshot} */
   const currentMatch = {
     ...match,
     inviteId,
@@ -177,6 +235,7 @@ async function fixture(
     guestMatch: paired && !pendingRematch ? match.guestMatch : null,
     ...initialMatch,
   };
+  /** @type {WagersSnapshot} */
   const currentWagers = { inviteId, revision: 1, wagers: initialWagers ?? {} };
   const historyByMatchId = new Map(
     historicalPairs.map((pair) => [pair.matchId, pair]),
@@ -197,6 +256,7 @@ async function fixture(
   const metadataSocketReady = deferred();
   const matchSocketReady = deferred();
   const wagersSocketReady = deferred();
+  /** @type {Map<string, import("playwright").WebSocketRoute>} */
   const coreSockets = new Map();
   const sessionBootstrapGate = holdSessionBootstrap
     ? deferred()
@@ -206,11 +266,17 @@ async function fixture(
   const selectedAssetsRequested = deferred();
   const wagersRequested = deferred();
   const profilesRequested = deferred();
+  /** @type {LoadingRequest[]} */
   const requests = [];
+  /** @type {string[]} */
   const sockets = [];
+  /** @type {string[]} */
   const resources = [];
+  /** @type {string[]} */
   const pageErrors = [];
+  /** @type {Set<string>} */
   const sessions = new Set();
+  /** @type {Map<string, string>} */
   const sessionUids = new Map();
   let closed = false;
   if (!holdAssets) assetsGate.resolve();
@@ -267,17 +333,25 @@ async function fixture(
       if (url.origin !== "https://api.mons.link") return route.abort();
       const headers = {
         "Access-Control-Allow-Origin": server.origin,
-        "Access-Control-Allow-Headers": "Authorization, Content-Type",
+        "Access-Control-Allow-Headers":
+          "Authorization, Content-Type, X-Mons-Data-Epoch",
         "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
       };
       if (request.method() === "OPTIONS")
         return route.fulfill({ status: 204, headers });
+      if (url.pathname === "/release")
+        return route.fulfill({
+          status: 200,
+          headers,
+          json: { state: "active", dataEpoch: 1, generation: 1 },
+        });
       requests.push({
         path: url.pathname,
         query: url.search,
         method: request.method(),
         at: Date.now(),
       });
+      /** @type {Record<string, unknown> | import("@mons/shared/game-bootstrap").ReadGameBootstrapResponse | undefined} */
       let body;
       let status;
       if (
@@ -286,13 +360,16 @@ async function fixture(
       ) {
         const sessionId =
           url.pathname === "/auth/session/anonymous"
-            ? request.postDataJSON().sessionId
-            : request.headers().authorization.split(".")[1];
+            ? stringValue(jsonRecord(request.postDataJSON()).sessionId)
+            : stringValue(
+                present(request.headers().authorization).split(".")[1],
+              );
         if (url.pathname === "/auth/session/anonymous") sessions.add(sessionId);
         assert.ok(sessions.has(sessionId));
         const uid = sessionUids.get(sessionId) ?? initialSessionUid;
         const expiresAt = Math.floor(Date.now() / 1000) + 300;
-        body = {
+        /** @type {Record<string, unknown>} */
+        const sessionResponse = {
           ok: true,
           sessionId,
           uid,
@@ -305,7 +382,7 @@ async function fixture(
           bootstrapRequested.resolve();
           await sessionBootstrapGate.promise;
           if (sessionBootstrapResult !== "missing")
-            body.gameBootstrap = {
+            sessionResponse.gameBootstrap = {
               inviteId,
               selection: "current",
               result:
@@ -319,6 +396,7 @@ async function fixture(
                     })
                   : sessionBootstrapResult,
             };
+          body = sessionResponse;
           status = initialSessionStatus;
           if (status !== 200)
             body = {
@@ -326,7 +404,7 @@ async function fixture(
               error: "unavailable",
               message: "Old session fixture failure",
             };
-        }
+        } else body = sessionResponse;
       } else if (url.pathname === "/automatch/start") {
         assert.equal(url.searchParams.get("bootstrap"), "1");
         currentViewer.automatchOperationId =
@@ -370,7 +448,8 @@ async function fixture(
       ) {
         body = {
           ok: true,
-          pair: historyByMatchId.get(url.searchParams.get("matchId")) ?? null,
+          pair:
+            historyByMatchId.get(url.searchParams.get("matchId") ?? "") ?? null,
         };
       } else if (url.pathname === "/matches/snapshot") {
         body = {
@@ -402,7 +481,11 @@ async function fixture(
       });
     });
     await context.addInitScript(() => {
-      localStorage.setItem("preferredAssetsSet", "pixel");
+      localStorage.setItem(
+        "mons:data:v1:preferredAssetsSet",
+        JSON.stringify("Pixel"),
+      );
+      /** @type {import("./fixtures/loadingGlobals.ts").LoadingProbe} */
       const timing = { shell: null, populated: null };
       window.loadingProbe = timing;
       new MutationObserver(() => {
@@ -427,35 +510,38 @@ async function fixture(
       await page.goto(`${server.origin}/__loading-seed`);
       await page.evaluate(
         ({ sessionId, uid }) =>
-          new Promise((resolve, reject) => {
-            const open = indexedDB.open("mons-link-sessions-v1", 1);
-            open.onupgradeneeded = () => open.result.createObjectStore("state");
-            open.onerror = () => reject(open.error);
-            open.onsuccess = () => {
-              const database = open.result;
-              const transaction = database.transaction("state", "readwrite");
-              transaction.objectStore("state").put(
-                {
-                  generation: crypto.randomUUID(),
-                  revision: 1,
-                  initialized: true,
-                  session: {
-                    sessionId,
-                    uid,
-                    refreshSecret: "a".repeat(42) + "A",
-                    revokeSecret: "b".repeat(42) + "A",
+          /** @type {Promise<void>} */ (
+            new Promise((resolve, reject) => {
+              const open = indexedDB.open("mons-link-sessions-v1", 1);
+              open.onupgradeneeded = () =>
+                open.result.createObjectStore("state");
+              open.onerror = () => reject(open.error);
+              open.onsuccess = () => {
+                const database = open.result;
+                const transaction = database.transaction("state", "readwrite");
+                transaction.objectStore("state").put(
+                  {
+                    generation: crypto.randomUUID(),
+                    revision: 1,
+                    initialized: true,
+                    session: {
+                      sessionId,
+                      uid,
+                      refreshSecret: "a".repeat(42) + "A",
+                      revokeSecret: "b".repeat(42) + "A",
+                    },
+                    revocations: [],
                   },
-                  revocations: [],
-                },
-                "current",
-              );
-              transaction.oncomplete = () => {
-                database.close();
-                resolve();
+                  "current",
+                );
+                transaction.oncomplete = () => {
+                  database.close();
+                  resolve();
+                };
+                transaction.onerror = () => reject(transaction.error);
               };
-              transaction.onerror = () => reject(transaction.error);
-            };
-          }),
+            })
+          ),
         { sessionId, uid: initialSessionUid },
       );
       requests.length = 0;
@@ -484,7 +570,7 @@ async function fixture(
       ]),
       publishMetadata(update) {
         Object.assign(currentMetadata, update);
-        coreSockets.get("metadata").send(
+        present(coreSockets.get("metadata")).send(
           JSON.stringify({
             schemaVersion: 1,
             type: "snapshot",
@@ -494,7 +580,7 @@ async function fixture(
       },
       publishMatch(update) {
         Object.assign(currentMatch, update);
-        coreSockets.get("match").send(
+        present(coreSockets.get("match")).send(
           JSON.stringify({
             schemaVersion: 1,
             type: "snapshot",
@@ -505,7 +591,7 @@ async function fixture(
       async publishWagers(update) {
         await withinDeadline(wagersSocketReady.promise);
         Object.assign(currentWagers, update);
-        coreSockets.get("wagers").send(
+        present(coreSockets.get("wagers")).send(
           JSON.stringify({
             schemaVersion: 1,
             type: "snapshot",
@@ -543,6 +629,7 @@ async function fixture(
   }
 }
 
+/** @param {import("playwright").Page} page */
 async function assertBoardAcceptsInput(page) {
   await page.waitForFunction(
     () =>
@@ -562,7 +649,8 @@ async function assertBoardAcceptsInput(page) {
   });
   await page.locator('.board-rect[x="500"][y="1000"]').click();
   await page.waitForFunction(
-    () => document.querySelector("#highlightsLayer")?.childElementCount > 0,
+    () =>
+      (document.querySelector("#highlightsLayer")?.childElementCount ?? 0) > 0,
   );
   assert.equal(
     await page.evaluate(() => window.loadingProbe.trustedInput),
@@ -570,6 +658,7 @@ async function assertBoardAcceptsInput(page) {
   );
 }
 
+/** @param {import("playwright").Page} page */
 async function startAutomatchAndWaitForGame(page) {
   const readyCount = await page.evaluate(
     () => performance.getEntriesByName("main-game:interaction-ready").length,
@@ -583,17 +672,19 @@ async function startAutomatchAndWaitForGame(page) {
   );
 }
 
+/** @param {LoadingRequest[]} requests @param {"fresh" | "restored"} [sessionMode] */
 function assertBundledBootstrap(requests, sessionMode = "fresh") {
   const sessions = requests.filter(({ path }) =>
     /^\/auth\/session\/(anonymous|refresh)$/.test(path),
   );
   assert.equal(sessions.length, 1);
+  const first = present(sessions[0]);
   assert.equal(
-    sessions[0].path,
+    first.path,
     `/auth/session/${sessionMode === "fresh" ? "anonymous" : "refresh"}`,
   );
   assert.equal(
-    new URLSearchParams(sessions[0].query).get("bootstrapInviteId"),
+    new URLSearchParams(first.query).get("bootstrapInviteId"),
     inviteId,
   );
   assert.equal(
@@ -602,6 +693,7 @@ function assertBundledBootstrap(requests, sessionMode = "fresh") {
   );
 }
 
+/** @param {import("playwright").Page} page @param {string} path */
 async function navigateWithinApp(page, path) {
   await page.evaluate((path) => {
     for (const name of [
@@ -861,8 +953,10 @@ for (const metadataFirst of [false, true]) {
           else sendMatch();
           await page.evaluate(
             () =>
-              new Promise((resolve) =>
-                requestAnimationFrame(() => requestAnimationFrame(resolve)),
+              /** @type {Promise<number>} */ (
+                new Promise((resolve) =>
+                  requestAnimationFrame(() => requestAnimationFrame(resolve)),
+                )
               ),
           );
           assert.equal(
@@ -935,6 +1029,7 @@ test(
   },
 );
 
+/** @param {import("playwright").Page} page */
 async function installGameStateProbe(page) {
   await page.waitForFunction(() => window.loadingProbe.populated !== null);
   await page.evaluate(async () => {
@@ -962,6 +1057,7 @@ async function installGameStateProbe(page) {
   });
 }
 
+/** @type {import("@mons/shared/game-sessions").HistoricalMatchPair} */
 const historicalPair = {
   matchId: inviteId,
   hostPlayerId: hostId,
@@ -978,8 +1074,15 @@ test(
   },
   async () => {
     const liveMatchId = `${inviteId}1`;
+    /** @param {number} count @returns {import("@mons/shared/invite-wagers").PublicMatchWagerState} */
     const proposals = (count) => ({
-      proposals: { [hostId]: { material: "dust", count } },
+      schemaVersion: 1,
+      state: "proposed",
+      proposals: { [hostId]: { material: "dust", count, createdAt: 1 } },
+      proposedBy: { [hostId]: true },
+      agreed: null,
+      resolved: null,
+      blocked: null,
     });
     await fixture(
       async ({ page, coreSocketsReady, publishMatch, publishWagers }) => {
@@ -1000,13 +1103,19 @@ test(
           inviteId,
         );
         assert.equal(
-          await page.evaluate(
-            (hostId) => window.gameStateProbe().wager.proposals[hostId].count,
-            hostId,
-          ),
+          await page.evaluate((hostId) => {
+            const proposal = window.gameStateProbe().wager?.proposals?.[hostId];
+            if (!proposal) throw new Error("loading-probe-wager-missing");
+            return proposal.count;
+          }, hostId),
           7,
         );
-        const timer = `${new Game({ variant: "Classic" }).turnNumber};${Date.now() + 60_000}`;
+        /** @type {import("@mons/shared/timers").MatchTimer} */
+        const timer = {
+          state: "running",
+          turnNumber: new Game({ variant: "Classic" }).turnNumber,
+          deadlineAtMs: Date.now() + 60_000,
+        };
         publishMatch({
           revision: 2,
           guestMatch: { ...record("black"), timer },
@@ -1072,8 +1181,8 @@ test(
         holdExtras: false,
         initialMetadata: {
           hostColor: "black",
-          hostRematches: "1",
-          guestRematches: "1",
+          hostRematches: { state: "open", indices: [1] },
+          guestRematches: { state: "open", indices: [1] },
         },
         initialMatch: {
           matchId: liveMatchId,
@@ -1120,7 +1229,10 @@ test(
             window.gameStateProbe().context.boardViewMode === "historicalView",
         );
         publishMatch({ revision: 2, guestMatch: record("white") });
-        publishMetadata({ revision: 2, guestRematches: "1" });
+        publishMetadata({
+          revision: 2,
+          guestRematches: { state: "open", indices: [1] },
+        });
         await page.waitForFunction((liveMatchId) => {
           const state = window.gameStateProbe();
           return (
@@ -1255,25 +1367,36 @@ test(
   },
 );
 
+/** @param {import("playwright").Page} page */
 async function readReplacementState(page) {
   return page.evaluate(async () => {
     const { sessionAuth } = await import("/src/session/sessionAuth.ts");
     const { connection } = await import("/src/connection/connection.ts");
     const { getMainGameLoadState } =
       await import("/src/game/mainGameLoadState.ts");
-    const token = await sessionAuth.currentUser.getIdToken();
-    const claims = JSON.parse(
-      atob(token.split(".")[1].replace(/-/g, "+").replace(/_/g, "/")),
+    const user = sessionAuth.currentUser;
+    if (!user) throw new Error("loading-probe-session-user-missing");
+    const token = await user.getIdToken();
+    const segment = token.split(".")[1];
+    if (!segment) throw new Error("loading-probe-token-segment-missing");
+    const claims = /** @type {unknown} */ (
+      JSON.parse(atob(segment.replace(/-/g, "+").replace(/_/g, "/")))
     );
+    if (!claims || typeof claims !== "object" || !("sid" in claims))
+      throw new Error("loading-probe-token-claims-invalid");
+    const probePath = "/test/fixtures/loadingGlobals.ts";
+    const { loadingConnectionInternals } =
+      /** @type {typeof import("./fixtures/loadingGlobals.ts")} */ (
+        await import(probePath)
+      );
+    const context = connection.getActiveContextSnapshot();
+    if (!context) throw new Error("loading-probe-context-missing");
     return {
-      sessionId: sessionAuth.currentUser.sessionId,
-      uid: sessionAuth.currentUser.uid,
+      sessionId: user.sessionId,
+      uid: user.uid,
       tokenSessionId: claims.sid,
-      context: connection.getActiveContextSnapshot(),
-      loginUid: connection.activeContext?.loginUid,
-      actorUid: connection.activeContext?.actorUid,
-      color: connection.myMatch?.color,
-      fen: connection.myMatch?.fen,
+      context,
+      ...loadingConnectionInternals(connection),
       canPlay: getMainGameLoadState().canPlay,
     };
   });
@@ -1284,7 +1407,7 @@ for (const {
   sessionMode,
   initialSessionStatus,
   uiReadyBeforeReplacement = false,
-} of [
+} of /** @type {{name: string, sessionMode: "fresh" | "restored", initialSessionStatus: number, uiReadyBeforeReplacement?: boolean}[]} */ ([
   {
     name: "a session replaced before board assets load fetches its own game",
     sessionMode: "restored",
@@ -1312,7 +1435,7 @@ for (const {
     initialSessionStatus: 503,
     uiReadyBeforeReplacement: true,
   },
-]) {
+])) {
   test(
     name,
     {
@@ -1369,10 +1492,15 @@ for (const {
                 throw new Error(
                   "anonymous-user-published-before-create-response",
                 );
-              const originalRequest =
-                sessionMode === "fresh"
-                  ? sessionAuth.signingIn
-                  : sessionAuth.refreshing?.promise;
+              const probePath = "/test/fixtures/loadingGlobals.ts";
+              const { loadingOriginalSessionRequest, loadingSessionStore } =
+                /** @type {typeof import("./fixtures/loadingGlobals.ts")} */ (
+                  await import(probePath)
+                );
+              const originalRequest = loadingOriginalSessionRequest(
+                sessionAuth,
+                sessionMode,
+              );
               if (!originalRequest)
                 throw new Error("original-session-request-missing");
               globalThis.oldSessionRequestSettled = false;
@@ -1380,7 +1508,7 @@ for (const {
                 globalThis.oldSessionRequestSettled = true;
               };
               void originalRequest.then(settled, settled);
-              await sessionAuth.dependencies.store.update((state) => ({
+              await loadingSessionStore(sessionAuth).update((state) => ({
                 ...state,
                 revision: state.revision + 1,
                 generation: crypto.randomUUID(),
@@ -1399,10 +1527,12 @@ for (const {
           );
           assetsGate.resolve();
           const request = await replacementRead;
-          const claims = JSON.parse(
-            Buffer.from(
-              request.headers().authorization.split(".")[1],
-              "base64url",
+          const claims = jsonRecord(
+            JSON.parse(
+              Buffer.from(
+                present(present(request.headers().authorization).split(".")[1]),
+                "base64url",
+              ).toString("utf8"),
             ),
           );
           assert.equal(claims.sid, replacementId);
@@ -1483,23 +1613,32 @@ test(
   "production loading benchmark",
   { skip: !benchmark, timeout: 180_000 },
   async (t) => {
+    /** @typedef {import("./fixtures/loadingGlobals.ts").LoadingProbe & {interactionReady: number, routePrepared: number, requests: Pick<LoadingRequest, "path" | "query" | "method">[]}} BenchmarkSample */
+    /** @type {Record<string, {runs: BenchmarkSample[], medianShellMs: number, medianPopulatedMs: number, medianInteractionReadyMs: number, medianFirstInputMs: number}>} */
     const scenarios = {};
-    for (const sessionMode of ["fresh", "restored"]) {
+    for (const sessionMode of /** @type {const} */ (["fresh", "restored"])) {
+      /** @type {BenchmarkSample[]} */
       const samples = [];
       for (let index = 0; index < 5; index++) {
         await fixture(
           async ({ page, requests }) => {
             await assertBoardAcceptsInput(page);
             samples.push({
-              ...(await page.evaluate(() => ({
-                ...window.loadingProbe,
-                interactionReady: performance.getEntriesByName(
+              ...(await page.evaluate(() => {
+                const interaction = performance.getEntriesByName(
                   "main-game:interaction-ready",
-                )[0].startTime,
-                routePrepared: performance.getEntriesByName(
+                )[0];
+                const prepared = performance.getEntriesByName(
                   "main-game:route-prepared",
-                )[0].startTime,
-              }))),
+                )[0];
+                if (!interaction || !prepared)
+                  throw new Error("loading-probe-timing-missing");
+                return {
+                  ...window.loadingProbe,
+                  interactionReady: interaction.startTime,
+                  routePrepared: prepared.startTime,
+                };
+              })),
               requests: requests.map(({ path, query, method }) => ({
                 path,
                 query,
@@ -1510,16 +1649,25 @@ test(
               JSON.stringify({
                 sessionMode,
                 sample: index + 1,
-                populated: samples.at(-1).populated,
-                interactionReady: samples.at(-1).interactionReady,
+                populated: present(samples.at(-1)).populated,
+                interactionReady: present(samples.at(-1)).interactionReady,
               }),
             );
           },
           { apiDelayMs: 200, holdExtras: false, sessionMode },
         );
       }
+      /** @param {"shell" | "populated" | "interactionReady" | "firstInput"} key */
       const median = (key) =>
-        samples.map((sample) => sample[key]).sort((a, b) => a - b)[2];
+        present(
+          samples
+            .map((sample) => {
+              const value = sample[key];
+              assert.ok(typeof value === "number");
+              return value;
+            })
+            .sort((a, b) => a - b)[2],
+        );
       scenarios[sessionMode] = {
         runs: samples,
         medianShellMs: median("shell"),

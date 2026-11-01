@@ -3,7 +3,7 @@ import {
   MATERIAL_KEYS,
   createDropsForMiningEvent,
   formatMiningDateUtc,
-  normalizeMaterials,
+  parseMiningMaterials,
   sumMaterials,
 } from "@mons/shared/mining";
 import { AuthApiFailure } from "./authErrors.ts";
@@ -60,7 +60,9 @@ async function parseMineRockRequest(
       "A valid mining date is required.",
     );
   }
-  const materials = normalizeMaterials(body.materials);
+  const materials = parseMiningMaterials(body.materials);
+  if (!materials)
+    throw new AuthApiFailure(400, "invalid-argument", "invalid-request");
   if (!MATERIAL_KEYS.some((key) => materials[key] > 0)) {
     throw new AuthApiFailure(
       400,
@@ -149,8 +151,12 @@ export async function handleMiningRoute(
     {
       failureMessage: "mining-service-unavailable",
       failureEvent: "mining_route_failure",
-      logFailure: dependencies.logFailure,
-      verifyIdentity: dependencies.verifyIdentity,
+      ...(dependencies.logFailure === undefined
+        ? {}
+        : { logFailure: dependencies.logFailure }),
+      ...(dependencies.verifyIdentity === undefined
+        ? {}
+        : { verifyIdentity: dependencies.verifyIdentity }),
     },
     async ({ corsHeaders, authenticate }) => {
       const identity = await authenticate();

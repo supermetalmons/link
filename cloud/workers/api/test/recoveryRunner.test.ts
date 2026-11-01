@@ -22,9 +22,9 @@ test("recovery collection retains source indexes and completion order while repo
       visited.push(item);
       active++;
       maximum = Math.max(maximum, active);
-      started[index].resolve();
+      started[index]!.resolve();
       try {
-        return await gates[index].promise;
+        return await gates[index]!.promise;
       } finally {
         active--;
       }
@@ -33,7 +33,7 @@ test("recovery collection retains source indexes and completion order while repo
       concurrency: 2,
       onFailure(item, error, index) {
         reports.push([item, error, index]);
-        reported[index].resolve();
+        reported[index]!.resolve();
         throw new Error("reporter-unavailable");
       },
     },
@@ -42,20 +42,20 @@ test("recovery collection retains source indexes and completion order while repo
     return result;
   });
 
-  await started[1].promise;
+  await started[1]!.promise;
   assert.deepEqual(visited, items.slice(0, 2));
-  gates[1].resolve(20);
-  await started[2].promise;
-  gates[2].reject(failure);
-  await reported[2].promise;
-  await started[3].promise;
-  gates[3].resolve(undefined);
-  await started[4].promise;
-  gates[4].reject(0);
-  await reported[4].promise;
+  gates[1]!.resolve(20);
+  await started[2]!.promise;
+  gates[2]!.reject(failure);
+  await reported[2]!.promise;
+  await started[3]!.promise;
+  gates[3]!.resolve(undefined);
+  await started[4]!.promise;
+  gates[4]!.reject(0);
+  await reported[4]!.promise;
   assert.equal(settled, false);
   assert.equal(active, 1);
-  gates[0].resolve(10);
+  gates[0]!.resolve(10);
 
   assert.deepEqual(await recovery, {
     successes: [
@@ -123,17 +123,17 @@ test("recovery bounds concurrent work and starts remaining items in input order"
       active++;
       maximum = Math.max(maximum, active);
       visited.push(item);
-      started[item].resolve();
-      await gates[item].promise;
+      started[item]!.resolve();
+      await gates[item]!.promise;
       active--;
     },
     { concurrency: 2 },
   );
 
-  await started[1].promise;
+  await started[1]!.promise;
   assert.deepEqual(visited, [0, 1]);
-  gates[1].resolve();
-  await started[2].promise;
+  gates[1]!.resolve();
+  await started[2]!.promise;
   assert.deepEqual(visited, [0, 1, 2]);
   assert.equal(active, 2);
   for (const gate of gates) gate.resolve();
@@ -240,7 +240,12 @@ test("recovery aggregates raw failures in completion order with the selected mes
         laterStarted.resolve();
         throw 0;
       },
-      { concurrency: 2, aggregateErrorMessage },
+      {
+        concurrency: 2,
+        ...(aggregateErrorMessage === undefined
+          ? {}
+          : { aggregateErrorMessage }),
+      },
     );
     const rejected = assert.rejects(recovery, (error: unknown) => {
       assert(error instanceof AggregateError);

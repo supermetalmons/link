@@ -31,7 +31,6 @@ import {
   EVENT_STATUSES,
   parseStoredEventPrizeAssignment,
   decodeJson,
-  isRecord,
 } from "./validation.ts";
 import type {
   EventJsonRecord,
@@ -68,7 +67,7 @@ export function prepareEventRecordRead(
     .prepare(
       `SELECT event_id, status, start_at_ms, updated_at_ms, revision,
               pending_transition_id, record_json
-       FROM event_records WHERE event_id = ?`,
+       FROM event_records_canonical WHERE event_id = ?`,
     )
     .bind(normalizedEventId);
 }
@@ -90,7 +89,7 @@ export function prepareSelectionsRead(
 ): D1PreparedStatement {
   return db
     .prepare(
-      `SELECT profile_id, prize_id FROM event_prize_selections
+      `SELECT profile_id, prize_id FROM event_prize_selections_canonical
        WHERE event_id = ? ORDER BY profile_id`,
     )
     .bind(eventId);
@@ -107,16 +106,16 @@ export async function readEventPrizeSelectionSnapshot(
     eventStatement,
     db
       .prepare(
-        `SELECT profile_id, prize_id FROM event_prize_selections
+        `SELECT profile_id, prize_id FROM event_prize_selections_canonical
          WHERE event_id = ? AND profile_id = ?`,
       )
       .bind(eventId, profileId),
   ]);
-  const row = results[0].results[0] as EventRow | undefined;
+  const row = results[0]!.results[0]! as EventRow | undefined;
   if (!row) return { event: null, value: null };
   if (row.event_id !== eventId) throw new EventD1Failure("event-row-mismatch");
   const event = decodeEventRow(row);
-  const selection = results[1].results[0] as
+  const selection = results[1]!.results[0]! as
     { profile_id: string; prize_id: string } | undefined;
   if (selection && selection.profile_id !== profileId)
     throw new EventD1Failure("invalid-event-prize-selection");
@@ -200,19 +199,19 @@ export async function readStoredEventSnapshotIfChanged(
         `SELECT event_id, status, start_at_ms, updated_at_ms, revision,
                 pending_transition_id,
                 CASE WHEN revision = ? THEN NULL ELSE record_json END AS record_json
-         FROM event_records WHERE event_id = ?`,
+         FROM event_records_canonical WHERE event_id = ?`,
       )
       .bind(knownRevision, normalizedEventId),
     db
       .prepare(
-        `SELECT profile_id, prize_id FROM event_prize_selections
+        `SELECT profile_id, prize_id FROM event_prize_selections_canonical
          WHERE event_id = CASE WHEN EXISTS (
-           SELECT 1 FROM event_records WHERE event_id = ? AND revision = ?
+           SELECT 1 FROM event_records_canonical WHERE event_id = ? AND revision = ?
          ) THEN NULL ELSE ? END ORDER BY profile_id`,
       )
       .bind(normalizedEventId, knownRevision, normalizedEventId),
   ]);
-  const row = results[0].results[0] as EventRow | undefined;
+  const row = results[0]!.results[0]! as EventRow | undefined;
   if (!row) {
     if (knownRevision === 0) return { notModified: true, revision: 0 };
     return {
@@ -245,7 +244,7 @@ export async function readStoredEventSnapshotIfChanged(
       eventId: normalizedEventId,
       pendingTransitionId: state.pendingTransitionId,
       prizeSelections: selectionsFromRows(
-        results[1].results as Array<{ prize_id: string; profile_id: string }>,
+        results[1]!.results as Array<{ prize_id: string; profile_id: string }>,
       ),
       revision: state.revision,
     },
@@ -294,9 +293,9 @@ export async function readProfilePrizeMutationSnapshots(
           .prepare(
             `SELECT prizes.event_id, prizes.assignment_json, revisions.revision
          FROM (SELECT ? AS profile_id) requested
-         LEFT JOIN profile_event_prize_revisions revisions
+         LEFT JOIN profile_event_prize_revisions_canonical revisions
            ON revisions.profile_id = requested.profile_id
-         LEFT JOIN profile_event_prizes prizes
+         LEFT JOIN profile_event_prizes_canonical prizes
            ON prizes.profile_id = requested.profile_id
              AND prizes.event_id IN (SELECT value FROM json_each(?))`,
           )
@@ -337,27 +336,28 @@ export async function readProfileEventPrizesIfChanged(
     db
       .prepare(
         `SELECT profile_id, event_id, assignment_json
-         FROM profile_event_prizes
+         FROM profile_event_prizes_canonical
          WHERE profile_id = CASE WHEN EXISTS (
-           SELECT 1 FROM profile_event_prize_revisions
+           SELECT 1 FROM profile_event_prize_revisions_canonical
            WHERE profile_id = ? AND revision = ?
          ) THEN NULL ELSE ? END ORDER BY event_id`,
       )
       .bind(normalizedProfileId, knownRevision, normalizedProfileId),
     db
       .prepare(
-        `SELECT revision FROM profile_event_prize_revisions
+        `SELECT revision FROM profile_event_prize_revisions_canonical
          WHERE profile_id = ?`,
       )
       .bind(normalizedProfileId),
   ]);
-  const revisionRow = results[1].results[0] as { revision: number } | undefined;
+  const revisionRow = results[1]!.results[0]! as
+    { revision: number } | undefined;
   const revision = revisionRow ? safeInteger(revisionRow.revision, 1) : 0;
   if (revisionRow && knownRevision === revision) {
     return { notModified: true, revision };
   }
   const prizes: Record<string, EventPrizeAssignmentRecord> = {};
-  for (const row of results[0].results as AssignmentRow[]) {
+  for (const row of results[0]!.results as AssignmentRow[]) {
     prizes[row.event_id] = parseStoredEventPrizeAssignment(
       normalizedProfileId,
       row.event_id,
@@ -397,20 +397,20 @@ export async function readProfileEventPrizePage(
   const results = await db.batch([
     db
       .prepare(
-        "SELECT revision FROM profile_event_prize_revisions WHERE profile_id = ?",
+        "SELECT revision FROM profile_event_prize_revisions_canonical WHERE profile_id = ?",
       )
       .bind(profileId),
     db
       .prepare(
         `SELECT profile_id, event_id, assignment_json
-         FROM profile_event_prizes
+         FROM profile_event_prizes_canonical
          WHERE profile_id = CASE WHEN EXISTS (
-           SELECT 1 FROM profile_event_prize_revisions
+           SELECT 1 FROM profile_event_prize_revisions_canonical
            WHERE profile_id = ? AND revision = ?
          ) THEN NULL ELSE ? END
            AND event_id > ?
            AND (? IS NULL OR COALESCE((
-             SELECT revision FROM profile_event_prize_revisions WHERE profile_id = ?
+             SELECT revision FROM profile_event_prize_revisions_canonical WHERE profile_id = ?
            ), 0) = ?)
          ORDER BY event_id LIMIT ?`,
       )
@@ -430,16 +430,17 @@ export async function readProfileEventPrizePage(
     results.some(
       (result) => !result.success || !Array.isArray(result.results),
     ) ||
-    results[0].results.length > 1 ||
-    results[1].results.length > PROFILE_EVENT_PRIZES_PAGE_SIZE + 1
+    results[0]!.results.length > 1 ||
+    results[1]!.results.length > PROFILE_EVENT_PRIZES_PAGE_SIZE + 1
   ) {
     throw new EventD1Failure("profile-prize-page-unavailable");
   }
-  const revisionRow = results[0].results[0] as { revision: number } | undefined;
+  const revisionRow = results[0]!.results[0]! as
+    { revision: number } | undefined;
   const revision = revisionRow ? safeInteger(revisionRow.revision, 1) : 0;
   return {
     revision,
-    entries: (results[1].results as AssignmentRow[]).map((row) => {
+    entries: (results[1]!.results as AssignmentRow[]).map((row) => {
       if (row.profile_id !== profileId) throw new EventD1Failure();
       return {
         eventId: row.event_id,
@@ -464,7 +465,7 @@ export async function readProfileEventPrizeAssignment(
   if (!normalizedEventId) throw new EventD1Failure("invalid-event-id");
   const row = await db
     .prepare(
-      `SELECT assignment_json FROM profile_event_prizes
+      `SELECT assignment_json FROM profile_event_prizes_canonical
        WHERE profile_id = ? AND event_id = ?`,
     )
     .bind(normalizedProfileId, normalizedEventId)
@@ -493,7 +494,7 @@ export async function listProfileEventPrizeAssignments(
         await db
           .prepare(
             `SELECT profile_id, event_id, assignment_json
-             FROM profile_event_prizes
+             FROM profile_event_prizes_canonical
              WHERE profile_id = ? AND event_id >= ?
              ORDER BY event_id LIMIT ?`,
           )
@@ -506,7 +507,7 @@ export async function listProfileEventPrizeAssignments(
     const stored = await db
       .prepare(
         `SELECT profile_id, event_id, assignment_json
-         FROM profile_event_prizes WHERE profile_id = ?`,
+         FROM profile_event_prizes_canonical WHERE profile_id = ?`,
       )
       .bind(normalizedProfileId)
       .all<AssignmentRow>();
@@ -543,9 +544,9 @@ export async function readProfilePrizeAssignmentSnapshot(
   const row = await db
     .prepare(
       `SELECT
-         (SELECT assignment_json FROM profile_event_prizes
+         (SELECT assignment_json FROM profile_event_prizes_canonical
           WHERE profile_id = ? AND event_id = ?) AS assignment_json,
-         (SELECT revision FROM profile_event_prize_revisions
+         (SELECT revision FROM profile_event_prize_revisions_canonical
           WHERE profile_id = ?) AS revision`,
     )
     .bind(normalizedProfileId, eventId, normalizedProfileId)
@@ -620,7 +621,7 @@ export async function readEventProgressDeadOutbox(
 ): Promise<EventProgressDocument<"dead"> | null> {
   const row = await db
     .prepare(
-      "SELECT record_json FROM event_progress_outboxes WHERE outbox_id = ? AND status = 'dead'",
+      "SELECT record_json FROM event_progress_outboxes_canonical WHERE outbox_id = ? AND status = 'dead'",
     )
     .bind(outboxId)
     .first<{ record_json: string }>();
@@ -662,7 +663,7 @@ export function prepareEventProgressOutboxRead(
 ): D1PreparedStatement {
   return db
     .prepare(
-      `SELECT record_json FROM event_progress_outboxes
+      `SELECT record_json FROM event_progress_outboxes_canonical
        WHERE outbox_id = ? AND status = 'pending'`,
     )
     .bind(exactKey(outboxId));
@@ -677,7 +678,7 @@ export async function listDueEventProgressOutboxes(
 > {
   const rows = await db
     .prepare(
-      `SELECT outbox_id, record_json FROM event_progress_outboxes
+      `SELECT outbox_id, record_json FROM event_progress_outboxes_canonical
        WHERE status = 'pending' AND last_queued_at_ms <= ?
        ORDER BY last_queued_at_ms, outbox_id LIMIT ?`,
     )
@@ -710,8 +711,8 @@ async function readProjectionOutbox<Kind extends ProjectionOutboxKind>(
 ): Promise<EventProjectionOutboxDocument<Kind> | null> {
   const table =
     kind === "profile-game"
-      ? "event_profile_game_projection_outboxes"
-      : "event_telegram_projection_outboxes";
+      ? "event_profile_game_projection_outboxes_canonical"
+      : "event_telegram_projection_outboxes_canonical";
   const row = await prepareProjectionOutboxRead(db, table, eventId).first<{
     record_json: string;
   }>();
@@ -721,8 +722,8 @@ async function readProjectionOutbox<Kind extends ProjectionOutboxKind>(
 export function prepareProjectionOutboxRead(
   db: EventD1Connection,
   table:
-    | "event_profile_game_projection_outboxes"
-    | "event_telegram_projection_outboxes",
+    | "event_profile_game_projection_outboxes_canonical"
+    | "event_telegram_projection_outboxes_canonical",
   eventId: string,
 ): D1PreparedStatement {
   return db
@@ -818,8 +819,8 @@ export async function listDueProjectionOutboxSnapshotsPage<
 ): Promise<RecoveryScanPage<ProjectionOutboxSnapshot<Kind>[]>> {
   const table =
     kind === "profile-game"
-      ? "event_profile_game_projection_outboxes"
-      : "event_telegram_projection_outboxes";
+      ? "event_profile_game_projection_outboxes_canonical"
+      : "event_telegram_projection_outboxes_canonical";
   const timestampColumn =
     kind === "profile-game" ? "last_queued_at_ms" : "updated_at_ms";
   const exclusions = recoveryScanExclusionSql(
@@ -867,7 +868,7 @@ export async function readEventTelegramProjectionState(
     revision: number;
     state_json: string;
   }>();
-  return decodeTelegramProjectionStateRow(row);
+  return decodeTelegramProjectionStateRow(row, eventId);
 }
 
 export function prepareTelegramProjectionStateRead(
@@ -877,7 +878,7 @@ export function prepareTelegramProjectionStateRead(
   return db
     .prepare(
       `SELECT generation, revision, state_json
-       FROM event_telegram_projection_state WHERE event_id = ?`,
+       FROM event_telegram_projection_state_canonical WHERE event_id = ?`,
     )
     .bind(exactKey(eventId));
 }
@@ -887,13 +888,20 @@ export function decodeTelegramProjectionStateRow(
     | { generation: number; revision: number; state_json: string }
     | null
     | undefined,
+  eventId: string,
 ): TelegramProjectionState | null {
   if (!row) return null;
-  const state = decodeJson(row.state_json);
-  if (!isRecord(state)) throw new EventD1Failure();
+  const state = readEventTelegramProjectionDocument(decodeJson(row.state_json));
+  const generation = safeInteger(row.generation);
+  const guard = state.eventTelegramProjectionGuard;
+  if (
+    guard !== null &&
+    (guard.eventId !== eventId || guard.generation > generation)
+  )
+    throw new EventD1Failure();
   return {
-    generation: safeInteger(row.generation),
+    generation,
     revision: safeInteger(row.revision, 1),
-    state: readEventTelegramProjectionDocument(state),
+    state,
   };
 }

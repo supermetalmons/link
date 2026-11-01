@@ -1,3 +1,5 @@
+import { APPLICATION_DATA_SOCKET_PROTOCOL } from "@mons/shared/data-contract";
+import { applicationRequest } from "./testEnv.ts";
 import { retainedInviteSourceFixture } from "./inviteDocumentFixture.ts";
 import { socketTestIdentity } from "./socketTestSession.ts";
 import assert from "node:assert/strict";
@@ -25,8 +27,8 @@ const metadata: InviteMetadataSnapshot = {
   hostId: "host-login",
   guestId: "guest-login",
   hostColor: "white",
-  hostRematches: "1",
-  guestRematches: "1",
+  hostRematches: { state: "open", indices: [1] },
+  guestRematches: { state: "open", indices: [1] },
   automatchStateHint: null,
   eventId: null,
   eventOwned: false,
@@ -45,7 +47,7 @@ function request({
   method?: string;
   headers?: HeadersInit;
 } = {}): Request {
-  return new Request(
+  return applicationRequest(
     `https://api.mons.link${path || `/invites/invite-one/matches/invite-one1/${socket ? "socket" : "snapshot"}`}`,
     {
       method,
@@ -55,7 +57,7 @@ function request({
         ...(socket
           ? {
               Upgrade: "websocket",
-              "Sec-WebSocket-Protocol": `${MATCH_SYNC_SOCKET_PROTOCOL}${authenticated ? `, bearer.${token}` : ""}`,
+              "Sec-WebSocket-Protocol": `${MATCH_SYNC_SOCKET_PROTOCOL}, ${APPLICATION_DATA_SOCKET_PROTOCOL}${authenticated ? `, bearer.${token}` : ""}`,
             }
           : authenticated
             ? { Authorization: `Bearer ${token}` }
@@ -107,7 +109,8 @@ function setup({
     readInviteMetadata: async (inviteId) => {
       calls.existence++;
       assert.equal(inviteId, "invite-one");
-      return retainedInviteSourceFixture(source);
+      const { inviteId: _inviteId, revision: _revision, ...invite } = source;
+      return retainedInviteSourceFixture(invite);
     },
     readProfileOwnershipSnapshot: async (query) => ({
       canonicalProfileIdByProfileId: new Map(),
@@ -219,16 +222,25 @@ test("pending invitations preserve participant and spectator access rules", asyn
 test("missing, invalid and unregistered canonical invites do not allocate a room", async () => {
   for (const [source, expected] of [
     [null, 404],
-    [{ hostId: "invalid/slash" }, 409],
-    [{ ...metadata, hostRematches: "", guestRematches: "" }, 404],
+    [{ hostId: "invalid/slash" }, 503],
+    [
+      {
+        ...metadata,
+        hostRematches: { state: "open", indices: [] },
+        guestRematches: "",
+      },
+      404,
+    ],
     [new Error("source-unavailable"), 503],
   ] as const) {
     const state = setup();
     state.repository.readInviteMetadata = async () => {
       if (source instanceof Error) throw source;
-      return retainedInviteSourceFixture(source);
+      if (source === null) return null;
+      const { inviteId: _inviteId, revision: _revision, ...invite } = source;
+      return retainedInviteSourceFixture(invite);
     };
-    state.dependencies.room = undefined;
+    delete state.dependencies.room;
     assert.equal((await state.handle()).status, expected);
     assert.equal(state.calls.reads, 0);
   }
@@ -283,22 +295,22 @@ test("socket admission forwards verified identity and match revision without its
     "connect:match-connect:identity:host-login",
   ]);
   const forwarded = state.calls.sockets[0];
-  assert.equal(forwarded.url, "https://reactions.internal/matches/socket");
+  assert.equal(forwarded!.url, "https://reactions.internal/matches/socket");
   assert.equal(
-    forwarded.headers.get("Sec-WebSocket-Protocol"),
+    forwarded!.headers.get("Sec-WebSocket-Protocol"),
     MATCH_SYNC_SOCKET_PROTOCOL,
   );
-  assert.equal(forwarded.headers.get("Authorization"), null);
-  assert.equal(forwarded.headers.get("X-Mons-Match-Invite"), "invite-one");
-  assert.equal(forwarded.headers.get("X-Mons-Match-Match"), "invite-one1");
-  assert.equal(forwarded.headers.get("X-Mons-Match-Revision"), "7");
-  assert.equal(forwarded.headers.get("X-Mons-Match-Actor"), "host-login");
-  assert.equal(forwarded.headers.get("X-Mons-Match-Role"), "host");
-  assert.equal(forwarded.headers.get("X-Mons-Match-Protected"), "1");
-  assert.equal(forwarded.headers.get("X-Mons-Match-Authenticated"), "1");
-  assert.equal(forwarded.headers.get("X-Mons-Session-Id"), state.identity.sid);
+  assert.equal(forwarded!.headers.get("Authorization"), null);
+  assert.equal(forwarded!.headers.get("X-Mons-Match-Invite"), "invite-one");
+  assert.equal(forwarded!.headers.get("X-Mons-Match-Match"), "invite-one1");
+  assert.equal(forwarded!.headers.get("X-Mons-Match-Revision"), "7");
+  assert.equal(forwarded!.headers.get("X-Mons-Match-Actor"), "host-login");
+  assert.equal(forwarded!.headers.get("X-Mons-Match-Role"), "host");
+  assert.equal(forwarded!.headers.get("X-Mons-Match-Protected"), "1");
+  assert.equal(forwarded!.headers.get("X-Mons-Match-Authenticated"), "1");
+  assert.equal(forwarded!.headers.get("X-Mons-Session-Id"), state.identity.sid);
   assert.equal(
-    forwarded.headers.get("X-Mons-Session-Expires-At"),
+    forwarded!.headers.get("X-Mons-Session-Expires-At"),
     String(state.identity.authExpiresAtMs),
   );
 });
@@ -323,7 +335,7 @@ test("same-profile logins use canonical ownership for socket actor admission", a
           revision: 1,
           profile: {
             profileId: "profile",
-            aura: "",
+            aura: "none" as const,
             emoji: 1000,
             eth: "",
             sol: "",
@@ -339,7 +351,7 @@ test("same-profile logins use canonical ownership for socket actor admission", a
     200,
   );
   assert.equal(
-    state.calls.sockets[0].headers.get("X-Mons-Match-Actor"),
+    state.calls.sockets[0]!.headers.get("X-Mons-Match-Actor"),
     "host-login",
   );
 });

@@ -19,8 +19,6 @@ import {
 import type { MatchPresentationSnapshot } from "@mons/shared/match-presentation";
 import type { AutomatchEntryRead } from "./automatchRecords.js";
 
-import { PROFILE_GAME_PROJECTION_SOURCE } from "./stateCompatibility.js";
-
 import { orderProfileMergeCleanupIds } from "./profileMergeTargets.js";
 import { deriveLatestMatchId } from "@mons/shared/rematches";
 import { inferAutomatchStateHint } from "@mons/shared/navigation";
@@ -395,9 +393,11 @@ const createProfileGamesProjectionCore: Signature_createProfileGamesProjectionCo
             presentationCache.set(candidateMatchId, snapshot);
           }
           const snapshot = presentationCache.get(candidateMatchId)!;
-          const emoji = Object.hasOwn(snapshot.players, normalizedLoginUid)
-            ? getEmojiId(snapshot.players[normalizedLoginUid].emojiId)
-            : null;
+          const player = snapshot.players[normalizedLoginUid];
+          const emoji =
+            Object.hasOwn(snapshot.players, normalizedLoginUid) && player
+              ? getEmojiId(player.emojiId)
+              : null;
           if (emoji !== null) {
             return { name: null, emoji };
           }
@@ -477,7 +477,7 @@ const createProfileGamesProjectionCore: Signature_createProfileGamesProjectionCo
           );
         const automatchStateHint = inferAutomatchStateHint({
           inviteId: normalizedInviteId,
-          queueValue: automatchData.isTruthy,
+          queueValue: automatchData !== null,
           hasGuest: !!guestLoginId,
           storedStateHint: inviteProjection.automatchStateHint,
         });
@@ -572,7 +572,7 @@ const createProfileGamesProjectionCore: Signature_createProfileGamesProjectionCo
         const commonProjection = {
           schemaVersion: PROJECTOR_SCHEMA_VERSION,
           projectorVersion: PROJECTOR_SCHEMA_VERSION,
-          source: PROFILE_GAME_PROJECTION_SOURCE,
+          source: "game-projector",
           entityType: "game",
           inviteId: normalizedInviteId,
           kind: isAutoInviteId(normalizedInviteId) ? "auto" : "direct",
@@ -703,9 +703,9 @@ const createProfileGamesProjectionCore: Signature_createProfileGamesProjectionCo
             options,
             status,
             automatchData:
-              automatchData.record?.numericTimestamp == null
+              automatchData === null
                 ? null
-                : { timestamp: automatchData.record.numericTimestamp },
+                : { timestamp: automatchData.timestamp },
             nowMs,
             existingListSortMs,
           });
@@ -723,9 +723,7 @@ const createProfileGamesProjectionCore: Signature_createProfileGamesProjectionCo
             opponentProfileId: ownerContext.opponentProfileId,
             opponentLoginId: ownerContext.opponentLoginId,
             opponentName,
-            opponentDisplayName: opponentName,
             opponentEmoji,
-            opponentEmojiId: opponentEmoji,
             listSortAt: toTimestampMillis(nextListSortMs),
             createdAt:
               existingCreatedAt === null

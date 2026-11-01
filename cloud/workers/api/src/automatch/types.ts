@@ -1,3 +1,4 @@
+import type { Aura } from "@mons/shared/appearance";
 import type {
   AutomatchEntryFields,
   AutomatchReceiptView,
@@ -66,7 +67,7 @@ export type AutomatchPlanInput = {
   requesterUid: string;
   request: StartAutomatchOperationRequest;
   emojiId: GameplayProfile["emoji"];
-  aura: string | null;
+  aura: Aura;
   name: string;
 };
 

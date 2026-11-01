@@ -1,8 +1,7 @@
 import {
   cloneMaterials,
   createEmptyMaterials,
-  normalizeMaterials,
-  normalizeMiningSnapshot,
+  parseMiningMaterials,
 } from "@mons/shared/mining";
 import { computeHash32 } from "@mons/shared/ids";
 import type {
@@ -22,14 +21,6 @@ export const cloneMiningMaterials = (
   source: PlayerMiningMaterials,
 ): PlayerMiningMaterials => cloneMaterials(source);
 
-export const normalizeMiningMaterials = (
-  source?: Partial<PlayerMiningMaterials> | null,
-): PlayerMiningMaterials => normalizeMaterials(source);
-
-export const normalizeMiningState = (
-  source?: PlayerMiningData | null,
-): PlayerMiningData => normalizeMiningSnapshot(source);
-
 export const loadStoredMiningState = ({
   profileId,
   lastRockDate,
@@ -37,12 +28,12 @@ export const loadStoredMiningState = ({
 }: {
   profileId: string;
   lastRockDate: unknown;
-  materials: Partial<PlayerMiningMaterials> | null | undefined;
+  materials: unknown;
 }): PlayerMiningData => ({
   lastRockDate: typeof lastRockDate === "string" ? lastRockDate : null,
   materials: isAnonymousProfile(profileId)
     ? createEmptyMiningMaterials()
-    : normalizeMiningMaterials(materials),
+    : (parseMiningMaterials(materials) ?? createEmptyMiningMaterials()),
 });
 
 export const shouldShowMiningRock = ({

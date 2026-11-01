@@ -9,7 +9,6 @@ import type {
   TimerClaimEffectPayload,
 } from "../src/matchEffectCodec.ts";
 import type { writeMatchTimer } from "../src/matchRecordCodec.ts";
-import type { MatchTimerStartStore } from "../src/gameplayCoordinationD1.ts";
 import type { LocalMatchTimerStore } from "../src/localMatchTimerStore.ts";
 import type { MatchStateEventEffectsRequest } from "../src/matchStateTypes.ts";
 
@@ -72,7 +71,7 @@ export type NewEffectRequiresIdentity = Assert<
 >;
 export type NewEffectRequiresKnownReason = Assert<
   Rejects<
-    Omit<TimerClaimEffectPayload, "reason"> & { reason: string },
+    Omit<TimerClaimEffectPayload, "kind"> & { kind: string },
     TimerClaimEffectPayload
   >
 >;
@@ -82,8 +81,11 @@ export type OrdinaryTimerPatchesRejectRetainedScalars = Assert<
     Parameters<typeof writeMatchTimer>[0]
   >
 >;
-export type OrdinaryTimerCleanupKeysStayStrings = Assert<
-  Rejects<number, Parameters<MatchTimerStartStore["deletePair"]>[0]>
+export type LocalTimerStartKeysStayStrings = Assert<
+  Rejects<number, Parameters<LocalMatchTimerStore["getOrAdvance"]>[0]>
+>;
+export type StoredTimerModesRejectD1 = Assert<
+  Rejects<"d1", ReturnType<LocalMatchTimerStore["mode"]>>
 >;
 export type OrdinaryTimerModeKeysStayStrings = Assert<
   Rejects<number, Parameters<LocalMatchTimerStore["mode"]>[0]>

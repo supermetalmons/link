@@ -1,6 +1,34 @@
+export type RematchSeries = { state: "open" | "ended"; indices: number[] };
 export interface RematchInviteData {
-  hostRematches?: unknown;
-  guestRematches?: unknown;
+  hostRematches: RematchSeries;
+  guestRematches: RematchSeries;
+}
+export function isRematchSeries(value: unknown): value is RematchSeries {
+  if (value === null || typeof value !== "object" || Array.isArray(value))
+    return false;
+  const row: Record<string, unknown> = Object.fromEntries(
+    Object.entries(value),
+  );
+  if (
+    Object.keys(row).length !== 2 ||
+    !Object.hasOwn(row, "state") ||
+    !Object.hasOwn(row, "indices") ||
+    (row.state !== "open" && row.state !== "ended") ||
+    !Array.isArray(row.indices)
+  )
+    return false;
+  const indices: unknown[] = row.indices;
+  let previous = 0;
+  for (const index of indices) {
+    if (
+      typeof index !== "number" ||
+      !Number.isSafeInteger(index) ||
+      index <= previous
+    )
+      return false;
+    previous = index;
+  }
+  return true;
 }
 
 const normalizeString = (value: unknown) =>
@@ -14,43 +42,29 @@ const parseCanonicalRematchIndex = (value: unknown) => {
   return Number.isSafeInteger(parsed) ? parsed : null;
 };
 
-const parseRematchIndices = (rawValue: unknown): number[] => {
-  if (typeof rawValue !== "string" || rawValue === "") {
-    return [];
-  }
-  const normalized = rawValue.endsWith("x") ? rawValue.slice(0, -1) : rawValue;
-  if (normalized === "") {
-    return [];
-  }
-  return normalized
-    .split(";")
-    .map(parseCanonicalRematchIndex)
-    .filter((value) => value !== null);
+const parseRematchIndices = (
+  value: RematchSeries | null | undefined,
+): number[] => {
+  if (value === null || value === undefined) return [];
+  if (!isRematchSeries(value)) throw new TypeError("invalid-rematch-series");
+  return [...value.indices];
 };
 
-const rematchSeriesEnded = (inviteData: unknown): boolean => {
-  if (!inviteData || typeof inviteData !== "object") {
-    return false;
-  }
-  const record = inviteData as Record<string, unknown>;
-  const hostRematches =
-    typeof record.hostRematches === "string" ? record.hostRematches : "";
-  const guestRematches =
-    typeof record.guestRematches === "string" ? record.guestRematches : "";
-  return hostRematches.endsWith("x") || guestRematches.endsWith("x");
-};
+const rematchSeriesEnded = (
+  inviteData: RematchInviteData | null | undefined,
+): boolean =>
+  inviteData?.hostRematches.state === "ended" ||
+  inviteData?.guestRematches.state === "ended";
 
 const inviteMatchesPlayers = (
-  inviteData: unknown,
+  inviteData: { hostId: string; guestId: string | null } | null | undefined,
   playerId: string,
   opponentId: string,
 ): boolean =>
-  !!inviteData &&
-  typeof inviteData === "object" &&
-  (((inviteData as Record<string, unknown>).hostId === playerId &&
-    (inviteData as Record<string, unknown>).guestId === opponentId) ||
-    ((inviteData as Record<string, unknown>).hostId === opponentId &&
-      (inviteData as Record<string, unknown>).guestId === playerId));
+  inviteData !== null &&
+  inviteData !== undefined &&
+  ((inviteData.hostId === playerId && inviteData.guestId === opponentId) ||
+    (inviteData.hostId === opponentId && inviteData.guestId === playerId));
 
 const createInviteCandidatesFromMatchId = (matchId: string): string[] => {
   const candidates: string[] = [];
@@ -160,7 +174,7 @@ const getLatestApprovedRematchIndex = (
 
 const selectInviteMatch = (
   inviteId: string,
-  inviteData: RematchInviteData & { hostId?: unknown; guestId?: unknown },
+  inviteData: RematchInviteData & { hostId: string; guestId: string | null },
   actorUid: string | null,
   options: { preferApproved?: boolean } = {},
 ): { matchId: string; hasPendingProposal: boolean } => {

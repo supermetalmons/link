@@ -1,3 +1,9 @@
+import {
+  MON_SELECTION_CATALOG,
+  isMonSelectionIndex,
+  type MonSelectionKind,
+  type SelectedMons,
+} from "@mons/shared/appearance";
 import { getStableRandomIdForProfileId } from "../utils/misc";
 import { PlayerProfile } from "../connection/connectionModels";
 import { storage } from "../utils/storage";
@@ -11,121 +17,77 @@ export enum MonType {
   MYSTIC = "mystic",
 }
 
-export const demonTypes = ["borgalo", "notchur"];
-export const angelTypes = [
-  "applecreme",
-  "gerp",
-  "goxfold",
-  "mowch",
-  "mummyfly",
-];
-export const drainerTypes = [
-  "deino",
-  "greenseech",
-  "omom",
-  "supermetaldrop",
-  "zwubbi",
-  "royal_aguapwoshi",
-];
-export const spiritTypes = ["melmut", "omenstatue", "owg"];
-export const mysticTypes = ["chamgot", "dart", "estalibur"];
-export const royalAguapwoshiDrainerIndex =
-  drainerTypes.indexOf("royal_aguapwoshi");
-const randomizableDrainerIndexes = drainerTypes
-  .map((_, index) => index)
-  .filter((index) => index !== royalAguapwoshiDrainerIndex);
+export const demonTypes = MON_SELECTION_CATALOG.demon;
+export const angelTypes = MON_SELECTION_CATALOG.angel;
+export const drainerTypes = MON_SELECTION_CATALOG.drainer;
+export const spiritTypes = MON_SELECTION_CATALOG.spirit;
+export const mysticTypes = MON_SELECTION_CATALOG.mystic;
+export const royalAguapwoshiDrainerIndex = 5;
+const randomizableDrainerIndexes = [0, 1, 2, 3, 4] as const;
 
-export function getMonId(type: MonType, index: number): string {
-  switch (type) {
-    case MonType.DEMON:
-      return demonTypes[index] + "_" + type;
-    case MonType.ANGEL:
-      return angelTypes[index] + "_" + type;
-    case MonType.DRAINER:
-      return drainerTypes[index] + "_" + type;
-    case MonType.SPIRIT:
-      return spiritTypes[index] + "_" + type;
-    case MonType.MYSTIC:
-      return mysticTypes[index] + "_" + type;
-  }
+export function getMonId(type: MonSelectionKind, index: number): string {
+  const name = MON_SELECTION_CATALOG[type][index];
+  if (name === undefined) throw new RangeError("invalid-mon-selection");
+  return `${name}_${type}`;
 }
 
-function getDefaultMonId(type: MonType, profileId: string): number {
-  switch (type) {
-    case MonType.DEMON:
-      return getStableRandomIdForProfileId(profileId, demonTypes.length);
-    case MonType.ANGEL:
-      return getStableRandomIdForProfileId(profileId, angelTypes.length);
-    case MonType.DRAINER: {
-      if (drainerTypes.length === 0) {
-        return 0;
-      }
-      const defaultDrainerIndex = getStableRandomIdForProfileId(
-        profileId,
-        drainerTypes.length,
-      );
-      if (defaultDrainerIndex !== royalAguapwoshiDrainerIndex) {
-        return defaultDrainerIndex;
-      }
-      if (randomizableDrainerIndexes.length === 0) {
-        return defaultDrainerIndex;
-      }
-      const fallbackIndex = getStableRandomIdForProfileId(
-        profileId,
-        randomizableDrainerIndexes.length,
-      );
-      return randomizableDrainerIndexes[fallbackIndex];
-    }
-    case MonType.SPIRIT:
-      return getStableRandomIdForProfileId(profileId, spiritTypes.length);
-    case MonType.MYSTIC:
-      return getStableRandomIdForProfileId(profileId, mysticTypes.length);
+function getDefaultMonIndex<Kind extends MonSelectionKind>(
+  kind: Kind,
+  profileId: string,
+): SelectedMons[Kind] {
+  let index = getStableRandomIdForProfileId(
+    profileId,
+    MON_SELECTION_CATALOG[kind].length,
+  );
+  if (kind === "drainer" && index === royalAguapwoshiDrainerIndex) {
+    const alternate =
+      randomizableDrainerIndexes[
+        getStableRandomIdForProfileId(
+          profileId,
+          randomizableDrainerIndexes.length,
+        )
+      ];
+    if (alternate === undefined) throw new Error("invalid-default-mon-index");
+    index = alternate;
   }
+  if (!isMonSelectionIndex(kind, index))
+    throw new Error("invalid-default-mon-index");
+  return index;
+}
+
+export function getMonsSelection(
+  isOtherPlayer: boolean,
+  profile: PlayerProfile | null,
+): SelectedMons {
+  if (!isOtherPlayer) flushDeferredProfilePresentation();
+  const selected = isOtherPlayer
+    ? (profile?.profileMons ?? null)
+    : storage.getProfileMons(null);
+  if (selected !== null) return { ...selected };
+  const profileId = isOtherPlayer
+    ? (profile?.id ?? "")
+    : storage.getProfileId("");
+  return {
+    demon: getDefaultMonIndex("demon", profileId),
+    angel: getDefaultMonIndex("angel", profileId),
+    drainer: getDefaultMonIndex("drainer", profileId),
+    spirit: getDefaultMonIndex("spirit", profileId),
+    mystic: getDefaultMonIndex("mystic", profileId),
+  };
 }
 
 export function getMonsIndexes(
   isOtherPlayer: boolean,
   profile: PlayerProfile | null,
 ): [number, number, number, number, number] {
-  if (!isOtherPlayer) flushDeferredProfilePresentation();
-  const currentIndexes = isOtherPlayer
-    ? (profile?.profileMons ?? "")
-    : storage.getProfileMons("");
-
-  let useDefaultIndexes = true;
-  let demonIndex = 0;
-  let angelIndex = 0;
-  let drainerIndex = 0;
-  let spiritIndex = 0;
-  let mysticIndex = 0;
-
-  if (currentIndexes && currentIndexes.trim() !== "") {
-    const parts = currentIndexes.split(",");
-    if (parts.length === 5) {
-      const parsedIndexes = parts.map((part: string) => parseInt(part, 10));
-      if (parsedIndexes.every((index: number) => !isNaN(index))) {
-        demonIndex = parsedIndexes[0];
-        angelIndex = parsedIndexes[1];
-        drainerIndex = parsedIndexes[2];
-        spiritIndex = parsedIndexes[3];
-        mysticIndex = parsedIndexes[4];
-        useDefaultIndexes = false;
-      }
-    }
-  }
-
-  if (useDefaultIndexes) {
-    const profileId = isOtherPlayer
-      ? (profile?.id ?? "")
-      : storage.getProfileId("");
-    demonIndex = getDefaultMonId(MonType.DEMON, profileId);
-    angelIndex = getDefaultMonId(MonType.ANGEL, profileId);
-    drainerIndex = getDefaultMonId(MonType.DRAINER, profileId);
-    spiritIndex = getDefaultMonId(MonType.SPIRIT, profileId);
-    mysticIndex = getDefaultMonId(MonType.MYSTIC, profileId);
-  }
-
-  return [demonIndex, angelIndex, drainerIndex, spiritIndex, mysticIndex];
+  const selected = getMonsSelection(isOtherPlayer, profile);
+  return [
+    selected.demon,
+    selected.angel,
+    selected.drainer,
+    selected.spirit,
+    selected.mystic,
+  ];
 }
 
 export function getOwnMonIdByType(type: MonType): string {

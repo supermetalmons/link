@@ -16,7 +16,7 @@ type HistoricalMatchRouteDependencies = {
 
 function publicHeaders(): Record<string, string> {
   return {
-    "Access-Control-Allow-Headers": "Content-Type",
+    "Access-Control-Allow-Headers": "Content-Type, X-Mons-Data-Epoch",
     "Access-Control-Allow-Methods": "GET, OPTIONS",
     "Access-Control-Allow-Origin": "*",
     "Cache-Control": "no-store",

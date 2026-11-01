@@ -6,23 +6,29 @@ const {
   createTelegramRetryCoordinator,
 } = require("../runtime/telegram/deliveryRetryCoordinator");
 
+/** @type {import("../runtime/telegram/deliveryRetryTypes").TelegramRetryTarget[]} */
 const targets = [
   { kind: "desired", safeRejectedAttemptId: "attempt-1" },
   { kind: "desired" },
   { kind: "pending-delete", pendingDeleteId: "cleanup-1" },
 ];
 
+/** @param {{failAt?: string, barrierApplied?: boolean, releaseResult?: boolean}} [options] */
 function createHarness({
   failAt,
   barrierApplied = true,
   releaseResult = true,
 } = {}) {
+  /** @type {{stage: string, value: unknown}[]} */
   const calls = [];
+  /** @type {import("../runtime/telegram/deliveryRetryTypes").TelegramExactRetryInput[]} */
   const tasks = [];
+  /** @type {import("../runtime/telegram/deliveryRetryTypes").TelegramRetryContext[]} */
   const contexts = [];
   const failure = new Error("injected-failure");
   let nowReads = 0;
   let localUpdates = 0;
+  /** @param {string} stage @param {unknown} value */
   const record = (stage, value) => {
     calls.push({ stage, value });
     if (stage === failAt) throw failure;
@@ -35,6 +41,7 @@ function createHarness({
     async scheduleExactRetry(input) {
       record("enqueue", input);
       tasks.push(input);
+      return { scheduled: true };
     },
     async releaseApiGate(owner) {
       record("release", owner);
@@ -45,7 +52,7 @@ function createHarness({
       return {
         applied: barrierApplied,
         retryNotBeforeMs: proof.retryNotBeforeMs,
-        gate: {},
+        gate: null,
       };
     },
     localRetryBarrier: {
@@ -63,7 +70,9 @@ function createHarness({
     contexts,
     failure,
     nowReads: () => nowReads,
+    /** @param {Partial<import("../runtime/telegram/deliveryRetryTypes").TelegramRetryInput>} [input] */
     finish(input = {}) {
+      assert.ok(targets[0]);
       return coordinator.finish({
         current: {},
         failure: { code: "safe-rejection", retryAfterSeconds: 8 },
@@ -127,7 +136,9 @@ test("retry targets preserve durable proof fields and effect ordering", async (t
               : {}),
             pendingDeleteId: target.pendingDeleteId || "",
             retryProofLeaseOwner:
-              target.safeRejectedAttemptId || persistBeforeSchedule
+              ("safeRejectedAttemptId" in target &&
+                target.safeRejectedAttemptId) ||
+              persistBeforeSchedule
                 ? ""
                 : "lease-1",
             proofTaskKind: rateLimited ? target.kind : "",
@@ -215,6 +226,7 @@ test("an unconfirmed barrier leaves the proof pending without finalizing", async
       });
       assert.equal(result.barrierProofPending, true);
       assert.equal(result.retryAtMs, 610_000);
+      assert.ok(harness.tasks[0]);
       assert.equal(harness.tasks[0].barrierRetryNotBeforeMs, 910_000);
       assert.equal(
         harness.calls.some(({ stage }) => stage === "state"),
@@ -244,11 +256,13 @@ test("rate-limit proof requires an owner and retains its exact identity", async 
     failure: { code: "rate-limited" },
     apiGateOwner: " gate-1 ",
   });
+  assert.ok(exact.tasks[0]);
   assert.equal(exact.tasks[0].barrierProofOwner, " gate-1 ");
-  assert.equal(
-    exact.calls.find(({ stage }) => stage === "barrier").value.owner,
-    " gate-1 ",
+  const barrier = exact.calls.find(({ stage }) => stage === "barrier")?.value;
+  assert.ok(
+    barrier !== null && typeof barrier === "object" && "owner" in barrier,
   );
+  assert.equal(barrier.owner, " gate-1 ");
 });
 
 test("a stale gate release still finalizes the owned retry state", async () => {

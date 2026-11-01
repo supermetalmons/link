@@ -1,7 +1,14 @@
+import { createStoredPlayerProfile } from "../src/profileCanonical/contracts.ts";
+import { createDefaultProfileAppearance } from "@mons/shared/appearance";
 import {
   eventDocumentFixture,
   eventRecordFixture,
 } from "../test/eventCompatibilityFixture.ts";
+import { parseQueueEnvelope } from "../src/queueEnvelope.ts";
+import {
+  eventApplicationEnvironment,
+  activateEventApplicationFixture,
+} from "./eventApplicationFixture.ts";
 import {
   COMPRESSED_PRIZES_EVENT_ID,
   LEGACY_CORE_PRIZES_EVENT_ID,
@@ -39,7 +46,7 @@ import { resetMatchPresentationTestState } from "./matchPresentationTestFixture.
 import { applyRetiredProfileMigrations } from "./profileTestMigrations.ts";
 import { applyStrictMatchStateTestMigrations } from "./strictMatchStateTestFixture.ts";
 
-const testEnv = env as Env & {
+const testEnv = eventApplicationEnvironment(env) as Env & {
   TEST_D1_MIGRATIONS: D1Migration[];
   TEST_EVENT_D1_MIGRATIONS: D1Migration[];
   TEST_PROFILE_D1_MIGRATIONS: D1Migration[];
@@ -55,7 +62,7 @@ function participant(profileId: string): EventParticipantSnapshot {
     username: profileId,
     displayName: profileId,
     emojiId: 1,
-    aura: "",
+    aura: "none",
     joinedAtMs: 1,
     state: "active",
     eliminatedRoundIndex: null,
@@ -76,23 +83,25 @@ async function insertProfileOwner(profileId: string) {
         value: materializeCanonicalProfile({
           createdAtMs: 1,
           updatedAtMs: 1,
-          profile: {
-            id: profileId,
-            nonce: 1,
-            rating: 1500,
-            totalManaPoints: 0,
-            win: false,
-            emoji: 1,
-            username: profileId,
-            eth: null,
-            sol: null,
-            completedProblemIds: [],
-            isTutorialCompleted: true,
-            mining: {
-              lastRockDate: "",
-              materials: { dust: 0, slime: 0, gum: 0, metal: 0, ice: 0 },
+          profile: createStoredPlayerProfile(
+            profileId,
+            createDefaultProfileAppearance(1),
+            {
+              nonce: 1,
+              rating: 1500,
+              totalManaPoints: 0,
+              win: false,
+              username: profileId,
+              eth: null,
+              sol: null,
+              completedProblemIds: [],
+              isTutorialCompleted: true,
+              mining: {
+                lastRockDate: null,
+                materials: { dust: 0, slime: 0, gum: 0, metal: 0, ice: 0 },
+              },
             },
-          },
+          ),
         }),
       },
       {
@@ -117,7 +126,10 @@ function fixture(
     EVENT_PROFILE_GAME_PROJECTION_QUEUE: {
       ...TELEGRAM_TEST_ENV.EVENT_PROFILE_GAME_PROJECTION_QUEUE,
       send: async (body) => {
-        const task = parseProfileGameProjectionTask(body);
+        const task = parseProfileGameProjectionTask(
+          parseQueueEnvelope(body, "EVENT_PROFILE_GAME_PROJECTION_QUEUE")
+            ?.payload,
+        );
         if (task?.kind === "event-profile-game-projection")
           profileTasks.push(task);
         return { metadata: { metrics: { backlogCount: 0, backlogBytes: 0 } } };
@@ -126,7 +138,9 @@ function fixture(
     TELEGRAM_PROJECTION_QUEUE: {
       ...TELEGRAM_TEST_ENV.TELEGRAM_PROJECTION_QUEUE,
       send: async (body) => {
-        const task = parseTelegramProjectionTask(body);
+        const task = parseTelegramProjectionTask(
+          parseQueueEnvelope(body, "TELEGRAM_PROJECTION_QUEUE")?.payload,
+        );
         if (task?.kind === "event-telegram-projection")
           telegramTasks.push(task);
         return { metadata: { metrics: { backlogCount: 0, backlogBytes: 0 } } };
@@ -158,7 +172,7 @@ function fixture(
           kind: "event",
           eventId,
           value: eventDocumentFixture({
-            schemaVersion: 2,
+            schemaVersion: 3,
             eventId,
             status: "scheduled",
             createdAtMs: 1,
@@ -209,7 +223,7 @@ function fixture(
           {
             verifyIdentity: async () => ({ uid: guestLoginUid }),
             participation: { now },
-            repository: repositoryOverride,
+            ...(repositoryOverride ? { repository: repositoryOverride } : {}),
           },
         );
       } finally {
@@ -240,6 +254,7 @@ describe("leave event D1 integration", () => {
       testEnv.EVENT_DB,
       testEnv.TEST_EVENT_D1_MIGRATIONS,
     );
+    await activateEventApplicationFixture(testEnv.PROFILE_GAMES_DB);
     await applyRetiredProfileMigrations(
       testEnv.PROFILE_DB,
       testEnv.TEST_PROFILE_D1_MIGRATIONS,

@@ -1,3 +1,5 @@
+import { createDefaultProfileAppearance } from "@mons/shared/appearance";
+import { xFlowFixture } from "./authStateFixture.ts";
 import assert from "node:assert/strict";
 import test from "node:test";
 import bs58 from "bs58";
@@ -32,7 +34,7 @@ const profile: AuthProfileResponse = {
   username: "Mons123",
   linkedMethods: { apple: true, eth: true, sol: true, x: true },
   appleLinked: true,
-  emoji: 1,
+  ...createDefaultProfileAppearance(1),
   opId: "operation-1",
 };
 
@@ -153,7 +155,7 @@ test("returns the legacy false response for invalid Ethereum signatures", async 
       message,
       signature: await Wallet.createRandom().signMessage(message),
       emoji: 1,
-      aura: null,
+      aura: "none",
     }),
     identity,
     env,
@@ -172,7 +174,7 @@ test("does not replay before validating the submitted Solana proof", async () =>
       address: bs58.encode(keys.publicKey),
       signature: Buffer.alloc(64).toString("base64"),
       emoji: 1,
-      aura: null,
+      aura: "none",
     }),
     identity,
     env,
@@ -213,7 +215,7 @@ test("links a valid Ethereum proof with the consumed nonce", async () => {
       message,
       signature,
       emoji: 1,
-      aura: "",
+      aura: "none",
     }),
     identity,
     env,
@@ -250,7 +252,7 @@ test("links a valid Ethereum proof with the consumed nonce", async () => {
       message,
       signature,
       emoji: 1,
-      aura: "",
+      aura: "none",
     }),
     identity,
     env,
@@ -320,7 +322,7 @@ test("verifies Apple through the injected bounded provider", async () => {
       idToken: "apple-token",
       consentSource: "settings",
       emoji: 1,
-      aura: "",
+      aura: "none",
     }),
     identity,
     env,
@@ -347,7 +349,7 @@ test("does not consume an Apple intent when verification is unavailable", async 
         idToken: "apple-token",
         consentSource: "signin",
         emoji: 1,
-        aura: null,
+        aura: "none",
       }),
       identity,
       env,
@@ -383,7 +385,7 @@ test("starts the Apple operation before consuming its intent", async () => {
         idToken: "apple-token",
         consentSource: "signin",
         emoji: 1,
-        aura: null,
+        aura: "none",
       }),
       identity,
       env,
@@ -418,7 +420,7 @@ test("resumes Apple linking after its operation consumed the intent", async () =
       idToken: "apple-token",
       consentSource: "signin",
       emoji: 1,
-      aura: null,
+      aura: "none",
     }),
     identity,
     env,
@@ -454,29 +456,27 @@ function authStateRecord(
   updateTime = "2026-08-22T00:00:00Z",
 ): XRedirectFlow {
   const revision = Number(updateTime.match(/:(\d{2})Z$/)?.[1] || 0) + 1;
-  return {
-    callbackUri: "https://api.mons.link/auth/x/callback",
-    codeChallenge: "challenge",
-    codeVerifier: "verifier",
-    completedAtMs: 0,
+  const createdAtMs = Date.now();
+  const result =
+    fields.result &&
+    typeof fields.result === "object" &&
+    "opId" in fields.result &&
+    "profileId" in fields.result
+      ? { opId: fields.result.opId, profileId: fields.result.profileId }
+      : fields.result;
+  return xFlowFixture({
+    createdAtMs,
+    expiresAtMs: createdAtMs + 60_000,
+    updatedAtMs: createdAtMs,
     consentSource: "signin",
-    createdAtMs: Date.now(),
-    errorCode: "",
-    expiresAtMs: Date.now() + 60_000,
+    returnUrl: "https://mons.link/",
     flowId: id,
     intentId: INTENT_ID,
-    method: "x",
-    processingStartedAtMs: 0,
-    result: null,
-    returnUrl: "https://mons.link/",
-    status: "created",
     uid: identity.uid,
-    updatedAtMs: Date.now(),
-    xUserId: "",
-    xUsername: "",
-    ...(fields as Partial<XRedirectFlow>),
+    ...fields,
+    ...(result === undefined ? {} : { result }),
     revision,
-  };
+  });
 }
 
 type StateWrite = { expectedRevision: number; updates: XFlowUpdate };
@@ -509,7 +509,7 @@ test("prepares X verification before linking", async () => {
     request("/auth/x/flows/complete", {
       flowId: FLOW_ID,
       emoji: 1,
-      aura: "",
+      aura: "none",
     }),
     identity,
     env,
@@ -555,7 +555,7 @@ test("does not trim stored X flow UIDs", async () => {
       request("/auth/x/flows/complete", {
         flowId: FLOW_ID,
         emoji: 1,
-        aura: "",
+        aura: "none",
       }),
       identity,
       env,
@@ -589,7 +589,7 @@ test("replays and persists completed X flows without consuming again", async () 
     request("/auth/x/flows/complete", {
       flowId: FLOW_ID,
       emoji: 1,
-      aura: "",
+      aura: "none",
     }),
     identity,
     env,
@@ -634,8 +634,8 @@ test("re-evaluates a verified callback after an expiry conflict", async () => {
     {
       uid: identity.uid,
       status: "created",
-      createdAtMs: nowMs,
-      expiresAtMs: 0,
+      createdAtMs: nowMs - 60_000,
+      expiresAtMs: nowMs - 1,
     },
     "2026-08-22T00:00:00Z",
   );
@@ -645,8 +645,8 @@ test("re-evaluates a verified callback after an expiry conflict", async () => {
     {
       uid: identity.uid,
       status: "verified",
-      createdAtMs: nowMs,
-      expiresAtMs: 0,
+      createdAtMs: nowMs - 60_000,
+      expiresAtMs: nowMs - 1,
       intentId: INTENT_ID,
       xUserId: "12345",
       consentSource: "signin",
@@ -678,7 +678,7 @@ test("re-evaluates a verified callback after an expiry conflict", async () => {
     request("/auth/x/flows/complete", {
       flowId: FLOW_ID,
       emoji: 1,
-      aura: "",
+      aura: "none",
     }),
     identity,
     env,
@@ -744,7 +744,7 @@ test("lets successful X completion supersede a concurrent expiry failure", async
     request("/auth/x/flows/complete", {
       flowId: FLOW_ID,
       emoji: 1,
-      aura: "",
+      aura: "none",
     }),
     identity,
     env,
@@ -808,7 +808,7 @@ test("preserves other concurrent X terminal failures", async () => {
       request("/auth/x/flows/complete", {
         flowId: FLOW_ID,
         emoji: 1,
-        aura: "",
+        aura: "none",
       }),
       identity,
       env,
@@ -867,7 +867,7 @@ test("returns a concurrently completed X replay after a write conflict", async (
     request("/auth/x/flows/complete", {
       flowId: FLOW_ID,
       emoji: 1,
-      aura: "",
+      aura: "none",
     }),
     identity,
     env,
@@ -889,7 +889,7 @@ test("returns a concurrently completed X replay after a write conflict", async (
   assert.equal(reads, 2);
   assert.equal(refreshes, 1);
   assert.equal(writes.length, 1);
-  assert.equal(writes[0].expectedRevision, 1);
+  assert.equal(writes[0]!.expectedRevision, 1);
 });
 
 test("rejects a completed X flow after live ownership validation fails", async () => {
@@ -899,7 +899,7 @@ test("rejects a completed X flow after live ownership validation fails", async (
       request("/auth/x/flows/complete", {
         flowId: FLOW_ID,
         emoji: 1,
-        aura: "",
+        aura: "none",
       }),
       identity,
       env,
@@ -958,7 +958,7 @@ test("strictly rejects malformed mutation bodies", async () => {
         address: "11111111111111111111111111111111",
         signature: "AA==",
         emoji: 1,
-        aura: null,
+        aura: "none",
       }),
       identity,
       env,
@@ -983,7 +983,7 @@ test("strictly rejects malformed mutation bodies", async () => {
         address: "z".repeat(65),
         signature: "A".repeat(88),
         emoji: 1,
-        aura: null,
+        aura: "none",
       }),
       identity,
       env,

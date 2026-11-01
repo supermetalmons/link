@@ -1,4 +1,4 @@
-import { MATCH_TIMER_TERMINAL } from "@mons/shared/timers";
+import { isMatchTimer } from "@mons/shared/timers";
 import { loadMonsRules } from "./monsRules.js";
 import { buildOrderedMatchSubmissions } from "./gameplay/matchReconstruction.js";
 
@@ -38,14 +38,15 @@ export async function resolveMatchWinner(
 
   if (
     matchData.status === "surrendered" ||
-    opponentMatchData.timer === MATCH_TIMER_TERMINAL
+    (isMatchTimer(opponentMatchData.timer) &&
+      opponentMatchData.timer.state === "finished")
   ) {
     return { winner: "opponent", reason: "surrender-or-timer" };
   }
 
   if (
     opponentMatchData.status === "surrendered" ||
-    matchData.timer === MATCH_TIMER_TERMINAL
+    (isMatchTimer(matchData.timer) && matchData.timer.state === "finished")
   ) {
     return { winner: "player", reason: "surrender-or-timer" };
   }

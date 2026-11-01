@@ -226,7 +226,7 @@ export class MatchSyncRoom {
     matchId: string,
     state: MatchReadState,
   ): Promise<MatchSyncReadResult> {
-    state.result = undefined;
+    delete state.result;
     for (let attempt = 0; attempt < 3; attempt++) {
       const generation = state.generation;
       const inviteGeneration = this.dependencies.inviteGeneration();
@@ -240,12 +240,12 @@ export class MatchSyncRoom {
         const metadata = await this.dependencies.readMetadata(inviteId);
         if (!current()) continue;
         if (metadata.status !== "ok") {
-          state.projection = undefined;
+          delete state.projection;
           this.close(matchId, 1008, "Invite unavailable");
           return metadata;
         }
         if (!isRegisteredSyncMatch(metadata, matchId)) {
-          state.projection = undefined;
+          delete state.projection;
           this.close(matchId, 1008, "Match unavailable");
           return { status: "missing" };
         }
@@ -266,7 +266,7 @@ export class MatchSyncRoom {
           matchId,
           playerId: metadata.snapshot.hostId,
           opponentId: metadata.snapshot.guestId,
-          knownRevision: reusable?.matchRevision,
+          ...(reusable ? { knownRevision: reusable.matchRevision } : {}),
         });
         if (!current()) continue;
         readingSource = false;
@@ -313,8 +313,8 @@ export class MatchSyncRoom {
         return result;
       } catch (error) {
         if (!current()) continue;
-        state.result = undefined;
-        state.projection = undefined;
+        delete state.result;
+        delete state.projection;
         if (readingSource && attempt < 2) continue;
         if (
           readingSource &&
@@ -328,8 +328,8 @@ export class MatchSyncRoom {
         throw error;
       }
     }
-    state.result = undefined;
-    state.projection = undefined;
+    delete state.result;
+    delete state.projection;
     throw new Error("match-sync-source-kept-changing");
   }
 
@@ -356,7 +356,7 @@ export class MatchSyncRoom {
     this.pruneStates();
     void pending
       .finally(() => {
-        if (state.pending === pending) state.pending = undefined;
+        if (state.pending === pending) delete state.pending;
         this.pruneStates();
       })
       .catch(() => undefined);
@@ -366,8 +366,8 @@ export class MatchSyncRoom {
   invalidateSource(): void {
     for (const state of this.states.values()) {
       state.generation++;
-      state.result = undefined;
-      state.projection = undefined;
+      delete state.result;
+      delete state.projection;
     }
   }
 
@@ -387,7 +387,7 @@ export class MatchSyncRoom {
       const state = this.states.get(matchId);
       if (state) {
         state.generation++;
-        state.result = undefined;
+        delete state.result;
       }
       const hasSubscribers =
         groups === undefined && targets.size === 1
@@ -415,7 +415,7 @@ export class MatchSyncRoom {
     let cursor = 0;
     const refresh = async () => {
       while (cursor < matchIds.length) {
-        await this.read(inviteId, matchIds[cursor++], true);
+        await this.read(inviteId, matchIds[cursor++]!, true);
       }
     };
     await Promise.all(
@@ -570,7 +570,7 @@ export class MatchSyncRoom {
     let cursor = 0;
     const run = async () => {
       while (cursor < due.length) {
-        const { match_id: matchId } = due[cursor++];
+        const { match_id: matchId } = due[cursor++]!;
         const socket = (groups ??= this.socketGroups())
           .get(matchId)
           ?.find((candidate) =>

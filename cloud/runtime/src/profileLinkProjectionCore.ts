@@ -86,7 +86,7 @@ const processWithConcurrency = async <T>(
           return;
         }
         try {
-          await worker(items[currentIndex], currentIndex);
+          await worker(items[currentIndex]!, currentIndex);
         } catch (error) {
           failure ||= error;
         }

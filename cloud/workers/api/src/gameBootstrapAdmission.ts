@@ -31,8 +31,8 @@ export async function readGameBootstrapAdmission(
       prepareInviteSourceSnapshotRead(session, inviteId),
     ]);
   signal.throwIfAborted();
-  const mode = parseAutomatchRuntimeControlRow(modeRows.results[0]);
-  const control = parseInviteSourceControlRow(controlRows.results[0]);
+  const mode = parseAutomatchRuntimeControlRow(modeRows!.results[0]);
+  const control = parseInviteSourceControlRow(controlRows!.results[0]);
   if (mode.backend !== "d1")
     throw new AuthApiFailure(
       503,
@@ -41,6 +41,6 @@ export async function readGameBootstrapAdmission(
     );
   if (control.backend !== "d1")
     throw new InviteSourceFailure("invite-source-backend-retired");
-  assertNoGameSessionResourceTransition(transitionRows.results[0]);
-  return decodeInviteSourceSnapshot(inviteId, sourceRows.results[0]).value;
+  assertNoGameSessionResourceTransition(transitionRows!.results[0]);
+  return decodeInviteSourceSnapshot(inviteId, sourceRows!.results[0]).value;
 }

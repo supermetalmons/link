@@ -1,3 +1,11 @@
+import type {
+  CardBackgroundId,
+  CardSubtitleId,
+  ProfileCounter,
+  SelectedMons,
+  StickerMap,
+} from "@mons/shared/appearance";
+import type { Aura } from "@mons/shared/appearance";
 import type { ProfileCustomizationUpdateRequest } from "@mons/shared/profiles";
 import type { UsernameEditResponse } from "@mons/shared/usernames";
 import type { AuthTokenProvider } from "../services/apiTransport";
@@ -27,7 +35,7 @@ export type ProfileClientDependencies = {
   getAuthApiToken: AuthTokenProvider;
   getUserBoundAuthTokenProvider: () => BoundAuthTokenProvider;
   getLocalProfileId: () => string | null;
-  getStoredEmojiAura: () => string;
+  getStoredEmojiAura: () => Aura;
   invalidateInitialIdentity: () => void;
   api: ProfileClientApi;
   now: () => number;
@@ -129,7 +137,7 @@ export class ProfileClient {
     );
     this.assertLeaderboardRequestCurrent(generation);
     MINING_MATERIAL_NAMES.forEach((material, index) => {
-      this.materialLeaderboardCache.set(material, leaderboards[index]);
+      this.materialLeaderboardCache.set(material, leaderboards[index]!);
     });
     this.materialLeaderboardCacheTime = this.dependencies.now();
   }
@@ -216,39 +224,36 @@ export class ProfileClient {
     }
   }
 
-  public updateStoredEmoji(
-    newId: number,
-    aura: string | null | undefined,
-  ): void {
+  public updateStoredEmoji(newId: number, aura: Aura | undefined): void {
     const storedAura = aura ?? this.dependencies.getStoredEmojiAura();
     this.updateCustomField({
       field: "emojiAndAura",
       value: {
         emoji: newId,
-        aura: storedAura === "rainbow" ? "rainbow" : "",
+        aura: storedAura,
       },
     });
   }
 
-  public updateCardBackgroundId(newId: number): void {
+  public updateCardBackgroundId(newId: CardBackgroundId): void {
     this.updateCustomField({ field: "cardBackgroundId", value: newId });
   }
 
-  public updateCardSubtitleId(newId: number): void {
+  public updateCardSubtitleId(newId: CardSubtitleId): void {
     this.updateCustomField({ field: "cardSubtitleId", value: newId });
   }
 
-  public updateProfileCounter(counter: string): void {
+  public updateProfileCounter(counter: ProfileCounter): void {
     if (counter === "gp" || counter === "mp") {
       this.updateCustomField({ field: "profileCounter", value: counter });
     }
   }
 
-  public updateProfileMons(mons: string): void {
+  public updateProfileMons(mons: SelectedMons | null): void {
     this.updateCustomField({ field: "profileMons", value: mons });
   }
 
-  public updateCardStickers(stickers: string): void {
+  public updateCardStickers(stickers: StickerMap): void {
     this.updateCustomField({ field: "cardStickers", value: stickers });
   }
 

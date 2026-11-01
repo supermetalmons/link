@@ -8,8 +8,6 @@ const deliveryPolicy_js_1 = require("./deliveryPolicy.js");
 const records_js_1 = require("./records.js");
 const normalizeString = (value) =>
   typeof value === "string" && value.trim() !== "" ? value.trim() : "";
-const asObject = (value) =>
-  value && typeof value === "object" && !Array.isArray(value) ? value : {};
 const createTelegramRepository = ({
   readMessage,
   transactMessage,
@@ -47,7 +45,7 @@ const createTelegramRepository = ({
         throw new TypeError("retryNotBeforeMs must be a positive number");
       }
       const result = await transactControl((current) => {
-        const control = asObject(current);
+        const control = (0, records_js_1.controlDocument)(current);
         const previous = Number(control.retryNotBeforeMs);
         return {
           value: (0, records_js_1.updateTelegramControl)(
@@ -87,7 +85,7 @@ const createTelegramRepository = ({
         input?.messageKey,
       );
       const revision = normalizeString(input?.revision);
-      const operation = normalizeString(input?.operation);
+      const operation = input.operation;
       const acquiredAtMs = (0, deliveryPolicy_js_1.normalizeTimestamp)(
         input?.acquiredAtMs,
       );
@@ -97,7 +95,7 @@ const createTelegramRepository = ({
       }
       let decision = "blocked";
       const result = await transactControl((current) => {
-        const control = asObject(current);
+        const control = (0, records_js_1.controlDocument)(current);
         const retryNotBeforeMs = (0, deliveryPolicy_js_1.normalizeTimestamp)(
           control.retryNotBeforeMs,
         );
@@ -148,14 +146,14 @@ const createTelegramRepository = ({
           decision,
         };
       });
-      const control = asObject(result.value);
+      const control = (0, records_js_1.controlDocument)(result.value);
       return {
         acquired: result.committed && decision === "acquired",
         reason: decision,
         retryNotBeforeMs: (0, deliveryPolicy_js_1.normalizeTimestamp)(
           control.retryNotBeforeMs,
         ),
-        gate: (0, records_js_1.apiGateDocument)(control.apiGate),
+        gate: control.apiGate ?? null,
       };
     },
     async releaseApiGate(ownerInput) {
@@ -165,7 +163,7 @@ const createTelegramRepository = ({
       }
       let released = false;
       const result = await transactControl((current) => {
-        const control = asObject(current);
+        const control = (0, records_js_1.controlDocument)(current);
         if (
           normalizeString(
             (0, values_js_1.readProperty)(control.apiGate, "owner"),
@@ -196,7 +194,7 @@ const createTelegramRepository = ({
       }
       let applied = false;
       const result = await transactControl((current) => {
-        const control = asObject(current);
+        const control = (0, records_js_1.controlDocument)(current);
         const gateOwner = normalizeString(
           (0, values_js_1.readProperty)(control.apiGate, "owner"),
         );
@@ -222,13 +220,13 @@ const createTelegramRepository = ({
           decision: "barrier-proof-applied",
         };
       });
-      const control = asObject(result.value);
+      const control = (0, records_js_1.controlDocument)(result.value);
       return {
         applied: result.committed && applied,
         retryNotBeforeMs: (0, deliveryPolicy_js_1.normalizeTimestamp)(
           control.retryNotBeforeMs,
         ),
-        gate: (0, records_js_1.apiGateDocument)(control.apiGate),
+        gate: control.apiGate ?? null,
       };
     },
   };

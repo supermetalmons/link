@@ -1,5 +1,5 @@
 import { inviteDocumentFixture } from "../test/inviteDocumentFixture.ts";
-import { readMatchCreationInput } from "../src/matchRecordCodec.ts";
+import { matchCreationFixture as readMatchCreationInput } from "../test/matchRecordFixture.ts";
 import {
   matchTestPort,
   legacySessionClient,
@@ -16,6 +16,8 @@ import { resetMatchPresentationTestState } from "./matchPresentationTestFixture.
 
 const testEnv = env as Env & { TEST_D1_MIGRATIONS: D1Migration[] };
 const db = env.PROFILE_GAMES_DB;
+let fixtureIndex = 0;
+let fixtureInviteId = "fixture";
 
 function memoryState() {
   const values = new Map<string, unknown>();
@@ -48,14 +50,18 @@ function memoryState() {
         return {
           committed: false,
           value: current,
-          decision: decision.decision,
+          ...(decision.decision === undefined
+            ? {}
+            : { decision: decision.decision }),
         };
       }
       values.set(path, structuredClone(decision.value));
       return {
         committed: true,
         value: decision.value,
-        decision: decision.decision,
+        ...(decision.decision === undefined
+          ? {}
+          : { decision: decision.decision }),
       };
     },
   };
@@ -71,7 +77,7 @@ function persistence(
     database,
     matchTestPort(client),
     {
-      onCommitted,
+      ...(onCommitted === undefined ? {} : { onCommitted }),
       async prepareMatchPresentations(creations) {
         return creations.map((creation) => ({
           ...creation,
@@ -93,24 +99,25 @@ describe("automatch persistence integration", () => {
     applyStrictMatchStateTestMigrations(db, testEnv.TEST_D1_MIGRATIONS),
   );
   beforeEach(async () => {
+    fixtureInviteId = `invite-${++fixtureIndex}`;
     await resetMatchPresentationTestState(
       db,
       testEnv.TEST_D1_MIGRATIONS,
       "durable",
     );
     for (const table of [
-      "game_session_transition_resources",
-      "game_session_transitions",
+      "game_session_transition_resources_canonical",
+      "game_session_transitions_canonical",
       "automatch_write_admissions",
-      "automatch_entries",
-      "automatch_telegram_sources",
-      "automatch_telegram_projection_outbox",
-      "game_session_projection_outbox",
-      "game_session_mutation_receipts",
+      "automatch_entries_canonical",
+      "automatch_telegram_sources_canonical",
+      "automatch_telegram_projection_outbox_canonical",
+      "game_session_projection_outbox_canonical",
+      "game_session_mutation_receipts_canonical",
       "game_session_mutation_locks",
-      "invite_sources",
+      "invite_sources_canonical",
       "invite_source_write_admissions",
-      "login_match_discovery",
+      "login_match_discovery_canonical",
     ])
       await db.prepare(`DELETE FROM ${table}`).run();
     await db
@@ -129,50 +136,56 @@ describe("automatch persistence integration", () => {
     const raw = memoryState();
     const runtime = persistence(raw.client);
     const locks = runtime.decorateLocks(createGameSessionMutationLockStore(db));
-    const lock = { lockId: "invite-one", operationId: "operation-one" };
+    const lock = { lockId: `${fixtureInviteId}`, operationId: "operation-one" };
     await locks.acquire(lock, "owner", Date.now());
     await runtime.client.patchRoot({
-      "invites/invite-one": { hostId: "host", guestId: null },
-      "players/host/matches/invite-one": {
+      [`invites/${fixtureInviteId}`]: { hostId: "host", guestId: null },
+      [`players/host/matches/${fixtureInviteId}`]: {
         fen: "initial",
         flatMovesString: "",
         color: "white",
       },
-      "automatch/invite-one": {
+      [`automatch/${fixtureInviteId}`]: {
         uid: "host",
         timestamp: { ".sv": "timestamp" },
       },
       "gameplayMutationReceipts/operation-one": {
-        inviteId: "invite-one",
+        inviteId: `${fixtureInviteId}`,
         requesterUid: "host",
         response: { ok: true },
       },
-      "profileGameProjectionOutbox/automatch/invite-one": {
+      [`profileGameProjectionOutbox/automatch/${fixtureInviteId}`]: {
         requestId: "operation-one",
         status: "pending",
       },
     });
     await locks.release(lock, "owner");
     expect(raw.patches).toEqual([]);
-    expect(await runtime.client.getPath("automatch/invite-one")).toMatchObject({
+    expect(
+      await runtime.client.getPath(`automatch/${fixtureInviteId}`),
+    ).toMatchObject({
       uid: "host",
     });
-    expect(raw.values.get("players/host/matches/invite-one")).toMatchObject({
+    expect(
+      raw.values.get(`players/host/matches/${fixtureInviteId}`),
+    ).toMatchObject({
       fen: "initial",
       sessionCreation: expect.stringMatching(/^[a-f0-9]{64}$/),
     });
-    expect(await runtime.client.getPath("invites/invite-one")).toMatchObject({
+    expect(
+      await runtime.client.getPath(`invites/${fixtureInviteId}`),
+    ).toMatchObject({
       hostId: "host",
     });
-    expect(raw.values.has("invites/invite-one")).toBe(false);
+    expect(raw.values.has(`invites/${fixtureInviteId}`)).toBe(false);
     const result = await runtime.client.transactPath(
-      "profileGameProjectionOutbox/automatch/invite-one",
+      `profileGameProjectionOutbox/automatch/${fixtureInviteId}`,
       () => ({ value: null, decision: "cleared" }),
     );
     expect(result.committed).toBe(true);
     expect(
       await runtime.client.getPath(
-        "profileGameProjectionOutbox/automatch/invite-one",
+        `profileGameProjectionOutbox/automatch/${fixtureInviteId}`,
       ),
     ).toBeNull();
     expect(
@@ -195,12 +208,12 @@ describe("automatch persistence integration", () => {
     });
     const base = createGameSessionMutationLockStore(db);
     const locks = runtime.decorateLocks(base);
-    const lock = { lockId: "invite-one", operationId: "operation-one" };
+    const lock = { lockId: `${fixtureInviteId}`, operationId: "operation-one" };
     const nextLock = { ...lock, operationId: "operation-two" };
     await locks.acquire(lock, "owner", Date.now());
     const commit = runtime.client.patchRoot({
-      "invites/invite-one": { hostId: "host" },
-      "automatch/invite-one": { uid: "host" },
+      [`invites/${fixtureInviteId}`]: { hostId: "host" },
+      [`automatch/${fixtureInviteId}`]: { uid: "host" },
     });
     let release: Promise<void> | undefined;
     try {
@@ -215,7 +228,9 @@ describe("automatch persistence integration", () => {
       await notificationStarted.promise;
       await base.acquire(nextLock, "next-owner", Date.now());
       expect(notified).toBe(false);
-      expect(await runtime.client.getPath("invites/invite-one")).toMatchObject({
+      expect(
+        await runtime.client.getPath(`invites/${fixtureInviteId}`),
+      ).toMatchObject({
         hostId: "host",
       });
     } finally {
@@ -224,7 +239,7 @@ describe("automatch persistence integration", () => {
       await (release || locks.release(lock, "owner"));
       await base.release(nextLock, "next-owner");
     }
-    expect(notifications).toEqual(["invite-one"]);
+    expect(notifications).toEqual([`${fixtureInviteId}`]);
     expect(notified).toBe(true);
   });
 
@@ -239,28 +254,35 @@ describe("automatch persistence integration", () => {
           .prepare("SELECT COUNT(*) AS n FROM game_session_mutation_locks")
           .first<number>("n"),
       );
-      observedInvites.push(await runtime.client.getPath("invites/invite-one"));
+      observedInvites.push(
+        await runtime.client.getPath(`invites/${fixtureInviteId}`),
+      );
     });
     const locks = runtime.decorateLocks(createGameSessionMutationLockStore(db));
     const outer = { lockId: "automatch-owner", operationId: "owner-operation" };
-    const inner = { lockId: "invite-one", operationId: "operation-one" };
+    const inner = {
+      lockId: `${fixtureInviteId}`,
+      operationId: "operation-one",
+    };
     await locks.acquire(outer, "outer-owner", Date.now());
     await locks.acquire(inner, "inner-owner", Date.now());
     await runtime.client.patchRoot({
-      "invites/invite-one": { hostId: "host" },
-      "automatch/invite-one": { uid: "host" },
+      [`invites/${fixtureInviteId}`]: { hostId: "host" },
+      [`automatch/${fixtureInviteId}`]: { uid: "host" },
     });
     await runtime.client.patchRoot({
-      "invites/invite-one/hostRematches": "1",
-      "automatch/invite-one": { uid: "host" },
+      [`invites/${fixtureInviteId}/hostRematches`]: "1",
+      [`automatch/${fixtureInviteId}`]: { uid: "host" },
     });
     expect(notifications).toEqual([]);
     await locks.release(inner, "inner-owner");
     expect(notifications).toEqual([]);
     await locks.release(outer, "outer-owner");
-    expect(notifications).toEqual(["invite-one"]);
+    expect(notifications).toEqual([`${fixtureInviteId}`]);
     expect(lockCounts).toEqual([0]);
-    expect(observedInvites).toMatchObject([{ hostRematches: "1" }]);
+    expect(observedInvites).toMatchObject([
+      { hostRematches: { state: "open", indices: [1] } },
+    ]);
   });
 
   it.each(["synchronous", "asynchronous"])(
@@ -282,11 +304,14 @@ describe("automatch persistence integration", () => {
             if (releaseFails) throw releaseError;
           },
         });
-        const lock = { lockId: "invite-one", operationId: "operation-one" };
+        const lock = {
+          lockId: `${fixtureInviteId}`,
+          operationId: "operation-one",
+        };
         await locks.acquire(lock, "owner", Date.now());
         await runtime.client.patchRoot({
-          "invites/invite-one": { hostId: "host" },
-          "automatch/invite-one": { uid: "host" },
+          [`invites/${fixtureInviteId}`]: { hostId: "host" },
+          [`automatch/${fixtureInviteId}`]: { uid: "host" },
         });
         expect(notifications).toEqual([]);
         if (releaseFails) {
@@ -294,7 +319,7 @@ describe("automatch persistence integration", () => {
         } else {
           await expect(locks.release(lock, "owner")).resolves.toBeUndefined();
         }
-        expect(notifications).toEqual(["invite-one"]);
+        expect(notifications).toEqual([`${fixtureInviteId}`]);
       }
     },
   );
@@ -327,30 +352,29 @@ describe("automatch persistence integration", () => {
       },
     );
     const locks = runtime.decorateLocks(createGameSessionMutationLockStore(db));
-    const lock = { lockId: "invite-one", operationId: "operation-one" };
+    const lock = { lockId: `${fixtureInviteId}`, operationId: "operation-one" };
     await locks.acquire(lock, "owner", Date.now());
     await expect(
       runtime.client.patchRoot({
-        "invites/invite-one": { hostId: "host" },
-        "players/host/matches/invite-one": {
+        [`invites/${fixtureInviteId}`]: { hostId: "host" },
+        [`players/host/matches/${fixtureInviteId}`]: {
           fen: "initial",
           flatMovesString: "",
           color: "white",
         },
-        "automatch/invite-one": { uid: "host" },
+        [`automatch/${fixtureInviteId}`]: { uid: "host" },
         "gameplayMutationReceipts/operation-one": {
-          inviteId: "invite-one",
+          inviteId: `${fixtureInviteId}`,
           requesterUid: "host",
         },
       }),
     ).rejects.toThrow("connection-lost");
     await locks.release(lock, "owner");
     expect(notifications).toEqual([]);
-    const match = raw.values.get("players/host/matches/invite-one") as Record<
-      string,
-      unknown
-    >;
-    raw.values.set("players/host/matches/invite-one", {
+    const match = raw.values.get(
+      `players/host/matches/${fixtureInviteId}`,
+    ) as Record<string, unknown>;
+    raw.values.set(`players/host/matches/${fixtureInviteId}`, {
       ...match,
       fen: "advanced",
       flatMovesString: "move",
@@ -360,9 +384,11 @@ describe("automatch persistence integration", () => {
       "next",
       Date.now(),
     );
-    expect(notifications).toEqual(["invite-one"]);
+    expect(notifications).toEqual([`${fixtureInviteId}`]);
     expect(lockCounts).toEqual([0]);
-    expect(raw.values.get("players/host/matches/invite-one")).toMatchObject({
+    expect(
+      raw.values.get(`players/host/matches/${fixtureInviteId}`),
+    ).toMatchObject({
       fen: "advanced",
       flatMovesString: "move",
     });
@@ -371,7 +397,9 @@ describe("automatch persistence integration", () => {
     ).toMatchObject({ requesterUid: "host" });
     expect(
       await db
-        .prepare("SELECT COUNT(*) AS n FROM game_session_transition_resources")
+        .prepare(
+          "SELECT COUNT(*) AS n FROM game_session_transition_resources_canonical",
+        )
         .first("n"),
     ).toBe(0);
   });
@@ -385,7 +413,9 @@ describe("automatch persistence integration", () => {
       )
       .run();
     await expect(
-      runtime.client.patchRoot({ "automatch/invite-one": { uid: "host" } }),
+      runtime.client.patchRoot({
+        [`automatch/${fixtureInviteId}`]: { uid: "host" },
+      }),
     ).rejects.toMatchObject({
       status: 503,
       message: "automatch-persistence-frozen",
@@ -398,12 +428,14 @@ describe("automatch persistence integration", () => {
           playerId: "host",
           matchId: "live",
           marker: "created",
-          value: readMatchCreationInput({ timer: "1;1000" }),
+          value: readMatchCreationInput({
+            timer: { state: "running", turnNumber: 1, deadlineAtMs: 1000 },
+          }),
         },
       ],
     });
     expect(raw.values.get("players/host/matches/live")).toMatchObject({
-      timer: "1;1000",
+      timer: { state: "running", turnNumber: 1, deadlineAtMs: 1000 },
     });
     expect(await runtime.sweep()).toEqual({ recovered: 0, failed: 0 });
   });
@@ -428,27 +460,49 @@ describe("automatch persistence integration", () => {
       const raw = memoryState();
       const runtime = persistence(raw.client);
       await expect(
-        runtime.client.getPath("invites/invite-one"),
-      ).rejects.toThrow("backend-retired");
+        runtime.client.getPath(`invites/${fixtureInviteId}`),
+      ).rejects.toThrow(
+        backend === "automatch"
+          ? "automatch-control-unavailable"
+          : "backend-retired",
+      );
       await expect(
-        runtime.client.patchRoot({ "automatch/invite-one": { uid: "host" } }),
-      ).rejects.toThrow("backend-retired");
+        runtime.client.patchRoot({
+          [`automatch/${fixtureInviteId}`]: { uid: "host" },
+        }),
+      ).rejects.toThrow(
+        backend === "automatch"
+          ? "automatch-control-unavailable"
+          : "backend-retired",
+      );
       await expect(
         runtime.typedClient.projectionRecovery.repairInvalidAutomatchProfileOutbox(
-          "invite-one",
+          `${fixtureInviteId}`,
           100,
           () => "repair",
         ),
-      ).rejects.toThrow("backend-retired");
-      await expect(runtime.writesEnabled()).rejects.toThrow("backend-retired");
+      ).rejects.toThrow(
+        backend === "automatch"
+          ? "automatch-control-unavailable"
+          : "backend-retired",
+      );
+      await expect(runtime.writesEnabled()).rejects.toThrow(
+        backend === "automatch"
+          ? "automatch-control-unavailable"
+          : "backend-retired",
+      );
       if (backend === "automatch") {
         await expect(runtime.readQueuedByLogins(["host"])).rejects.toThrow(
-          "backend-retired",
+          "automatch-control-unavailable",
         );
         await expect(runtime.expireReceipts(Date.now(), 10)).rejects.toThrow(
-          "backend-retired",
+          "automatch-control-unavailable",
         );
-        await expect(runtime.sweep()).rejects.toThrow("backend-retired");
+        await expect(runtime.sweep()).rejects.toThrow(
+          backend === "automatch"
+            ? "automatch-control-unavailable"
+            : "backend-retired",
+        );
       }
       for (const table of [
         "automatch_write_admissions",
@@ -470,7 +524,7 @@ describe("automatch persistence integration", () => {
       runtime.typedClient.commitSessionChanges([
         {
           kind: "invite-merge",
-          inviteId: "invite-one",
+          inviteId: `${fixtureInviteId}`,
           value: inviteDocumentFixture({ hostId: "host" }),
         },
       ]),

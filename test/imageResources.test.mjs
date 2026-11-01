@@ -19,14 +19,22 @@ const { getImageResource } = await import("../src/resources/imageResources.ts");
 
 test("loads lazily and shares a request and successful blob URL by source", async (t) => {
   const source = "https://images.example/shared.webp";
-  const fetchMock = t.mock.method(globalThis, "fetch", async (url) => {
-    assert.equal(url, source);
-    return new Response("image");
-  });
-  const objectUrlMock = t.mock.method(URL, "createObjectURL", (blob) => {
-    assert.ok(blob instanceof Blob);
-    return "blob:shared";
-  });
+  const fetchMock = t.mock.method(
+    globalThis,
+    "fetch",
+    async (/** @type {Parameters<typeof fetch>[0]} */ url) => {
+      assert.equal(url, source);
+      return new Response("image");
+    },
+  );
+  const objectUrlMock = t.mock.method(
+    URL,
+    "createObjectURL",
+    (/** @type {Blob | MediaSource} */ blob) => {
+      assert.ok(blob instanceof Blob);
+      return "blob:shared";
+    },
+  );
   const first = getImageResource(source);
   assert.strictEqual(getImageResource(source), first);
   assert.equal(first.getCachedValue(), null);
@@ -42,7 +50,11 @@ test("loads lazily and shares a request and successful blob URL by source", asyn
 });
 
 test("keeps resources for distinct source URLs separate", async (t) => {
-  t.mock.method(globalThis, "fetch", async (url) => new Response(url));
+  t.mock.method(
+    globalThis,
+    "fetch",
+    async (/** @type {BodyInit | null | undefined} */ url) => new Response(url),
+  );
   let nextUrl = 0;
   t.mock.method(URL, "createObjectURL", () => `blob:distinct-${++nextUrl}`);
   const first = getImageResource("https://images.example/first.webp");

@@ -1,4 +1,6 @@
 import type * as Auth from "./auth.js";
+import type { ApplicationReleaseStatus } from "./data-contract.js";
+import type { ApiErrorDetails } from "./api-errors.js";
 import type * as EventPrizes from "./event-prizes.js";
 import type * as Events from "./events.js";
 import type * as Bootstrap from "./game-bootstrap.js";
@@ -22,7 +24,7 @@ import type * as XRedirect from "./x-redirect.js";
 export type ApiShortError = { ok: false; error: string };
 export type ApiAuthError = ApiShortError & {
   message: string;
-  details?: unknown;
+  details?: ApiErrorDetails;
 };
 export type ApiJson<Body, Status extends number = 200> = {
   kind: "json";
@@ -177,6 +179,7 @@ type InviteParameters = { inviteId: string };
 type MatchParameters = InviteParameters & { matchId: string };
 
 export type ApiEndpoints = {
+  "GET /release": Endpoint<undefined, ApplicationReleaseStatus>;
   "GET /matches/snapshot": Endpoint<
     undefined,
     Sessions.ReadMatchSnapshotResponse,

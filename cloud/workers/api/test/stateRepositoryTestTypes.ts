@@ -7,9 +7,11 @@ import type {
 export {
   StateRepositoryFailure,
   StateRepositoryPermissionDenied,
-  STATE_SERVER_TIMESTAMP,
-  stateIncrement,
 } from "../src/stateCompatibility.ts";
+export {
+  SESSION_TIMESTAMP as STATE_SERVER_TIMESTAMP,
+  sessionIncrement as stateIncrement,
+} from "../src/sessionValueOperations.ts";
 
 export type StateQuery = {
   endAt?: string | number | boolean | null;

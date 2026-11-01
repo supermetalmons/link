@@ -1,10 +1,17 @@
+import { inviteDocumentFixture } from "../test/inviteDocumentFixture.ts";
+import { eventStatusFixture } from "../test/eventCompatibilityFixture.ts";
+import { eventDocumentFixture } from "../test/eventCompatibilityFixture.ts";
 import {
-  eventIntentFixture,
+  eventApplicationEnvironment,
+  activateEventApplicationFixture,
+} from "./eventApplicationFixture.ts";
+import {
+  eventDraftFixture,
   retainedEventIntentFixture,
   retainedEventInviteMutationsFixture,
 } from "../test/transitionIntentFixture.ts";
 import { commitEventCompatibilityFixture } from "../test/eventCompatibilityFixture.ts";
-import { decodeEventUpdates } from "../src/eventCompatibilityCodec.ts";
+import { decodeEventUpdates } from "../test/eventLegacyFixtureCodec.ts";
 import { eventMatchTestPort } from "./eventRepositoryFixture.ts";
 import { env } from "cloudflare:workers";
 import type { D1Migration } from "cloudflare:test";
@@ -41,7 +48,7 @@ import {
 } from "../src/matchPresentationRegistry.ts";
 import { resetMatchPresentationTestState } from "./matchPresentationTestFixture.ts";
 
-const testEnv = env as Env & {
+const testEnv = eventApplicationEnvironment(env) as Env & {
   TEST_D1_MIGRATIONS: D1Migration[];
   TEST_EVENT_D1_MIGRATIONS: D1Migration[];
 };
@@ -55,8 +62,8 @@ function record(value: unknown): value is Record<string, unknown> {
 }
 
 function eventRecord() {
-  return {
-    schemaVersion: 2,
+  return eventDocumentFixture({
+    schemaVersion: 3,
     eventId,
     status: "scheduled",
     createdAtMs: 100,
@@ -66,8 +73,7 @@ function eventRecord() {
     createdByLoginUid: "host",
     createdByUsername: "ivan",
     participants: {},
-    rounds: {},
-  };
+  });
 }
 
 function matchEffects(id = inviteId) {
@@ -87,14 +93,14 @@ function matchEffects(id = inviteId) {
       flatMovesString: "",
       color: "white",
       emojiId: 2,
-      aura: "host-aura",
+      aura: "rainbow",
     },
     [`players/guest/matches/${id}`]: {
       fen: "initial",
       flatMovesString: "",
       color: "black",
       emojiId: 3,
-      aura: "guest-aura",
+      aura: "none",
     },
   };
 }
@@ -102,13 +108,13 @@ function matchEffects(id = inviteId) {
 function prepareEffects() {
   return prepareInviteEventIntent(
     testEnv.PROFILE_GAMES_DB,
-    eventIntentFixture({
-      schemaVersion: 1,
+    eventDraftFixture({
+      schemaVersion: 3,
       transitionId: "prepared-event-transition",
       eventId,
       expectedRevision: 1,
-      canonicalUpdates: { [`events/${eventId}/status`]: "active" },
-      rtdbEffects: matchEffects(),
+      canonicalUpdates: { ...eventStatusFixture(eventId, "active") },
+      effects: matchEffects(),
       createdAtMs: 100,
       updatedAtMs: 100,
     }),
@@ -122,7 +128,7 @@ function observeInviteControlReads() {
       get(target, property) {
         if (property === "prepare")
           return (query: string) => {
-            if (/^SELECT \* FROM invite_source_control\b/.test(query))
+            if (/^SELECT[^;]*\bFROM invite_source_control\b/.test(query))
               reads.push(query);
             return target.prepare(query);
           };
@@ -168,7 +174,7 @@ function fixture(profileGamesDb = testEnv.PROFILE_GAMES_DB) {
       expect(path.startsWith("invites/")).toBe(false);
       expect(path.startsWith("eventTransitionReceipts/")).toBe(false);
       if (hooks.failBeforePath === path) {
-        hooks.failBeforePath = undefined;
+        delete hooks.failBeforePath;
         throw new Error("state-before-create");
       }
       const current = structuredClone(values.get(path) ?? null);
@@ -186,7 +192,7 @@ function fixture(profileGamesDb = testEnv.PROFILE_GAMES_DB) {
       values.set(path, structuredClone(result.value));
       await hooks.afterWrite?.(path);
       if (hooks.failAfterPath === path) {
-        hooks.failAfterPath = undefined;
+        delete hooks.failAfterPath;
         throw new Error("state-ambiguous-create");
       }
       return {
@@ -236,7 +242,7 @@ function fixture(profileGamesDb = testEnv.PROFILE_GAMES_DB) {
       commitEventCompatibilityFixture(
         client,
         decodeEventUpdates({
-          [`events/${eventId}/status`]: "active",
+          ...eventStatusFixture(eventId, "active"),
           [`events/${eventId}/updatedAtMs`]: 200,
           ...matchEffects(),
           ...extra,
@@ -255,12 +261,12 @@ function fixture(profileGamesDb = testEnv.PROFILE_GAMES_DB) {
 async function count(table: string) {
   if (
     ![
-      "invite_sources",
+      "invite_sources_canonical",
       "invite_event_effect_receipts",
       "event_transition_receipts",
-      "login_match_discovery",
+      "login_match_discovery_canonical",
       "invite_source_write_admissions",
-      "match_presentation_registrations",
+      "match_presentation_registrations_canonical",
     ].includes(table)
   ) {
     throw new Error("unsupported-test-table");
@@ -290,6 +296,7 @@ describe("event transitions with canonical D1 invitation metadata", () => {
       testEnv.EVENT_DB,
       testEnv.TEST_EVENT_D1_MIGRATIONS,
     );
+    await activateEventApplicationFixture(testEnv.PROFILE_GAMES_DB);
   });
 
   beforeEach(async () => {
@@ -302,11 +309,13 @@ describe("event transitions with canonical D1 invitation metadata", () => {
       testEnv.PROFILE_GAMES_DB.prepare(
         "DROP TRIGGER IF EXISTS reject_event_source_discovery",
       ),
-      testEnv.PROFILE_GAMES_DB.prepare("DELETE FROM invite_sources"),
+      testEnv.PROFILE_GAMES_DB.prepare("DELETE FROM invite_sources_canonical"),
       testEnv.PROFILE_GAMES_DB.prepare(
         "DELETE FROM invite_event_effect_receipts",
       ),
-      testEnv.PROFILE_GAMES_DB.prepare("DELETE FROM login_match_discovery"),
+      testEnv.PROFILE_GAMES_DB.prepare(
+        "DELETE FROM login_match_discovery_canonical",
+      ),
       testEnv.PROFILE_GAMES_DB.prepare(
         "DELETE FROM invite_source_write_admissions",
       ),
@@ -321,12 +330,14 @@ describe("event transitions with canonical D1 invitation metadata", () => {
         "DROP TRIGGER IF EXISTS reject_event_source_finalization",
       ),
       testEnv.EVENT_DB.prepare(
-        "UPDATE event_records SET pending_transition_id = NULL",
+        "UPDATE event_records_canonical SET pending_transition_id = NULL",
       ),
-      testEnv.EVENT_DB.prepare("DELETE FROM event_transition_intents"),
+      testEnv.EVENT_DB.prepare(
+        "DELETE FROM event_transition_intents_canonical",
+      ),
       testEnv.EVENT_DB.prepare("DELETE FROM event_leases"),
       testEnv.EVENT_DB.prepare("DELETE FROM event_write_admissions"),
-      testEnv.EVENT_DB.prepare("DELETE FROM event_records"),
+      testEnv.EVENT_DB.prepare("DELETE FROM event_records_canonical"),
     ]);
     await resetEventReceiptTestState(
       testEnv.PROFILE_GAMES_DB,
@@ -347,7 +358,7 @@ describe("event transitions with canonical D1 invitation metadata", () => {
     );
     expect(observed.reads).toHaveLength(1);
     expect(f.writes).toEqual([hostPath, guestPath]);
-    expect(await count("invite_sources")).toBe(1);
+    expect(await count("invite_sources_canonical")).toBe(1);
     expect(await count("invite_event_effect_receipts")).toBe(1);
     expect(await count("event_transition_receipts")).toBe(1);
     expect(await count("invite_source_write_admissions")).toBe(0);
@@ -373,7 +384,7 @@ describe("event transitions with canonical D1 invitation metadata", () => {
         ),
       ).rejects.toThrow("invite-source-control-unavailable");
       expect(f.writes).toEqual([]);
-      expect(await count("invite_sources")).toBe(0);
+      expect(await count("invite_sources_canonical")).toBe(0);
       expect(await count("invite_source_write_admissions")).toBe(0);
     },
   );
@@ -382,8 +393,8 @@ describe("event transitions with canonical D1 invitation metadata", () => {
     const f = fixture();
     f.hooks.prepareMatchPresentations = async (creations) => {
       expect(creations).toHaveLength(4);
-      expect(await count("invite_sources")).toBe(0);
-      expect(await count("match_presentation_registrations")).toBe(0);
+      expect(await count("invite_sources_canonical")).toBe(0);
+      expect(await count("match_presentation_registrations_canonical")).toBe(0);
       for (const creation of creations) {
         expect(
           f.values.get(
@@ -399,14 +410,14 @@ describe("event transitions with canonical D1 invitation metadata", () => {
     };
     await f.create();
     await f.start(matchEffects("third-place-invite"));
-    expect(await count("invite_sources")).toBe(2);
+    expect(await count("invite_sources_canonical")).toBe(2);
     expect(await count("invite_event_effect_receipts")).toBe(1);
     expect(await count("event_transition_receipts")).toBe(1);
-    expect(await count("login_match_discovery")).toBe(4);
-    expect(await count("match_presentation_registrations")).toBe(4);
+    expect(await count("login_match_discovery_canonical")).toBe(4);
+    expect(await count("match_presentation_registrations_canonical")).toBe(4);
     expect(await count("invite_source_write_admissions")).toBe(0);
     expect((await f.source.read(inviteId)).value).toEqual(
-      matchEffects()[`invites/${inviteId}`],
+      inviteDocumentFixture(matchEffects()[`invites/${inviteId}`]!),
     );
     expect(f.values.get(hostPath)).toMatchObject({
       fen: "initial",
@@ -429,27 +440,27 @@ describe("event transitions with canonical D1 invitation metadata", () => {
       "match-presentation-capture-required",
     );
     expect(f.writes).toEqual([hostPath, guestPath]);
-    expect(await count("invite_sources")).toBe(0);
+    expect(await count("invite_sources_canonical")).toBe(0);
     expect(await count("invite_event_effect_receipts")).toBe(0);
-    expect(await count("match_presentation_registrations")).toBe(0);
+    expect(await count("match_presentation_registrations_canonical")).toBe(0);
     expect(
       await listPendingEventTransitionIntents(testEnv.EVENT_DB),
     ).toHaveLength(1);
     f.hooks.prepareMatchPresentations = (creations) =>
-      prepareCreatedMatchPresentations(env, creations);
+      prepareCreatedMatchPresentations(testEnv, creations);
     await f.recover();
-    expect(await count("invite_sources")).toBe(1);
-    expect(await count("match_presentation_registrations")).toBe(2);
+    expect(await count("invite_sources_canonical")).toBe(1);
+    expect(await count("match_presentation_registrations_canonical")).toBe(2);
     expect(
-      await readRegisteredMatchPresentations(env, inviteId, inviteId),
+      await readRegisteredMatchPresentations(testEnv, inviteId, inviteId),
     ).toMatchObject({
       matchId: inviteId,
       players: {
-        host: { actorUid: "host", emojiId: 2, aura: "host-aura", revision: 0 },
+        host: { actorUid: "host", emojiId: 2, aura: "rainbow", revision: 0 },
         guest: {
           actorUid: "guest",
           emojiId: 3,
-          aura: "guest-aura",
+          aura: "none",
           revision: 0,
         },
       },
@@ -480,8 +491,8 @@ describe("event transitions with canonical D1 invitation metadata", () => {
     await expect(f.start()).rejects.toThrow("appearance-unavailable");
     expect(f.writes).toEqual([hostPath, guestPath]);
     expect(await count("event_transition_receipts")).toBe(1);
-    expect(await count("invite_sources")).toBe(0);
-    expect(await count("match_presentation_registrations")).toBe(0);
+    expect(await count("invite_sources_canonical")).toBe(0);
+    expect(await count("match_presentation_registrations_canonical")).toBe(0);
     expect(
       await listPendingEventTransitionIntents(testEnv.EVENT_DB),
     ).toHaveLength(1);
@@ -494,8 +505,8 @@ describe("event transitions with canonical D1 invitation metadata", () => {
       emojiId: 9,
       aura: "edited",
     });
-    expect(await count("match_presentation_registrations")).toBe(2);
-    expect(await count("invite_sources")).toBe(1);
+    expect(await count("match_presentation_registrations_canonical")).toBe(2);
+    expect(await count("invite_sources_canonical")).toBe(1);
     expect(f.writes).toEqual([hostPath, guestPath]);
     expect(f.reads).toEqual([]);
     expect(await listPendingEventTransitionIntents(testEnv.EVENT_DB)).toEqual(
@@ -525,7 +536,7 @@ describe("event transitions with canonical D1 invitation metadata", () => {
       const [pending] = await listPendingEventTransitionIntents(
         testEnv.EVENT_DB,
       );
-      expect(pending.schemaVersion).toBe(2);
+      expect(pending!.schemaVersion).toBe(3);
       const stored = f.values.get(hostPath);
       expect(record(stored)).toBe(true);
       if (!record(stored)) throw new Error("missing-host-match");
@@ -534,7 +545,7 @@ describe("event transitions with canonical D1 invitation metadata", () => {
         fen: "advanced",
         flatMovesString: "first-move",
       });
-      expect(await count("invite_sources")).toBe(0);
+      expect(await count("invite_sources_canonical")).toBe(0);
       expect(await count("invite_event_effect_receipts")).toBe(0);
       expect(await count("event_transition_receipts")).toBe(
         failure === "after-receipt" ? 1 : 0,
@@ -548,8 +559,8 @@ describe("event transitions with canonical D1 invitation metadata", () => {
         flatMovesString: "first-move",
       });
       expect(f.writes.filter((path) => path === hostPath)).toHaveLength(1);
-      expect(await count("invite_sources")).toBe(1);
-      expect(await count("login_match_discovery")).toBe(2);
+      expect(await count("invite_sources_canonical")).toBe(1);
+      expect(await count("login_match_discovery_canonical")).toBe(2);
       expect(await f.recover()).toBe(0);
     });
   }
@@ -561,25 +572,25 @@ describe("event transitions with canonical D1 invitation metadata", () => {
     await f.create();
     await testEnv.PROFILE_GAMES_DB.prepare(
       `CREATE TRIGGER reject_event_source_discovery
-       BEFORE INSERT ON login_match_discovery
+       BEFORE INSERT ON login_match_discovery_canonical
        BEGIN SELECT RAISE(ABORT, 'event-source-discovery-failed'); END`,
     ).run();
     await expect(f.start(matchEffects("second-invite"))).rejects.toThrow(
       "event-source-discovery-failed",
     );
-    expect(await count("invite_sources")).toBe(0);
+    expect(await count("invite_sources_canonical")).toBe(0);
     expect(await count("invite_event_effect_receipts")).toBe(0);
-    expect(await count("match_presentation_registrations")).toBe(0);
+    expect(await count("match_presentation_registrations_canonical")).toBe(0);
     const writes = f.writes.length;
     await testEnv.PROFILE_GAMES_DB.prepare(
       "DROP TRIGGER reject_event_source_discovery",
     ).run();
     await f.recover();
     expect(f.writes).toHaveLength(writes);
-    expect(await count("invite_sources")).toBe(2);
+    expect(await count("invite_sources_canonical")).toBe(2);
     expect(await count("invite_event_effect_receipts")).toBe(1);
-    expect(await count("login_match_discovery")).toBe(4);
-    expect(await count("match_presentation_registrations")).toBe(4);
+    expect(await count("login_match_discovery_canonical")).toBe(4);
+    expect(await count("match_presentation_registrations_canonical")).toBe(4);
   });
 
   it("uses the committed D1 effect receipt when EVENT_DB finalization must be retried", async () => {
@@ -587,15 +598,15 @@ describe("event transitions with canonical D1 invitation metadata", () => {
     await f.create();
     await testEnv.EVENT_DB.prepare(
       `CREATE TRIGGER reject_event_source_finalization
-       BEFORE UPDATE OF revision ON event_records WHEN NEW.revision > OLD.revision
+       BEFORE UPDATE OF revision ON event_records_canonical WHEN NEW.revision > OLD.revision
        BEGIN SELECT RAISE(ABORT, 'event-finalization-failed'); END`,
     ).run();
     await expect(f.start()).rejects.toThrow("event-d1-integrity");
-    expect(await count("invite_sources")).toBe(1);
+    expect(await count("invite_sources_canonical")).toBe(1);
     expect(await count("invite_event_effect_receipts")).toBe(1);
     const writes = f.writes.length;
     const reads = f.reads.length;
-    expect(await count("match_presentation_registrations")).toBe(2);
+    expect(await count("match_presentation_registrations_canonical")).toBe(2);
     await testEnv.EVENT_DB.prepare(
       "DROP TRIGGER reject_event_source_finalization",
     ).run();
@@ -603,7 +614,7 @@ describe("event transitions with canonical D1 invitation metadata", () => {
     expect(f.writes).toHaveLength(writes);
     expect(f.reads).toHaveLength(reads);
     expect((await f.source.read(inviteId)).revision).toBe(1);
-    expect(await count("match_presentation_registrations")).toBe(2);
+    expect(await count("match_presentation_registrations_canonical")).toBe(2);
     expect(await readEventSnapshot(testEnv.EVENT_DB, eventId)).toMatchObject({
       event: { status: "active" },
       revision: 2,
@@ -650,24 +661,27 @@ describe("event transitions with canonical D1 invitation metadata", () => {
     f.values.set(startPath, { pending: true });
     await testEnv.PROFILE_GAMES_DB.prepare(
       `CREATE TRIGGER reject_event_source_discovery
-       BEFORE INSERT ON login_match_discovery
+       BEFORE INSERT ON login_match_discovery_canonical
        BEGIN SELECT RAISE(ABORT, 'event-source-discovery-failed'); END`,
     ).run();
     await expect(
       f.start({
-        [timerPath]: "gg",
+        [timerPath]: { state: "finished" },
         [claimPath]: {
           status: "claimed",
           claimedAtMs: 100,
           inviteId,
           playerId: "host",
           opponentId: "guest",
+          timer: "1;90",
+          turnNumber: 1,
+          expiresAtMs: null,
         },
         [startPath]: null,
       }),
     ).rejects.toThrow("event-source-discovery-failed");
     expect(await count("event_transition_receipts")).toBe(1);
-    expect(f.values.get(timerPath)).toBe("gg");
+    expect(f.values.get(timerPath)).toEqual({ state: "finished" });
     const laterClaim = { status: "claimed", claimedAtMs: 300, processed: true };
     f.values.set(claimPath, laterClaim);
     f.values.set(startPath, { nextGeneration: true });
@@ -677,7 +691,7 @@ describe("event transitions with canonical D1 invitation metadata", () => {
     ).run();
     await f.recover();
     expect(f.writes).toHaveLength(writes);
-    expect(f.values.get(timerPath)).toBe("gg");
+    expect(f.values.get(timerPath)).toEqual({ state: "finished" });
     expect(f.values.get(claimPath)).toEqual(laterClaim);
     expect(f.values.get(startPath)).toEqual({ nextGeneration: true });
   });
@@ -704,7 +718,7 @@ describe("event transitions with canonical D1 invitation metadata", () => {
     );
     expect(f.writes).toEqual([]);
     expect(f.reads).toEqual([]);
-    expect(await count("invite_sources")).toBe(0);
+    expect(await count("invite_sources_canonical")).toBe(0);
   });
 
   it("requires exact match-effect proof even when the final invite receipt exists", async () => {
@@ -713,12 +727,13 @@ describe("event transitions with canonical D1 invitation metadata", () => {
     f.hooks.failBeforePath = guestPath;
     await expect(f.start()).rejects.toThrow("state-before-create");
     const [pending] = await listPendingEventTransitionIntents(testEnv.EVENT_DB);
-    if (pending.schemaVersion !== 2) throw new Error("missing-v2-intent");
+    if (pending!.schemaVersion !== 3)
+      throw new Error("missing-canonical-intent");
     await testEnv.PROFILE_GAMES_DB.prepare(
       `INSERT INTO invite_event_effect_receipts
        (transition_id, event_id, payload_digest, applied_at_ms) VALUES (?, ?, ?, ?)`,
     )
-      .bind(pending.transitionId, eventId, pending.payloadDigest, 100)
+      .bind(pending!.transitionId, eventId, pending!.payloadDigest, 100)
       .run();
     await expect(f.recover()).rejects.toThrow(
       "event-transition-recovery-failed",
@@ -738,7 +753,7 @@ describe("event transitions with canonical D1 invitation metadata", () => {
       sessionCreation: "other",
     });
     await expect(f.start()).rejects.toThrow("event-match-creation-conflict");
-    expect(await count("invite_sources")).toBe(0);
+    expect(await count("invite_sources_canonical")).toBe(0);
     expect(await count("invite_event_effect_receipts")).toBe(0);
     expect(f.writes).toEqual([]);
     expect(f.values.get(hostPath)).toEqual({
@@ -751,13 +766,14 @@ describe("event transitions with canonical D1 invitation metadata", () => {
     const f = fixture();
     await f.create();
     for (const owner of [undefined, "another-event", eventId]) {
-      const initial = {
+      const initial = inviteDocumentFixture({
         hostId: "existing-host",
         hostColor: "black",
-        ...(owner ? { eventId: owner } : {}),
-      };
+        ...(owner ? { eventId: owner, guestId: "existing-guest" } : {}),
+      });
+      const { sessionTransition: _transition, ...initialFields } = initial;
       const mutations = await f.source.preparePatch({
-        [`invites/${inviteId}`]: initial,
+        [`invites/${inviteId}`]: initialFields,
       });
       await testEnv.PROFILE_GAMES_DB.batch(
         f.source.buildCommitStatements(mutations),
@@ -767,7 +783,9 @@ describe("event transitions with canonical D1 invitation metadata", () => {
           ? "event-transition-invite-already-exists"
           : "event-transition-invite-owner-conflict",
       );
-      expect((await f.source.read(inviteId)).value).toEqual(initial);
+      expect((await f.source.read(inviteId)).value).toEqual(
+        inviteDocumentFixture(initial),
+      );
       expect(f.writes).toEqual([]);
       expect(await count("invite_event_effect_receipts")).toBe(0);
     }
@@ -778,21 +796,21 @@ describe("event transitions with canonical D1 invitation metadata", () => {
     await f.create();
     f.hooks.afterWrite = async (path) => {
       if (path !== hostPath) return;
-      f.hooks.afterWrite = undefined;
+      delete f.hooks.afterWrite;
       await testEnv.PROFILE_GAMES_DB.prepare(
         "UPDATE invite_source_control SET state = 'frozen', freeze_generation = freeze_generation + 1 WHERE singleton = 1",
       ).run();
     };
     await expect(f.start()).rejects.toThrow();
     expect(f.writes).toEqual([hostPath, guestPath]);
-    expect(await count("invite_sources")).toBe(0);
+    expect(await count("invite_sources_canonical")).toBe(0);
     expect(await count("invite_source_write_admissions")).toBe(0);
     await testEnv.PROFILE_GAMES_DB.prepare(
       "UPDATE invite_source_control SET state = 'active' WHERE singleton = 1",
     ).run();
     expect(await f.recover()).toBe(1);
     expect(f.writes.filter((path) => path === hostPath)).toHaveLength(1);
-    expect(await count("invite_sources")).toBe(1);
+    expect(await count("invite_sources_canonical")).toBe(1);
   });
 
   it("fails closed on a conflicting immutable D1 effect receipt", async () => {
@@ -801,14 +819,15 @@ describe("event transitions with canonical D1 invitation metadata", () => {
     f.hooks.failBeforePath = guestPath;
     await expect(f.start()).rejects.toThrow("state-before-create");
     const [pending] = await listPendingEventTransitionIntents(testEnv.EVENT_DB);
-    if (pending.schemaVersion !== 2) throw new Error("missing-v2-intent");
+    if (pending!.schemaVersion !== 3)
+      throw new Error("missing-canonical-intent");
     await ensureEventTransitionReceipt(
       testEnv.PROFILE_GAMES_DB,
       {
         schemaVersion: 2,
-        transitionId: pending.transitionId,
-        eventId: pending.eventId,
-        expectedRevision: pending.expectedRevision,
+        transitionId: pending!.transitionId,
+        eventId: pending!.eventId,
+        expectedRevision: pending!.expectedRevision,
         payloadDigest: "f".repeat(64),
       },
       { recordedAtMs: 100, guards: () => [] },
@@ -817,26 +836,26 @@ describe("event transitions with canonical D1 invitation metadata", () => {
       "event-transition-recovery-failed",
     );
     expect(f.writes).toEqual([hostPath]);
-    expect(await count("invite_sources")).toBe(0);
+    expect(await count("invite_sources_canonical")).toBe(0);
     expect(await count("invite_event_effect_receipts")).toBe(0);
     expect(
       await readEventTransitionReceipt(
         testEnv.PROFILE_GAMES_DB,
-        pending.transitionId,
+        pending!.transitionId,
       ),
     ).toMatchObject({ payloadDigest: "f".repeat(64) });
   });
 
-  it("rejects v1 effects after activation and malformed v2 persisted intents", async () => {
+  it("rejects legacy effects and malformed canonical persisted intents", async () => {
     const f = fixture();
     await f.create();
     const legacy = {
-      schemaVersion: 1 as const,
+      schemaVersion: 3 as const,
       transitionId: "legacy-event-transition",
       eventId,
       expectedRevision: 1,
-      canonicalUpdates: { [`events/${eventId}/status`]: "active" },
-      rtdbEffects: matchEffects(),
+      canonicalUpdates: { ...eventStatusFixture(eventId, "active") },
+      effects: matchEffects(),
       createdAtMs: 100,
       updatedAtMs: 100,
     };
@@ -844,7 +863,7 @@ describe("event transitions with canonical D1 invitation metadata", () => {
     try {
       const prepared = await prepareInviteEventIntent(
         testEnv.PROFILE_GAMES_DB,
-        eventIntentFixture(legacy),
+        eventDraftFixture(legacy),
       );
       await expect(
         createEventTransitionIntent(
@@ -861,29 +880,29 @@ describe("event transitions with canonical D1 invitation metadata", () => {
           { admission },
         ),
       ).rejects.toThrow("invalid-event-transition");
-      await createEventTransitionIntent(
-        testEnv.EVENT_DB,
-        eventIntentFixture(legacy),
-        {
-          admission,
-        },
-      );
+      await expect(
+        createEventTransitionIntent(
+          testEnv.EVENT_DB,
+          retainedEventIntentFixture({ ...prepared, schemaVersion: 2 }),
+          { admission },
+        ),
+      ).rejects.toThrow("invalid-event-transition");
     } finally {
       await releaseEventWriteAdmission(testEnv.EVENT_DB, admission);
     }
-    await expect(f.recover()).rejects.toThrow(
-      "event-transition-recovery-failed",
-    );
+    await expect(f.recover()).resolves.toBe(0);
     expect(f.reads).toEqual([]);
     expect(f.writes).toEqual([]);
   });
 
-  it("preserves specific timer cleanup effects and fences source freezes", async () => {
+  it("accepts historical timer cleanup with the retired D1 timer table absent and fences source freezes", async () => {
     const f = fixture();
     await f.create();
-    await testEnv.PROFILE_GAMES_DB.prepare(
-      "INSERT INTO match_timer_starts(player_id,match_id,timer,turn_number,updated_at_ms) VALUES('timer-match','host','pending',0,1)",
-    ).run();
+    expect(
+      await testEnv.PROFILE_GAMES_DB.prepare(
+        "SELECT COUNT(*) AS count FROM sqlite_schema WHERE type = 'table' AND name = 'match_timer_starts_canonical'",
+      ).first<number>("count"),
+    ).toBe(0);
     await commitEventCompatibilityFixture(
       f.client,
       decodeEventUpdates({
@@ -893,9 +912,14 @@ describe("event transitions with canonical D1 invitation metadata", () => {
     );
     expect(
       await testEnv.PROFILE_GAMES_DB.prepare(
-        "SELECT COUNT(*) AS count FROM match_timer_starts WHERE player_id='timer-match' AND match_id='host'",
+        "SELECT COUNT(*) AS count FROM sqlite_schema WHERE type = 'table' AND name = 'match_timer_starts_canonical'",
       ).first<number>("count"),
     ).toBe(0);
+    expect(f.writes).toEqual([]);
+    expect(await readEventSnapshot(testEnv.EVENT_DB, eventId)).toMatchObject({
+      event: { updatedAtMs: 200 },
+      revision: 2,
+    });
     expect(await count("invite_event_effect_receipts")).toBe(1);
     await testEnv.PROFILE_GAMES_DB.prepare(
       "UPDATE invite_source_control SET state = 'frozen', freeze_generation = freeze_generation + 1 WHERE singleton = 1",

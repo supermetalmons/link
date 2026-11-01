@@ -18,15 +18,9 @@ registerHooks({
 const { createEventPrizeSelectionCoordinator } =
   await import("../src/ui/event/prizeSelectionCoordinator.ts");
 
-const deferred = () => {
-  let resolve;
-  let reject;
-  const promise = new Promise((resolvePromise, rejectPromise) => {
-    resolve = resolvePromise;
-    reject = rejectPromise;
-  });
-  return { promise, reject, resolve };
-};
+/** @typedef {Parameters<typeof createEventPrizeSelectionCoordinator>[0]} Dependencies */
+/** @returns {PromiseWithResolvers<Awaited<ReturnType<Dependencies["mutate"]>>>} */
+const deferred = () => Promise.withResolvers();
 
 const flushPromises = async () => {
   await Promise.resolve();
@@ -34,9 +28,13 @@ const flushPromises = async () => {
 };
 
 const createHarness = () => {
+  /** @type {(ReturnType<typeof deferred> & { prizeId: Parameters<Dependencies["mutate"]>[0] })[]} */
   const mutations = [];
+  /** @type {boolean[]} */
   const pendingStates = [];
+  /** @type {Parameters<Dependencies["onSelectionsChange"]>[0][]} */
   const selections = [];
+  /** @type {Parameters<NonNullable<Dependencies["onError"]>>[0][]} */
   const errors = [];
   const coordinator = createEventPrizeSelectionCoordinator({
     profileId: "local",
@@ -49,7 +47,20 @@ const createHarness = () => {
     onPendingChange: (isPending) => pendingStates.push(isPending),
     onSelectionsChange: (nextSelections) => selections.push(nextSelections),
   });
-  return { coordinator, errors, mutations, pendingStates, selections };
+  /** @param {number} index */
+  const mutation = (index) => {
+    const value = mutations[index];
+    assert.ok(value);
+    return value;
+  };
+  return {
+    coordinator,
+    errors,
+    mutations,
+    pendingStates,
+    selections,
+    mutation,
+  };
 };
 
 test("applies a local selection immediately and merges remote updates", async () => {
@@ -73,7 +84,7 @@ test("applies a local selection immediately and merges remote updates", async ()
     remote: "1514",
   });
 
-  harness.mutations[0].resolve("1092");
+  harness.mutation(0).resolve("1092");
   await flushPromises();
   assert.deepEqual(harness.pendingStates, [true, false]);
   const emittedCount = harness.selections.length;
@@ -93,7 +104,7 @@ test("keeps a newer authoritative selection after a delayed response", async () 
   harness.coordinator.receiveAuthoritative({ local: "1111" });
 
   assert.deepEqual(harness.selections.at(-1), { local: "1092" });
-  harness.mutations[0].resolve("1092");
+  harness.mutation(0).resolve("1092");
   await flushPromises();
 
   assert.deepEqual(harness.selections.at(-1), { local: "1111" });
@@ -113,7 +124,7 @@ test("coalesces rapid moves and deselection to the latest intent", async () => {
     ["1092"],
   );
 
-  harness.mutations[0].resolve("1092");
+  harness.mutation(0).resolve("1092");
   await flushPromises();
   assert.deepEqual(
     harness.mutations.map(({ prizeId }) => prizeId),
@@ -122,7 +133,7 @@ test("coalesces rapid moves and deselection to the latest intent", async () => {
   assert.deepEqual(harness.selections.at(-1), {});
   assert.deepEqual(harness.pendingStates, [true]);
 
-  harness.mutations[1].resolve(null);
+  harness.mutation(1).resolve(null);
   await flushPromises();
   assert.deepEqual(harness.selections.at(-1), {});
   assert.deepEqual(harness.pendingStates, [true, false]);
@@ -134,7 +145,7 @@ test("serializes a rapid move to the latest selected prize", async () => {
   harness.coordinator.toggle("1092");
   harness.coordinator.toggle("1111");
 
-  harness.mutations[0].resolve("1092");
+  harness.mutation(0).resolve("1092");
   await flushPromises();
   assert.deepEqual(
     harness.mutations.map(({ prizeId }) => prizeId),
@@ -142,7 +153,7 @@ test("serializes a rapid move to the latest selected prize", async () => {
   );
   assert.deepEqual(harness.selections.at(-1), { local: "1111" });
 
-  harness.mutations[1].resolve("1111");
+  harness.mutation(1).resolve("1111");
   await flushPromises();
   assert.deepEqual(harness.selections.at(-1), { local: "1111" });
   assert.deepEqual(harness.pendingStates, [true, false]);
@@ -159,12 +170,12 @@ test("exposes pending work synchronously until the queued selection settles", as
   harness.coordinator.receiveAuthoritative({});
   assert.equal(harness.coordinator.isPending(), true);
 
-  harness.mutations[0].resolve("1092");
+  harness.mutation(0).resolve("1092");
   await flushPromises();
   assert.equal(harness.coordinator.isPending(), true);
-  assert.equal(harness.mutations[1].prizeId, "1111");
+  assert.equal(harness.mutation(1).prizeId, "1111");
 
-  harness.mutations[1].resolve("1111");
+  harness.mutation(1).resolve("1111");
   await flushPromises();
   assert.equal(harness.coordinator.isPending(), false);
 });
@@ -186,7 +197,7 @@ test("rolls back a failed mutation to the newest authoritative state", async () 
     local: "1514",
     remote: "1514",
   });
-  harness.mutations[0].reject(failure);
+  harness.mutation(0).reject(failure);
   await flushPromises();
 
   assert.deepEqual(harness.selections.at(-1), {
@@ -207,7 +218,7 @@ test("ignores mutation completions and snapshots after disposal", async () => {
 
   harness.coordinator.dispose();
   assert.equal(harness.coordinator.isPending(), false);
-  harness.mutations[0].resolve("1092");
+  harness.mutation(0).resolve("1092");
   await flushPromises();
   harness.coordinator.receiveAuthoritative({ local: "1111" });
   harness.coordinator.toggle("1514");

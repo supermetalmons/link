@@ -1,8 +1,8 @@
-import { withdrawalFixture } from "./withdrawalStorageFixture.ts";
+import { canonicalWithdrawalFixture as withdrawalFixture } from "./canonicalWithdrawalFixture.ts";
 import { eventDocumentFixture } from "./eventCompatibilityFixture.ts";
 import type { EventPrizeAssignmentRecord } from "../../../runtime/eventReads.js";
 import type { EventCommitPlan } from "../../../runtime/eventCommands.js";
-import { encodeEventUpdates } from "../src/eventCompatibilityCodec.ts";
+import { encodeEventUpdates } from "./eventLegacyFixtureCodec.ts";
 import { attachEventTestPorts } from "./eventTestPorts.ts";
 import assert from "node:assert/strict";
 import test from "node:test";
@@ -58,7 +58,7 @@ function prizeOwnership(
         profileId,
         {
           profile: {
-            aura: "",
+            aura: "none",
             emoji: 1,
             eth: "",
             profileId,

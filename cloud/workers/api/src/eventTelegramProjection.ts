@@ -22,6 +22,7 @@ import {
   type EventTelegramDesiredChange,
   isV2TelegramEvent,
   loadEndedMatchResults,
+  EVENT_TELEGRAM_PROJECTION_LOCK_ROOT,
 } from "../../../runtime/telegram/eventProjectionCore.js";
 import {
   createEventLockManagerCore,
@@ -130,7 +131,7 @@ async function commitFencedDesiredUpdate(
   messageKey: string,
   value: EventTelegramDesiredChange["value"],
   generation: number,
-  expectedApplied?: TelegramAppliedDocument,
+  expectedApplied?: TelegramAppliedDocument | null,
 ): Promise<boolean | "deferred"> {
   const result = await telegram.transactMessage(messageKey, (current) =>
     projectEventMessage(current, value, generation, expectedApplied),
@@ -240,9 +241,16 @@ export async function processEventProjectionTask(
       projection,
     });
     if (!changes) throw new Error("event-telegram-projection-changes-missing");
+    const lockGuard = lockManager.getEventLockGuard(lockHandle);
+    if (lockGuard.lockRoot !== EVENT_TELEGRAM_PROJECTION_LOCK_ROOT)
+      throw new TypeError("invalid-event-telegram-projection-lock");
     const guarded = addEventTelegramProjectionGuard({
       changes,
-      guard: { ...lockManager.getEventLockGuard(lockHandle), generation },
+      guard: {
+        ...lockGuard,
+        lockRoot: EVENT_TELEGRAM_PROJECTION_LOCK_ROOT,
+        generation,
+      },
     });
     const refreshLock = async () => {
       if (!(await lockManager.refreshEventLock(lockHandle))) {
@@ -270,7 +278,9 @@ export async function processEventProjectionTask(
           messageKey,
           value,
           generation,
-          editable ? messageAppliedDocument(editable.message) : undefined,
+          editable
+            ? (messageAppliedDocument(editable.message) ?? null)
+            : undefined,
         );
         if (committed === "deferred") {
           deferredTextFields.add(editable!.textField);

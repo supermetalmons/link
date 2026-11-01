@@ -13,10 +13,7 @@ export type EventTransitionReceipt = ReceiptIdentity &
     | { schemaVersion: 2; payloadDigest: string }
   );
 
-declare const retainedEventReceipt: unique symbol;
-export type RetainedEventTransitionReceipt = EventTransitionReceipt & {
-  readonly [retainedEventReceipt]: true;
-};
+export type RetainedEventTransitionReceipt = EventTransitionReceipt;
 
 export type EventTransitionReceiptRow = {
   transition_id: string;
@@ -55,7 +52,19 @@ export function parseEventTransitionReceipt(
   if (!value || typeof value !== "object" || Array.isArray(value))
     return fail();
   const record = value as Record<string, unknown>;
+  const allowed =
+    record.schemaVersion === 1
+      ? ["schemaVersion", "transitionId", "eventId", "expectedRevision"]
+      : [
+          "schemaVersion",
+          "transitionId",
+          "eventId",
+          "expectedRevision",
+          "payloadDigest",
+        ];
   if (
+    Object.keys(record).length !== allowed.length ||
+    allowed.some((field) => !Object.hasOwn(record, field)) ||
     (record.schemaVersion !== 1 && record.schemaVersion !== 2) ||
     !safeKey(record.transitionId) ||
     !safeKey(record.eventId) ||
@@ -67,12 +76,14 @@ export function parseEventTransitionReceipt(
         !/^[a-f0-9]{64}$/.test(record.payloadDigest)))
   )
     return fail();
-  try {
-    const retained: unknown = JSON.parse(canonicalJson(value));
-    return retained as RetainedEventTransitionReceipt;
-  } catch {
-    return fail();
-  }
+  const identity = {
+    transitionId: record.transitionId,
+    eventId: record.eventId,
+    expectedRevision: record.expectedRevision,
+  };
+  if (record.schemaVersion === 1) return { schemaVersion: 1, ...identity };
+  if (typeof record.payloadDigest !== "string") return fail();
+  return { schemaVersion: 2, ...identity, payloadDigest: record.payloadDigest };
 }
 
 export function serializeEventTransitionReceipt(value: unknown): string {

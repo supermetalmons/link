@@ -1,3 +1,4 @@
+import { createEmptyWager, type WagerRecord } from "../src/wagerModel.ts";
 import { inviteDocumentFixture } from "../test/inviteDocumentFixture.ts";
 import type { D1Migration } from "cloudflare:test";
 import { env } from "cloudflare:workers";
@@ -25,10 +26,15 @@ import {
 } from "../src/wagerStateRepository.ts";
 import { observeD1FailureDatabase } from "./d1FailureTestUtils.ts";
 import { applyRetiredProfileMigrations } from "./profileTestMigrations.ts";
+import { preCleanupTestMigrations } from "./canonicalTestMigrations.ts";
 const migrations = (env as Env & { TEST_PROFILE_D1_MIGRATIONS: D1Migration[] })
   .TEST_PROFILE_D1_MIGRATIONS;
 const db = env.PROFILE_DB;
 const now = () => 2_000_000;
+const record = (label: string): WagerRecord => ({
+  ...createEmptyWager(),
+  proposedBy: { [label]: true },
+});
 const key = (inviteId: string): WagerKey => ({ inviteId, matchId: inviteId });
 function proposal(
   playerUid = "host",
@@ -150,7 +156,7 @@ describe("canonical wager state", () => {
       await store.commit([
         {
           current: await store.read(id),
-          value: { wager: { snapshot: "before" }, resolutionMarker: false },
+          value: { wager: record("before"), resolutionMarker: false },
         },
       ]);
       const before = await store.read(id);
@@ -162,7 +168,7 @@ describe("canonical wager state", () => {
           await store.commit([
             {
               current: before,
-              value: { wager: { snapshot: "after" }, resolutionMarker: true },
+              value: { wager: record("after"), resolutionMarker: true },
             },
           ]),
         ).toBe(true);
@@ -170,12 +176,12 @@ describe("canonical wager state", () => {
       const snapshot = await createWagerStateReader(
         observed.database,
       ).readWagerSnapshot(id);
-      expect(snapshot.wager?.raw).toEqual({ snapshot: "before" });
+      expect(snapshot.wager).toEqual(record("before"));
       expect(snapshot.resolutionMarker).toBe(false);
       expect(observed.queries).toHaveLength(1);
       expect(observed.sessions).toEqual(["first-primary"]);
       const latest = await createWagerStateReader(db).readWagerSnapshot(id);
-      expect(latest.wager?.raw).toEqual({ snapshot: "after" });
+      expect(latest.wager).toEqual(record("after"));
       expect(latest.resolutionMarker).toBe(true);
     });
   });
@@ -197,29 +203,30 @@ describe("canonical wager state", () => {
       const commit = store.commit([
         {
           current: valid,
-          value: { wager: { retained: true }, resolutionMarker: null },
+          value: { wager: record("retained"), resolutionMarker: null },
         },
         {
           current: invalid,
-          value: { wager: { nested: Infinity }, resolutionMarker: null },
+          value: {
+            wager: { nested: Infinity } as unknown as WagerRecord,
+            resolutionMarker: null,
+          },
         },
       ]);
       await expect(commit).rejects.toBeInstanceOf(TypeError);
       await expect(commit).rejects.toHaveProperty(
         "message",
-        "invalid-wager-state-json",
+        "invalid-canonical-wager",
       );
       expect(await store.read(valid)).toEqual(valid);
       expect(await store.read(invalid)).toEqual(invalid);
     });
   });
-  it("preserves JSON payload bytes and SQL null without normalizing values", async () => {
+  it("preserves canonical JSON payload bytes and explicit SQL null", async () => {
     await withWriter(async (writeGuards) => {
       const store = createWagerStateD1Store(db, { writeGuards, now });
       const id = key("json-encoding");
-      const sparse = new Array(3);
-      sparse[1] = { z: 2, a: 1 };
-      const wager = { retained: null, empty: {}, sparse };
+      const wager = record("encoded");
       Object.setPrototypeOf(wager, null);
       expect(
         await store.commit([
@@ -232,13 +239,12 @@ describe("canonical wager state", () => {
       const readPayload = () =>
         db
           .prepare(
-            "SELECT wager_json FROM invite_wager_states WHERE invite_id = ? AND match_id = ?",
+            "SELECT wager_json FROM invite_wager_states_canonical WHERE invite_id = ? AND match_id = ?",
           )
           .bind(id.inviteId, id.matchId)
           .first<{ wager_json: string | null }>();
       expect(await readPayload()).toEqual({
-        wager_json:
-          '{"retained":null,"empty":{},"sparse":[null,{"z":2,"a":1},null]}',
+        wager_json: JSON.stringify(wager),
       });
       expect(
         await store.commit([
@@ -251,7 +257,7 @@ describe("canonical wager state", () => {
       expect(await readPayload()).toEqual({ wager_json: null });
     });
   });
-  it("commits completion and its marker atomically, preserves extensions, and retains deletion revisions", async () => {
+  it("commits completion and its marker atomically and retains deletion revisions", async () => {
     await withWriter(async (writeGuards) => {
       const notices: boolean[] = [];
       const writer = createWagerStateRepository(db, {
@@ -263,35 +269,14 @@ describe("canonical wager state", () => {
       });
       const store = createWagerStateD1Store(db, { writeGuards, now });
       const id = key("atomic");
-      const initial = await store.read(id);
       await store.commit([
         {
-          current: initial,
-          value: {
-            wager: { retained: { ids: ["first", "second"] } },
-            resolutionMarker: null,
-          },
+          current: await store.read(id),
+          value: { wager: record("retained"), resolutionMarker: null },
         },
       ]);
       const claimed = await writer.claimSettlement(id, claim);
       expect(claimed.committed).toBe(true);
-      const pending = await store.read(id);
-      const wager = pending.wager as Record<string, unknown>;
-      await store.commit([
-        {
-          current: pending,
-          value: {
-            wager: {
-              ...wager,
-              settlement: {
-                ...(wager.settlement as Record<string, unknown>),
-                extension: { retained: null },
-              },
-            },
-            resolutionMarker: null,
-          },
-        },
-      ]);
       const settlement = readStoredSettlement(claimed.value)!;
       const completed = await writer.completeSettlement(id, {
         settlement,
@@ -300,26 +285,12 @@ describe("canonical wager state", () => {
       });
       expect(completed.committed).toBe(true);
       expect((await writer.readWagerSnapshot(id)).resolutionMarker).toBe(true);
-      expect((await writer.readWager(id))?.raw).toMatchObject({
-        retained: { ids: ["first", "second"] },
-        settlement: {
-          state: "completed",
-          completedAtMs: now() + 1,
-          extension: { retained: null },
-        },
+      expect(await writer.readWager(id)).toMatchObject({
+        state: "settled",
+        proposedBy: { retained: true },
+        settlement: { state: "completed", completedAtMs: now() + 1 },
       });
-      const row = await db
-        .prepare(
-          "SELECT revision,resolution_marker,wager_json FROM invite_wager_states WHERE invite_id='atomic'",
-        )
-        .first<{
-          revision: number;
-          resolution_marker: number;
-          wager_json: string;
-        }>();
-      expect(row?.revision).toBe(4);
-      expect(row?.resolution_marker).toBe(1);
-      expect(JSON.parse(row!.wager_json).settlement.state).toBe("completed");
+      expect((await store.read(id)).revision).toBe(3);
       expect(
         await writer.completeSettlement(id, {
           settlement,
@@ -337,51 +308,57 @@ describe("canonical wager state", () => {
         ]),
       ).toBe(true);
       expect(await writer.readWager(id)).toBeNull();
-      expect((await store.read(id)).revision).toBe(5);
+      expect((await store.read(id)).revision).toBe(4);
       expect(
         await store.commit([
           {
             current: beforeDelete,
-            value: { wager: { stale: true }, resolutionMarker: true },
+            value: { wager: record("stale"), resolutionMarker: true },
           },
         ]),
       ).toBe(false);
       expect(notices).toEqual([true, true]);
     });
   });
-  it("reads canonical invite wager data without a fallback and masks retained source values when composing", async () => {
+  it("composes canonical invite metadata with separate canonical wager state", async () => {
     await withWriter(async (writeGuards) => {
       const writer = createWagerStateRepository(db, { writeGuards, now });
       await writer.sendProposal(key("composed"), proposal());
       const store = createWagerStateD1Store(db);
       const states = await store.readInvite("composed");
-      const composed = composeInviteWagerSource(
-        inviteDocumentFixture({
-          hostId: "host",
-          guestId: "guest",
-          wagers: { legacy: { agreed: { count: 99 } } },
-          matchesWagerResolutions: { legacy: true },
-        }),
-        states,
-        false,
-      );
-      expect(composed).toEqual({
+      const invite = inviteDocumentFixture({
         hostId: "host",
         guestId: "guest",
-        wagers: { composed: (await writer.readWager(key("composed")))?.raw },
       });
-      expect(composeInviteWagerSource(null, states, false)).toBeNull();
+      const composed = composeInviteWagerSource(invite, states);
+      expect(composed).toEqual({
+        invite,
+        wagers: { composed: await writer.readWager(key("composed")) },
+        resolutionMarkers: {},
+      });
+      expect(composeInviteWagerSource(null, states)).toBeNull();
       expect(await store.readInvite("missing")).toEqual([]);
       expect(await writer.readWager(key("missing"))).toBeNull();
     });
   });
   it("reads full invite payloads with false, null, and completed markers and retained tombstones", async () => {
     await withWriter(async (writeGuards) => {
-      const history = "x".repeat(100_000);
+      const history: WagerRecord = {
+        ...createEmptyWager(),
+        proposalRemovalOperations: Object.fromEntries(
+          Array.from({ length: 1000 }, (_, index) => [
+            index.toString(16).padStart(64, "0"),
+            {
+              proposalOperationId: "a".repeat(64),
+              reservationOperationId: "b".repeat(64),
+            },
+          ]),
+        ),
+      };
       const store = createWagerStateD1Store(db, { writeGuards, now });
       for (const [matchId, value] of Object.entries({
-        first: { wager: { history }, resolutionMarker: false },
-        second: { wager: { history }, resolutionMarker: null },
+        first: { wager: history, resolutionMarker: false },
+        second: { wager: history, resolutionMarker: null },
         deleted: { wager: null, resolutionMarker: null },
         marker: { wager: null, resolutionMarker: true },
       })) {
@@ -409,26 +386,24 @@ describe("canonical wager state", () => {
         },
         {
           matchId: "first",
-          wager: { history },
+          wager: history,
           resolutionMarker: false,
           revision: 1,
         },
         { matchId: "marker", wager: null, resolutionMarker: true, revision: 1 },
         {
           matchId: "second",
-          wager: { history },
+          wager: history,
           resolutionMarker: null,
           revision: 1,
         },
       ]);
       expect(
-        (
-          await createWagerStateReader(db).readWager({
-            inviteId: "full-history",
-            matchId: "first",
-          })
-        )?.raw,
-      ).toEqual({ history });
+        await createWagerStateReader(db).readWager({
+          inviteId: "full-history",
+          matchId: "first",
+        }),
+      ).toEqual(history);
     });
   });
   it("retries concurrent proposals and rolls back every row for a stale CAS snapshot", async () => {
@@ -441,9 +416,7 @@ describe("canonical wager state", () => {
       ]);
       expect(results.every((result) => result.committed)).toBe(true);
       expect(
-        Object.keys(
-          (await writer.readWager(id))!.proposals.raw as object,
-        ).sort(),
+        Object.keys((await writer.readWager(id))!.proposals).sort(),
       ).toEqual(["guest", "host"]);
       const observed = observeD1FailureDatabase(db);
       const store = createWagerStateD1Store(observed.database, {
@@ -454,18 +427,18 @@ describe("canonical wager state", () => {
       const missing = await store.read(key("other"));
       await writer.removeProposal(id, {
         proposalUid: "host",
-        operationId: "remove",
+        operationId: "9".repeat(64),
         expectedReservationOperationId: proposal().reservationOperationId,
       });
       expect(
         await store.commit([
           {
             current: missing,
-            value: { wager: { created: true }, resolutionMarker: true },
+            value: { wager: record("created"), resolutionMarker: true },
           },
           {
             current: stale,
-            value: { wager: { overwritten: true }, resolutionMarker: true },
+            value: { wager: record("overwritten"), resolutionMarker: true },
           },
         ]),
       ).toBe(false);
@@ -474,7 +447,9 @@ describe("canonical wager state", () => {
         "wager-state-conflict",
       );
       expect((await store.read(key("other"))).revision).toBe(0);
-      expect((await writer.readWager(id))?.record?.overwritten).toBeUndefined();
+      expect(
+        (await writer.readWager(id))?.proposedBy.overwritten,
+      ).toBeUndefined();
     });
   });
   it.each(["host", "guest"])(
@@ -571,9 +546,9 @@ describe("canonical wager state", () => {
       expect(observed.sessions).toHaveLength(1);
       expect(observed.batches).toHaveLength(1);
       expect(notices).toEqual([]);
-      expect(
-        Object.keys((await live.readWager(id))!.proposals.raw as object),
-      ).toEqual(["guest"]);
+      expect(Object.keys((await live.readWager(id))!.proposals)).toEqual([
+        "guest",
+      ]);
     });
   });
   it("keeps admission guards in completion and invalidates uncertain commits", async () => {
@@ -604,7 +579,7 @@ describe("canonical wager state", () => {
       expect(observed.errors).toHaveLength(1);
       expect(classifyD1Failure(observed.errors[0])).toBe("guard");
       expect((await writer.readWagerSnapshot(id)).resolutionMarker).toBeNull();
-      expect((await writer.readWager(id))!.settlement.raw).toMatchObject({
+      expect((await writer.readWager(id))!.settlement).toMatchObject({
         state: "pending",
       });
       const notices: boolean[] = [];
@@ -623,7 +598,7 @@ describe("canonical wager state", () => {
         }),
       ).rejects.toThrow("response-lost-after-commit");
       expect((await writer.readWagerSnapshot(id)).resolutionMarker).toBe(true);
-      expect((await writer.readWager(id))!.settlement.raw).toMatchObject({
+      expect((await writer.readWager(id))!.settlement).toMatchObject({
         state: "completed",
       });
       expect(notices).toEqual([false]);
@@ -644,7 +619,7 @@ describe("canonical wager state", () => {
         writeGuards: () => [
           ...writeGuards(),
           db.prepare(
-            `INSERT INTO wager_frozen_balances
+            `INSERT INTO wager_frozen_balances_canonical
              (player_uid, frozen_json, revision, updated_at_ms)
              VALUES ('foreign-conflict', '{"dust":0,"slime":0,"gum":0,"metal":0,"ice":0}', 0, 0)`,
           ),
@@ -730,14 +705,14 @@ describe("canonical wager state", () => {
       await expect(
         uncertain.removeProposal(id, {
           proposalUid: "host",
-          operationId: "remove",
+          operationId: "9".repeat(64),
           expectedReservationOperationId: proposal().reservationOperationId,
         }),
       ).rejects.toThrow("response-lost-after-commit");
       expect(notices.splice(0)).toEqual([id.inviteId]);
       expect(
-        (await writer.readWager(id))!.proposalRemovalOperations.raw,
-      ).toHaveProperty("remove");
+        (await writer.readWager(id))!.proposalRemovalOperations,
+      ).toHaveProperty("9".repeat(64));
       const unreadableDb = new Proxy(db, {
         get(target, property) {
           if (property === "withSession")
@@ -796,14 +771,14 @@ describe("canonical wager state", () => {
       await expect(
         uncertain.removeProposal(id, {
           proposalUid: "host",
-          operationId: "remove",
+          operationId: "9".repeat(64),
           expectedReservationOperationId: proposal().reservationOperationId,
         }),
       ).rejects.toBe(failure);
       expect(notices).toEqual([true, false]);
       expect(
-        (await writer.readWager(id))!.proposalRemovalOperations.raw,
-      ).toHaveProperty("remove");
+        (await writer.readWager(id))!.proposalRemovalOperations,
+      ).toHaveProperty("9".repeat(64));
     });
   });
 });
@@ -811,7 +786,7 @@ it("requires verified activation and permanently fences legacy default-epoch wri
   const activationDb = env.PROFILE_GAMES_DB;
   await applyRetiredProfileMigrations(
     activationDb,
-    migrations,
+    preCleanupTestMigrations(migrations),
     "b".repeat(64),
     { activateWagerState: false },
   );

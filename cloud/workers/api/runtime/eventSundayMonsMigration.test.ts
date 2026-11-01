@@ -1,13 +1,10 @@
-import { eventIntentFixture } from "../test/transitionIntentFixture.ts";
-import { patchEventOwnedPaths } from "./eventD1Fixture.ts";
+import { applyPreCleanupTestMigrations } from "./canonicalTestMigrations.ts";
 import { env } from "cloudflare:workers";
-import { applyD1Migrations, type D1Migration } from "cloudflare:test";
+import type { D1Migration } from "cloudflare:test";
 import { beforeAll, beforeEach, describe, expect, it } from "vitest";
 import {
   acquireEventWriteAdmission,
-  createEventTransitionIntent,
   EventD1Conflict,
-  readEventSnapshot,
   releaseEventWriteAdmission,
 } from "../src/eventD1.ts";
 import { applyEventTestMigrations } from "./eventTestMigrations.ts";
@@ -27,7 +24,8 @@ const prizeEventIds = [
   "z3oj52Iiime",
 ];
 const statuses = ["scheduled", "active", "ended", "dismissed"];
-const migrate = () => applyD1Migrations(db, [migrations[migrationIndex]]);
+const migrate = () =>
+  applyPreCleanupTestMigrations(db, [migrations[migrationIndex]!]);
 
 function eventRecord(eventId: string, overrides: Record<string, unknown> = {}) {
   return {
@@ -68,22 +66,64 @@ async function rows(table: string) {
 async function pendingTransition(eventId: string) {
   const admission = await acquireEventWriteAdmission(db);
   try {
-    await createEventTransitionIntent(
-      db,
-      eventIntentFixture({
-        schemaVersion: 1,
-        transitionId: `transition-${eventId}`,
-        eventId,
-        expectedRevision: 7,
-        canonicalUpdates: { [`events/${eventId}/status`]: "active" },
-        rtdbEffects: { "invites/invite-one/status": "active" },
-        createdAtMs: 400,
-        updatedAtMs: 400,
-      }),
-      { admission },
-    );
+    const intent = {
+      schemaVersion: 1,
+      transitionId: `transition-${eventId}`,
+      eventId,
+      expectedRevision: 7,
+      canonicalUpdates: { [`events/${eventId}/status`]: "active" },
+      rtdbEffects: { "invites/invite-one/status": "active" },
+      createdAtMs: 400,
+      updatedAtMs: 400,
+    };
+    await db.batch([
+      db
+        .prepare(
+          "INSERT INTO event_transition_intents(transition_id,event_id,expected_revision,status,intent_json,attempts,last_error,created_at_ms,updated_at_ms) VALUES (?, ?, 7, 'pending', ?, 0, NULL, 400, 400)",
+        )
+        .bind(intent.transitionId, eventId, JSON.stringify(intent)),
+      db
+        .prepare(
+          "UPDATE event_records SET pending_transition_id = ? WHERE event_id = ?",
+        )
+        .bind(intent.transitionId, eventId),
+    ]);
   } finally {
     await releaseEventWriteAdmission(db, admission);
+  }
+}
+
+async function readEventSnapshot(database: D1Database, eventId: string) {
+  const row = await database
+    .prepare(
+      "SELECT record_json,revision FROM event_records WHERE event_id = ?",
+    )
+    .bind(eventId)
+    .first<{ record_json: string; revision: number }>();
+  if (!row) throw new Error("missing historical migration fixture");
+  const event: unknown = JSON.parse(row.record_json);
+  return { event, eventId, prizeSelections: {}, revision: row.revision };
+}
+
+async function patchEventOwnedPaths(
+  database: D1Database,
+  updates: Record<string, unknown>,
+  options: {
+    admission: unknown;
+    expectedEventRevisions: Record<string, number>;
+  },
+) {
+  for (const [path, value] of Object.entries(updates)) {
+    const [root, eventId, field] = path.split("/");
+    if (root !== "events" || !eventId || field !== "status")
+      throw new Error("unexpected historical migration patch");
+    const result = await database
+      .prepare(
+        "UPDATE event_records SET status = ?, record_json = json_set(record_json, '$.status', ?), revision = revision + 1 WHERE event_id = ? AND revision = ?",
+      )
+      .bind(value, value, eventId, options.expectedEventRevisions[eventId])
+      .run();
+    if (result.meta.changes !== 1) throw new EventD1Conflict();
   }
 }
 
@@ -101,7 +141,7 @@ describe("Sunday Mons event migration", () => {
       db.prepare("DELETE FROM profile_event_prize_revisions"),
       db
         .prepare("DELETE FROM d1_migrations WHERE name = ?")
-        .bind(migrations[migrationIndex].name),
+        .bind(migrations[migrationIndex]!.name),
     ]);
   });
 
@@ -145,15 +185,15 @@ describe("Sunday Mons event migration", () => {
 
   it("preserves explicit choices and remains idempotent when the SQL is rerun", async () => {
     await db.batch([
-      insertEvent(prizeEventIds[0], { isSundayMons: false }),
+      insertEvent(prizeEventIds[0]!, { isSundayMons: false }),
       insertEvent("explicit-sunday", { isSundayMons: true }),
       insertEvent("missing-flag"),
     ]);
-    await pendingTransition(prizeEventIds[0]);
+    await pendingTransition(prizeEventIds[0]!);
 
     await migrate();
 
-    expect(await readEventSnapshot(db, prizeEventIds[0])).toMatchObject({
+    expect(await readEventSnapshot(db, prizeEventIds[0]!)).toMatchObject({
       revision: 7,
       event: { isSundayMons: false },
     });
@@ -167,13 +207,13 @@ describe("Sunday Mons event migration", () => {
     });
     const after = await rows("event_records");
     await db.batch(
-      migrations[migrationIndex].queries.map((query) => db.prepare(query)),
+      migrations[migrationIndex]!.queries.map((query) => db.prepare(query)),
     );
     expect(await rows("event_records")).toEqual(after);
   });
 
   it("preserves prizes and projection state without enqueuing work", async () => {
-    const eventId = prizeEventIds[0];
+    const eventId = prizeEventIds[0]!;
     const assignment = {
       eventId,
       profileId: "profile-one",
@@ -235,7 +275,7 @@ describe("Sunday Mons event migration", () => {
 
   it("atomically rejects pending target transitions and succeeds after they clear", async () => {
     await db.batch([
-      insertEvent(prizeEventIds[0]),
+      insertEvent(prizeEventIds[0]!),
       insertEvent("pending-event"),
     ]);
     await pendingTransition("pending-event");
@@ -249,7 +289,7 @@ describe("Sunday Mons event migration", () => {
     expect(
       await db
         .prepare("SELECT COUNT(*) AS count FROM d1_migrations WHERE name = ?")
-        .bind(migrations[migrationIndex].name)
+        .bind(migrations[migrationIndex]!.name)
         .first("count"),
     ).toBe(0);
     await db.batch([
@@ -261,7 +301,7 @@ describe("Sunday Mons event migration", () => {
   });
 
   it("invalidates stale revisions while allowing later nested mutations to preserve the flag", async () => {
-    const eventId = prizeEventIds[0];
+    const eventId = prizeEventIds[0]!;
     await insertEvent(eventId).run();
     const admission = await acquireEventWriteAdmission(db);
     try {

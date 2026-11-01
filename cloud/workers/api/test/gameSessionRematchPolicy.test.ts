@@ -29,7 +29,17 @@ function inviteFixture(fields: Record<string, unknown> = {}) {
     hostId: "host-player",
     guestId: "guest-player",
     hostColor: "white",
-    ...fields,
+    ...Object.fromEntries(
+      Object.entries(fields).filter(([key]) =>
+        [
+          "hostId",
+          "guestId",
+          "hostColor",
+          "hostRematches",
+          "guestRematches",
+        ].includes(key),
+      ),
+    ),
   });
 }
 
@@ -38,15 +48,16 @@ function matchFixture(
   fields: Partial<GameSessionMatch> = {},
 ): GameSessionMatch {
   return {
+    schemaVersion: 1,
     version: CONTROLLER_VERSION,
     color,
     emojiId: 9,
-    aura: "stored-aura",
+    aura: "rainbow",
     gameVariant: "StoredVariant",
     fen: "stored-fen",
-    status: "completed",
+    status: "surrendered",
     flatMovesString: "move-one",
-    timer: "stored-timer",
+    timer: { state: "finished" },
     ...fields,
   };
 }
@@ -62,7 +73,7 @@ function proposalInput(
 ): Parameters<typeof finalizeRematchProposal>[0] {
   return {
     invite,
-    request: { inviteId, emojiId: 3, aura: "request-aura" },
+    request: { inviteId, emojiId: 3, aura: "none" as const },
     actor: { actorUid: `${role}-player`, role },
     inspection: inspectRematchProposal({ invite, inviteId, role }),
     storedMatch: null,
@@ -78,46 +89,52 @@ function precondition(message: string) {
 }
 
 const indexCases = [
-  { name: "empty", hostRematches: "", guestRematches: "", host: 1, guest: 1 },
+  {
+    name: "empty",
+    hostRematches: { state: "open", indices: [] },
+    guestRematches: { state: "open", indices: [] },
+    host: 1,
+    guest: 1,
+  },
   {
     name: "host proposed",
-    hostRematches: "1",
-    guestRematches: "",
+    hostRematches: { state: "open", indices: [1] },
+    guestRematches: { state: "open", indices: [] },
     host: null,
     guest: 1,
   },
   {
     name: "guest proposed",
-    hostRematches: "",
-    guestRematches: "1",
+    hostRematches: { state: "open", indices: [] },
+    guestRematches: { state: "open", indices: [1] },
     host: 1,
     guest: null,
   },
   {
     name: "approved",
-    hostRematches: "1",
-    guestRematches: "1",
+    hostRematches: { state: "open", indices: [1] },
+    guestRematches: { state: "open", indices: [1] },
     host: 2,
     guest: 2,
   },
   {
     name: "host ahead",
-    hostRematches: "1;2",
-    guestRematches: "1",
+    hostRematches: { state: "open", indices: [1, 2] },
+    guestRematches: { state: "open", indices: [1] },
     host: null,
     guest: 2,
   },
   {
     name: "nonprefix intersection",
-    hostRematches: "1;3",
-    guestRematches: "2;3",
+    hostRematches: { state: "open", indices: [1, 3] },
+    guestRematches: { state: "open", indices: [2, 3] },
     host: 4,
     guest: 4,
   },
   {
     name: "ended",
-    hostRematches: "1",
-    guestRematches: "1x",
+    hostRematches: { state: "open", indices: [1] },
+    guestRematches: { state: "ended", indices: [1] },
     host: null,
     guest: null,
   },
@@ -187,15 +204,16 @@ for (const [hostColor, role, index, expectedColor] of [
     });
     assert.equal(plan.response.actorUid, `${role}-player`);
     assert.deepEqual(plan.response.match, {
+      schemaVersion: 1,
       version: CONTROLLER_VERSION,
       color: expectedColor,
       emojiId: 3,
-      aura: "request-aura",
+      aura: "none" as const,
       gameVariant: "StoredVariant",
       fen: "stored-fen",
-      status: "",
+      status: "active",
       flatMovesString: "",
-      timer: "",
+      timer: { state: "idle" },
     });
   });
 }
@@ -218,7 +236,7 @@ for (const storedMatch of [null, undefined]) {
     assert.deepEqual(calls, [storedMatch, null, `rematch:${inviteId}1`]);
     assert.equal(plan.response.match.fen, seed.fen);
     assert.equal(plan.response.match.gameVariant, seed.gameVariant);
-    assert.equal(plan.changes?.[1].kind, "match-create");
+    assert.equal(plan.changes?.[1]?.kind, "match-create");
   });
 }
 
@@ -296,7 +314,7 @@ test("an existing actor is preserved and omits creation while the missing-oppone
       kind: "invite-rematches",
       inviteId,
       role: "host",
-      value: "1",
+      value: { state: "open", indices: [1] },
     },
   ]);
 });
@@ -322,23 +340,23 @@ for (const storedMatch of [null, matchFixture("black")]) {
 for (const entry of [
   {
     role: "host",
-    hostRematches: "",
-    guestRematches: "",
-    rematches: "1",
+    hostRematches: { state: "open", indices: [] },
+    guestRematches: { state: "open", indices: [] },
+    rematches: { state: "open", indices: [1] },
     historyMatchId: inviteId,
   },
   {
     role: "host",
-    hostRematches: "1",
-    guestRematches: "1",
-    rematches: "1;2",
+    hostRematches: { state: "open", indices: [1] },
+    guestRematches: { state: "open", indices: [1] },
+    rematches: { state: "open", indices: [1, 2] },
     historyMatchId: `${inviteId}1`,
   },
   {
     role: "guest",
-    hostRematches: "1",
-    guestRematches: "",
-    rematches: "1",
+    hostRematches: { state: "open", indices: [1] },
+    guestRematches: { state: "open", indices: [] },
+    rematches: { state: "open", indices: [1] },
     historyMatchId: null,
   },
 ] as const) {
@@ -385,9 +403,24 @@ for (const entry of [
 }
 
 for (const entry of [
-  { role: "host", hostRematches: "1x", guestRematches: "1", rematches: "1x" },
-  { role: "host", hostRematches: "1", guestRematches: "1x", rematches: "1x" },
-  { role: "guest", hostRematches: "1x", guestRematches: "", rematches: "x" },
+  {
+    role: "host",
+    hostRematches: { state: "ended", indices: [1] },
+    guestRematches: { state: "open", indices: [1] },
+    rematches: { state: "ended", indices: [1] },
+  },
+  {
+    role: "host",
+    hostRematches: { state: "open", indices: [1] },
+    guestRematches: { state: "ended", indices: [1] },
+    rematches: { state: "ended", indices: [1] },
+  },
+  {
+    role: "guest",
+    hostRematches: { state: "ended", indices: [1] },
+    guestRematches: { state: "open", indices: [] },
+    rematches: { state: "ended", indices: [] },
+  },
 ] as const) {
   test(`already-ended ${entry.role} ${entry.hostRematches}/${entry.guestRematches} schedules no write or history`, () => {
     assert.deepEqual(
@@ -411,37 +444,37 @@ for (const entry of [
 for (const entry of [
   {
     role: "host",
-    hostRematches: "",
-    guestRematches: "",
-    rematches: "x",
+    hostRematches: { state: "open", indices: [] },
+    guestRematches: { state: "open", indices: [] },
+    rematches: { state: "ended", indices: [] },
     historyMatchId: inviteId,
   },
   {
     role: "guest",
-    hostRematches: "1;2",
-    guestRematches: "1;2",
-    rematches: "1;2x",
+    hostRematches: { state: "open", indices: [1, 2] },
+    guestRematches: { state: "open", indices: [1, 2] },
+    rematches: { state: "ended", indices: [1, 2] },
     historyMatchId: `${inviteId}2`,
   },
   {
     role: "host",
-    hostRematches: "1;2",
-    guestRematches: "1",
-    rematches: "1;2x",
+    hostRematches: { state: "open", indices: [1, 2] },
+    guestRematches: { state: "open", indices: [1] },
+    rematches: { state: "ended", indices: [1, 2] },
     historyMatchId: null,
   },
   {
     role: "guest",
-    hostRematches: "1;2",
-    guestRematches: "1",
-    rematches: "1x",
+    hostRematches: { state: "open", indices: [1, 2] },
+    guestRematches: { state: "open", indices: [1] },
+    rematches: { state: "ended", indices: [1] },
     historyMatchId: null,
   },
   {
     role: "host",
-    hostRematches: "1;3",
-    guestRematches: "2;3",
-    rematches: "1;3x",
+    hostRematches: { state: "open", indices: [1, 3] },
+    guestRematches: { state: "open", indices: [2, 3] },
+    rematches: { state: "ended", indices: [1, 3] },
     historyMatchId: null,
   },
 ] as const) {
@@ -481,7 +514,10 @@ for (const entry of [
 
 test("proposal and end plans leave frozen inputs unchanged", () => {
   const invite = Object.freeze(
-    inviteFixture({ hostRematches: "1", guestRematches: "1" }),
+    inviteFixture({
+      hostRematches: { state: "open", indices: [1] },
+      guestRematches: { state: "open", indices: [1] },
+    }),
   );
   const input = proposalInput(invite);
   input.storedMatch = Object.freeze(matchFixture("white"));

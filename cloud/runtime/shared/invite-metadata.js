@@ -8,6 +8,7 @@ exports.INVITE_METADATA_REFRESH_MS =
 exports.isInviteMetadataSnapshot = isInviteMetadataSnapshot;
 exports.isReadInviteMetadataResponse = isReadInviteMetadataResponse;
 exports.isInviteMetadataMessage = isInviteMetadataMessage;
+const rematches_js_1 = require("./rematches.js");
 const ids_js_1 = require("./ids.js");
 const game_sessions_js_1 = require("./game-sessions.js");
 const INVITE_METADATA_SOCKET_PROTOCOL = "mons-invite-metadata-v1";
@@ -47,10 +48,8 @@ function isInviteMetadataSnapshot(value) {
     (value.guestId === null ||
       (isUid(value.guestId) && value.guestId !== value.hostId)) &&
     (value.hostColor === "white" || value.hostColor === "black") &&
-    typeof value.hostRematches === "string" &&
-    typeof value.guestRematches === "string" &&
-    value.hostRematches.length <= INVITE_METADATA_MAX_MESSAGE_BYTES &&
-    value.guestRematches.length <= INVITE_METADATA_MAX_MESSAGE_BYTES &&
+    (0, rematches_js_1.isRematchSeries)(value.hostRematches) &&
+    (0, rematches_js_1.isRematchSeries)(value.guestRematches) &&
     [null, "pending", "matched", "canceled"].includes(
       value.automatchStateHint,
     ) &&

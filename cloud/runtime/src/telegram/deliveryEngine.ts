@@ -40,7 +40,6 @@ import {
   TELEGRAM_PENDING_DELETE_TASK_KIND,
   TELEGRAM_RATE_LIMIT_PROOF_TASK_KIND,
 } from "./taskKinds.js";
-import { readProperty } from "./values.js";
 export type {
   TelegramApiGateResult,
   TelegramEngineOptions,
@@ -149,8 +148,12 @@ const createTelegramDeliveryEngine: (input: TelegramEngineOptions) => {
         return { status: "skipped", reason: "invalid-rate-limit-proof" };
       }
       const barrierProof = await applyRateLimitBarrierProof({
-        barrierProofOwner: input.barrierProofOwner,
-        barrierRetryNotBeforeMs: input.barrierRetryNotBeforeMs,
+        ...(input.barrierProofOwner === undefined
+          ? {}
+          : { barrierProofOwner: input.barrierProofOwner }),
+        ...(input.barrierRetryNotBeforeMs === undefined
+          ? {}
+          : { barrierRetryNotBeforeMs: input.barrierRetryNotBeforeMs }),
       });
       if (!barrierProof.applied) {
         if (telegramApiGateOwner(barrierProof.gate)) {
@@ -180,7 +183,7 @@ const createTelegramDeliveryEngine: (input: TelegramEngineOptions) => {
       await repository.getMessage(effectiveInput.messageKey),
     );
     const pendingDelete = readPendingDelete(
-      readProperty(messageDeliveryDocument(record), "pendingDelete"),
+      messageDeliveryDocument(record).pendingDelete,
     );
     if (!pendingDelete.present) {
       return desiredResult;
@@ -199,21 +202,41 @@ const createTelegramDeliveryEngine: (input: TelegramEngineOptions) => {
           retrySequence: normalizeRetrySequence(pendingDelete.retrySequence),
         },
         pendingDeleteId,
-        sourceGeneration: effectiveInput.requestedGeneration,
+        ...(effectiveInput.requestedGeneration === undefined
+          ? {}
+          : { sourceGeneration: effectiveInput.requestedGeneration }),
       });
       return { ...desiredResult, cleanupScheduled: true };
     }
     const cleanupResult = await reconcilePendingDelete({
       messageKey: effectiveInput.messageKey,
-      requestedRevision: effectiveInput.requestedRevision,
-      requestedPendingDeleteId: effectiveInput.pendingDeleteId,
-      requestedGeneration: effectiveInput.requestedGeneration,
-      retryStartedAtMs: effectiveInput.retryStartedAtMs,
-      retryDeadlineAtMs: effectiveInput.retryDeadlineAtMs,
-      retryAtMs: effectiveInput.retryAtMs,
-      retrySequence: effectiveInput.retrySequence,
-      retryProofLeaseOwner: effectiveInput.retryProofLeaseOwner,
-      apiGateReclaimOwner: effectiveInput.apiGateReclaimOwner,
+      ...(effectiveInput.requestedRevision === undefined
+        ? {}
+        : { requestedRevision: effectiveInput.requestedRevision }),
+      ...(effectiveInput.pendingDeleteId === undefined
+        ? {}
+        : { requestedPendingDeleteId: effectiveInput.pendingDeleteId }),
+      ...(effectiveInput.requestedGeneration === undefined
+        ? {}
+        : { requestedGeneration: effectiveInput.requestedGeneration }),
+      ...(effectiveInput.retryStartedAtMs === undefined
+        ? {}
+        : { retryStartedAtMs: effectiveInput.retryStartedAtMs }),
+      ...(effectiveInput.retryDeadlineAtMs === undefined
+        ? {}
+        : { retryDeadlineAtMs: effectiveInput.retryDeadlineAtMs }),
+      ...(effectiveInput.retryAtMs === undefined
+        ? {}
+        : { retryAtMs: effectiveInput.retryAtMs }),
+      ...(effectiveInput.retrySequence === undefined
+        ? {}
+        : { retrySequence: effectiveInput.retrySequence }),
+      ...(effectiveInput.retryProofLeaseOwner === undefined
+        ? {}
+        : { retryProofLeaseOwner: effectiveInput.retryProofLeaseOwner }),
+      ...(effectiveInput.apiGateReclaimOwner === undefined
+        ? {}
+        : { apiGateReclaimOwner: effectiveInput.apiGateReclaimOwner }),
     });
     let cleanupScheduled = false;
     if (cleanupResult.status === "settled") {
@@ -221,7 +244,7 @@ const createTelegramDeliveryEngine: (input: TelegramEngineOptions) => {
         await repository.getMessage(effectiveInput.messageKey),
       );
       const nextPendingDelete = readPendingDelete(
-        readProperty(messageDeliveryDocument(refreshed), "pendingDelete"),
+        messageDeliveryDocument(refreshed).pendingDelete,
       );
       if (nextPendingDelete.present) {
         const nextPendingDeleteId = resolvePendingDeleteId(nextPendingDelete);
@@ -239,7 +262,9 @@ const createTelegramDeliveryEngine: (input: TelegramEngineOptions) => {
             ),
           },
           pendingDeleteId: nextPendingDeleteId,
-          sourceGeneration: effectiveInput.requestedGeneration,
+          ...(effectiveInput.requestedGeneration === undefined
+            ? {}
+            : { sourceGeneration: effectiveInput.requestedGeneration }),
         });
         cleanupScheduled = true;
       }

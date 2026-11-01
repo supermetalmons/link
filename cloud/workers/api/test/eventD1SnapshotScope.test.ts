@@ -1,4 +1,4 @@
-import { readEventTelegramProjectionDocument } from "../../../runtime/telegram/eventProjectionRecords.js";
+import { eventProjectionStateFixture as readEventTelegramProjectionDocument } from "./eventProjectionFixture.ts";
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { EventMutation } from "../../../runtime/eventCommands.js";

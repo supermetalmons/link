@@ -1,14 +1,19 @@
+import { applyCanonicalTestMigrations } from "./canonicalTestMigrations.ts";
+import { requiredFixture } from "../test/requiredFixture.ts";
 import {
   readTelegramMessageDocument,
   messageDeliveryDocument,
   updateTelegramMessage,
   messageDocument,
 } from "../../../runtime/telegram/records.js";
-import { retainTelegramAnnouncementAttempt } from "../src/telegramAnnouncementRecords.ts";
+import {
+  retainTelegramAnnouncementAttempt,
+  type TelegramAnnouncementAttempt,
+} from "../src/telegramAnnouncementRecords.ts";
 import type { TelegramAnnouncementRepository } from "../src/telegramD1.ts";
 import { beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { env } from "cloudflare:workers";
-import { applyD1Migrations, type D1Migration } from "cloudflare:test";
+import type { D1Migration } from "cloudflare:test";
 import {
   buildTelegramSendDesired,
   createTelegramDeliveryEngine,
@@ -50,7 +55,7 @@ function retainedAnnouncementInput(input: {
   requestId: string;
   payloadDigest: string;
   createdAtMs: number;
-  attempt?: unknown;
+  attempt?: TelegramAnnouncementAttempt;
 }): Parameters<TelegramAnnouncementRepository["reserve"]>[0] {
   return {
     requestId: input.requestId,
@@ -64,7 +69,7 @@ function retainedAnnouncementInput(input: {
 
 describe("Telegram D1 repositories", () => {
   beforeAll(async () => {
-    await applyD1Migrations(
+    await applyCanonicalTestMigrations(
       testEnv.TELEGRAM_DB,
       testEnv.TEST_TELEGRAM_D1_MIGRATIONS,
     );
@@ -72,13 +77,13 @@ describe("Telegram D1 repositories", () => {
 
   beforeEach(async () => {
     await testEnv.TELEGRAM_DB.batch([
-      testEnv.TELEGRAM_DB.prepare("DELETE FROM telegram_messages"),
+      testEnv.TELEGRAM_DB.prepare("DELETE FROM telegram_messages_canonical"),
       testEnv.TELEGRAM_DB.prepare(
-        "DELETE FROM telegram_event_prize_announcements",
+        "DELETE FROM telegram_event_prize_announcements_canonical",
       ),
       testEnv.TELEGRAM_DB.prepare(
-        `UPDATE telegram_delivery_control
-         SET record_json = '{}', version = 1, updated_at_ms = 1
+        `UPDATE telegram_delivery_control_canonical
+         SET record_json = '{"schemaVersion":1}', version = 1, updated_at_ms = 1
          WHERE singleton = 1`,
       ),
       testEnv.TELEGRAM_DB.prepare(
@@ -141,8 +146,8 @@ describe("Telegram D1 repositories", () => {
     });
     await first.transactMessage("message-1", () => ({
       value: readTelegramMessageDocument({
-        desired: { revision: "a" },
-        count: 1,
+        schemaVersion: 1,
+        delivery: { status: "pending", revision: "a", attempts: 1 },
       })!,
       decision: "created",
     }));
@@ -151,12 +156,12 @@ describe("Telegram D1 repositories", () => {
     });
     const aborted = await second.transactMessage("message-1", (current) => ({
       commit: false,
-      decision: Reflect.get(current!, "count") === 1 ? "same" : "wrong",
+      decision: current?.delivery?.attempts === 1 ? "same" : "wrong",
     }));
     expect(aborted).toMatchObject({ committed: false, decision: "same" });
     expect(await second.getMessage("message-1")).toEqual({
-      desired: { revision: "a" },
-      count: 1,
+      schemaVersion: 1,
+      delivery: { status: "pending", revision: "a", attempts: 1 },
     });
   });
 
@@ -169,22 +174,35 @@ describe("Telegram D1 repositories", () => {
     await Promise.all(
       repositories.map((repository) =>
         repository.transactMessage("counter", (current) => ({
-          value: readTelegramMessageDocument({
-            count:
-              typeof (current === null
-                ? undefined
-                : Reflect.get(current, "count")) === "number"
-                ? Number(Reflect.get(current!, "count")) + 1
-                : 1,
-          })!,
+          value: {
+            schemaVersion: 1,
+            delivery: {
+              status: "pending",
+              revision: "a",
+              attempts: (current?.delivery?.attempts ?? 0) + 1,
+            },
+          },
         })),
       ),
     );
-    expect(await repositories[0].getMessage("counter")).toEqual({ count: 12 });
+    expect(
+      await requiredFixture(repositories[0]).getMessage("counter"),
+    ).toEqual({
+      schemaVersion: 1,
+      delivery: { status: "pending", revision: "a", attempts: 12 },
+    });
   });
 
   it("returns the proposed object and rounds only the storage timestamp", async () => {
-    const value = { count: 1, omitted: undefined, updatedAtMs: 900 };
+    const value = {
+      schemaVersion: 1 as const,
+      delivery: {
+        status: "pending" as const,
+        revision: "a",
+        attempts: 1,
+        startedAtMs: 900,
+      },
+    };
     const repository = createD1TelegramRepository(testEnv.TELEGRAM_DB, {
       now: () => 100.9,
     });
@@ -192,13 +210,10 @@ describe("Telegram D1 repositories", () => {
       value: readTelegramMessageDocument(value)!,
     }));
     expect(result.value).toBe(value);
-    expect(await repository.getMessage("identity")).toEqual({
-      count: 1,
-      updatedAtMs: 900,
-    });
+    expect(await repository.getMessage("identity")).toEqual(value);
     expect(
       await testEnv.TELEGRAM_DB.prepare(
-        "SELECT updated_at_ms FROM telegram_messages WHERE message_key = ?",
+        "SELECT updated_at_ms FROM telegram_messages_canonical WHERE message_key = ?",
       )
         .bind("identity")
         .first<number>("updated_at_ms"),
@@ -229,15 +244,19 @@ describe("Telegram D1 repositories", () => {
     const repository = createD1TelegramRepository(testEnv.TELEGRAM_DB);
     await repository.transactMessage("cold-engine", () => ({
       value: readTelegramMessageDocument({
+        schemaVersion: 1,
         desired,
-        futureRecord: { keep: true },
-        delivery: { futureDelivery: { keep: true }, explicitNull: null },
+        delivery: {
+          status: "pending",
+          revision: desired.revision,
+          attempts: 0,
+        },
       })!,
     }));
     await testEnv.TELEGRAM_DB.prepare(
-      "UPDATE telegram_delivery_control SET record_json = ? WHERE singleton = 1",
+      "UPDATE telegram_delivery_control_canonical SET record_json = ? WHERE singleton = 1",
     )
-      .bind(JSON.stringify({ futureControl: { keep: true } }))
+      .bind(JSON.stringify({ schemaVersion: 1 }))
       .run();
     const createEngine = () =>
       createTelegramDeliveryEngine({
@@ -300,11 +319,8 @@ describe("Telegram D1 repositories", () => {
     const stored = await repository.getMessage("cold-engine");
     expect(stored).toMatchObject({
       desired,
-      futureRecord: { keep: true },
       delivery: {
         status: "delivered",
-        futureDelivery: { keep: true },
-        explicitNull: null,
       },
       applied: { messageId: 77 },
     });
@@ -312,10 +328,10 @@ describe("Telegram D1 repositories", () => {
     expect(stored).not.toHaveProperty("delivery.sendInFlight");
     expect(stored).not.toHaveProperty("delivery.leaseOwner");
     const control = await testEnv.TELEGRAM_DB.prepare(
-      "SELECT record_json FROM telegram_delivery_control WHERE singleton = 1",
+      "SELECT record_json FROM telegram_delivery_control_canonical WHERE singleton = 1",
     ).first<{ record_json: string }>();
     expect(JSON.parse(control!.record_json)).toEqual({
-      futureControl: { keep: true },
+      schemaVersion: 1,
     });
   });
 
@@ -323,7 +339,8 @@ describe("Telegram D1 repositories", () => {
     const repository = createD1TelegramRepository(testEnv.TELEGRAM_DB);
     await repository.transactMessage("typed-conflict", () => ({
       value: readTelegramMessageDocument({
-        delivery: { futureDelivery: { keep: true }, attempts: 0 },
+        schemaVersion: 1,
+        delivery: { status: "pending", revision: "a", attempts: 0 },
       })!,
     }));
     let decisions = 0;
@@ -356,7 +373,6 @@ describe("Telegram D1 repositories", () => {
       delivery: {
         status: "processing",
         attempts: 8,
-        futureDelivery: { keep: true },
       },
     });
   });
@@ -367,7 +383,10 @@ describe("Telegram D1 repositories", () => {
       now: () => ++clockCalls,
     });
     await repository.transactMessage("delete-message", () => ({
-      value: readTelegramMessageDocument({ count: 1 })!,
+      value: readTelegramMessageDocument({
+        schemaVersion: 1,
+        delivery: { status: "pending", revision: "a", attempts: 1 },
+      })!,
     }));
     for (const decision of ["deleted", "already-absent"]) {
       await expect(
@@ -404,12 +423,10 @@ describe("Telegram D1 repositories", () => {
     await expect(
       repository.transactMessage("invalid", () => {
         decisions++;
-        return { value: readTelegramMessageDocument(circular)! };
+        expect(readTelegramMessageDocument(circular)).toBeNull();
+        return { value: JSON.parse('{"schemaVersion":1,"unknown":true}') };
       }),
-    ).rejects.toMatchObject({
-      message: "telegram-d1-unavailable",
-      cause: expect.any(TypeError),
-    });
+    ).rejects.toThrow("telegram-d1-unavailable");
     expect(decisions).toBe(1);
     expect(clockCalls).toBe(1);
     await expect(repository.getMessage("invalid")).resolves.toBeNull();
@@ -487,11 +504,19 @@ describe("Telegram D1 repositories", () => {
       payloadDigest: "album-digest",
       createdAtMs: 1_000,
       attempt: {
+        kind: "prizes" as const,
         eventId: "prize-event",
         startAtMs: 3_601_000,
         runAtMs: 1_000,
         firstQueuedAtMs: 500,
-        payload: { text: "album", imageUrls: ["a", "b"] },
+        payload: {
+          chatId: "chat",
+          text: "album",
+          imageUrls: ["a", "b"],
+          parseMode: "HTML" as const,
+          hasSpoiler: true as const,
+          silent: false as const,
+        },
         attemptId: "attempt-a",
         expectedAttemptId: null,
       },
@@ -507,7 +532,7 @@ describe("Telegram D1 repositories", () => {
       ),
     );
     expect(results.filter((result) => result === "reserved")).toHaveLength(1);
-    const receipt = await repositories[0].get(input.requestId);
+    const receipt = await requiredFixture(repositories[0]).get(input.requestId);
     expect(receipt).toMatchObject({
       status: "sending",
       eventId: "prize-event",
@@ -517,7 +542,7 @@ describe("Telegram D1 repositories", () => {
       kind: "prizes",
     });
     await expect(
-      repositories[0].reserve(
+      requiredFixture(repositories[0]).reserve(
         retainedAnnouncementInput({
           ...input,
           createdAtMs: 1_000_000,
@@ -539,11 +564,19 @@ describe("Telegram D1 repositories", () => {
       payloadDigest: "album-digest",
       createdAtMs: 1_000,
       attempt: {
+        kind: "prizes" as const,
         eventId: "retry-event",
         startAtMs: 3_601_000,
         runAtMs: 1_000,
         firstQueuedAtMs: 500,
-        payload: { text: "album", imageUrls: ["a", "b"] },
+        payload: {
+          chatId: "chat",
+          text: "album",
+          imageUrls: ["a", "b"],
+          parseMode: "HTML" as const,
+          hasSpoiler: true as const,
+          silent: false as const,
+        },
         attemptId: "attempt-a",
         expectedAttemptId: null,
       },
@@ -623,11 +656,19 @@ describe("Telegram D1 repositories", () => {
       payloadDigest: "album-digest",
       createdAtMs: 1_000,
       attempt: {
+        kind: "prizes" as const,
         eventId: "uncertain-event",
         startAtMs: 3_601_000,
         runAtMs: 1_000,
         firstQueuedAtMs: 500,
-        payload: { text: "album", imageUrls: ["a", "b"] },
+        payload: {
+          chatId: "chat",
+          text: "album",
+          imageUrls: ["a", "b"],
+          parseMode: "HTML" as const,
+          hasSpoiler: true as const,
+          silent: false as const,
+        },
         attemptId: "attempt-a",
         expectedAttemptId: null,
       },
@@ -662,11 +703,19 @@ describe("Telegram D1 repositories", () => {
       payloadDigest: "album-digest",
       createdAtMs: 1_000,
       attempt: {
+        kind: "prizes" as const,
         eventId: "shared-event",
         startAtMs: 10_801_000,
         runAtMs: 7_201_000,
         firstQueuedAtMs: 500,
-        payload: { text: "album", imageUrls: ["a", "b"] },
+        payload: {
+          chatId: "chat",
+          text: "album",
+          imageUrls: ["a", "b"],
+          parseMode: "HTML" as const,
+          hasSpoiler: true as const,
+          silent: false as const,
+        },
         attemptId: "prize-attempt",
         expectedAttemptId: null,
       },
@@ -679,7 +728,12 @@ describe("Telegram D1 repositories", () => {
         ...prizes.attempt,
         kind: "reminder" as const,
         runAtMs: 1_000,
-        payload: { text: "reminder" },
+        payload: {
+          chatId: "chat",
+          text: "reminder",
+          parseMode: "HTML" as const,
+          silent: false as const,
+        },
         attemptId: "reminder-attempt",
       },
     };
@@ -722,7 +776,7 @@ describe("Telegram D1 repositories", () => {
       ),
     ).rejects.toThrow("telegram-d1-unavailable");
     const row = await testEnv.TELEGRAM_DB.prepare(
-      "SELECT COUNT(*) AS count FROM telegram_event_prize_announcements WHERE event_id = ?",
+      "SELECT COUNT(*) AS count FROM telegram_event_prize_announcements_canonical WHERE event_id = ?",
     )
       .bind("shared-event")
       .first<{ count: number }>();
@@ -743,7 +797,12 @@ describe("Telegram D1 repositories", () => {
         startAtMs: 10_801_000,
         runAtMs: 1_000,
         firstQueuedAtMs: 500,
-        payload: { text: "reminder" },
+        payload: {
+          chatId: "chat",
+          text: "reminder",
+          parseMode: "HTML" as const,
+          silent: false as const,
+        },
         attemptId: "reminder-attempt",
         expectedAttemptId: null,
       },
@@ -770,7 +829,18 @@ describe("Telegram D1 repositories", () => {
       repository.reserve(
         retainedAnnouncementInput({
           ...retry,
-          attempt: { ...retry.attempt, kind: "prizes" },
+          attempt: {
+            ...retry.attempt,
+            kind: "prizes",
+            payload: {
+              chatId: "chat",
+              text: "album",
+              imageUrls: ["a", "b"],
+              parseMode: "HTML",
+              hasSpoiler: true,
+              silent: false,
+            },
+          },
         }),
       ),
     ).resolves.toMatchObject({

@@ -1,14 +1,18 @@
+import { applyCanonicalTestMigrations } from "./canonicalTestMigrations.ts";
+import { admittedLocalMatchRoom } from "./canonicalMatchTestFixture.ts";
+import { APPLICATION_DATA_SOCKET_PROTOCOL } from "@mons/shared/data-contract";
+import { inviteDocumentFixture } from "../test/inviteDocumentFixture.ts";
+import { canonicalMatchEnvironment } from "./canonicalMatchTestFixture.ts";
+import { activateCanonicalApplicationFixture } from "./applicationRoomFixture.ts";
+import { runInCanonicalMatchRoom as runInDurableObject } from "./canonicalMatchTestFixture.ts";
 import type { MatchPresentationSnapshot } from "@mons/shared/match-presentation";
 import {
   REACTION_SOCKET_PROTOCOL,
   isInviteRoomMessage,
 } from "@mons/shared/reactions";
-import {
-  applyD1Migrations,
-  runInDurableObject,
-  type D1Migration,
-} from "cloudflare:test";
-import { env } from "cloudflare:workers";
+import type { D1Migration } from "cloudflare:test";
+import { env as nativeEnv } from "cloudflare:workers";
+
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import type { GameplayRepository } from "../src/gameplayRepository.ts";
 import {
@@ -25,6 +29,7 @@ import { handleMatchPresentationRoute } from "../src/matchPresentationRoute.ts";
 import { socketTestIdentity } from "../test/socketTestSession.ts";
 import { resetMatchPresentationTestState } from "./matchPresentationTestFixture.ts";
 import { readStoredPresentationsFromStorage } from "./presentationStorageFixture.ts";
+const env = canonicalMatchEnvironment(nativeEnv);
 
 const testEnv = env as Env & { TEST_D1_MIGRATIONS: D1Migration[] };
 const db = env.PROFILE_GAMES_DB;
@@ -34,7 +39,7 @@ const ctx = { waitUntil: (_promise: Promise<unknown>) => undefined };
 const sockets: WebSocket[] = [];
 
 beforeAll(async () => {
-  await applyD1Migrations(db, testEnv.TEST_D1_MIGRATIONS);
+  await applyCanonicalTestMigrations(db, testEnv.TEST_D1_MIGRATIONS);
 });
 
 beforeEach(async () => {
@@ -94,19 +99,19 @@ async function fixture() {
   const inviteId = `presentation-admission-${crypto.randomUUID()}`;
   const matchId = `${inviteId}1`;
   const room = env.INVITE_REACTIONS.getByName(inviteId);
-  const invite = {
+  const invite = inviteDocumentFixture({
     hostId,
     guestId,
     hostRematches: "1",
     guestRematches: "",
     hostColor: "white",
-  };
+  });
   const creation = (actorUid: string, emojiId: number) => ({
     inviteId,
     matchId,
     actorUid,
     emojiId,
-    aura: "",
+    aura: "none" as const,
     sourceId: `${actorUid}-proposal`,
   });
   const host = await prepareCreatedMatchPresentations(env, [
@@ -116,7 +121,7 @@ async function fixture() {
     ...buildMatchPresentationRegistrationStatements(db, host, 1),
     db
       .prepare(
-        "INSERT INTO invite_sources (invite_id, source_json, revision, updated_at_ms) VALUES (?, ?, 1, 1)",
+        "INSERT INTO invite_sources_canonical (invite_id, source_json, revision, updated_at_ms) VALUES (?, ?, 1, 1)",
       )
       .bind(inviteId, JSON.stringify(invite)),
   ]);
@@ -124,7 +129,9 @@ async function fixture() {
     async readInviteMetadata(requestedInviteId: string) {
       expect(requestedInviteId).toBe(inviteId);
       const row = await db
-        .prepare("SELECT source_json FROM invite_sources WHERE invite_id = ?")
+        .prepare(
+          "SELECT source_json FROM invite_sources_canonical WHERE invite_id = ?",
+        )
         .bind(inviteId)
         .first<{ source_json: string }>();
       if (!row) return null;
@@ -139,9 +146,15 @@ async function fixture() {
       ...buildMatchPresentationRegistrationStatements(db, guest, 4),
       db
         .prepare(
-          "UPDATE invite_sources SET source_json = ?, revision = revision + 1 WHERE invite_id = ?",
+          "UPDATE invite_sources_canonical SET source_json = ?, revision = revision + 1 WHERE invite_id = ?",
         )
-        .bind(JSON.stringify({ ...invite, guestRematches: "1" }), inviteId),
+        .bind(
+          JSON.stringify({
+            ...invite,
+            guestRematches: { state: "open", indices: [1] },
+          }),
+          inviteId,
+        ),
     ]);
   };
   const updateGuest = async (workerEnv = env) => {
@@ -171,7 +184,7 @@ async function fixture() {
         logFailure: () => undefined,
       },
     );
-    expect(response.status).toBe(200);
+    expect(response.status, await response.clone().text()).toBe(200);
   };
   const connect = (
     fetchRoom: (request: Request) => Promise<Response>,
@@ -191,7 +204,7 @@ async function fixture() {
             Origin: "https://mons.link",
             Upgrade: "websocket",
             "CF-Connecting-IP": "192.0.2.45",
-            "Sec-WebSocket-Protocol": REACTION_SOCKET_PROTOCOL,
+            "Sec-WebSocket-Protocol": `${REACTION_SOCKET_PROTOCOL}, ${APPLICATION_DATA_SOCKET_PROTOCOL}`,
           },
         },
       ),
@@ -227,7 +240,7 @@ function interceptFirstRegistryRead(
             statement(current.bind(...values), query);
         if (
           property === "all" &&
-          query.includes("FROM match_presentation_registrations")
+          query.includes("FROM match_presentation_registrations_canonical")
         ) {
           return async <T>() => {
             const result = await current.all<T>();
@@ -318,7 +331,7 @@ describe("canonical presentation socket admission", () => {
             : Reflect.get(target, property, receiver);
         },
       });
-      instance = new InviteReactions(state, queryEnv);
+      instance = admittedLocalMatchRoom(new InviteReactions(state, queryEnv));
       const response = await f.connect(
         (request) => instance.fetch(request),
         localEnv,
@@ -357,7 +370,7 @@ describe("canonical presentation socket admission", () => {
             : Reflect.get(target, property, receiver);
         },
       });
-      instance = new InviteReactions(state, queryEnv);
+      instance = admittedLocalMatchRoom(new InviteReactions(state, queryEnv));
       const response = await f.connect(
         (request) => instance.fetch(request),
         localEnv,
@@ -367,7 +380,7 @@ describe("canonical presentation socket admission", () => {
       expect(Object.keys(snapshot.players)).toEqual([hostId]);
       expect(
         (await readStoredPresentationsFromStorage(state.storage, f.matchId))
-          .players[guestId].revision,
+          .players[guestId]!.revision,
       ).toBe(0);
     });
   });
@@ -399,7 +412,7 @@ describe("canonical presentation socket admission", () => {
             : Reflect.get(target, property, receiver);
         },
       });
-      instance = new InviteReactions(state, queryEnv);
+      instance = admittedLocalMatchRoom(new InviteReactions(state, queryEnv));
       const response = await f.connect(
         (request) => instance.fetch(request),
         localEnv,
@@ -410,3 +423,5 @@ describe("canonical presentation socket admission", () => {
     });
   });
 });
+
+beforeAll(activateCanonicalApplicationFixture);

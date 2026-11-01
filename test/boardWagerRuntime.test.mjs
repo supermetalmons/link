@@ -1,3 +1,4 @@
+import { required } from "./fixtures/canonicalData.mjs";
 import assert from "node:assert/strict";
 import { appendFileSync } from "node:fs";
 import { registerHooks } from "node:module";
@@ -16,10 +17,14 @@ registerHooks({
   },
 });
 
+/** @type {typeof import("../src/game/boardWagerRuntime.ts")} */
 const { createBoardWagerRuntime } = await import(
   process.env.MONS_WAGER_RUNTIME_MODULE ?? "../src/game/boardWagerRuntime.ts"
 );
 
+/** @typedef {import("../src/game/boardWagerModels.ts").WagerRenderState} RenderState */
+/** @typedef {ReturnType<typeof createBoardWagerRuntime>} Runtime */
+/** @type {Required<import("../src/game/boardWagerModels.ts").WagerSlotLayoutMap>} */
 const layouts = {
   player: {
     pile: { x: 1, y: 10, w: 2, h: 1 },
@@ -30,7 +35,9 @@ const layouts = {
     winner: { x: 0, y: 0, w: 4, h: 2 },
   },
 };
+/** @type {NonNullable<Parameters<Runtime["setWagerPiles"]>[0]["player"]>} */
 const player = { material: "dust", count: 2, pending: true };
+/** @type {NonNullable<Parameters<Runtime["setWagerPiles"]>[0]["opponent"]>} */
 const opponent = { material: "dust", count: 3, pending: false };
 const empty = {
   player: null,
@@ -41,8 +48,9 @@ const empty = {
   opponentDisappearing: null,
 };
 
+/** @param {{x: number, y: number}} frame @param {{x: number, y: number}} expected */
 function assertFrame(frame, expected) {
-  for (const axis of ["x", "y"]) {
+  for (const axis of /** @type {const} */ (["x", "y"])) {
     assert.ok(
       Math.abs(frame[axis] - expected[axis]) < 1e-10,
       `${axis}: expected ${expected[axis]}, received ${frame[axis]}`,
@@ -50,6 +58,9 @@ function assertFrame(frame, expected) {
   }
 }
 
+/**
+ * @param {test.TestContext} t
+ */
 function harness(t, { commit = true } = {}) {
   let now = 0;
   let nextId = 1;
@@ -57,10 +68,15 @@ function harness(t, { commit = true } = {}) {
   let canLayout = true;
   let avatarSize = 1;
   let flipped = false;
+  /** @type {(state: RenderState) => void} */
   let onRender = () => {};
+  /** @type {Map<number, { callback: () => void, due: number }>} */
   const timers = new Map();
+  /** @type {Map<number, FrameRequestCallback>} */
   const rafs = new Map();
+  /** @type {RenderState[]} */
   const renders = [];
+  /** @type {(["timeout", number, number, number] | ["cancelTimeout" | "raf" | "cancelRaf", number, number])[]} */
   const scheduled = [];
   const random = () => {
     randomSeed = (Math.imul(randomSeed, 1664525) + 1013904223) >>> 0;
@@ -70,9 +86,12 @@ function harness(t, { commit = true } = {}) {
   const runtime = createBoardWagerRuntime({
     canLayout: () => canLayout,
     getAvatarSize: () => avatarSize,
-    getDisplaySlot: (opponent) =>
+    getDisplaySlot: (/** @type {boolean} */ opponent) =>
       opponent !== flipped ? "opponent" : "player",
-    getFallbackRect: (opponent, scale) => ({
+    getFallbackRect: (
+      /** @type {boolean} */ opponent,
+      /** @type {number} */ scale,
+    ) => ({
       x: 1,
       y: opponent !== flipped ? 0.5 : 10,
       w: 2 * scale,
@@ -104,6 +123,7 @@ function harness(t, { commit = true } = {}) {
     random,
     log: () => {},
   });
+  /** @param {RenderState} state */
   const handler = (state) => {
     renders.push(structuredClone(state));
     onRender(state);
@@ -122,7 +142,7 @@ function harness(t, { commit = true } = {}) {
     assert.equal(timers.size, 0, "wager timers leaked after disposal");
     assert.equal(rafs.size, 0, "wager frames leaked after disposal");
   });
-  const advance = (milliseconds) => {
+  const advance = (/** @type {number} */ milliseconds) => {
     const until = now + milliseconds;
     let iterations = 0;
     while (true) {
@@ -141,14 +161,18 @@ function harness(t, { commit = true } = {}) {
   return {
     ...runtime,
     renders,
-    latest: () => renders.at(-1),
+    latest: () => required(renders.at(-1)),
     pending: () => ({ timers: timers.size, rafs: rafs.size }),
-    onRender: (callback) => (onRender = callback),
+    onRender: (/** @type {(state: RenderState) => void} */ callback) =>
+      (onRender = callback),
     rebind: () => runtime.setWagerRenderHandler(handler),
-    setCanLayout: (value) => (canLayout = value),
-    setAvatarSize: (value) => (avatarSize = value),
+    setCanLayout: (/** @type {boolean} */ value) => (canLayout = value),
+    setAvatarSize: (/** @type {number} */ value) => (avatarSize = value),
     flip: () => (flipped = !flipped),
     advance,
+    /**
+     * @param {number} time
+     */
     frameAt(time) {
       assert.ok(time >= now);
       advance(time - now);
@@ -165,19 +189,19 @@ test("initial piles stay still until readiness and later appearances retain pend
   const h = harness(t);
   assert.deepEqual(h.latest(), empty);
   h.setWagerPiles({ player, opponent });
-  assert.equal(h.latest().player.animation, "none");
-  assert.equal(h.latest().opponent.animation, "none");
-  assert.equal(h.latest().player.isPending, true);
-  assert.equal(h.latest().opponent.isPending, false);
+  assert.equal(required(h.latest().player).animation, "none");
+  assert.equal(required(h.latest().opponent).animation, "none");
+  assert.equal(required(h.latest().player).isPending, true);
+  assert.equal(required(h.latest().opponent).isPending, false);
   h.setWagerPiles({});
   assert.deepEqual(h.latest(), empty);
   assert.deepEqual(h.pending(), { timers: 0, rafs: 0 });
   h.markWagerInitialStateReceived();
   h.setWagerPiles({ player, opponent });
-  assert.equal(h.latest().player.animation, "appear");
-  assert.equal(h.latest().opponent.animation, "appear");
+  assert.equal(required(h.latest().player).animation, "appear");
+  assert.equal(required(h.latest().opponent).animation, "appear");
   h.updateLayout();
-  assert.equal(h.latest().player.animation, "none");
+  assert.equal(required(h.latest().player).animation, "none");
 });
 
 test("both disappearance snapshots last exactly 280 ms and stop pulsing", (t) => {
@@ -197,8 +221,8 @@ test("both disappearance snapshots last exactly 280 ms and stop pulsing", (t) =>
     isPending: false,
   });
   h.advance(279);
-  assert.equal(h.latest().playerDisappearing.count, 2);
-  assert.equal(h.latest().opponentDisappearing.count, 3);
+  assert.equal(required(h.latest().playerDisappearing).count, 2);
+  assert.equal(required(h.latest().opponentDisappearing).count, 3);
   assert.deepEqual(h.pending(), { timers: 2, rafs: 0 });
   h.advance(1);
   assert.deepEqual(h.latest(), empty);
@@ -213,7 +237,7 @@ test("reappearance cancels only its own timer and a replacement receives a full 
   h.advance(100);
   h.setWagerPiles({ player });
   assert.equal(h.latest().playerDisappearing, null);
-  assert.equal(h.latest().opponentDisappearing.count, 3);
+  assert.equal(required(h.latest().opponentDisappearing).count, 3);
   assert.equal(h.pending().timers, 1);
   h.advance(180);
   assert.equal(h.latest().opponentDisappearing, null);
@@ -222,7 +246,7 @@ test("reappearance cancels only its own timer and a replacement receives a full 
   h.setWagerPiles({ player: { ...player, count: 5 } });
   h.setWagerPiles({});
   h.advance(160);
-  assert.equal(h.latest().playerDisappearing.count, 5);
+  assert.equal(required(h.latest().playerDisappearing).count, 5);
   h.advance(120);
   assert.equal(h.latest().playerDisappearing, null);
   assert.equal(h.pending().timers, 0);
@@ -237,17 +261,17 @@ test("transition suppression is consumed once and layout hiding is not disappear
   assert.deepEqual(h.latest(), empty);
   assert.equal(h.pending().timers, 0);
   h.setWagerPiles({ player, opponent });
-  assert.equal(h.latest().player.animation, "appear");
+  assert.equal(required(h.latest().player).animation, "appear");
   const hidden = structuredClone(layouts);
-  hidden.player.pile.w = 0;
-  hidden.player.pile.h = 0;
+  required(hidden).player.pile.w = 0;
+  required(hidden).player.pile.h = 0;
   h.setWagerSlotLayouts(hidden, 0);
   assert.equal(h.latest().player, null);
   assert.equal(h.latest().playerDisappearing, null);
   assert.equal(h.pending().timers, 0);
-  assert.equal(h.latest().opponent.count, 3);
+  assert.equal(required(h.latest().opponent).count, 3);
   h.setWagerSlotLayouts(layouts, 0);
-  assert.equal(h.latest().player.animation, "appear");
+  assert.equal(required(h.latest().player).animation, "appear");
 });
 
 test("layout availability gates rendering while handlers can detach and replay current state", (t) => {
@@ -257,7 +281,7 @@ test("layout availability gates rendering while handlers can detach and replay c
   assert.deepEqual(h.latest(), empty);
   h.setCanLayout(true);
   h.updateLayout();
-  assert.equal(h.latest().player.count, 2);
+  assert.equal(required(h.latest().player).count, 2);
   h.setWagerRenderHandler(null);
   const renderCount = h.renders.length;
   h.setWagerPiles({ opponent });
@@ -265,7 +289,7 @@ test("layout availability gates rendering while handlers can detach and replay c
   assert.equal(h.renders.length, renderCount);
   h.rebind();
   assert.equal(h.latest().player, null);
-  assert.equal(h.latest().opponent.count, 3);
+  assert.equal(required(h.latest().opponent).count, 3);
 });
 
 for (const winnerIsOpponent of [false, true]) {
@@ -277,19 +301,22 @@ for (const winnerIsOpponent of [false, true]) {
     const initial = h.latest();
     assert.equal(initial.player, null);
     assert.equal(initial.opponent, null);
-    assert.equal(initial.winner.count, 4);
-    assert.equal(initial.winner.actualCount, 4);
-    assert.deepEqual(initial.winner.frames.slice(0, 2), source.frames);
+    assert.equal(required(initial.winner).count, 4);
+    assert.equal(required(initial.winner).actualCount, 4);
+    assert.deepEqual(
+      required(initial.winner).frames.slice(0, 2),
+      required(source).frames,
+    );
     assert.equal(h.isWagerWinAnimationPendingOrActive(), true);
     assert.deepEqual(h.pending(), { timers: 0, rafs: 1 });
     h.frameAt(400);
     const midpoint = h.latest();
     assert.notDeepEqual(
-      midpoint.winner.frames.slice(2),
-      initial.winner.frames.slice(2),
+      required(midpoint.winner).frames.slice(2),
+      required(initial.winner).frames.slice(2),
     );
     assertFrame(
-      midpoint.winner.frames[2],
+      required(required(midpoint.winner).frames[2]),
       winnerIsOpponent
         ? { x: 2.5797686311846375, y: 2.742252388277858 }
         : { x: 2.2079276634688396, y: 9.696215109312476 },
@@ -301,10 +328,10 @@ for (const winnerIsOpponent of [false, true]) {
     assert.equal(h.latest().winAnimationActive, false);
     assert.equal(h.isWagerWinAnimationPendingOrActive(), false);
     assert.deepEqual(
-      h.latest().winner.rect,
-      layouts[winnerIsOpponent ? "opponent" : "player"].winner,
+      required(h.latest().winner).rect,
+      required(layouts)[winnerIsOpponent ? "opponent" : "player"].winner,
     );
-    assertFrame(h.latest().winner.frames[2], {
+    assertFrame(required(required(h.latest().winner).frames[2]), {
       x: 2.520976,
       y: winnerIsOpponent ? 1.29888 : 11.29888,
     });
@@ -318,21 +345,21 @@ for (const winnerIsOpponent of [false, true]) {
 test("normal and winner caps preserve existing displayed and actual totals", (t) => {
   const h = harness(t);
   h.setWagerPiles({ player: { ...player, count: 40 }, opponent });
-  assert.equal(h.latest().player.count, 13);
-  assert.equal(h.latest().player.actualCount, 40);
-  assert.equal(h.latest().player.frames.length, 13);
+  assert.equal(required(h.latest().player).count, 13);
+  assert.equal(required(h.latest().player).actualCount, 40);
+  assert.equal(required(h.latest().player).frames.length, 13);
   h.showResolvedWager(false, "dust", 40, false);
-  assert.equal(h.latest().winner.count, 32);
-  assert.equal(h.latest().winner.actualCount, 80);
+  assert.equal(required(h.latest().winner).count, 32);
+  assert.equal(required(h.latest().winner).actualCount, 80);
   assert.equal(h.pending().rafs, 0);
   h.showResolvedWager(true, "dust", 40, true);
-  assert.equal(h.latest().winner.count, 32);
-  assert.equal(h.latest().winner.actualCount, 32);
-  assert.equal(h.latest().winner.frames.length, 32);
+  assert.equal(required(h.latest().winner).count, 32);
+  assert.equal(required(h.latest().winner).actualCount, 32);
+  assert.equal(required(h.latest().winner).frames.length, 32);
   h.frameAt(400);
   h.frameAt(800);
-  assert.equal(h.latest().winner.count, 32);
-  assert.equal(h.latest().winner.actualCount, 32);
+  assert.equal(required(h.latest().winner).count, 32);
+  assert.equal(required(h.latest().winner).actualCount, 32);
 });
 
 test("resolution waits for a current layout and identical geometry still commits it", (t) => {
@@ -350,14 +377,17 @@ test("resolution waits for a current layout and identical geometry still commits
   assert.equal(h.latest().winAnimationActive, true);
   h.frameAt(800);
   h.invalidateLayout();
-  h.showResolvedWager(true, "gold", 5, false);
+  Reflect.apply(h.showResolvedWager, h, [true, "gold", 5, false]);
   const beforeCommit = h.latest();
-  assert.equal(beforeCommit.winner.count, 6);
+  assert.equal(required(beforeCommit.winner).count, 6);
   h.setWagerSlotLayouts(structuredClone(layouts), h.getLayoutRevision());
   assert.notEqual(h.latest(), beforeCommit);
-  assert.equal(h.latest().winner.count, 10);
-  assert.match(h.latest().winner.materialUrl, /\/gold\.webp$/);
-  assert.deepEqual(h.latest().winner.rect, layouts.opponent.winner);
+  assert.equal(required(h.latest().winner).count, 10);
+  assert.match(required(h.latest().winner).materialUrl, /\/gold\.webp$/);
+  assert.deepEqual(
+    required(h.latest().winner).rect,
+    required(layouts).opponent.winner,
+  );
 });
 
 for (const cancellation of ["piles", "clear", "newMatch", "dispose"]) {
@@ -391,9 +421,9 @@ test("a newer layout invalidation keeps a deferred result pending until its own 
   h.frameAt(800);
   h.setWagerSlotLayouts(null);
   h.showResolvedWager(true, "dust", 4, false);
-  assert.equal(h.latest().winner.count, 6);
+  assert.equal(required(h.latest().winner).count, 6);
   h.setWagerSlotLayouts(layouts, 2);
-  assert.equal(h.latest().winner.count, 8);
+  assert.equal(required(h.latest().winner).count, 8);
 });
 
 test("resize and flipped display slots retarget an active win without restarting its clock", (t) => {
@@ -414,19 +444,39 @@ test("resize and flipped display slots retarget an active win without restarting
   }
   h.invalidateLayout();
   h.setWagerSlotLayouts(resized, h.getLayoutRevision());
-  assert.deepEqual(h.latest().winner.rect, resized.opponent.winner);
-  assert.ok(h.latest().winner.iconSize < beforeResize.iconSize);
-  assert.notDeepEqual(h.latest().winner.frames, beforeResize.frames);
+  assert.deepEqual(
+    required(h.latest().winner).rect,
+    required(resized).opponent.winner,
+  );
+  assert.ok(
+    required(h.latest().winner).iconSize < required(beforeResize).iconSize,
+  );
+  assert.notDeepEqual(
+    required(h.latest().winner).frames,
+    required(beforeResize).frames,
+  );
   assert.equal(h.pending().rafs, 1);
   h.frameAt(799);
   assert.equal(h.latest().winAnimationActive, true);
   h.frameAt(800);
   assert.equal(h.latest().winAnimationActive, false);
-  assert.deepEqual(h.latest().winner.rect, resized.opponent.winner);
-  assertFrame(h.latest().winner.frames[3], { x: 2.140732, y: 1.47416 });
+  assert.deepEqual(
+    required(h.latest().winner).rect,
+    required(resized).opponent.winner,
+  );
+  assertFrame(required(required(h.latest().winner).frames[3]), {
+    x: 2.140732,
+    y: 1.47416,
+  });
   h.setWagerPiles({ player, opponent });
-  assert.deepEqual(h.latest().player.rect, resized.opponent.pile);
-  assert.deepEqual(h.latest().opponent.rect, resized.player.pile);
+  assert.deepEqual(
+    required(h.latest().player).rect,
+    required(resized).opponent.pile,
+  );
+  assert.deepEqual(
+    required(h.latest().opponent).rect,
+    required(resized).player.pile,
+  );
 });
 
 test("hidden target layout cancels a running win and prevents another frame", (t) => {
@@ -434,7 +484,7 @@ test("hidden target layout cancels a running win and prevents another frame", (t
   h.showResolvedWager(false, "dust", 3, true);
   h.frameAt(200);
   const hidden = structuredClone(layouts);
-  hidden.player.winner.w = 0;
+  required(hidden).player.winner.w = 0;
   h.setWagerSlotLayouts(hidden, 0);
   assert.equal(h.latest().winner, null);
   assert.equal(h.latest().winAnimationActive, false);
@@ -473,13 +523,16 @@ test("a render callback can replace a win without letting the previous frame cla
   h.onRender((state) => {
     if (!replace || !state.winAnimationActive) return;
     replace = false;
-    h.showResolvedWager(true, "gold", 4, true);
+    Reflect.apply(h.showResolvedWager, h, [true, "gold", 4, true]);
   });
   h.frameAt(400);
   assert.equal(h.pending().rafs, 1);
-  assert.equal(h.latest().winner.count, 8);
-  assert.match(h.latest().winner.materialUrl, /\/gold\.webp$/);
-  assert.deepEqual(h.latest().winner.rect, layouts.opponent.winner);
+  assert.equal(required(h.latest().winner).count, 8);
+  assert.match(required(h.latest().winner).materialUrl, /\/gold\.webp$/);
+  assert.deepEqual(
+    required(h.latest().winner).rect,
+    required(layouts).opponent.winner,
+  );
   h.frameAt(800);
   assert.equal(h.latest().winAnimationActive, true);
   h.frameAt(1200);
@@ -504,8 +557,11 @@ test("repeated disposal cancels work and permits reuse with the same handler and
   h.advance(1000);
   assert.equal(h.renders.length, renderCount);
   h.setWagerPiles({ player });
-  assert.equal(h.latest().player.animation, "none");
-  assert.deepEqual(h.latest().player.rect, layouts.player.pile);
+  assert.equal(required(h.latest().player).animation, "none");
+  assert.deepEqual(
+    required(h.latest().player).rect,
+    required(layouts).player.pile,
+  );
   h.showResolvedWager(true, "dust", 3, true);
   assert.equal(h.latest().winAnimationActive, true);
   assert.equal(h.pending().rafs, 1);
@@ -513,7 +569,7 @@ test("repeated disposal cancels work and permits reuse with the same handler and
   h.dispose();
   assert.equal(h.getLayoutRevision(), 1);
   assert.deepEqual(h.pending(), { timers: 0, rafs: 0 });
-  h.showResolvedWager(false, "gold", 2, false);
-  assert.equal(h.latest().winner.count, 4);
+  Reflect.apply(h.showResolvedWager, h, [false, "gold", 2, false]);
+  assert.equal(required(h.latest().winner).count, 4);
   assert.equal(h.latest().winAnimationActive, false);
 });

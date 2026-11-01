@@ -1,5 +1,10 @@
 // Generated from src/shared/auth.ts. Run npm run generate:runtime.
 import type { MiningSnapshot } from "./mining.js";
+import {
+  type Aura,
+  type EmojiId,
+  type ProfileAppearance,
+} from "./appearance.js";
 export type AuthMethodKey = "eth" | "sol" | "apple" | "x";
 export type AuthCooldownReason =
   "method-reuse-cooldown" | "profile-method-cooldown";
@@ -27,7 +32,7 @@ export interface LinkedAuthMethodsResponse {
   linkedMethods: LinkedAuthMethods;
   appleLinked: boolean;
 }
-export interface AuthProfileResponse {
+export interface AuthProfileResponse extends ProfileAppearance {
   ok: true;
   uid: string;
   profileId: string;
@@ -36,16 +41,10 @@ export interface AuthProfileResponse {
   sol?: string | null;
   linkedMethods: LinkedAuthMethods;
   appleLinked: boolean;
-  emoji: number;
-  aura?: string | null;
+  emoji: EmojiId;
   rating?: number | null;
   nonce?: number | null;
   totalManaPoints?: number | null;
-  cardBackgroundId?: number | null;
-  cardStickers?: string | null;
-  cardSubtitleId?: number | null;
-  profileCounter?: string | null;
-  profileMons?: string | null;
   completedProblems?: string[] | null;
   tutorialCompleted?: boolean | null;
   mining?: MiningSnapshot;
@@ -60,35 +59,35 @@ export interface SolanaAuthVerificationRequest {
   intentId: string;
   address: string;
   signature: string;
-  emoji: number;
-  aura: string | null;
+  emoji: EmojiId;
+  aura: Aura;
 }
 export interface EthereumAuthVerificationRequest {
   intentId: string;
   message: string;
   signature: string;
-  emoji: number;
-  aura: string | null;
+  emoji: EmojiId;
+  aura: Aura;
 }
 export interface AppleAuthVerificationRequest {
   intentId: string;
   idToken: string;
   consentSource: "signin" | "settings";
-  emoji: number;
-  aura: string | null;
+  emoji: EmojiId;
+  aura: Aura;
 }
 export interface XAuthCompletionRequest {
   flowId: string;
-  emoji: number;
-  aura: string | null;
+  emoji: EmojiId;
+  aura: Aura;
 }
 export interface AuthMethodUnlinkRequest {
   method: AuthMethodKey;
   opId: string;
 }
 export interface AuthPresentation {
-  emoji: number;
-  aura: string | null;
+  emoji: EmojiId;
+  aura: Aura;
 }
 declare const AUTH_METHODS: readonly ["eth", "sol", "apple", "x"];
 declare const AUTH_METHOD_FIELD_BY_TYPE: Readonly<{
@@ -108,9 +107,9 @@ declare const AUTH_COOLDOWN_REASONS: Readonly<{
   method: "method-reuse-cooldown";
   profileMethod: "profile-method-cooldown";
 }>;
-declare const normalizeAuthPresentation: (
-  emoji: unknown,
-  aura: unknown,
+declare const createAuthPresentation: (
+  emoji: EmojiId,
+  aura: Aura,
 ) => AuthPresentation;
 declare const normalizeAuthMethod: (value: unknown) => AuthMethodKey | null;
 declare const normalizeAuthCooldownReason: (
@@ -160,7 +159,7 @@ export {
   AUTH_METHOD_REUSE_COOLDOWN_MS,
   AUTH_COOLDOWN_REASONS,
   getLinkedAuthMethodsFromProfile,
-  normalizeAuthPresentation,
+  createAuthPresentation,
   normalizeAuthMethod,
   normalizeAuthCooldownReason,
   getAuthCooldownScope,

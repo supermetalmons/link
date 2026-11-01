@@ -1,3 +1,9 @@
+import { createStoredPlayerProfile } from "../src/profileCanonical/contracts.ts";
+import {
+  eventApplicationEnvironment,
+  activateEventApplicationFixture,
+} from "./eventApplicationFixture.ts";
+import { createDefaultProfileAppearance } from "@mons/shared/appearance";
 import { eventDocumentFixture } from "../test/eventCompatibilityFixture.ts";
 import { env } from "cloudflare:workers";
 import type { D1Migration } from "cloudflare:test";
@@ -16,7 +22,7 @@ import { applyRetiredProfileMigrations } from "./profileTestMigrations.ts";
 import { resetEventReceiptTestState } from "./eventTransitionTestFixture.ts";
 import { resetMatchPresentationTestState } from "./matchPresentationTestFixture.ts";
 
-const testEnv = env as Env & {
+const testEnv = eventApplicationEnvironment(env) as Env & {
   TEST_D1_MIGRATIONS: D1Migration[];
   TEST_EVENT_D1_MIGRATIONS: D1Migration[];
   TEST_PROFILE_D1_MIGRATIONS: D1Migration[];
@@ -31,6 +37,7 @@ beforeAll(async () => {
     testEnv.EVENT_DB,
     testEnv.TEST_EVENT_D1_MIGRATIONS,
   );
+  await activateEventApplicationFixture(testEnv.PROFILE_GAMES_DB);
   await applyRetiredProfileMigrations(
     testEnv.PROFILE_DB,
     testEnv.TEST_PROFILE_D1_MIGRATIONS,
@@ -65,7 +72,7 @@ it("returns a freshly committed HTTP snapshot while room notifications are still
           username: name,
           displayName: name,
           emojiId: 1,
-          aura: "",
+          aura: "none",
           joinedAtMs: 1,
           state: "active",
           eliminatedRoundIndex: null,
@@ -76,23 +83,25 @@ it("returns a freshly committed HTTP snapshot while room notifications are still
   );
   for (const participant of Object.values(participants)) {
     const value = materializeCanonicalProfile({
-      profile: {
-        id: participant.profileId,
-        nonce: 1,
-        rating: 1500,
-        totalManaPoints: 0,
-        win: true,
-        emoji: 1,
-        username: participant.username,
-        eth: null,
-        sol: null,
-        completedProblemIds: [],
-        isTutorialCompleted: true,
-        mining: {
-          lastRockDate: "",
-          materials: { dust: 0, slime: 0, gum: 0, metal: 0, ice: 0 },
+      profile: createStoredPlayerProfile(
+        participant.profileId,
+        createDefaultProfileAppearance(1),
+        {
+          nonce: 1,
+          rating: 1500,
+          totalManaPoints: 0,
+          win: true,
+          username: participant.username,
+          eth: null,
+          sol: null,
+          completedProblemIds: [],
+          isTutorialCompleted: true,
+          mining: {
+            lastRockDate: null,
+            materials: { dust: 0, slime: 0, gum: 0, metal: 0, ice: 0 },
+          },
         },
-      },
+      ),
       createdAtMs: 1,
       updatedAtMs: 1,
     });
@@ -120,7 +129,7 @@ it("returns a freshly committed HTTP snapshot while room notifications are still
       kind: "event",
       eventId,
       value: eventDocumentFixture({
-        schemaVersion: 2,
+        schemaVersion: 3,
         eventId,
         status: "scheduled",
         createdAtMs: 1,

@@ -72,7 +72,7 @@ export function createSessionRepository(
           )
           .bind(refreshHash, revokeHash, input.sessionId),
       ]);
-      const row = results[1].results[0] as SessionRow | undefined;
+      const row = results[1]!.results[0] as SessionRow | undefined;
       if (!row) throw new Error("session-create-unavailable");
       if (!row.revoke_matches || (row.uid !== null && !row.refresh_matches)) {
         throw new AuthApiFailure(

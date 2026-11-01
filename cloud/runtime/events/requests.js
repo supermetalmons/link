@@ -29,13 +29,24 @@ function eventRequestStartsInMinutes(value) {
 }
 function eventCreateOptions(value) {
   const data = fields(value);
+  if (
+    Object.hasOwn(data, "telegramAnnouncements") &&
+    !(0, events_js_1.isEventAnnouncements)(data.telegramAnnouncements)
+  ) {
+    throw Object.assign(
+      new Error("Telegram announcements must contain boolean preferences."),
+      { code: "invalid-argument" },
+    );
+  }
   return {
     validSundayMons:
       !Object.hasOwn(data, "isSundayMons") ||
       typeof data.isSundayMons === "boolean",
     isSundayMons: data.isSundayMons === true,
     telegramAnnouncements: (0, events_js_1.resolveEventTelegramAnnouncements)(
-      data,
+      (0, events_js_1.isEventAnnouncements)(data.telegramAnnouncements)
+        ? { telegramAnnouncements: data.telegramAnnouncements }
+        : {},
     ),
   };
 }

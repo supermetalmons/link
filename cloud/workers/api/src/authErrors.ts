@@ -1,3 +1,7 @@
+import {
+  parseApiErrorDetails,
+  type ApiErrorDetails,
+} from "@mons/shared/api-errors";
 export type AuthErrorCode =
   | "aborted"
   | "deadline-exceeded"
@@ -15,20 +19,20 @@ export const PROFILE_WRITES_RETRY_AFTER_SECONDS = 60;
 
 export class AuthApiFailure extends Error {
   readonly code: AuthErrorCode;
-  readonly details?: unknown;
+  readonly details: ApiErrorDetails | undefined;
   readonly status: number;
 
   constructor(
     status: number,
     code: AuthErrorCode,
     message: string,
-    details?: unknown,
+    details?: ApiErrorDetails,
     options?: ErrorOptions,
   ) {
     super(message, options);
     this.status = status;
     this.code = code;
-    this.details = details;
+    this.details = parseApiErrorDetails(code, details);
   }
 }
 

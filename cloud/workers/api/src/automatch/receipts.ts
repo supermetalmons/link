@@ -1,4 +1,4 @@
-import { STATE_SERVER_TIMESTAMP } from "../stateCompatibility.ts";
+import { SESSION_TIMESTAMP } from "../sessionValueOperations.ts";
 import type { GameSessionChange } from "../gameSessionContracts.ts";
 import type {
   AutomatchPlan,
@@ -18,13 +18,14 @@ export function buildAutomatchReceiptChanges(
   profileProjectionRequestId: string | null,
   telegramProjection: boolean,
 ): GameSessionChange[] {
-  const completedAtMs = STATE_SERVER_TIMESTAMP;
+  const completedAtMs = SESSION_TIMESTAMP;
   return [
     {
       kind: "mutation-receipt",
       operationId: request.operationId,
       value: {
-        schemaVersion: 1,
+        schemaVersion: 2,
+        effects: { state: "enabled" },
         aura: request.aura,
         completedAtMs,
         emojiId: request.emojiId,
@@ -37,6 +38,7 @@ export function buildAutomatchReceiptChanges(
         telegramProjection,
       },
       expiration: {
+        schemaVersion: 1,
         completedAtMs,
       },
     },
@@ -59,7 +61,11 @@ export function matchesAutomatchReceiptRequest(
 export function buildAutomatchReplayTasks(
   receipt: AutomatchReceipt,
 ): Pick<AutomatchPlan, "profileGameProjectionTask" | "projectionTask"> | null {
-  if (!receipt.profileProjectionRequestId) return null;
+  if (
+    !receipt.profileProjectionRequestId ||
+    receipt.effects.state === "retired"
+  )
+    return null;
   return {
     projectionTask: receipt.telegramProjection
       ? {

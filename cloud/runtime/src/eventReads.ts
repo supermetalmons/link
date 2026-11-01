@@ -1,5 +1,6 @@
 import type { EventDocument } from "./events/documents.js";
-export type EventJsonRecord = Record<string, unknown>;
+import type { EventRecord } from "./shared/event-types.js";
+export type EventJsonRecord = EventRecord;
 
 export type EventPrizeAssignmentRecord = {
   assignedAtMs: number;

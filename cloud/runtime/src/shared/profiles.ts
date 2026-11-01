@@ -1,3 +1,23 @@
+import {
+  isAura,
+  isCardBackgroundId,
+  isCardSubtitleId,
+  isEmojiAppearance,
+  isEmojiId,
+  isProfileCounter,
+  isSelectedMons,
+  isStickerMap,
+  PROFILE_FALLBACK_EMOJI_COUNT,
+  PROFILE_STICKER_CATALOG,
+  INVENTORY_EMOJI_START,
+  getProfileFallbackEmojiId,
+  type ProfileAppearance,
+  type CardBackgroundId,
+  type CardSubtitleId,
+  type ProfileCounter,
+  type SelectedMons,
+  type StickerMap,
+} from "./appearance.js";
 import type { MiningMaterialName, MiningSnapshot } from "./mining.js";
 import { MATERIAL_KEYS, isMiningSnapshot } from "./mining.js";
 
@@ -14,19 +34,12 @@ export type ResolveProfileIdResponse = { ok: true; profileId: string | null };
 
 export type LeaderboardReadType = "rating" | "mp" | MiningMaterialName;
 
-export interface PlayerProfile {
+export interface PlayerProfile extends ProfileAppearance {
   id: string;
   nonce?: number;
   rating?: number;
   totalManaPoints?: number;
   win?: boolean;
-  emoji: number | string;
-  aura?: string;
-  cardBackgroundId?: number;
-  cardSubtitleId?: number;
-  profileCounter?: string;
-  profileMons?: string;
-  cardStickers?: string;
   username: string | null;
   eth: string | null;
   sol: string | null;
@@ -71,14 +84,13 @@ export type ProfileCustomizationField =
 export type ProfileCustomizationUpdateRequest =
   | {
       field: "emojiAndAura";
-      value: { emoji: number; aura: "" | "rainbow" };
+      value: Pick<ProfileAppearance, "emoji" | "aura">;
     }
-  | {
-      field: "cardBackgroundId" | "cardSubtitleId";
-      value: number;
-    }
-  | { field: "profileCounter"; value: "gp" | "mp" }
-  | { field: "profileMons" | "cardStickers"; value: string }
+  | { field: "cardBackgroundId"; value: CardBackgroundId }
+  | { field: "cardSubtitleId"; value: CardSubtitleId }
+  | { field: "profileCounter"; value: ProfileCounter }
+  | { field: "profileMons"; value: SelectedMons | null }
+  | { field: "cardStickers"; value: StickerMap }
   | { field: "completedProblems"; value: string[] }
   | { field: "tutorialCompleted"; value: boolean };
 
@@ -112,61 +124,22 @@ const REQUIRED_PROFILE_KEYS = Object.freeze([
   "totalManaPoints",
   "win",
   "emoji",
+  "aura",
+  "cardBackgroundId",
+  "cardSubtitleId",
+  "profileCounter",
+  "profileMons",
+  "cardStickers",
   "username",
   "eth",
   "sol",
   "mining",
 ]);
-const PROFILE_FALLBACK_EMOJI_COUNT = 155;
 const LEADERBOARD_READ_TYPES: readonly LeaderboardReadType[] = Object.freeze([
   "rating",
   "mp",
   ...MATERIAL_KEYS,
 ]);
-const PROFILE_STICKER_CATALOG: Readonly<Record<string, readonly string[]>> =
-  Object.freeze({
-    "big-mon-top-right": Object.freeze([
-      "applecreme",
-      "armored-gummoskullj",
-      "crystal-cloud-gabber",
-      "crystal-gummy-deino",
-      "gate",
-      "crystal-owg",
-      "estalibur",
-      "gerp",
-      "gummy-deino",
-      "hatchat",
-      "king-snowbie",
-      "lord-idgecreist",
-      "melmut",
-      "omen-statue",
-      "omom-2",
-      "omom-3",
-      "omom-4",
-      "omom",
-      "speklmic",
-      "super-mana-piece-3",
-      "zemred",
-    ]),
-    "bottom-left": Object.freeze(["heart", "rock"]),
-    "bottom-right": Object.freeze(["cursor", "star"]),
-    mana: Object.freeze(["blue-mana", "metal-mana"]),
-    "middle-left": Object.freeze(["super-mana-piece-2", "super-mana-piece"]),
-    "middle-right": Object.freeze([
-      "glitter-rock",
-      "metal-mana-pog",
-      "swag-coin",
-    ]),
-    "mini-logo": Object.freeze(["bomb", "mana", "potion", "super-mana"]),
-    "type-logo": Object.freeze([
-      "angel",
-      "demon",
-      "drainer",
-      "mystic",
-      "spirit",
-    ]),
-  });
-
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null && !Array.isArray(value);
 
@@ -187,13 +160,8 @@ const hasOnlyKeys = (value: object, allowedKeys: readonly string[]): boolean =>
 const isOptionalFiniteNumber = (value: unknown): value is number | undefined =>
   value === undefined || (typeof value === "number" && Number.isFinite(value));
 
-const isOptionalString = (value: unknown): value is string | undefined =>
-  value === undefined || typeof value === "string";
-
-const isOptionalNullableString = (
-  value: unknown,
-): value is string | null | undefined =>
-  value === undefined || value === null || typeof value === "string";
+const isNullableString = (value: unknown): value is string | null =>
+  value === null || typeof value === "string";
 
 const isPlayerProfile = (value: unknown): value is CompletePlayerProfile =>
   isRecord(value) &&
@@ -208,17 +176,16 @@ const isPlayerProfile = (value: unknown): value is CompletePlayerProfile =>
   typeof value.totalManaPoints === "number" &&
   Number.isFinite(value.totalManaPoints) &&
   typeof value.win === "boolean" &&
-  ((typeof value.emoji === "number" && Number.isFinite(value.emoji)) ||
-    (typeof value.emoji === "string" && value.emoji !== "")) &&
-  isOptionalString(value.aura) &&
-  isOptionalFiniteNumber(value.cardBackgroundId) &&
-  isOptionalFiniteNumber(value.cardSubtitleId) &&
-  isOptionalString(value.profileCounter) &&
-  isOptionalString(value.profileMons) &&
-  isOptionalString(value.cardStickers) &&
-  isOptionalNullableString(value.username) &&
-  isOptionalNullableString(value.eth) &&
-  isOptionalNullableString(value.sol) &&
+  isEmojiId(value.emoji) &&
+  isAura(value.aura) &&
+  isCardBackgroundId(value.cardBackgroundId) &&
+  isCardSubtitleId(value.cardSubtitleId) &&
+  isProfileCounter(value.profileCounter) &&
+  (value.profileMons === null || isSelectedMons(value.profileMons)) &&
+  isStickerMap(value.cardStickers) &&
+  isNullableString(value.username) &&
+  isNullableString(value.eth) &&
+  isNullableString(value.sol) &&
   isOptionalFiniteNumber(value.feb2026UniqueOpponentsCount) &&
   (value.completedProblemIds === undefined ||
     (Array.isArray(value.completedProblemIds) &&
@@ -290,63 +257,20 @@ const isProfileCustomizationUpdateRequest = (
   switch (value.field) {
     case "emojiAndAura":
       return (
-        isRecord(value.value) &&
-        hasExactKeys(value.value, ["emoji", "aura"]) &&
-        Number.isSafeInteger(value.value.emoji) &&
-        (((value.value.emoji as number) >= 0 &&
-          (value.value.emoji as number) <= 155 &&
-          value.value.aura === "") ||
-          ((value.value.emoji as number) >= 1000 &&
-            (value.value.emoji as number) <= 1466 &&
-            (value.value.aura === "" || value.value.aura === "rainbow")))
+        isEmojiAppearance(value.value) &&
+        (value.value.aura === "none" ||
+          value.value.emoji >= INVENTORY_EMOJI_START)
       );
     case "cardBackgroundId":
-      return (
-        Number.isSafeInteger(value.value) &&
-        (((value.value as number) >= 0 && (value.value as number) < 37) ||
-          value.value === 100)
-      );
+      return isCardBackgroundId(value.value);
     case "cardSubtitleId":
-      return (
-        Number.isSafeInteger(value.value) &&
-        (value.value as number) >= 0 &&
-        (value.value as number) < 30
-      );
+      return isCardSubtitleId(value.value);
     case "profileCounter":
-      return value.value === "gp" || value.value === "mp";
+      return isProfileCounter(value.value);
     case "profileMons":
-      return (
-        value.value === "" ||
-        (typeof value.value === "string" &&
-          /^(?:0|1),(?:0|1|2|3|4),(?:0|1|2|3|4|5),(?:0|1|2),(?:0|1|2)$/.test(
-            value.value,
-          ))
-      );
-    case "cardStickers": {
-      if (value.value === "") {
-        return true;
-      }
-      if (typeof value.value !== "string") {
-        return false;
-      }
-      let stickers: unknown;
-      try {
-        stickers = JSON.parse(value.value);
-      } catch {
-        return false;
-      }
-      return (
-        isRecord(stickers) &&
-        Object.keys(stickers).length <=
-          Object.keys(PROFILE_STICKER_CATALOG).length &&
-        Object.entries(stickers).every(
-          ([field, name]) =>
-            Object.hasOwn(PROFILE_STICKER_CATALOG, field) &&
-            typeof name === "string" &&
-            PROFILE_STICKER_CATALOG[field].includes(name),
-        )
-      );
-    }
+      return value.value === null || isSelectedMons(value.value);
+    case "cardStickers":
+      return isStickerMap(value.value);
     case "completedProblems":
       return (
         Array.isArray(value.value) &&
@@ -367,26 +291,6 @@ const isProfileCustomizationUpdateResponse = (
 ): value is ProfileCustomizationUpdateResponse =>
   isRecord(value) && hasExactKeys(value, ["ok"]) && value.ok === true;
 
-const getProfileFallbackEmojiId = (profileId: string): string => {
-  let hash = 0;
-  for (let index = 0; index < profileId.length; index += 1) {
-    hash += profileId.charCodeAt(index);
-  }
-  return `${(hash % PROFILE_FALLBACK_EMOJI_COUNT) + 1}`;
-};
-
-const normalizeProfileEmojiId = (
-  value: unknown,
-  fallback: number = 1,
-): number => {
-  const parsed =
-    typeof value === "number" ||
-    (typeof value === "string" && value.trim() !== "")
-      ? Number(value)
-      : NaN;
-  return Number.isFinite(parsed) ? Math.floor(parsed) : fallback;
-};
-
 const cropAddress = (address: string): string =>
   `${address.slice(0, 4)}...${address.slice(-4)}`;
 
@@ -395,7 +299,6 @@ export {
   PROFILE_STICKER_CATALOG,
   PROFILE_FALLBACK_EMOJI_COUNT,
   getProfileFallbackEmojiId,
-  normalizeProfileEmojiId,
   isLeaderboardReadRequest,
   isLeaderboardReadResponse,
   isLeaderboardReadType,

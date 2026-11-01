@@ -53,8 +53,8 @@ function confirmedReminder(
     receipt.status !== "sent" ||
     !Array.isArray(receipt.messageIds) ||
     receipt.messageIds.length !== 1 ||
-    !Number.isSafeInteger(receipt.messageIds[0]) ||
-    receipt.messageIds[0] <= 0 ||
+    !Number.isSafeInteger(receipt.messageIds[0]!) ||
+    receipt.messageIds[0]! <= 0 ||
     !Number.isSafeInteger(receipt.updatedAtMs) ||
     receipt.updatedAtMs <= 0
   ) {
@@ -68,7 +68,7 @@ function confirmedReminder(
   if (payload === null) return null;
   return {
     text: payload.text,
-    messageId: receipt.messageIds[0],
+    messageId: receipt.messageIds[0]!,
     appliedAtMs: receipt.updatedAtMs,
   };
 }

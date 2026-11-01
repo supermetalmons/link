@@ -1,3 +1,4 @@
+import { requiredFixture } from "./requiredFixture.ts";
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
@@ -13,7 +14,8 @@ import {
 import { createEventPrizeContext } from "../src/eventPrizeWithdrawal/context.ts";
 import type { EventPrizeWithdrawalStore } from "../src/eventPrizeWithdrawalD1.ts";
 import { createWithdrawalRecordCommands } from "../../../runtime/eventPrizes/withdrawalRepository.js";
-import { withdrawalFixture } from "./withdrawalStorageFixture.ts";
+import { canonicalWithdrawalFixture as withdrawalFixture } from "./canonicalWithdrawalFixture.ts";
+import { withdrawalWorkflowInstanceId } from "../src/eventPrizeWithdrawal/contracts.ts";
 import type { EventPrizeRepository } from "../src/eventPrizeRepository.ts";
 import { isMatchingProfileEventPrizeAssignment } from "../../../runtime/eventPrizeWithdrawalState.js";
 import type { EventPrizeAssignmentRecord } from "../../../runtime/eventReads.js";
@@ -81,7 +83,7 @@ function ownershipReader({
         );
         profileById.set(resolvedProfileId, {
           profile: {
-            aura: "",
+            aura: "none",
             emoji: 1,
             eth: "",
             profileId: resolvedProfileId,
@@ -221,14 +223,18 @@ function repository() {
       if ("commit" in decision) {
         return {
           committed: false,
-          decision: decision.decision,
+          ...(decision.decision === undefined
+            ? {}
+            : { decision: decision.decision }),
           value: current,
         };
       }
       values.set(path, decision.value);
       return {
         committed: true,
-        decision: decision.decision,
+        ...(decision.decision === undefined
+          ? {}
+          : { decision: decision.decision }),
         value: decision.value,
       };
     },
@@ -260,7 +266,9 @@ function repository() {
           if ("commit" in decision) {
             return {
               committed: false,
-              decision: decision.decision,
+              ...(decision.decision === undefined
+                ? {}
+                : { decision: decision.decision }),
               value: current,
             };
           }
@@ -269,7 +277,9 @@ function repository() {
           else values.set(path, next);
           return {
             committed: true,
-            decision: decision.decision,
+            ...(decision.decision === undefined
+              ? {}
+              : { decision: decision.decision }),
             value: next,
           };
         },
@@ -303,9 +313,9 @@ function setRecoverableWithdrawal(
     status,
     ...(status === "submitted"
       ? {
-          blockhash: "blockhash",
+          blockhash: recipientAddress,
           lastValidBlockHeight: 1,
-          signedTransactionBase64: "signed-transaction",
+          signedTransactionBase64: "AQID",
           transactionSignature: "signature",
         }
       : {}),
@@ -313,7 +323,7 @@ function setRecoverableWithdrawal(
 }
 
 function completedWithdrawal() {
-  return {
+  return withdrawalFixture({
     assetAddress: "JEGmxy88eGv9vD4rWRtN5so9fMfMU6WA5djgrysDWKrU",
     eventId,
     place: 1,
@@ -323,7 +333,7 @@ function completedWithdrawal() {
     requesterUid: uid,
     status: "completed",
     transactionSignature: "signature",
-  };
+  });
 }
 
 function unavailablePrizeConfiguration() {
@@ -555,7 +565,8 @@ test("builds and validates deterministic withdrawal Workflow identities", async 
     await buildEventPrizeWithdrawalOperationId(eventId, prizeId),
   );
   const params = {
-    schemaVersion: 1,
+    schemaVersion: 2,
+    dataEpoch: 1,
     kind: "withdrawal",
     eventId,
     operationId,
@@ -565,7 +576,10 @@ test("builds and validates deterministic withdrawal Workflow identities", async 
     requesterUid: uid,
   } as const;
   assert.deepEqual(
-    await parseEventPrizeWithdrawalWorkflowParams(params, operationId),
+    await parseEventPrizeWithdrawalWorkflowParams(
+      params,
+      withdrawalWorkflowInstanceId(operationId),
+    ),
     params,
   );
   assert.equal(
@@ -1057,7 +1071,8 @@ test("rejects a contradictory durable processing admission", async () => {
   await assert.rejects(
     resolveEventPrizeWithdrawalExecutionParams(
       {
-        schemaVersion: 1,
+        schemaVersion: 2,
+        dataEpoch: 1,
         kind: "withdrawal",
         eventId,
         operationId,
@@ -1085,7 +1100,8 @@ test("validates processing ownership through a canonical merge", async () => {
     prizeId,
   );
   const params = {
-    schemaVersion: 1,
+    schemaVersion: 2,
+    dataEpoch: 1,
     kind: "withdrawal",
     eventId,
     operationId,
@@ -1120,7 +1136,8 @@ test("lets an alternate canonical login execute an existing processing intent", 
   );
   const resolved = await resolveEventPrizeWithdrawalExecutionParams(
     {
-      schemaVersion: 1,
+      schemaVersion: 2,
+      dataEpoch: 1,
       kind: "withdrawal",
       eventId,
       operationId,
@@ -1155,7 +1172,8 @@ test("executes a processing capability without rereading the live owner", async 
     prizeId,
   );
   const params = {
-    schemaVersion: 1,
+    schemaVersion: 2,
+    dataEpoch: 1,
     kind: "withdrawal",
     eventId,
     operationId,
@@ -1190,7 +1208,8 @@ test("fails closed when the admitted profile no longer exists", async () => {
   await assert.rejects(
     resolveEventPrizeWithdrawalExecutionParams(
       {
-        schemaVersion: 1,
+        schemaVersion: 2,
+        dataEpoch: 1,
         kind: "withdrawal",
         eventId,
         operationId,
@@ -1229,7 +1248,8 @@ test("preserves submitted reconciliation after the login is unlinked", async () 
     prizeId,
   );
   const params = {
-    schemaVersion: 1,
+    schemaVersion: 2,
+    dataEpoch: 1,
     kind: "withdrawal",
     eventId,
     operationId,
@@ -1297,7 +1317,8 @@ test("completed execution retries projection cleanup failures", async () => {
     executeEventPrizeWithdrawal(
       TELEGRAM_TEST_ENV,
       {
-        schemaVersion: 1,
+        schemaVersion: 2,
+        dataEpoch: 1,
         kind: "withdrawal",
         eventId,
         operationId,
@@ -1677,8 +1698,9 @@ for (const durableStatus of ["processing", "submitted"] as const) {
 
     assert.equal(response.status, 202);
     assert.equal(batches.length, 1);
-    assert.deepEqual(batches[0][0].params, {
-      schemaVersion: 1,
+    assert.deepEqual(requiredFixture(requiredFixture(batches[0])[0]).params, {
+      schemaVersion: 2,
+      dataEpoch: 1,
       kind: "withdrawal",
       eventId,
       operationId,
@@ -1735,7 +1757,11 @@ test("alternate canonical login recreates a missing processing Workflow", async 
   assert.equal(response.status, 202);
   assert.equal(batches.length, 1);
   assert.equal(
-    (batches[0][0].params as { requesterUid: string }).requesterUid,
+    (
+      requiredFixture(requiredFixture(batches[0])[0]).params as {
+        requesterUid: string;
+      }
+    ).requesterUid,
     "original-login",
   );
 });
@@ -1841,7 +1867,7 @@ test("missing Workflow without durable state is terminal", async () => {
   assert.equal(creates, 0);
 });
 
-test("missing Workflow with an invalid durable place is terminal", async () => {
+test("invalid durable place fails closed before Workflow recovery", async () => {
   const state = repository();
   setRecoverableWithdrawal(state, "submitted");
   const withdrawalPath = `eventPrizeWithdrawals/${eventId}/${prizeId}`;
@@ -1878,9 +1904,10 @@ test("missing Workflow with an invalid durable place is terminal", async () => {
   );
 
   assert.equal(response.status, 503);
-  assert.deepEqual(((await response.json()) as { details: unknown }).details, {
-    terminal: true,
-  });
+  assert.equal(
+    ((await response.json()) as { error: unknown }).error,
+    "unavailable",
+  );
   assert.equal(creates, 0);
 });
 
@@ -2182,8 +2209,9 @@ test("status polling recreates a terminated processing Workflow", async () => {
   assert.equal(ownershipReads, 1);
   assert.equal(deletes, 1);
   assert.equal(batches.length, 1);
-  assert.deepEqual(batches[0][0].params, {
-    schemaVersion: 1,
+  assert.deepEqual(requiredFixture(requiredFixture(batches[0])[0]).params, {
+    schemaVersion: 2,
+    dataEpoch: 1,
     kind: "withdrawal",
     eventId,
     operationId,
@@ -2203,7 +2231,7 @@ test("status polling recreates a terminated submitted Workflow", async () => {
   state.values.delete(`profileEventPrizes/${profileId}/${eventId}`);
   state.values.set(`eventPrizeWithdrawals/${eventId}/${prizeId}`, {
     assetAddress: "JEGmxy88eGv9vD4rWRtN5so9fMfMU6WA5djgrysDWKrU",
-    blockhash: "blockhash",
+    blockhash: recipientAddress,
     eventId,
     lastValidBlockHeight: 1,
     leaseExpiresAtMs: 2_000,
@@ -2213,7 +2241,7 @@ test("status polling recreates a terminated submitted Workflow", async () => {
     profileId,
     recipientAddress,
     requesterUid: uid,
-    signedTransactionBase64: "signed-transaction",
+    signedTransactionBase64: "AQID",
     status: "submitted",
     transactionSignature: "signature",
   });
@@ -2418,7 +2446,8 @@ test("replaces a retained errored Workflow with the current request", async () =
   assert.equal(batches.length, 2);
   assert.equal(
     (
-      batches[1][0].params as EventPrizeWithdrawalWorkflowInput & {
+      requiredFixture(requiredFixture(batches[1])[0])
+        .params as EventPrizeWithdrawalWorkflowInput & {
         recipientAddress: string;
       }
     ).recipientAddress,

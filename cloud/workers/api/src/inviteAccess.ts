@@ -1,7 +1,6 @@
 import {
   inviteMutationParticipants,
   type InviteDocument,
-  type PresentationInviteView,
 } from "@mons/shared/invite-records";
 import type {
   ResolveInviteRoleRequest,
@@ -89,7 +88,7 @@ export async function resolveInviteRole(
 export async function resolveInviteRoleFromSnapshot(
   identity: RequestIdentity,
   request: ResolveInviteRoleRequest,
-  storedInvite: InviteDocument | PresentationInviteView | null,
+  storedInvite: InviteDocument | null,
   repository: ProfileOwnershipReader,
 ): Promise<ResolveInviteRoleResponse> {
   const participants = decodeCanonicalInviteParticipants(storedInvite);

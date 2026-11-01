@@ -14,17 +14,20 @@ exports.shouldProjectRatingTelegramUpdate =
   exports.AUTOMATCH_PROJECTION_GUARD_VERSION =
     void 0;
 exports.retainAutomatchTelegramSource = retainAutomatchTelegramSource;
+const automatchRecords_js_1 = require("../automatchRecords.js");
 const invite_records_1 = require("@mons/shared/invite-records");
 const values_js_1 = require("./values.js");
 const node_crypto_1 = require("node:crypto");
 const rematches_js_1 = require("../shared/rematches.js");
 const automatchSource_js_1 = require("./automatchSource.js");
 function retainAutomatchTelegramSource(value) {
-  return value;
+  return (0, automatchRecords_js_1.parseAutomatchRecord)(
+    "telegramAutomatches",
+    value,
+  );
 }
 function sourceEvidence(value) {
-  const retained = value;
-  return retained;
+  return value;
 }
 const AUTOMATCH_PROJECTION_GUARD_VERSION = 1;
 exports.AUTOMATCH_PROJECTION_GUARD_VERSION = AUTOMATCH_PROJECTION_GUARD_VERSION;
@@ -281,54 +284,31 @@ const shouldProjectRatingTelegramUpdate = (ratingUpdate) =>
   normalizeString(ratingUpdate.updateRatingMessage) !== "";
 exports.shouldProjectRatingTelegramUpdate = shouldProjectRatingTelegramUpdate;
 const mergeRatingResultFragment = (source, ratingUpdate) => {
-  const record = source || {};
   if (
     !source ||
-    record.version !== automatchSource_js_1.TELEGRAM_AUTOMATCH_VERSION ||
-    !shouldProjectRatingTelegramUpdate(ratingUpdate)
+    !shouldProjectRatingTelegramUpdate(ratingUpdate) ||
+    ratingUpdate.completedAtMs === null ||
+    ratingUpdate.updateRatingMessage === null
   ) {
     return { changed: false, source, reason: "skipped" };
   }
-  const matchId = normalizeString(ratingUpdate.matchId);
-  const existingResults =
-    record.results && typeof record.results === "object" ? record.results : {};
-  if (Object.hasOwn(existingResults, matchId)) {
+  const matchId = ratingUpdate.matchId;
+  if (Object.hasOwn(source.results, matchId))
     return { changed: false, source, reason: "duplicate" };
-  }
-  const completedAtMs =
-    typeof ratingUpdate.completedAtMs === "number" &&
-    Number.isFinite(ratingUpdate.completedAtMs)
-      ? Math.floor(ratingUpdate.completedAtMs)
-      : null;
-  const result = {
-    text: ratingUpdate.updateRatingMessage,
-    ...(completedAtMs === null ? {} : { completedAtMs }),
-  };
-  const currentUpdatedAtMs =
-    typeof record.updatedAtMs === "number" &&
-    Number.isFinite(record.updatedAtMs)
-      ? Math.floor(record.updatedAtMs)
-      : 0;
-  const currentGeneration =
-    typeof record.generation === "number" &&
-    Number.isInteger(record.generation) &&
-    record.generation >= 0
-      ? record.generation
-      : 0;
   return {
     changed: true,
     reason: "inserted",
     source: retainAutomatchTelegramSource({
-      ...record,
+      ...source,
       results: {
-        ...existingResults,
-        [matchId]: result,
+        ...source.results,
+        [matchId]: {
+          text: ratingUpdate.updateRatingMessage,
+          completedAtMs: ratingUpdate.completedAtMs,
+        },
       },
-      updatedAtMs:
-        completedAtMs === null
-          ? currentUpdatedAtMs
-          : Math.max(currentUpdatedAtMs, completedAtMs),
-      generation: currentGeneration + 1,
+      updatedAtMs: Math.max(source.updatedAtMs, ratingUpdate.completedAtMs),
+      generation: source.generation + 1,
     }),
   };
 };

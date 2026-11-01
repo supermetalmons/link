@@ -64,7 +64,6 @@ exports.validateDesiredForDelivery =
   exports.resolvePendingDeleteId =
   exports.buildApiGateOwner =
   exports.buildPendingDeleteId =
-  exports.omitKeys =
   exports.PendingDeleteSnapshot =
   exports.DeliverySnapshot =
   exports.hashValue =
@@ -78,29 +77,27 @@ exports.pendingDeleteDocument = pendingDeleteDocument;
 exports.retryDocument = retryDocument;
 exports.readDelivery = readDelivery;
 exports.readPendingDelete = readPendingDelete;
+exports.omitKeys = omitKeys;
+exports.documentFields = documentFields;
 const crypto = __importStar(require("node:crypto"));
-const deliveryPolicy_js_1 = require("./deliveryPolicy.js");
-const desiredStateCore_js_1 = require("./desiredStateCore.js");
 const client_js_1 = require("./client.js");
 const values_js_1 = require("./values.js");
-const sendEvidence = Symbol("telegram-send-evidence");
+const recordCodec_js_1 = require("./recordCodec.js");
 function preserveSendEvidence(value, present = true) {
-  return { [sendEvidence]: { value, present } };
+  return present ? value : undefined;
 }
 function writeDelivery(transition) {
-  if (transition.status !== "uncertain") {
-    const retained = transition;
-    return retained;
-  }
-  const evidence = transition.sendInFlight[sendEvidence];
   const output = { ...transition };
-  if (evidence.present) output.sendInFlight = evidence.value;
-  else delete output.sendInFlight;
-  return output;
+  if ("sendInFlight" in output && output.sendInFlight === undefined)
+    Reflect.deleteProperty(output, "sendInFlight");
+  const value = (0, recordCodec_js_1.readTelegramDelivery)(output);
+  if (!value) throw new TypeError("invalid-telegram-delivery-transition");
+  return value;
 }
 function writeCleanup(transition) {
-  const retained = transition;
-  return retained;
+  const value = (0, recordCodec_js_1.readTelegramCleanup)(transition);
+  if (!value) throw new TypeError("invalid-telegram-cleanup-transition");
+  return value;
 }
 const normalizeString = (value) =>
   typeof value === "string" && value.trim() !== "" ? value.trim() : "";
@@ -108,98 +105,72 @@ exports.normalizeString = normalizeString;
 const hashValue = (value) =>
   crypto.createHash("sha256").update(String(value)).digest("hex");
 exports.hashValue = hashValue;
-const snapshotSources = new WeakMap();
-const asObject = (value) =>
-  value instanceof StoredSnapshot
-    ? snapshotSources.get(value)
-    : value && typeof value === "object" && !Array.isArray(value)
-      ? value
-      : {};
-class StoredSnapshot {
-  constructor(value) {
-    snapshotSources.set(this, asObject(value));
+class RetrySnapshot {
+  document;
+  constructor(document = {}) {
+    this.document = document;
   }
   get present() {
-    return Object.keys(snapshotSources.get(this)).length > 0;
+    return Object.keys(this.document).length > 0;
+  }
+  get attempts() {
+    return this.document.attempts ?? 0;
+  }
+  get leaseOwner() {
+    return this.document.leaseOwner ?? "";
+  }
+  get leaseExpiresAtMs() {
+    return this.document.leaseExpiresAtMs ?? 0;
+  }
+  get retryStartedAtMs() {
+    return this.document.retryStartedAtMs ?? 0;
+  }
+  get retryDeadlineAtMs() {
+    return this.document.retryDeadlineAtMs ?? 0;
+  }
+  get retryAtMs() {
+    return this.document.retryAtMs ?? 0;
+  }
+  get retrySequence() {
+    return this.document.retrySequence ?? 0;
+  }
+  retryTimestampOr(field, fallback) {
+    return this.document[field] ?? fallback ?? 0;
+  }
+  retrySequenceOr(fallback) {
+    return this.document.retrySequence ?? fallback ?? 0;
+  }
+  get apiGateOwner() {
+    return this.document.apiGateOwner ?? "";
+  }
+  get apiGateGeneration() {
+    return this.document.apiGateGeneration ?? "";
+  }
+  get apiGateStartedAtMs() {
+    return this.document.apiGateStartedAtMs ?? 0;
+  }
+  get apiGateProofRequired() {
+    return this.document.apiGateProofRequired;
+  }
+  get apiGateProofOwner() {
+    return this.document.apiGateProofRequired?.owner ?? "";
   }
 }
 function deliveryDocument(value) {
-  return snapshotSources.get(value);
+  return value.document;
 }
 function pendingDeleteDocument(value) {
-  return snapshotSources.get(value);
+  return value.document;
 }
 function retryDocument(value) {
-  return asObject(value);
-}
-class RetrySnapshot extends StoredSnapshot {
-  get attempts() {
-    return (0, deliveryPolicy_js_1.normalizeAttempts)(
-      snapshotSources.get(this).attempts,
-    );
-  }
-  get leaseOwner() {
-    return (0, exports.normalizeString)(snapshotSources.get(this).leaseOwner);
-  }
-  get leaseExpiresAtMs() {
-    return Number(snapshotSources.get(this).leaseExpiresAtMs) || 0;
-  }
-  get retryStartedAtMs() {
-    return (0, deliveryPolicy_js_1.normalizeTimestamp)(
-      snapshotSources.get(this).retryStartedAtMs,
-    );
-  }
-  get retryDeadlineAtMs() {
-    return (0, deliveryPolicy_js_1.normalizeTimestamp)(
-      snapshotSources.get(this).retryDeadlineAtMs,
-    );
-  }
-  get retryAtMs() {
-    return Number(snapshotSources.get(this).retryAtMs);
-  }
-  get retrySequence() {
-    return (0, deliveryPolicy_js_1.normalizeRetrySequence)(
-      snapshotSources.get(this).retrySequence,
-    );
-  }
-  retryTimestampOr(field, fallback) {
-    return (0, deliveryPolicy_js_1.normalizeTimestamp)(
-      snapshotSources.get(this)[field] || fallback,
-    );
-  }
-  retrySequenceOr(fallback) {
-    return (0, deliveryPolicy_js_1.normalizeRetrySequence)(
-      snapshotSources.get(this).retrySequence ?? fallback,
-    );
-  }
-  get apiGateOwner() {
-    return (0, exports.normalizeString)(snapshotSources.get(this).apiGateOwner);
-  }
-  get apiGateGeneration() {
-    return (0, exports.normalizeString)(
-      snapshotSources.get(this).apiGateGeneration,
-    );
-  }
-  get apiGateStartedAtMs() {
-    return (0, deliveryPolicy_js_1.normalizeTimestamp)(
-      snapshotSources.get(this).apiGateStartedAtMs,
-    );
-  }
-  get apiGateProofRequired() {
-    return snapshotSources.get(this).apiGateProofRequired;
-  }
-  get apiGateProofOwner() {
-    return (0, exports.normalizeString)(
-      (0, values_js_1.readProperty)(
-        snapshotSources.get(this).apiGateProofRequired,
-        "owner",
-      ),
-    );
-  }
+  return value instanceof DeliverySnapshot ||
+    value instanceof PendingDeleteSnapshot
+    ? value.document
+    : value;
 }
 class DeliverySnapshot extends RetrySnapshot {
   get status() {
-    const status = snapshotSources.get(this).status;
+    const status = this.document.status;
     return status === "pending" ||
       status === "processing" ||
       status === "retryable" ||
@@ -210,80 +181,71 @@ class DeliverySnapshot extends RetrySnapshot {
       : undefined;
   }
   get kind() {
-    return this.status ?? "legacy";
+    return this.status ?? "missing";
   }
   get revision() {
-    return typeof snapshotSources.get(this).revision === "string"
-      ? snapshotSources.get(this).revision
+    return typeof this.document.revision === "string"
+      ? this.document.revision
       : undefined;
   }
   matchesRevision(revision) {
     return (
-      typeof snapshotSources.get(this).revision === "string" &&
-      (0, exports.normalizeString)(snapshotSources.get(this).revision) ===
-        revision
+      typeof this.document.revision === "string" &&
+      (0, exports.normalizeString)(this.document.revision) === revision
     );
   }
   get sendInFlight() {
-    return snapshotSources.get(this).sendInFlight;
+    return this.document.sendInFlight;
   }
   get hasSendInFlight() {
-    return Boolean(snapshotSources.get(this).sendInFlight);
+    return Boolean(this.document.sendInFlight);
   }
   get hasAppliedStateUnknown() {
-    return Boolean(snapshotSources.get(this).appliedStateUnknown);
+    return Boolean(this.document.appliedStateUnknown);
   }
   get hasRawApiGateOwner() {
-    return Boolean(snapshotSources.get(this).apiGateOwner);
+    return Boolean(this.document.apiGateOwner);
   }
   sendInFlightMatchesRevision(revision) {
     return (
-      (0, values_js_1.readProperty)(
-        snapshotSources.get(this).sendInFlight,
-        "revision",
-      ) === revision
+      (0, values_js_1.readProperty)(this.document.sendInFlight, "revision") ===
+      revision
     );
   }
   preservedSendInFlight() {
     return preserveSendEvidence(
-      snapshotSources.get(this).sendInFlight,
-      Object.hasOwn(snapshotSources.get(this), "sendInFlight"),
+      this.document.sendInFlight,
+      Object.hasOwn(this.document, "sendInFlight"),
     );
   }
   get pendingDelete() {
-    return new PendingDeleteSnapshot(snapshotSources.get(this).pendingDelete);
+    return new PendingDeleteSnapshot(this.document.pendingDelete);
   }
   get orphanedDeletes() {
-    return asObject(snapshotSources.get(this).orphanedDeletes);
+    return this.document.orphanedDeletes ?? {};
   }
   get apiGateSettleOwner() {
-    return (0, exports.normalizeString)(
-      snapshotSources.get(this).apiGateSettleOwner,
-    );
+    return (0, exports.normalizeString)(this.document.apiGateSettleOwner);
   }
   get pendingDeleteApiGateSettleOwner() {
     return (0, exports.normalizeString)(
-      snapshotSources.get(this).pendingDeleteApiGateSettleOwner,
+      this.document.pendingDeleteApiGateSettleOwner,
     );
   }
   get apiGateReleaseOwner() {
-    return (0, exports.normalizeString)(
-      snapshotSources.get(this).apiGateReleaseOwner,
-    );
+    return (0, exports.normalizeString)(this.document.apiGateReleaseOwner);
   }
   get lastRecoveryRequestId() {
-    return (0, exports.normalizeString)(
-      snapshotSources.get(this).lastRecoveryRequestId,
-    );
+    return (0, exports.normalizeString)(this.document.lastRecoveryRequestId);
   }
   settlementOwner(field) {
-    return (0, exports.normalizeString)(snapshotSources.get(this)[field]);
+    return (0, exports.normalizeString)(this.document[field]);
   }
 }
 exports.DeliverySnapshot = DeliverySnapshot;
 class PendingDeleteSnapshot extends RetrySnapshot {
   get status() {
-    const status = snapshotSources.get(this).status;
+    const status = this.document.status;
     return status === "pending" ||
       status === "processing" ||
       status === "retryable"
@@ -291,41 +253,46 @@ class PendingDeleteSnapshot extends RetrySnapshot {
       : undefined;
   }
   get kind() {
-    return this.present ? (this.status ?? "legacy") : "missing";
+    return this.present ? (this.status ?? "missing") : "missing";
   }
   get pendingDeleteId() {
-    return (0, exports.normalizeString)(
-      snapshotSources.get(this).pendingDeleteId,
-    );
+    return (0, exports.normalizeString)(this.document.pendingDeleteId);
   }
   get chatIdText() {
-    return (0, exports.normalizeString)(snapshotSources.get(this).chatId);
+    return (0, exports.normalizeString)(this.document.chatId);
   }
   get numericMessageId() {
-    return Number(snapshotSources.get(this).messageId);
+    return Number(this.document.messageId);
   }
   deleteInput() {
+    if (!this.document.chatId || !this.document.messageId)
+      throw new TypeError("telegram-cleanup-identity-missing");
     return (0, client_js_1.retainTelegramDeleteInput)({
-      chatId: snapshotSources.get(this).chatId,
-      messageId: snapshotSources.get(this).messageId,
+      chatId: this.document.chatId,
+      messageId: this.document.messageId,
     });
   }
 }
 exports.PendingDeleteSnapshot = PendingDeleteSnapshot;
 function readDelivery(value) {
-  return new DeliverySnapshot(value);
+  return value instanceof DeliverySnapshot
+    ? value
+    : new DeliverySnapshot(value ?? {});
 }
 function readPendingDelete(value) {
-  return new PendingDeleteSnapshot(value);
+  return value instanceof PendingDeleteSnapshot
+    ? value
+    : new PendingDeleteSnapshot(value ?? {});
 }
-const omitKeys = (value, keys) => {
-  const output = { ...asObject(value) };
-  for (const key of keys) {
-    delete output[key];
-  }
+function omitKeys(value, keys) {
+  const source =
+    value instanceof DeliverySnapshot || value instanceof PendingDeleteSnapshot
+      ? value.document
+      : value;
+  const output = { ...source };
+  for (const key of keys) Reflect.deleteProperty(output, key);
   return output;
-};
-exports.omitKeys = omitKeys;
+}
 const buildPendingDeleteId = ({ chatId, messageId }) =>
   (0, exports.hashValue)(
     `${(0, exports.normalizeString)(chatId)}:${Number(messageId)}`,
@@ -335,29 +302,22 @@ const buildApiGateOwner = (...parts) =>
   `api_${(0, exports.hashValue)(parts.map((part) => String(part ?? "")).join(":"))}`;
 exports.buildApiGateOwner = buildApiGateOwner;
 const resolvePendingDeleteId = (pendingDelete) => {
-  const value = asObject(pendingDelete);
-  return (
-    (0, exports.normalizeString)(value.pendingDeleteId) ||
-    (0, exports.hashValue)(
-      JSON.stringify({
-        chatId: (0, exports.normalizeString)(value.chatId),
-        messageId: value.messageId ?? null,
-        instanceKey: (0, exports.normalizeString)(value.instanceKey),
-      }),
-    ).slice(0, 32)
-  );
+  const value =
+    pendingDelete instanceof PendingDeleteSnapshot
+      ? pendingDelete.document
+      : pendingDelete;
+  return value.pendingDeleteId ?? "";
 };
 exports.resolvePendingDeleteId = resolvePendingDeleteId;
-const promotePendingDeleteQueue = (delivery) => {
-  const value = (0, exports.omitKeys)(delivery, ["pendingDelete"]);
-  const queue = asObject(value.pendingDeleteQueue);
+const promotePendingDeleteQueue = (input) => {
+  const delivery = input instanceof DeliverySnapshot ? input.document : input;
+  const value = omitKeys(delivery, ["pendingDelete"]);
+  const queue = value.pendingDeleteQueue ?? {};
   const [nextPendingDeleteId] = Object.keys(queue).sort();
-  if (!nextPendingDeleteId) {
-    return (0, exports.omitKeys)(value, ["pendingDeleteQueue"]);
-  }
-  const nextQueue = (0, exports.omitKeys)(queue, [nextPendingDeleteId]);
+  if (!nextPendingDeleteId) return omitKeys(value, ["pendingDeleteQueue"]);
+  const nextQueue = omitKeys(queue, [nextPendingDeleteId]);
   return {
-    ...(0, exports.omitKeys)(value, ["pendingDeleteQueue"]),
+    ...omitKeys(value, ["pendingDeleteQueue"]),
     pendingDelete: queue[nextPendingDeleteId],
     ...(Object.keys(nextQueue).length > 0
       ? { pendingDeleteQueue: nextQueue }
@@ -366,23 +326,14 @@ const promotePendingDeleteQueue = (delivery) => {
 };
 exports.promotePendingDeleteQueue = promotePendingDeleteQueue;
 const appendPendingDelete = (delivery, pendingDelete) => {
-  const value = asObject(delivery);
-  const currentPendingDelete = asObject(value.pendingDelete);
-  if (Object.keys(currentPendingDelete).length === 0) {
-    return { ...value, pendingDelete };
-  }
-  const pendingDeleteId = (0, exports.resolvePendingDeleteId)(pendingDelete);
-  if (
-    (0, exports.resolvePendingDeleteId)(currentPendingDelete) ===
-    pendingDeleteId
-  ) {
-    return value;
-  }
+  if (!delivery.pendingDelete) return { ...delivery, pendingDelete };
+  if (delivery.pendingDelete.pendingDeleteId === pendingDelete.pendingDeleteId)
+    return delivery;
   return {
-    ...value,
+    ...delivery,
     pendingDeleteQueue: {
-      ...asObject(value.pendingDeleteQueue),
-      [pendingDeleteId]: pendingDelete,
+      ...delivery.pendingDeleteQueue,
+      [pendingDelete.pendingDeleteId]: pendingDelete,
     },
   };
 };
@@ -395,31 +346,12 @@ const ensureCommitted = (result, code) => {
   throw error;
 };
 exports.ensureCommitted = ensureCommitted;
-const validateDesiredForDelivery = (desired) => {
-  const value = asObject(desired);
-  if (
-    value.schemaVersion !== desiredStateCore_js_1.TELEGRAM_SCHEMA_VERSION ||
-    !(0, exports.normalizeString)(value.revision) ||
-    !(0, exports.normalizeString)(value.sourceRevision) ||
-    !Object.hasOwn(
-      desiredStateCore_js_1.TELEGRAM_DESTINATIONS,
-      value.destination,
-    ) ||
-    !["send", "edit", "delete"].includes(value.operation)
-  ) {
-    return false;
-  }
-  if (value.operation === "delete") {
-    return true;
-  }
-  return (
-    (0, exports.normalizeString)(value.instanceKey) !== "" &&
-    typeof value.text === "string" &&
-    value.text.length > 0 &&
-    (value.parseMode === undefined || value.parseMode === "HTML") &&
-    (value.operation !== "edit" ||
-      value.ifMissing === "send" ||
-      value.ifMissing === "skip")
-  );
-};
+const validateDesiredForDelivery = (desired) =>
+  (0, recordCodec_js_1.readTelegramDesired)(desired) !== null;
 exports.validateDesiredForDelivery = validateDesiredForDelivery;
+function documentFields(value) {
+  return value instanceof DeliverySnapshot ||
+    value instanceof PendingDeleteSnapshot
+    ? value.document
+    : (value ?? {});
+}

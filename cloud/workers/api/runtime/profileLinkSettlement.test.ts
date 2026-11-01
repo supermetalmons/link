@@ -10,8 +10,12 @@ const jobs = createProfileLinkCatchupStore(db);
 
 async function expectRowsRemaining(count: number) {
   const results = await db.batch([
-    db.prepare("SELECT COUNT(*) AS count FROM profile_link_catchup_jobs"),
-    db.prepare("SELECT COUNT(*) AS count FROM profile_link_catchup_quarantine"),
+    db.prepare(
+      "SELECT COUNT(*) AS count FROM profile_link_catchup_jobs_canonical",
+    ),
+    db.prepare(
+      "SELECT COUNT(*) AS count FROM profile_link_catchup_quarantine_canonical",
+    ),
   ]);
   expect(results.map((result) => result.results)).toEqual([
     [{ count }],
@@ -29,24 +33,24 @@ beforeAll(async () => {
 
 beforeEach(async () => {
   await db.batch([
-    db.prepare("DELETE FROM profile_link_catchup_jobs"),
+    db.prepare("DELETE FROM profile_link_catchup_jobs_canonical"),
     db.prepare(
       "UPDATE profile_canonical_control SET state = 'active' WHERE singleton = 1",
     ),
     db.prepare(
-      `INSERT INTO profile_link_catchup_jobs (
+      `INSERT INTO profile_link_catchup_jobs_canonical (
          login_uid, request_id, profile_id, cleanup_profile_ids_json, match_cursor,
          source_updated_at_ms, last_queued_at_ms, revision
        ) VALUES ('login', 'request', 'profile', '[1]', 'cursor', 100, 0, 1)`,
     ),
   ]);
   const [entry] = await jobs.scanDue(1_000, 10);
-  if (entry.kind !== "invalid")
+  if (!entry || entry.kind !== "invalid")
     throw new Error("invalid-profile-entry-missing");
   expect(await jobs.quarantineInvalidEntry(entry, 1_000)).not.toBeNull();
   await db
     .prepare(
-      `UPDATE profile_link_catchup_jobs
+      `UPDATE profile_link_catchup_jobs_canonical
        SET cleanup_profile_ids_json = '[]', revision = revision + 1`,
     )
     .run();

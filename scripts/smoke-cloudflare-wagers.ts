@@ -4,6 +4,10 @@ import {
   refreshToolSession,
 } from "./cloudflare/sessions.ts";
 import type { SessionCreateRequest } from "@mons/shared/session-auth";
+import {
+  applicationDataHeaders,
+  APPLICATION_DATA_SOCKET_PROTOCOL,
+} from "@mons/shared/data-contract";
 import { randomBytes, randomUUID } from "node:crypto";
 import {
   closeSync,
@@ -162,7 +166,12 @@ async function readMatchSnapshot(
     dependencies,
     "Canonical match snapshot",
     `${API_ROOT}/matches/snapshot?${query}`,
-    { headers: { Accept: "application/json", Origin: ORIGIN } },
+    {
+      headers: applicationDataHeaders({
+        Accept: "application/json",
+        Origin: ORIGIN,
+      }),
+    },
   );
   if (
     !isReadMatchSnapshotResponse(payload) ||
@@ -186,7 +195,7 @@ function parseArgs(argv: string[]): Options {
   const values = new Map<string, string>();
   let mode: Mode | undefined;
   for (let index = 0; index < argv.length; index++) {
-    const key = argv[index];
+    const key = argv[index]!;
     if (
       [
         "--prepare-fixtures",
@@ -227,7 +236,13 @@ function parseArgs(argv: string[]): Options {
       usage();
   } else if (!fixture || !isAbsolute(fixture) || inviteId || authTokenFixture)
     usage();
-  return { baseUrl: API_ROOT, mode, fixture, inviteId, authTokenFixture };
+  return {
+    baseUrl: API_ROOT,
+    mode,
+    ...(fixture === undefined ? {} : { fixture }),
+    ...(inviteId === undefined ? {} : { inviteId }),
+    ...(authTokenFixture === undefined ? {} : { authTokenFixture }),
+  };
 }
 
 function readProtectedJson(path: string): unknown {
@@ -487,7 +502,7 @@ async function api(
     `${API_ROOT}${path}`,
     {
       method: body === undefined ? "GET" : "POST",
-      headers: {
+      headers: applicationDataHeaders({
         Origin: ORIGIN,
         Accept: "application/json",
         ...(token ? { Authorization: `Bearer ${token}` } : {}),
@@ -495,7 +510,7 @@ async function api(
         ...(path.startsWith("/wagers/")
           ? { [WAGER_STORAGE_VERSION_HEADER]: WAGER_STORAGE_VERSION }
           : {}),
-      },
+      }),
       ...(body === undefined ? {} : { body: JSON.stringify(body) }),
     },
     path.includes("/wagers") ? INVITE_WAGERS_MAX_MESSAGE_BYTES : MAX_HTTP_BYTES,
@@ -572,7 +587,7 @@ async function prepareActor(
           address: bs58.encode(key.publicKey),
           signature: Buffer.from(signature).toString("base64"),
           emoji: 1,
-          aura: "",
+          aura: "none",
         },
       );
       if (
@@ -642,6 +657,7 @@ function openSocket(
     `${API_ROOT.replace("https:", "wss:")}/invites/${encodeURIComponent(inviteId)}/wagers/socket`,
     [
       INVITE_WAGERS_SOCKET_PROTOCOL,
+      APPLICATION_DATA_SOCKET_PROTOCOL,
       ...(token ? [`${REACTION_AUTH_PROTOCOL_PREFIX}${token}`] : []),
     ],
     {
@@ -930,7 +946,7 @@ async function prepare(
           operationId: invite.createOperationId,
           inviteId: invite.id,
           emojiId: 1,
-          aura: "",
+          aura: "none",
         },
       );
       if (
@@ -951,8 +967,10 @@ async function prepare(
       metadata.snapshot.eventId !== null ||
       metadata.snapshot.eventOwned ||
       metadata.snapshot.automatchStateHint !== null ||
-      metadata.snapshot.hostRematches !== "" ||
-      metadata.snapshot.guestRematches !== "" ||
+      metadata.snapshot.hostRematches.state !== "open" ||
+      metadata.snapshot.hostRematches.indices.length !== 0 ||
+      metadata.snapshot.guestRematches.state !== "open" ||
+      metadata.snapshot.guestRematches.indices.length !== 0 ||
       metadata.viewer.role !== "host" ||
       metadata.viewer.actorUid !== fixture.actors.host.uid
     )
@@ -971,9 +989,16 @@ async function prepare(
         snapshot.wagers,
         {
           [invite.id]: {
+            schemaVersion: 1,
+            state: "proposed",
+            agreed: null,
+            resolved: null,
+            blocked: null,
             proposals: {
               [fixture.actors.host.uid!]:
-                snapshot.wagers[invite.id].proposals![fixture.actors.host.uid!],
+                snapshot.wagers[invite.id]!.proposals![
+                  fixture.actors.host.uid!
+                ],
             },
             proposedBy: { [fixture.actors.host.uid!]: true },
           },
@@ -990,9 +1015,9 @@ async function prepare(
         dependencies,
       );
       if (
-        match.status !== "" ||
+        match.status !== "active" ||
         match.flatMovesString !== "" ||
-        match.timer !== ""
+        match.timer.state !== "idle"
       )
         fail("Existing fixture match has unexpected gameplay state.");
     }
@@ -1005,7 +1030,7 @@ async function prepare(
           operationId: invite.joinOperationId,
           inviteId: invite.id,
           emojiId: 1,
-          aura: "",
+          aura: "none",
         },
       );
       if (
@@ -1166,7 +1191,7 @@ async function activeLifecycle(
             inviteId,
             dependencies,
           );
-          if (!["", "surrendered"].includes(match.status))
+          if (!["active", "surrendered"].includes(match.status))
             fail("Dedicated guest match cannot surrender.");
           for (let replay = 0; replay < 2; replay++) {
             const result = await api(

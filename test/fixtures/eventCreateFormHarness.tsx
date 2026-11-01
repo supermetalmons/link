@@ -1,3 +1,4 @@
+import { requireValue } from "./browserAssertions";
 import React, { act, useCallback, useLayoutEffect, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { flushSync } from "react-dom";
@@ -31,7 +32,7 @@ bindProfileSurfaceData({
   },
 });
 
-const root = createRoot(document.getElementById("root")!);
+const root = createRoot(requireValue(document.getElementById("root")));
 let currentForm: ReturnType<typeof useEventCreateForm>;
 let setAllowed: (allowed: boolean) => void;
 let starts = 0;
@@ -75,41 +76,41 @@ flushSync(() =>
     </React.StrictMode>,
   ),
 );
-Object.assign(window, {
-  harness: {
-    snapshot: () => ({
-      schedule: currentForm.schedule,
-      isSundayMons: currentForm.isSundayMons,
-      telegramAnnouncements: currentForm.telegramAnnouncements,
-      isCreatingEvent: currentForm.isCreatingEvent,
-      error: currentForm.error,
-      requests: requests.map(({ schedule, options }) => ({
-        schedule,
-        options,
-      })),
-      starts,
-      modal: getEventModalState(),
-    }),
-    setAllowed: (allowed: boolean) => flushSync(() => setAllowed(allowed)),
-    dismiss: closeEventModal,
-    openEvent: openEventModal,
-    submitTwice: () => {
-      flushSync(() => {
-        currentForm.submit();
-        currentForm.submit();
-      });
-    },
-    async settle(index: number, result: CreateResult, error?: string) {
-      Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
-      try {
-        await act(async () => {
-          if (error !== undefined) requests[index].reject(new Error(error));
-          else requests[index].resolve(result);
-        });
-      } finally {
-        Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: false });
-      }
-    },
-    dispose: () => flushSync(() => root.unmount()),
+export const eventCreateHarness = {
+  snapshot: () => ({
+    schedule: currentForm.schedule,
+    isSundayMons: currentForm.isSundayMons,
+    telegramAnnouncements: currentForm.telegramAnnouncements,
+    isCreatingEvent: currentForm.isCreatingEvent,
+    error: currentForm.error,
+    requests: requests.map(({ schedule, options }) => ({
+      schedule,
+      options,
+    })),
+    starts,
+    modal: getEventModalState(),
+  }),
+  setAllowed: (allowed: boolean) => flushSync(() => setAllowed(allowed)),
+  dismiss: closeEventModal,
+  openEvent: openEventModal,
+  submitTwice: () => {
+    flushSync(() => {
+      currentForm.submit();
+      currentForm.submit();
+    });
   },
-});
+  async settle(index: number, result: CreateResult, error?: string) {
+    Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
+    try {
+      await act(async () => {
+        if (error !== undefined)
+          requireValue(requests[index]).reject(new Error(error));
+        else requireValue(requests[index]).resolve(result);
+      });
+    } finally {
+      Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: false });
+    }
+  },
+  dispose: () => flushSync(() => root.unmount()),
+};
+Object.assign(window, { eventCreateHarness });

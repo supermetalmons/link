@@ -10,7 +10,10 @@ export const EventAvatar: React.FC<{
 }> = ({ emojiId, displayName, size, isBlocked }) => {
   if (isBlocked) {
     return (
-      <AvatarFallback $size={size} aria-hidden="true">
+      <AvatarFallback
+        {...(size === undefined ? {} : { $size: size })}
+        aria-hidden="true"
+      >
         ∅
       </AvatarFallback>
     );
@@ -18,14 +21,17 @@ export const EventAvatar: React.FC<{
   if (typeof emojiId === "number" && Number.isFinite(emojiId)) {
     return (
       <Avatar
-        $size={size}
-        src={emojis.getEmojiUrl(emojiId.toString())}
+        {...(size === undefined ? {} : { $size: size })}
+        src={emojis.getEmojiUrl(emojiId)}
         alt={displayName ?? ""}
       />
     );
   }
   return (
-    <AvatarFallback $size={size} aria-hidden="true">
+    <AvatarFallback
+      {...(size === undefined ? {} : { $size: size })}
+      aria-hidden="true"
+    >
       ?
     </AvatarFallback>
   );

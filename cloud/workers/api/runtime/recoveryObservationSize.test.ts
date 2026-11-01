@@ -1,12 +1,10 @@
+import { createEmptyRatingPayload } from "../src/profileCanonical/contracts.ts";
 import { env } from "cloudflare:workers";
 import type { D1Migration } from "cloudflare:test";
 import { beforeAll, beforeEach, expect, it } from "vitest";
 import { createProfileLinkCatchupStore } from "../src/profileLinkCatchupD1.ts";
 import { projectionRecoveryPages } from "../src/projectionRecoveryPages.ts";
-import {
-  quarantineRatingRecoveryEntry,
-  scanDueRatingEventProgress,
-} from "../src/ratingProjectionD1.ts";
+import { scanDueRatingEventProgress } from "../src/ratingProjectionD1.ts";
 import { applyRetiredProfileMigrations } from "./profileTestMigrations.ts";
 
 const testEnv = env as Env & { TEST_PROFILE_D1_MIGRATIONS: D1Migration[] };
@@ -110,7 +108,7 @@ function largeCleanupIds(): string[] {
 async function seedProfileLink(loginUid: string, cleanup: string) {
   await db
     .prepare(
-      `INSERT INTO profile_link_catchup_jobs (
+      `INSERT INTO profile_link_catchup_jobs_canonical (
        login_uid, request_id, profile_id, cleanup_profile_ids_json, match_cursor,
        source_updated_at_ms, last_queued_at_ms, revision
      ) VALUES (?, 'request', 'profile', ?, NULL, 100, 0, 1)`,
@@ -122,15 +120,22 @@ async function seedProfileLink(loginUid: string, cleanup: string) {
 async function seedRating(eventId: string) {
   await db
     .prepare(
-      `INSERT INTO rating_updates (
+      `INSERT INTO rating_updates_canonical (
        operation_id, payload_json, status, invite_id, match_id, player_id,
        opponent_id, owner_uid, owner_token, started_at_ms, updated_at_ms,
        lease_expires_at_ms, completed_at_ms, event_progress_state,
        event_progress_updated_at_ms, event_progress_version, revision
-     ) VALUES ('operation', ?, 'done', 'invite', 'match', 'player', 'opponent',
-       'owner', 'token', 100, 100, 100, 100, 'pending', 0, 1, 1.5)`,
+     ) VALUES ('invite__match', ?, 'done', 'invite', 'match', 'player', 'opponent',
+       'owner', 'token', 100, 100, 100, 100, 'pending', 0, 1, 1)`,
     )
-    .bind(JSON.stringify({ eventId }))
+    .bind(
+      JSON.stringify({
+        ...createEmptyRatingPayload(),
+        eventId,
+        eventOwned: true,
+        isEventMatch: true,
+      }),
+    )
     .run();
 }
 
@@ -144,8 +149,8 @@ beforeAll(async () => {
 
 beforeEach(async () => {
   await db.batch([
-    db.prepare("DELETE FROM profile_link_catchup_jobs"),
-    db.prepare("DELETE FROM rating_updates"),
+    db.prepare("DELETE FROM profile_link_catchup_jobs_canonical"),
+    db.prepare("DELETE FROM rating_updates_canonical"),
     db.prepare(
       "UPDATE profile_canonical_control SET state = 'active' WHERE singleton = 1",
     ),
@@ -221,7 +226,7 @@ it("quarantines large malformed JSON without expanding or rewriting it", async (
   expect(
     await db
       .prepare(
-        "SELECT cleanup_profile_ids_json FROM profile_link_catchup_jobs WHERE login_uid = 'large'",
+        "SELECT cleanup_profile_ids_json FROM profile_link_catchup_jobs_canonical WHERE login_uid = 'large'",
       )
       .first("cleanup_profile_ids_json"),
   ).toBe(cleanup);
@@ -232,11 +237,11 @@ it("preserves a large same-revision repair including changes at the end of the v
   await seedProfileLink("large", JSON.stringify([...ids, 1]));
   const jobs = createProfileLinkCatchupStore(sizeCheckedDatabase());
   const [entry] = await jobs.scanDue(1_000, 10);
-  if (entry.kind !== "invalid") throw new Error("expected-invalid");
+  if (!entry || entry.kind !== "invalid") throw new Error("expected-invalid");
   const repaired = JSON.stringify([...ids, "repaired"]);
   await db
     .prepare(
-      "UPDATE profile_link_catchup_jobs SET cleanup_profile_ids_json = ?",
+      "UPDATE profile_link_catchup_jobs_canonical SET cleanup_profile_ids_json = ?",
     )
     .bind(repaired)
     .run();
@@ -244,54 +249,61 @@ it("preserves a large same-revision repair including changes at the end of the v
   expect(await jobs.scanDue(1_000, 10)).toMatchObject([{ kind: "candidate" }]);
 });
 
-it("captures large malformed BLOB values without hexadecimal expansion", async () => {
+it("rejects large BLOB cursors without rewriting the valid cleanup record", async () => {
   await seedProfileLink("large", "[]");
-  await db
-    .prepare("UPDATE profile_link_catchup_jobs SET match_cursor = ?")
-    .bind(new Uint8Array(550_000).fill(255))
-    .run();
-  const jobs = createProfileLinkCatchupStore(sizeCheckedDatabase());
-  const [entry] = await jobs.scanDue(1_000, 10);
-  if (entry.kind !== "invalid") throw new Error("expected-invalid");
-  expect(await jobs.quarantineInvalidEntry(entry, 2_000)).not.toBeNull();
-  expect(await jobs.scanDue(1_000, 10)).toEqual([]);
+  await expect(
+    db
+      .prepare(
+        "UPDATE profile_link_catchup_jobs_canonical SET match_cursor = ?",
+      )
+      .bind(new Uint8Array(550_000).fill(255))
+      .run(),
+  ).rejects.toThrow("BLOB");
+  expect(
+    await createProfileLinkCatchupStore(sizeCheckedDatabase()).scanDue(
+      1_000,
+      10,
+    ),
+  ).toMatchObject([
+    { kind: "candidate", value: { loginUid: "large", matchCursor: null } },
+  ]);
 });
 
-it("does not alias adjacent REAL values when checking a stale observation", async () => {
+it("rejects adjacent REAL revisions without changing stored revision identity", async () => {
   await seedProfileLink("job", "[]");
-  await db
-    .prepare("UPDATE profile_link_catchup_jobs SET revision = ?")
-    .bind(1.0000000000000002)
-    .run();
-  const jobs = createProfileLinkCatchupStore(sizeCheckedDatabase());
-  const [entry] = await jobs.scanDue(1_000, 10);
-  if (entry.kind !== "invalid") throw new Error("expected-invalid");
-  await db
-    .prepare("UPDATE profile_link_catchup_jobs SET revision = ?")
-    .bind(1.0000000000000004)
-    .run();
-  expect(await jobs.quarantineInvalidEntry(entry, 2_000)).toBeNull();
+  for (const revision of [1.0000000000000002, 1.0000000000000004])
+    await expect(
+      db
+        .prepare("UPDATE profile_link_catchup_jobs_canonical SET revision = ?")
+        .bind(revision)
+        .run(),
+    ).rejects.toThrow("INTEGER column");
+  expect(
+    await createProfileLinkCatchupStore(sizeCheckedDatabase()).scanDue(
+      1_000,
+      10,
+    ),
+  ).toMatchObject([{ kind: "candidate", value: { revision: 1 } }]);
 });
 
-it("keeps large rating event metadata size-safe and protects same-revision repairs", async () => {
+it("reads large canonical rating event metadata without expansion and keeps outcomes immutable", async () => {
   const eventId = "e".repeat(600_000);
   await seedRating(eventId);
   const observed = sizeCheckedDatabase();
-  const [entry] = await scanDueRatingEventProgress(observed, 1_000, 10);
-  if (entry.kind !== "invalid") throw new Error("expected-invalid");
-  await db
-    .prepare("UPDATE rating_updates SET payload_json = ?")
-    .bind(JSON.stringify({ eventId: `${eventId.slice(0, -1)}x` }))
-    .run();
-  expect(
-    await quarantineRatingRecoveryEntry(observed, entry, 2_000),
-  ).toBeNull();
-  const [current] = await scanDueRatingEventProgress(observed, 1_000, 10);
-  if (current.kind !== "invalid") throw new Error("expected-invalid");
-  expect(
-    await quarantineRatingRecoveryEntry(observed, current, 2_000),
-  ).not.toBeNull();
-  expect(await scanDueRatingEventProgress(observed, 1_000, 10)).toEqual([]);
+  expect(await scanDueRatingEventProgress(observed, 1_000, 10)).toMatchObject([
+    { kind: "candidate", value: { eventId } },
+  ]);
+  await expect(
+    db
+      .prepare(
+        "UPDATE rating_updates_canonical SET payload_json = json_set(payload_json, '$.eventId', ?) WHERE operation_id = 'invite__match'",
+      )
+      .bind(eventId.slice(0, -1) + "x")
+      .run(),
+  ).rejects.toThrow("immutable");
+  expect(await scanDueRatingEventProgress(observed, 1_000, 10)).toMatchObject([
+    { kind: "candidate", value: { eventId } },
+  ]);
 });
 
 it.each(["repaired", "deleted", "rescheduled"] as const)(
@@ -305,11 +317,11 @@ it.each(["repaired", "deleted", "rescheduled"] as const)(
       firstRead = false;
       const query = {
         repaired:
-          "UPDATE profile_link_catchup_jobs SET cleanup_profile_ids_json = '[]' WHERE login_uid = 'first'",
+          "UPDATE profile_link_catchup_jobs_canonical SET cleanup_profile_ids_json = '[]' WHERE login_uid = 'first'",
         deleted:
-          "DELETE FROM profile_link_catchup_jobs WHERE login_uid = 'first'",
+          "DELETE FROM profile_link_catchup_jobs_canonical WHERE login_uid = 'first'",
         rescheduled:
-          "UPDATE profile_link_catchup_jobs SET last_queued_at_ms = 2000 WHERE login_uid = 'first'",
+          "UPDATE profile_link_catchup_jobs_canonical SET last_queued_at_ms = 2000 WHERE login_uid = 'first'",
       }[change];
       await db.prepare(query).run();
     });
@@ -326,8 +338,11 @@ it.each(["repaired", "deleted", "rescheduled"] as const)(
         : [{ kind: "candidate", value: { loginUid: "healthy" } }],
     );
     expect(
-      (await db.prepare("SELECT * FROM profile_link_catchup_quarantine").all())
-        .results,
+      (
+        await db
+          .prepare("SELECT * FROM profile_link_catchup_quarantine_canonical")
+          .all()
+      ).results,
     ).toEqual([]);
   },
 );

@@ -1,4 +1,8 @@
 import { applyD1Migrations, type D1Migration } from "cloudflare:test";
+import {
+  applyCanonicalCleanupTestMigrations,
+  preCleanupTestMigrations,
+} from "./canonicalTestMigrations.ts";
 
 const RETIREMENT_MIGRATION = "0009_retire_legacy_profile_projection.sql";
 const WAGER_FINALIZATION = "0014_finalize_wager_reservations.sql";
@@ -11,10 +15,11 @@ type ProfileMigrationOptions = {
 
 export async function applyRetiredProfileMigrations(
   db: D1Database,
-  migrations: D1Migration[],
+  allMigrations: D1Migration[],
   importDigest: string,
   options: ProfileMigrationOptions = {},
 ): Promise<void> {
+  const migrations = preCleanupTestMigrations(allMigrations);
   const retirementIndex = migrations.findIndex(
     (migration) => migration.name === RETIREMENT_MIGRATION,
   );
@@ -162,4 +167,5 @@ export async function applyRetiredProfileMigrations(
        WHERE singleton = 1 AND state = 'frozen'`,
     )
     .run();
+  await applyCanonicalCleanupTestMigrations(db, allMigrations);
 }

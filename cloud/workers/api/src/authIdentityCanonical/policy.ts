@@ -3,8 +3,12 @@ import type {
   AuthProfileResponse,
   LinkedAuthMethodsResponse,
 } from "@mons/shared/auth";
-import { normalizeMiningSnapshot, sumMaterials } from "@mons/shared/mining";
-import type { CompletePlayerProfile } from "@mons/shared/profiles";
+import { createEmptyMaterials, sumMaterials } from "@mons/shared/mining";
+import {
+  createDefaultProfileAppearance,
+  isAura,
+} from "@mons/shared/appearance";
+import type { StoredPlayerProfile } from "../profileCanonical/contracts.ts";
 import {
   isAlphanumericUsername,
   isReservedExplicitUsername,
@@ -13,12 +17,7 @@ import {
 import { AuthApiFailure } from "../authErrors.ts";
 import { matchesVerifiedAuthMethod } from "../authOperationReplay.ts";
 import type { LinkInput } from "../authIdentity.ts";
-import {
-  cleanString,
-  finiteNumber,
-  uniqueStoredLoginUids,
-  uniqueStrings,
-} from "../authPolicy.ts";
+import { cleanString, uniqueStoredLoginUids } from "../authPolicy.ts";
 import { newAuthRecoveryJob } from "../authRecovery.ts";
 import {
   materializeCanonicalProfile,
@@ -108,27 +107,30 @@ export function authMethodValue(
 export function initialProfile(
   input: LinkInput,
   profileId: string,
-): CompletePlayerProfile {
+): StoredPlayerProfile {
+  if (!isAura(input.requestAura)) throw new TypeError("invalid-profile-aura");
   return {
+    ...createDefaultProfileAppearance(input.requestEmoji),
     id: profileId,
     nonce: -1,
     rating: 1500,
     totalManaPoints: 0,
     win: true,
-    emoji: input.requestEmoji,
-    ...(input.requestAura ? { aura: input.requestAura } : {}),
+    aura: input.requestAura,
     username: null,
     eth: input.method === "eth" ? input.methodValueRaw : null,
     sol: input.method === "sol" ? input.methodValueRaw : null,
     feb2026UniqueOpponentsCount: 0,
-    mining: normalizeMiningSnapshot(),
+    completedProblemIds: [],
+    isTutorialCompleted: false,
+    mining: { lastRockDate: null, materials: createEmptyMaterials() },
   };
 }
 
 export function profileWithMethod(
-  profile: CompletePlayerProfile,
+  profile: StoredPlayerProfile,
   input: LinkInput,
-): CompletePlayerProfile {
+): StoredPlayerProfile {
   if (input.method === "eth") {
     return { ...profile, eth: input.methodValueRaw };
   }
@@ -139,9 +141,9 @@ export function profileWithMethod(
 }
 
 export function profileWithoutMethod(
-  profile: CompletePlayerProfile,
+  profile: StoredPlayerProfile,
   method: AuthMethodKey,
-): CompletePlayerProfile {
+): StoredPlayerProfile {
   if (method === "eth") return { ...profile, eth: null };
   if (method === "sol") return { ...profile, sol: null };
   return profile;
@@ -174,7 +176,7 @@ export function recoveryValue(
 
 export function profileValue(
   profile: CanonicalProfileSnapshot,
-  nextProfile: CompletePlayerProfile,
+  nextProfile: StoredPlayerProfile,
   updatedAtMs: number,
   overrides: Partial<{
     state: CanonicalProfileSnapshot["state"];
@@ -189,7 +191,6 @@ export function profileValue(
       overrides.mergedIntoProfileId === undefined
         ? profile.mergedIntoProfileId
         : overrides.mergedIntoProfileId,
-    legacyFields: profile.legacyFields,
     createdAtMs: profile.createdAtMs,
     updatedAtMs,
     mergedAtMs:
@@ -211,10 +212,7 @@ function hasMergeValue(value: unknown): boolean {
   return true;
 }
 
-function mergePreferred<T>(
-  target: T | undefined,
-  source: T | undefined,
-): T | undefined {
+function mergePreferred<T>(target: T, source: T): T {
   return hasMergeValue(target) ? target : source;
 }
 
@@ -231,7 +229,7 @@ export function mergeProfiles(
   targetSnapshot: CanonicalProfileSnapshot,
   sourceSnapshot: CanonicalProfileSnapshot,
   methods: CanonicalAuthMethodSnapshot[],
-): CompletePlayerProfile {
+): StoredPlayerProfile {
   const target = targetSnapshot.profile;
   const source = sourceSnapshot.profile;
   const dates = [target.mining.lastRockDate, source.mining.lastRockDate]
@@ -284,10 +282,12 @@ export function mergeProfiles(
     ),
     profileMons: mergePreferred(target.profileMons, source.profileMons),
     cardStickers: mergePreferred(target.cardStickers, source.cardStickers),
-    completedProblemIds: uniqueStrings(
-      target.completedProblemIds,
-      source.completedProblemIds,
-    ),
+    completedProblemIds: [
+      ...new Set([
+        ...target.completedProblemIds,
+        ...source.completedProblemIds,
+      ]),
+    ],
     isTutorialCompleted:
       target.isTutorialCompleted === true ||
       source.isTutorialCompleted === true,
@@ -312,9 +312,6 @@ export function profileResponse(
   const methods = linkedMethods(identityProfile.aggregate);
   const eth = methodFromAggregate(identityProfile.aggregate, "eth");
   const sol = methodFromAggregate(identityProfile.aggregate, "sol");
-  const emoji = snapshot.emojiPresent
-    ? Math.floor(finiteNumber(profile.emoji, 1))
-    : 1;
   return {
     ok: true,
     uid,
@@ -324,19 +321,19 @@ export function profileResponse(
     sol: sol?.normalizedValue || null,
     linkedMethods: methods,
     appleLinked: methods.apple,
-    emoji: emoji > 0 ? emoji : 1,
-    aura: cleanString(profile.aura) || null,
+    emoji: profile.emoji,
+    aura: profile.aura,
     rating: snapshot.sortPresence.rating ? snapshot.sortValues.rating : null,
     nonce: snapshot.sortPresence.nonce ? snapshot.sortValues.nonce : null,
     totalManaPoints: snapshot.sortPresence.mp ? snapshot.sortValues.mp : null,
-    cardBackgroundId: profile.cardBackgroundId ?? null,
-    cardStickers: profile.cardStickers ?? null,
-    cardSubtitleId: profile.cardSubtitleId ?? null,
-    profileCounter: cleanString(profile.profileCounter) || null,
-    profileMons: profile.profileMons ?? null,
-    completedProblems: profile.completedProblemIds ?? null,
-    tutorialCompleted: profile.isTutorialCompleted ?? null,
-    mining: normalizeMiningSnapshot(profile.mining),
+    cardBackgroundId: profile.cardBackgroundId,
+    cardStickers: profile.cardStickers,
+    cardSubtitleId: profile.cardSubtitleId,
+    profileCounter: profile.profileCounter,
+    profileMons: profile.profileMons,
+    completedProblems: profile.completedProblemIds,
+    tutorialCompleted: profile.isTutorialCompleted,
+    mining: profile.mining,
     opId,
   };
 }

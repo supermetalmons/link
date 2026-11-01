@@ -1,3 +1,4 @@
+import { buildTelegramSendDesired } from "../../../runtime/telegram/desiredStateCore.js";
 import {
   readTelegramMessageDocument,
   readTelegramControlDocument,
@@ -28,7 +29,7 @@ function repositoryState(initial: Record<string, unknown> = {}) {
     if ("commit" in output && output.commit === false) {
       return {
         committed: false,
-        decision: output.decision,
+        ...(output.decision === undefined ? {} : { decision: output.decision }),
         value: current,
       };
     }
@@ -36,7 +37,7 @@ function repositoryState(initial: Record<string, unknown> = {}) {
     values.set(key, output.value);
     return {
       committed: true,
-      decision: output.decision,
+      ...(output.decision === undefined ? {} : { decision: output.decision }),
       value: output.value,
     };
   };
@@ -157,10 +158,26 @@ test("persists exact recovery requests and exposes metadata-only status", async 
   const messageKey = "message-1";
   const state = repositoryState({
     [`telegramMessages/${messageKey}`]: {
-      desired: { revision: "revision-1" },
+      schemaVersion: 1,
+      desired: buildTelegramSendDesired({
+        destination: "community",
+        instanceKey: messageKey,
+        text: "fixture",
+        sourceRevision: "revision-1",
+      }),
       delivery: {
+        revision: "revision-1",
         status: "uncertain",
-        sendInFlight: { attemptId: "attempt-1" },
+        sendInFlight: {
+          attemptId: "attempt-1",
+          revision: "revision-1",
+          destination: "community",
+          chatId: "chat",
+          instanceKey: messageKey,
+          contentHash: "content",
+          startedAtMs: 1,
+          apiGateOwner: "owner",
+        },
       },
     },
   });
@@ -201,6 +218,7 @@ test("persists exact recovery requests and exposes metadata-only status", async 
         requestId,
         action: "confirm-send-absent",
         status: "accepted",
+        processedAtMs: NOW_MS,
       },
     })!,
   }));

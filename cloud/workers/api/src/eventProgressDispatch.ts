@@ -3,7 +3,6 @@ import {
   parseEventProgressOutbox,
   type EventProgressPlan,
   type EventProgressWorkflowParams,
-  type RetainedEventProgressPlan,
 } from "./eventProgressCodec.ts";
 import type {
   EventProgressRecoverySnapshot,
@@ -33,24 +32,17 @@ export async function withEventProgressDispatchAdmission(
   return withEventWriteAdmission(db, { kind: "dispatch" }, work);
 }
 
-type EventProgressTransportParams =
-  EventProgressWorkflowParams | RetainedEventProgressPlan["params"];
 type EventProgressTransportPlan = Pick<
-  EventProgressPlan | RetainedEventProgressPlan,
+  EventProgressPlan,
   "workflowId" | "params"
 >;
-function retainedProgressWorkflow(
-  workflow: Pick<Workflow<EventProgressWorkflowParams>, "createBatch">,
-): Pick<Workflow<EventProgressTransportParams>, "createBatch"> {
-  return workflow;
-}
 
 async function ensureEventProgressWorkflowInstance(
   workflow: Pick<Workflow<EventProgressWorkflowParams>, "createBatch" | "get">,
   plan: EventProgressTransportPlan,
 ): Promise<WorkflowInstance | undefined> {
   try {
-    const [instance] = await retainedProgressWorkflow(workflow).createBatch([
+    const [instance] = await workflow.createBatch([
       {
         id: plan.workflowId,
         params: plan.params,
@@ -89,7 +81,7 @@ export function ensureEventProgressWorkflow(
 
 export function ensureRetainedEventProgressWorkflow(
   env: Pick<Env, "EVENT_DB" | "EVENT_PROGRESS_WORKFLOW" | "PROFILE_GAMES_DB">,
-  plan: RetainedEventProgressPlan,
+  plan: EventProgressPlan,
 ): Promise<void> {
   return ensureEventProgressPlan(env, plan);
 }

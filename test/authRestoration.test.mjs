@@ -1,9 +1,9 @@
+import { required, canonicalProfile } from "./fixtures/canonicalData.mjs";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { registerHooks } from "node:module";
 import test from "node:test";
 import ts from "typescript";
-import { normalizeProfileEmojiId } from "../cloud/runtime/shared/profiles.js";
 import { bindProfileCosmeticStorage } from "./fixtures/profileCosmeticStorageHarness.mjs";
 
 registerHooks({
@@ -39,8 +39,11 @@ const profileApplication = profileApplicationSource.statements.find(
     ts.isFunctionDeclaration(node) &&
     node.name?.text === "applyVerifiedProfile",
 );
+assert.ok(profileApplication && ts.isFunctionDeclaration(profileApplication));
 const { outputText: profileApplicationOutput } = ts.transpileModule(
-  profileApplication.getText(profileApplicationSource).replace("export ", ""),
+  required(profileApplication)
+    .getText(profileApplicationSource)
+    .replace("export ", ""),
   { compilerOptions: { target: ts.ScriptTarget.ES2022 } },
 );
 
@@ -57,68 +60,134 @@ const hook = source.statements.find(
   (node) =>
     ts.isFunctionDeclaration(node) && node.name?.text === "useAuthStatus",
 );
-const effect = hook.body.statements
-  .filter(
-    (node) =>
-      ts.isExpressionStatement(node) &&
-      ts.isCallExpression(node.expression) &&
-      node.expression.expression.getText(source) === "useEffect",
-  )
-  .map((node) => node.expression.arguments[0])
+assert.ok(hook && ts.isFunctionDeclaration(hook));
+const effect = required(hook.body)
+  .statements.filter(ts.isExpressionStatement)
+  .map((node) => node.expression)
+  .filter(ts.isCallExpression)
+  .filter((node) => node.expression.getText(source) === "useEffect")
+  .map((node) => required(node.arguments[0]))
   .find((node) => node.getText(source).includes("subscribeToAuthChanges"));
 assert.ok(effect, "missing auth restoration effect");
 const { outputText } = ts.transpileModule(
   `const restoreAuth = ${effect.getText(source)};`,
   { compilerOptions: { target: ts.ScriptTarget.ES2022 } },
 );
-const authStatusCallback = hook.body.statements
-  .filter(ts.isVariableStatement)
-  .flatMap((node) => node.declarationList.declarations)
-  .find((node) => node.name.getText(source) === "setAuthStatus").initializer
-  .arguments[0];
+const authStatusInitializer = required(
+  required(
+    required(hook.body)
+      .statements.filter(ts.isVariableStatement)
+      .flatMap((node) => node.declarationList.declarations)
+      .find((node) => node.name.getText(source) === "setAuthStatus"),
+  ).initializer,
+);
+assert.ok(ts.isCallExpression(authStatusInitializer));
+const authStatusCallback = required(authStatusInitializer.arguments[0]);
 const { outputText: authStatusOutput } = ts.transpileModule(
   `const applyAuthStatus = ${authStatusCallback.getText(source)};`,
   { compilerOptions: { target: ts.ScriptTarget.ES2022 } },
 );
 
+/**
+ * @typedef {typeof import("../src/utils/storage.ts").storage} StorageContract
+ * @typedef {import("../src/connection/authModels.ts").AuthState} AuthState
+ * @typedef {import("../src/connection/authModels.ts").AuthStatus} AuthStatus
+ * @typedef {import("../src/session/sessionAuth.ts").SessionUser} SessionUser
+ * @typedef {import("@mons/shared/profiles").CompletePlayerProfile} Profile
+ * @typedef {import("@mons/shared/session-bootstrap").SessionIdentityBootstrap} Identity
+ * @typedef {import("../src/services/initialIdentityBootstrap.ts").InitialIdentityRead} InitialRead
+ * @typedef {(event: { type: string }) => void} Listener
+ * @typedef {Map<string, Set<Listener>>} Listeners
+ * @typedef {object} FixtureData
+ * @property {Parameters<StorageContract["setLoginId"]>[0]} loginId
+ * @property {Parameters<StorageContract["setProfileId"]>[0]} profileId
+ * @property {Parameters<StorageContract["setUsername"]>[0]} username
+ * @property {Parameters<StorageContract["setEthAddress"]>[0]} ethAddress
+ * @property {Parameters<StorageContract["setSolAddress"]>[0]} solAddress
+ * @property {Parameters<StorageContract["setPlayerEmojiId"]>[0]} playerEmojiId
+ * @property {Parameters<StorageContract["setPlayerEmojiAura"]>[0]} playerEmojiAura
+ * @property {Parameters<StorageContract["setPlayerRating"]>[0]} [playerRating]
+ * @property {Parameters<StorageContract["setPlayerNonce"]>[0]} [playerNonce]
+ * @property {Parameters<StorageContract["setPlayerTotalManaPoints"]>[0]} [playerTotalManaPoints]
+ * @property {Parameters<StorageContract["setCardBackgroundId"]>[0]} [cardBackgroundId]
+ * @property {Parameters<StorageContract["setCardStickers"]>[0]} [cardStickers]
+ * @property {Parameters<StorageContract["setCardSubtitleId"]>[0]} [cardSubtitleId]
+ * @property {Parameters<StorageContract["setProfileCounter"]>[0]} [profileCounter]
+ * @property {Parameters<StorageContract["setProfileMons"]>[0]} [profileMons]
+ */
+/** @type {(keyof FixtureData)[]} */
+const fixtureFields = [
+  "loginId",
+  "profileId",
+  "username",
+  "ethAddress",
+  "solAddress",
+  "playerEmojiId",
+  "playerEmojiAura",
+  "playerRating",
+  "playerNonce",
+  "playerTotalManaPoints",
+  "cardBackgroundId",
+  "cardStickers",
+  "cardSubtitleId",
+  "profileCounter",
+  "profileMons",
+];
+/** @param {string} key @returns {key is keyof FixtureData} */
+const isFixtureField = (key) => fixtureFields.some((field) => field === key);
+/** @param {string} uid @returns {SessionUser} */
+const sessionUser = (uid) => ({
+  uid,
+  sessionId: "fixture-session",
+  generation: "fixture-generation",
+  getIdToken: async () => "token",
+});
+
+/** @satisfies {Pick<FixtureData, "loginId" | "profileId" | "username" | "ethAddress" | "solAddress" | "playerEmojiId" | "playerEmojiAura">} */
 const cachedIdentity = {
   loginId: "login-1",
   profileId: "profile-1",
   username: "Cached player",
   ethAddress: "cached-eth",
   solAddress: "cached-sol",
-  playerEmojiId: "7",
-  playerEmojiAura: "cached-aura",
+  playerEmojiId: 7,
+  playerEmojiAura: "rainbow",
 };
-const authoritativeProfile = {
+const authoritativeProfile = canonicalProfile({
   id: "profile-2",
   username: "Canonical player",
   eth: "canonical-eth",
   sol: "canonical-sol",
   emoji: 9,
-  aura: "canonical-aura",
-  mining: { materials: {} },
-};
+  aura: "none",
+});
 const unavailable = async () => {
   throw new Error("unavailable");
 };
+/** @template [T=Identity] @returns {Pick<PromiseWithResolvers<T>, "promise" | "resolve">} */
 const deferred = () => {
-  let resolve;
-  const promise = new Promise((done) => {
-    resolve = done;
-  });
-  return { promise, resolve };
+  /** @type {PromiseWithResolvers<T>} */
+  const pending = Promise.withResolvers();
+  return { promise: pending.promise, resolve: pending.resolve };
 };
 
+/** @param {{ initialIdentity?: () => Promise<Identity>, syncProfile?: () => Promise<import("@mons/shared/auth").LinkedAuthMethodsResponse>, watchOnly?: boolean, stored?: Partial<FixtureData>, applicationErrors?: Partial<Record<string, Error>>, autoFlushPresentation?: boolean }} [options] */
 function harness({
   initialIdentity = async () => ({ ok: true, profile: authoritativeProfile }),
-  syncProfile = async () => ({ ok: true, profileId: "profile-1" }),
+  syncProfile = async () => ({
+    ok: true,
+    profileId: "profile-1",
+    linkedMethods: { eth: false, sol: false, apple: false, x: false },
+    appleLinked: false,
+  }),
   watchOnly = false,
   stored = {},
   applicationErrors = {},
   autoFlushPresentation = true,
 } = {}) {
+  /** @type {FixtureData} */
   const data = { ...cachedIdentity, ...stored };
+  /** @type {{ statuses: AuthStatus[], profiles: { profile: import("@mons/shared/profiles").PlayerProfile, uid: string }[], displays: Parameters<typeof import("../src/ui/identity/profileUiPort.ts").updateProfileDisplayName>[], syncs: number, lookups: string[], mining: import("@mons/shared/profiles").PlayerProfile[], flushes: number, attempts: number, unsubscribed: boolean, identities: number, consumedIdentities: number, invalidatedIdentities: number, tutorials: Parameters<typeof import("../src/content/problems.ts").syncTutorialProgress>[], presentationErrors: unknown[] }} */
   const events = {
     statuses: [],
     profiles: [],
@@ -135,15 +204,25 @@ function harness({
     tutorials: [],
     presentationErrors: [],
   };
+  /** @type {Map<number, { callback: () => void, delay: number }>} */
   const timers = new Map();
+  /** @type {Listeners} */
   const windowListeners = new Map();
+  /** @type {Listeners} */
   const documentListeners = new Map();
+  /** @param {Listeners} listeners */
   const eventTarget = (listeners) => ({
-    addEventListener: (type, callback) => {
+    addEventListener: (
+      /** @type {string} */ type,
+      /** @type {Listener} */ callback,
+    ) => {
       if (!listeners.has(type)) listeners.set(type, new Set());
-      listeners.get(type).add(callback);
+      required(listeners.get(type)).add(callback);
     },
-    removeEventListener: (type, callback) => {
+    removeEventListener: (
+      /** @type {string} */ type,
+      /** @type {Listener} */ callback,
+    ) => {
       listeners.get(type)?.delete(callback);
     },
   });
@@ -152,45 +231,98 @@ function harness({
     visibilityState: "visible",
   };
   const navigator = { onLine: true };
-  const checkApplicationError = (operation) => {
+  const checkApplicationError = (/** @type {string} */ operation) => {
     if (applicationErrors[operation]) throw applicationErrors[operation];
   };
-  const storage = {};
-  for (const field of Object.keys(data)) {
-    const suffix = field[0].toUpperCase() + field.slice(1);
-    storage[`get${suffix}`] = (fallback) => data[field] ?? fallback;
-    storage[`set${suffix}`] = (value) => {
-      checkApplicationError(`set${suffix}`);
-      data[field] = value;
-    };
-  }
-  for (const field of [
-    "playerRating",
-    "playerNonce",
-    "playerTotalManaPoints",
-    "cardBackgroundId",
-    "cardStickers",
-    "cardSubtitleId",
-    "profileCounter",
-    "profileMons",
-  ]) {
-    const suffix = field[0].toUpperCase() + field.slice(1);
-    storage[`set${suffix}`] = (value) => {
-      checkApplicationError(`set${suffix}`);
-      data[field] = value;
-    };
-  }
-  storage.getAuthIdentity = () => ({
-    profileId: data.profileId,
-    ethAddress: data.ethAddress,
-    solAddress: data.solAddress,
-  });
+  /** @satisfies {Pick<StorageContract, "getLoginId" | "getProfileId" | "getUsername" | "getEthAddress" | "getSolAddress" | "getPlayerEmojiId" | "getPlayerEmojiAura" | "setLoginId" | "setProfileId" | "setUsername" | "setEthAddress" | "setSolAddress" | "setPlayerEmojiId" | "setPlayerEmojiAura" | "setPlayerRating" | "setPlayerNonce" | "setPlayerTotalManaPoints" | "setCardBackgroundId" | "setCardStickers" | "setCardSubtitleId" | "setProfileCounter" | "setProfileMons" | "getAuthIdentity">} */
+  const storage = {
+    getLoginId: (fallback) => data.loginId ?? fallback,
+    setLoginId: (value) => {
+      checkApplicationError("setLoginId");
+      data.loginId = value;
+    },
+    getProfileId: (fallback) => data.profileId ?? fallback,
+    setProfileId: (value) => {
+      checkApplicationError("setProfileId");
+      data.profileId = value;
+    },
+    getUsername: (fallback) => data.username ?? fallback,
+    setUsername: (value) => {
+      checkApplicationError("setUsername");
+      data.username = value;
+    },
+    getEthAddress: (fallback) => data.ethAddress ?? fallback,
+    setEthAddress: (value) => {
+      checkApplicationError("setEthAddress");
+      data.ethAddress = value;
+    },
+    getSolAddress: (fallback) => data.solAddress ?? fallback,
+    setSolAddress: (value) => {
+      checkApplicationError("setSolAddress");
+      data.solAddress = value;
+    },
+    getPlayerEmojiId: (fallback) => data.playerEmojiId ?? fallback,
+    setPlayerEmojiId: (value) => {
+      checkApplicationError("setPlayerEmojiId");
+      data.playerEmojiId = value;
+    },
+    getPlayerEmojiAura: (fallback) => data.playerEmojiAura ?? fallback,
+    setPlayerEmojiAura: (value) => {
+      checkApplicationError("setPlayerEmojiAura");
+      data.playerEmojiAura = value;
+    },
+    setPlayerRating: (value) => {
+      checkApplicationError("setPlayerRating");
+      data.playerRating = value;
+    },
+    setPlayerNonce: (value) => {
+      checkApplicationError("setPlayerNonce");
+      data.playerNonce = value;
+    },
+    setPlayerTotalManaPoints: (value) => {
+      checkApplicationError("setPlayerTotalManaPoints");
+      data.playerTotalManaPoints = value;
+    },
+    setCardBackgroundId: (value) => {
+      checkApplicationError("setCardBackgroundId");
+      data.cardBackgroundId = value;
+    },
+    setCardStickers: (value) => {
+      checkApplicationError("setCardStickers");
+      data.cardStickers = value;
+    },
+    setCardSubtitleId: (value) => {
+      checkApplicationError("setCardSubtitleId");
+      data.cardSubtitleId = value;
+    },
+    setProfileCounter: (value) => {
+      checkApplicationError("setProfileCounter");
+      data.profileCounter = value;
+    },
+    setProfileMons: (value) => {
+      checkApplicationError("setProfileMons");
+      data.profileMons = value;
+    },
+    getAuthIdentity: () => ({
+      profileId: data.profileId,
+      ethAddress: data.ethAddress,
+      solAddress: data.solAddress,
+    }),
+  };
+  /**
+   * @type {((uid: string | null) => void) | undefined}
+   */
   let authCallback;
   let sessionEpoch = 0;
   let nextTimerId = 0;
+  /** @type {{ auth: { currentUser: SessionUser | null, isStoppedForLogout: boolean }, isCurrentAuthUser(uid: string): boolean, createSessionGuard(): () => boolean, subscribeToAuthChanges(callback: (uid: string | null) => void): () => void, syncProfile(): Promise<import("@mons/shared/auth").LinkedAuthMethodsResponse>, getProfileByLoginId(uid: string): Promise<Profile>, getSameProfilePlayerUid(): null }} */
   const connection = {
-    auth: { currentUser: { uid: "login-1" }, isStoppedForLogout: false },
-    isCurrentAuthUser: (uid) => connection.auth.currentUser?.uid === uid,
+    auth: {
+      currentUser: /** @type {SessionUser | null} */ (sessionUser("login-1")),
+      isStoppedForLogout: false,
+    },
+    isCurrentAuthUser: (/** @type {string} */ uid) =>
+      connection.auth.currentUser?.uid === uid,
     createSessionGuard: () => {
       const epoch = sessionEpoch;
       return () => epoch === sessionEpoch;
@@ -207,10 +339,11 @@ function harness({
     },
     getProfileByLoginId: async (uid) => {
       events.lookups.push(uid);
-      return lookupProfile(uid);
+      return assert.fail("unexpected legacy profile lookup");
     },
     getSameProfilePlayerUid: () => null,
   };
+  /** @type {Map<number, () => void>} */
   const presentationFrames = new Map();
   let nextPresentationFrame = 0;
   const presentation = createDeferredProfilePresentation({
@@ -234,29 +367,37 @@ function harness({
     callbacks.forEach((callback) => callback());
   };
   const authChangeVersionRef = { current: 0 };
+  /** @type {AuthState} */
   let authState = { authStatus: "authenticated", ...storage.getAuthIdentity() };
   const statusDependencies = {
     authChangeVersionRef,
     storage,
     EMPTY_AUTH_IDENTITY: { profileId: "", ethAddress: "", solAddress: "" },
-    setAuthState: (update) => {
-      authState = update(authState);
+    setAuthState: (
+      /** @type {import("react").SetStateAction<AuthState>} */ update,
+    ) => {
+      authState = typeof update === "function" ? update(authState) : update;
       events.statuses.push(authState.authStatus);
     },
   };
-  const setAuthStatus = new Function(
-    ...Object.keys(statusDependencies),
-    `${authStatusOutput}\nreturn applyAuthStatus;`,
-  )(...Object.values(statusDependencies));
+  const setAuthStatus =
+    /** @type {ReturnType<typeof import("../src/connection/authentication.ts").useAuthStatus>["setAuthStatus"]} */ (
+      new Function(
+        ...Object.keys(statusDependencies),
+        `${authStatusOutput}\nreturn applyAuthStatus;`,
+      )(...Object.values(statusDependencies))
+    );
   const dependencies = {
-    authAttemptTimeoutIdsRef: { current: new Set() },
+    authAttemptTimeoutIdsRef: {
+      current: new Set(/** @type {number[]} */ ([])),
+    },
     authChangeVersionRef,
     connection,
     storage,
     sessionAuth: connection.auth,
     localStorage: {
-      getItem: (key) => {
-        const value = data[key];
+      getItem: (/** @type {string} */ key) => {
+        const value = isFixtureField(key) ? data[key] : undefined;
         if (value == null) return null;
         return typeof value === "string" ? value : JSON.stringify(value);
       },
@@ -267,20 +408,24 @@ function harness({
     setAuthStatus,
     window: {
       ...eventTarget(windowListeners),
-      setTimeout: (callback, delay) => {
+      setTimeout: (
+        /** @type {() => void} */ callback,
+        /** @type {number} */ delay,
+      ) => {
         const id = ++nextTimerId;
         timers.set(id, { callback, delay });
         return id;
       },
-      clearTimeout: (id) => timers.delete(id),
+      clearTimeout: (/** @type {number} */ id) => timers.delete(id),
     },
     document,
     navigator,
     AuthApiError,
     markAuthIdentityReady: () => {},
+    /** @type {typeof import("../src/services/initialIdentityBootstrap.ts").readInitialIdentity} */
     readInitialIdentity: async () => {
       events.identities++;
-      const user = connection.auth.currentUser;
+      const user = required(connection.auth.currentUser);
       const identity = await initialIdentity();
       return { user, read: () => identity };
     },
@@ -290,12 +435,14 @@ function harness({
     invalidateInitialIdentity: () => {
       events.invalidatedIdentities++;
     },
+    /** @type {typeof import("../src/services/initialIdentityBootstrap.ts").repairInitialIdentity} */
     repairInitialIdentity: async (initial, repair) => {
       initial.read();
       await repair();
       dependencies.invalidateInitialIdentity();
       return dependencies.readInitialIdentity();
     },
+    /** @type {typeof import("../src/content/problems.ts").syncTutorialProgress} */
     syncTutorialProgress: (...args) => {
       checkApplicationError("syncTutorialProgress");
       events.tutorials.push(args);
@@ -303,40 +450,54 @@ function harness({
     didAttemptAuthentication: () => {
       events.attempts++;
     },
-    normalizeProfileEmojiId,
     flushPendingOwnProfileMiningState: () => {
       checkApplicationError("flushPendingOwnProfileMiningState");
       events.flushes++;
     },
+    /** @type {typeof import("../src/services/ownProfileMiningHydration.ts").syncOwnProfileMiningState} */
     syncOwnProfileMiningState: (profile) => {
       checkApplicationError("syncOwnProfileMiningState");
       events.mining.push(profile);
     },
     isWatchOnly: watchOnly,
-    updateProfileDisplayName: (...args) => events.displays.push(args),
+    /** @type {typeof import("../src/ui/identity/profileUiPort.ts").updateProfileDisplayName} */
+    updateProfileDisplayName: (...args) => {
+      events.displays.push(args);
+    },
+    /** @type {typeof import("../src/game/board.ts").setupLoggedInPlayerProfile} */
     setupLoggedInPlayerProfile: (profile, uid) => {
       checkApplicationError("setupLoggedInPlayerProfile");
       events.profiles.push({ profile, uid });
     },
   };
-  dependencies.createProfileCosmeticWrites = bindProfileCosmeticStorage(
-    storage,
-    dependencies.localStorage,
+  const profileDependencies = {
+    ...dependencies,
+    createProfileCosmeticWrites: bindProfileCosmeticStorage(
+      storage,
+      dependencies.localStorage,
+    ),
+  };
+  const applyVerifiedProfile =
+    /** @type {typeof import("../src/connection/verifiedProfile.ts").applyVerifiedProfile} */ (
+      new Function(
+        ...Object.keys(profileDependencies),
+        `${profileApplicationOutput}\nreturn applyVerifiedProfile;`,
+      )(...Object.values(profileDependencies))
+    );
+  const authDependencies = { ...profileDependencies, applyVerifiedProfile };
+  const cleanup = /** @type {() => void} */ (
+    new Function(
+      ...Object.keys(authDependencies),
+      `${outputText}\nreturn restoreAuth();`,
+    )(...Object.values(authDependencies))
   );
-  dependencies.applyVerifiedProfile = new Function(
-    ...Object.keys(dependencies),
-    `${profileApplicationOutput}\nreturn applyVerifiedProfile;`,
-  )(...Object.values(dependencies));
-  const cleanup = new Function(
-    ...Object.keys(dependencies),
-    `${outputText}\nreturn restoreAuth();`,
-  )(...Object.values(dependencies));
+
   return {
     data,
     events,
     connection,
     cleanup,
-    applyProfile: dependencies.applyVerifiedProfile,
+    applyProfile: applyVerifiedProfile,
     commitName: () =>
       presentation.nameCommitted(
         {
@@ -348,12 +509,12 @@ function harness({
     advancePresentationFrame,
     flushPresentation: presentation.flush,
     confirmSignIn: () => setAuthStatus("authenticated"),
-    setOnline: (online) => {
+    setOnline: (/** @type {boolean} */ online) => {
       navigator.onLine = online;
     },
-    changeAuth: (uid = "login-1") => {
-      connection.auth.currentUser = uid === null ? null : { uid };
-      authCallback(uid);
+    changeAuth: (/** @type {string | null} */ uid = "login-1") => {
+      connection.auth.currentUser = uid === null ? null : sessionUser(uid);
+      required(authCallback)(uid);
     },
     changeSession: () => {
       sessionEpoch++;
@@ -365,12 +526,15 @@ function harness({
     advanceRetry: () => {
       const pending = Array.from(timers).filter(([, { delay }]) => delay > 23);
       assert.equal(pending.length, 1, "expected one pending auth retry");
-      const [id, timer] = pending[0];
+      const [id, timer] = required(pending[0]);
       timers.delete(id);
       timer.callback();
       return timer.delay;
     },
-    wake: (type, visibilityState = document.visibilityState) => {
+    wake: (
+      /** @type {string} */ type,
+      visibilityState = document.visibilityState,
+    ) => {
       document.visibilityState = visibilityState;
       const listeners =
         type === "visibilitychange" ? documentListeners : windowListeners;
@@ -404,6 +568,7 @@ function harness({
 }
 
 test("applies the complete verified identity without sync or profile lookup", async () => {
+  /** @type {Profile} */
   const profile = {
     ...authoritativeProfile,
     rating: 1688,
@@ -413,8 +578,8 @@ test("applies the complete verified identity without sync or profile lookup", as
     cardBackgroundId: 3,
     cardSubtitleId: 2,
     profileCounter: "gp",
-    profileMons: "1,2,3,4,5",
-    cardStickers: "stickers",
+    profileMons: { demon: 1, angel: 2, drainer: 3, spirit: 1, mystic: 2 },
+    cardStickers: { mana: "blue-mana" },
     completedProblemIds: ["one"],
     isTutorialCompleted: true,
   };
@@ -484,7 +649,7 @@ test("a newer login fences a late verified startup identity", async () => {
   const h = harness({ initialIdentity: () => pending.promise });
   h.changeAuth();
   h.confirmSignIn();
-  pending.resolve({ ok: true, profile: authoritativeProfile });
+  required(pending.resolve)({ ok: true, profile: authoritativeProfile });
   await h.settle();
   assert.deepEqual(h.events.statuses, ["authenticated"]);
   assert.deepEqual(h.events.profiles, []);
@@ -511,7 +676,7 @@ test("retries a verified identity discarded after the game session changes", asy
   h.changeAuth();
   await h.settle();
   h.changeSession();
-  pending.resolve({ ok: true, profile: authoritativeProfile });
+  required(pending.resolve)({ ok: true, profile: authoritativeProfile });
   await h.settle();
   assert.deepEqual(h.events.statuses, []);
   assert.deepEqual(h.events.profiles, []);
@@ -537,7 +702,7 @@ for (const cancellation of ["sign-out", "account change", "cleanup"]) {
     await h.settle();
     if (cancellation === "cleanup") h.cleanup();
     else h.changeAuth(cancellation === "sign-out" ? null : "login-2");
-    pending.resolve({ ok: true, profile: authoritativeProfile });
+    required(pending.resolve)({ ok: true, profile: authoritativeProfile });
     await h.settle();
     assert.deepEqual(h.events.profiles, []);
     assert.deepEqual(h.data, cachedIdentity);
@@ -558,7 +723,7 @@ test("keeps the newer verified result when callbacks overlap for the same login"
   await h.settle();
   h.changeAuth();
   await h.settle();
-  pending.resolve({ ok: true, profile: authoritativeProfile });
+  required(pending.resolve)({ ok: true, profile: authoritativeProfile });
   await h.settle();
   assert.deepEqual(h.events.statuses, ["authenticated"]);
   assert.equal(h.events.profiles.length, 1);
@@ -656,6 +821,7 @@ test("keeps an offline identity retry pending until the network returns", async 
 });
 
 test("an explicit same-login sign-in fences a late identity retry failure", async () => {
+  /** @type {Pick<PromiseWithResolvers<void>, "promise" | "resolve">} */
   const pending = deferred();
   let reads = 0;
   const h = harness({
@@ -669,7 +835,7 @@ test("an explicit same-login sign-in fences a late identity retry failure", asyn
   h.advanceRetry();
   await h.settle();
   h.confirmSignIn();
-  pending.resolve();
+  required(pending.resolve)();
   await h.settle();
   assert.deepEqual(h.events.statuses, ["unauthenticated", "authenticated"]);
   assert.deepEqual(h.retryDelays(), []);
@@ -700,7 +866,7 @@ for (const wakeEvent of ["online", "pageshow", "visibilitychange"]) {
     await h.settle();
     assert.equal(h.events.identities, 2);
     assert.deepEqual(h.retryDelays(), []);
-    pending.resolve({ ok: true, profile: authoritativeProfile });
+    required(pending.resolve)({ ok: true, profile: authoritativeProfile });
     await h.settle();
     assert.deepEqual(h.events.statuses, ["unauthenticated", "authenticated"]);
   });
@@ -748,6 +914,7 @@ for (const operation of [
   "flushPendingOwnProfileMiningState",
 ]) {
   test(`quota failure in optional ${operation} preserves verified authentication and display`, async () => {
+    /** @type {Profile} */
     const profile = {
       ...authoritativeProfile,
       id: cachedIdentity.profileId,
@@ -760,7 +927,7 @@ for (const operation of [
       rating: 1688,
       nonce: 12,
       totalManaPoints: 42,
-      cardStickers: JSON.stringify({ "big-mon-top-right": "applecreme" }),
+      cardStickers: { "big-mon-top-right": "applecreme" },
       completedProblemIds: ["one"],
       isTutorialCompleted: true,
     };
@@ -823,7 +990,7 @@ for (const operation of [
   });
 }
 
-for (const [label, error] of [
+for (const [label, error] of /** @type {[string, Error][]} */ ([
   ["ordinary error", new Error("Unexpected profile failure")],
   [
     "blocked storage",
@@ -835,7 +1002,7 @@ for (const [label, error] of [
       name: "QuotaExceededError",
     }),
   ],
-]) {
+])) {
   test(`${label} in deferred cosmetics is reported without retrying verified authentication`, async () => {
     const h = harness({
       initialIdentity: async () => ({
@@ -878,13 +1045,14 @@ for (const [label, error] of [
 }
 
 test("restores verified identity and state before deferring only cosmetic cache writes until after the header paint", async () => {
+  /** @type {Profile} */
   const profile = {
     ...authoritativeProfile,
     cardBackgroundId: 4,
-    cardStickers: "server stickers",
+    cardStickers: { mana: "blue-mana" },
     cardSubtitleId: 8,
-    profileCounter: "wins",
-    profileMons: "1,2,3,4,5",
+    profileCounter: "gp",
+    profileMons: { demon: 1, angel: 2, drainer: 3, spirit: 1, mystic: 2 },
     rating: 1800,
     nonce: 7,
     totalManaPoints: 42,
@@ -903,13 +1071,13 @@ test("restores verified identity and state before deferring only cosmetic cache 
   assert.equal(h.events.profiles.length, 1);
   assert.equal(h.events.tutorials.length, 1);
   assert.equal(h.events.mining.length, 1);
-  const fields = [
+  const fields = /** @type {const} */ ([
     "cardBackgroundId",
     "cardStickers",
     "cardSubtitleId",
     "profileCounter",
     "profileMons",
-  ];
+  ]);
   fields.forEach((field) => assert.equal(h.data[field], undefined));
   h.commitName();
   h.advancePresentationFrame();
@@ -937,7 +1105,7 @@ for (const invalidate of [
     h.commitName();
     if (invalidate === "logout") h.connection.auth.isStoppedForLogout = true;
     else if (invalidate === "replacement session for the same uid")
-      h.connection.auth.currentUser = { uid: "login-1" };
+      h.connection.auth.currentUser = sessionUser("login-1");
     else h.data.profileId = "different-profile";
     h.advancePresentationFrame();
     h.advancePresentationFrame();

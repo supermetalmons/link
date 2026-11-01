@@ -1,4 +1,5 @@
 // Generated from src/gameSessionChanges.ts. Run npm run generate:runtime.
+import type { RematchSeries } from "./shared/rematches.js";
 import type {
   InviteDocument,
   InviteFieldChanges,
@@ -23,18 +24,23 @@ export type TelegramSourceChanges = {
   generation?: SessionCounter;
 };
 export type TelegramProjectionRequest = {
-  schemaVersion: 1;
+  schemaVersion: 2;
   status: "pending";
   requestId: string;
   updatedAtMs: SessionTimestamp;
 };
 export type ProfileProjectionRequest = {
-  schemaVersion: 1;
+  schemaVersion: 2;
   status: "pending";
   requestId: string;
   reason: string;
   sourceUpdatedAtMs: SessionTimestamp;
   lastQueuedAtMs: SessionTimestamp;
+  historicalMatches: Record<string, HistoricalMatchDescriptorWrite>;
+  archiveRetry: {
+    requestId: string;
+    notBeforeMs: number;
+  } | null;
 };
 export type GameSessionChange =
   | {
@@ -57,7 +63,7 @@ export type GameSessionChange =
       kind: "invite-rematches";
       inviteId: string;
       role: "host" | "guest";
-      value: string;
+      value: RematchSeries;
     }
   | {
       kind: "match-create";

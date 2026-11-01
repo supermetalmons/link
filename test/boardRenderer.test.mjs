@@ -1,3 +1,4 @@
+import { required } from "./fixtures/canonicalData.mjs";
 import assert from "node:assert/strict";
 import { registerHooks } from "node:module";
 import test from "node:test";
@@ -71,17 +72,27 @@ const {
 const { getLifecycleCounters } =
   await import("../src/lifecycle/lifecycleDiagnostics.ts");
 
-const recordingBoardUiHandlers = (events) =>
-  Object.fromEntries(
-    [
-      "updateBoardComponentForBoardStyleChange",
-      "setTopBoardOverlayVisible",
-      "showRaibowAura",
-      "updateAuraForAvatarElement",
-      "updateWagerPlayerUids",
-      "setBoardPlayerInfoOverlayState",
-    ].map((name) => [name, (...args) => events.push([name, ...args])]),
-  );
+/** @param {unknown[][]} events @returns {import("../src/game/boardUiPort.ts").BoardUiHandlers} */
+const recordingBoardUiHandlers = (events) => ({
+  updateBoardComponentForBoardStyleChange: (...args) => {
+    events.push(["updateBoardComponentForBoardStyleChange", ...args]);
+  },
+  setTopBoardOverlayVisible: (...args) => {
+    events.push(["setTopBoardOverlayVisible", ...args]);
+  },
+  showRaibowAura: (...args) => {
+    events.push(["showRaibowAura", ...args]);
+  },
+  updateAuraForAvatarElement: (...args) => {
+    events.push(["updateAuraForAvatarElement", ...args]);
+  },
+  updateWagerPlayerUids: (...args) => {
+    events.push(["updateWagerPlayerUids", ...args]);
+  },
+  setBoardPlayerInfoOverlayState: (...args) => {
+    events.push(["setBoardPlayerInfoOverlayState", ...args]);
+  },
+});
 
 test.afterEach(() => {
   resetBoardUiHandlers();
@@ -93,6 +104,7 @@ test("board UI port forwards exact arguments only while bound", () => {
   resetBoardUiHandlers();
   const empty = createEmptyPlayerInfoOverlayState();
   setBoardPlayerInfoOverlayState(empty);
+  /** @type {unknown[][]} */
   const events = [];
   const handlers = recordingBoardUiHandlers(events);
   const svgElement = { id: "overlay" };
@@ -100,9 +112,15 @@ test("board UI port forwards exact arguments only while bound", () => {
   const cancel = () => {};
   const sendCommands = () => {
     updateBoardComponentForBoardStyleChange();
-    setTopBoardOverlayVisible(true, svgElement, true, ok, cancel);
+    Reflect.apply(setTopBoardOverlayVisible, undefined, [
+      true,
+      svgElement,
+      true,
+      ok,
+      cancel,
+    ]);
     showRaibowAura(true, "aura.webp", false);
-    updateAuraForAvatarElement(true, svgElement);
+    Reflect.apply(updateAuraForAvatarElement, undefined, [true, svgElement]);
     updateWagerPlayerUids("player-1", "player-2");
     setBoardPlayerInfoOverlayState(empty);
   };
@@ -135,6 +153,7 @@ test("board UI port preserves cached player info without dispatching on bind", (
   setBoardPlayerInfoOverlayState(state);
   assert.equal(getBoardPlayerInfoOverlayState(), state);
 
+  /** @type {unknown[][]} */
   const firstEvents = [];
   const first = bindBoardUiHandlers(recordingBoardUiHandlers(firstEvents));
   assert.deepEqual(firstEvents, []);
@@ -150,9 +169,11 @@ test("board UI port preserves cached player info without dispatching on bind", (
   unbindBoardUiHandlers(first);
   assert.equal(getBoardPlayerInfoOverlayState(), updated);
 
+  /** @type {import("../src/game/boardUiPort.ts").BoardPlayerInfoOverlayState} */
   const whileUnmounted = { ...updated, topControlSlot: "player" };
   setBoardPlayerInfoOverlayState(whileUnmounted);
   assert.equal(firstEvents.length, 1);
+  /** @type {unknown[][]} */
   const secondEvents = [];
   bindBoardUiHandlers(recordingBoardUiHandlers(secondEvents));
   assert.deepEqual(secondEvents, []);
@@ -162,6 +183,7 @@ test("board UI port preserves cached player info without dispatching on bind", (
   assert.equal(getBoardPlayerInfoOverlayState(), whileUnmounted);
   updateBoardComponentForBoardStyleChange();
   assert.deepEqual(secondEvents, []);
+  /** @type {unknown[][]} */
   const thirdEvents = [];
   bindBoardUiHandlers(recordingBoardUiHandlers(thirdEvents));
   assert.deepEqual(thirdEvents, []);
@@ -169,7 +191,9 @@ test("board UI port preserves cached player info without dispatching on bind", (
 });
 
 test("an older board UI binding cannot unbind its replacement", () => {
+  /** @type {unknown[][]} */
   const firstEvents = [];
+  /** @type {unknown[][]} */
   const secondEvents = [];
   const first = bindBoardUiHandlers(recordingBoardUiHandlers(firstEvents));
   const second = bindBoardUiHandlers(recordingBoardUiHandlers(secondEvents));
@@ -191,10 +215,18 @@ test("an older board UI binding cannot unbind its replacement", () => {
 test("video reaction bindings forward exact arguments and unbind by identity", () => {
   resetBoardVideoReactionHandler();
   assert.doesNotThrow(() => showVideoReaction(true, 17));
+  /** @type {unknown[][]} */
   const firstEvents = [];
+  /** @type {unknown[][]} */
   const secondEvents = [];
-  const firstHandler = (...args) => firstEvents.push(args);
-  const secondHandler = (...args) => secondEvents.push(args);
+  /** @type {Parameters<typeof bindBoardVideoReactionHandler>[0]} */
+  const firstHandler = (...args) => {
+    firstEvents.push(args);
+  };
+  /** @type {Parameters<typeof bindBoardVideoReactionHandler>[0]} */
+  const secondHandler = (...args) => {
+    secondEvents.push(args);
+  };
   const first = bindBoardVideoReactionHandler(firstHandler);
   assert.equal(first, firstHandler);
   showVideoReaction(false, 20);
@@ -234,7 +266,9 @@ test("board player info comparison checks state values", () => {
 test("board effects runtime is read lazily", () => {
   let flipped = false;
   const effectsLayer = { id: "effects" };
-  bindBoardEffectsRuntime(() => ({ isFlipped: flipped, effectsLayer }));
+  Reflect.apply(bindBoardEffectsRuntime, undefined, [
+    () => ({ isFlipped: flipped, effectsLayer }),
+  ]);
 
   assert.deepEqual(getBoardEffectsRuntime(), {
     isFlipped: false,
@@ -262,12 +296,12 @@ test("wager stacks retain their exact column and center layout", () => {
 
 test("wager pile models cap visible icons while retaining totals and geometry", () => {
   const pile = createWagerPile();
-  syncWagerPileIcons(pile, "obsidian", 40);
+  syncWagerPileIcons(pile, "metal", 40);
   assert.equal(pile.count, MAX_WAGER_PILE_ITEMS);
   assert.equal(pile.actualCount, 40);
   assert.equal(
     pile.materialUrl,
-    "https://cdn.lil.org/mons/rocks/materials/obsidian.webp",
+    "https://cdn.lil.org/mons/rocks/materials/metal.webp",
   );
 
   const rect = { x: 2, y: 3, w: 4, h: 2 };
@@ -308,21 +342,25 @@ test("board scheduler clears timeout and animation counters exactly once", () =>
   const previousWindow = Object.getOwnPropertyDescriptor(globalThis, "window");
   const previousClearTimeout = globalThis.clearTimeout;
   const previousCancelAnimationFrame = globalThis.cancelAnimationFrame;
+  /** @type {Map<number, () => void>} */
   const timeoutCallbacks = new Map();
+  /** @type {Map<number, FrameRequestCallback>} */
   const rafCallbacks = new Map();
+  /** @type {Array<Parameters<typeof clearTimeout>[0]>} */
   const clearedTimeouts = [];
+  /** @type {number[]} */
   const canceledRafs = [];
   let nextTimeoutId = 10;
   let nextRafId = 20;
   Object.defineProperty(globalThis, "window", {
     configurable: true,
     value: {
-      setTimeout(callback) {
+      setTimeout(/** @type {() => void} */ callback) {
         const id = nextTimeoutId++;
         timeoutCallbacks.set(id, callback);
         return id;
       },
-      requestAnimationFrame(callback) {
+      requestAnimationFrame(/** @type {FrameRequestCallback} */ callback) {
         const id = nextRafId++;
         rafCallbacks.set(id, callback);
         return id;
@@ -350,8 +388,8 @@ test("board scheduler clears timeout and animation counters exactly once", () =>
 
     const firedTimeout = setManagedBoardTimeout(() => {}, 1);
     const firedRaf = setManagedBoardRaf(() => {});
-    timeoutCallbacks.get(firedTimeout)();
-    rafCallbacks.get(firedRaf)(123);
+    required(timeoutCallbacks.get(firedTimeout))();
+    required(rafCallbacks.get(firedRaf))(123);
     assert.equal(getLifecycleCounters().boardTimeouts, initial.boardTimeouts);
     assert.equal(getLifecycleCounters().boardRaf, initial.boardRaf);
 
@@ -371,7 +409,7 @@ test("board scheduler clears timeout and animation counters exactly once", () =>
     if (previousWindow) {
       Object.defineProperty(globalThis, "window", previousWindow);
     } else {
-      delete globalThis.window;
+      Reflect.deleteProperty(globalThis, "window");
     }
   }
 });

@@ -2,6 +2,7 @@
 
 const assert = require("node:assert/strict");
 const test = require("node:test");
+const { event: eventFixture } = require("./fixtures/canonicalEvents");
 const {
   SUNDAY_MONS_REMINDER_LEAD_MS,
   buildSundayMonsReminder,
@@ -111,18 +112,23 @@ test("uses the invitation participant threshold and exact shared formatting", ()
     assert.deepEqual(
       buildSundayMonsReminder({
         eventId: PRIZE_EVENT_ID,
-        eventData: { ...EVENT, participants },
+        eventData: eventFixture({ ...EVENT, participants }),
       }),
       base,
     );
   }
-  const eventData = {
+  const eventData = eventFixture({
     ...EVENT,
     participants: {
-      bob: { displayName: "Bob & Co", emojiId: 2, joinedAtMs: 200 },
+      bob: {
+        username: "",
+        displayName: "Bob & Co",
+        emojiId: 2,
+        joinedAtMs: 200,
+      },
       alice,
     },
-  };
+  });
   const reminder = buildSundayMonsReminder({
     eventId: PRIZE_EVENT_ID,
     eventData,
@@ -130,25 +136,30 @@ test("uses the invitation participant threshold and exact shared formatting", ()
   const participantLine =
     '<tg-emoji emoji-id="5273900723417929741">&#11088;</tg-emoji> &lt;Alice&gt; <tg-emoji emoji-id="5273897076990696847">&#11088;</tg-emoji> Bob &amp; Co';
   assert.equal(reminder.text, `${base.text}\n\n${participantLine}`);
-  assert.equal(
-    renderUpcomingMessage(PRIZE_EVENT_ID, eventData, EVENT.startAtMs)
-      .split("\n")
-      .at(-1),
-    participantLine,
+  const upcoming = renderUpcomingMessage(
+    PRIZE_EVENT_ID,
+    eventData,
+    EVENT.startAtMs,
   );
+  assert.ok(upcoming !== null);
+  assert.equal(upcoming.split("\n").at(-1), participantLine);
 });
 
 test("shares deterministic joined order, display-name fallbacks, and anonymous names", () => {
   const result = buildSundayMonsReminder({
     eventId: PRIZE_EVENT_ID,
-    eventData: {
+    eventData: eventFixture({
       participants: {
-        z: { username: "Z", joinedAtMs: 100 },
-        b: { displayName: 'B "quoted"', emojiId: 999999, joinedAtMs: 50 },
-        a: { joinedAtMs: 50 },
-        invalid: null,
+        z: { username: "Z", emojiId: 0, joinedAtMs: 100 },
+        b: {
+          username: "",
+          displayName: 'B "quoted"',
+          emojiId: 0,
+          joinedAtMs: 50,
+        },
+        a: { username: "", displayName: "", emojiId: 0, joinedAtMs: 50 },
       },
-    },
+    }),
   });
   assert.ok(result.text.endsWith("\n\nanon B &quot;quoted&quot; Z"));
 });

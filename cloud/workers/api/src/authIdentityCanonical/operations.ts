@@ -6,8 +6,6 @@ import {
   type AuthOperationStartInput,
 } from "./operationRecords.ts";
 import {
-  isAuthProfileResponse,
-  isLinkedAuthMethodsResponse,
   type AuthMethodKey,
   type AuthProfileResponse,
   type LinkedAuthMethodsResponse,
@@ -90,12 +88,12 @@ export function createCanonicalAuthOperations({
         !matchesVerifiedAuthMethod(operation.method, current, expectedHash)
       )
         return null;
-      return isAuthProfileResponse(operation.result)
+      return operation.result.kind === "verify"
         ? profileResponse(profile, operation.loginUid, operation.operationId)
         : null;
     }
     if (methodFromAggregate(profile.aggregate, operation.method)) return null;
-    if (!isLinkedAuthMethodsResponse(operation.result)) return null;
+    if (operation.result.kind !== "unlink") return null;
     const methods = linkedMethods(profile.aggregate);
     return {
       ok: true,
@@ -125,17 +123,19 @@ export function createCanonicalAuthOperations({
         if (replay) return { operation: existing, replay };
         if (existing.status === "success")
           authFailure(409, "aborted", "profile-merged-retry");
+        if (existing.status === "cancelled")
+          authFailure(409, "aborted", "operation-cancelled");
         return { operation: existing, replay: null };
       }
       const timestamp = now();
-      const value = startedAuthOperation({
-        operationId,
-        kind,
-        method,
-        loginUid: uid,
-        meta,
-        timestamp,
-      } as AuthOperationStartInput);
+      const base = { operationId, method, loginUid: uid, timestamp };
+      if (kind === "verify" && meta === null)
+        throw new CanonicalProfileCorruption();
+      const start: AuthOperationStartInput =
+        kind === "verify"
+          ? { ...base, kind, meta: meta! }
+          : { ...base, kind, meta: null };
+      const value = startedAuthOperation(start);
       try {
         await commitCanonicalPlan(db, {
           expectations: [{ kind: "auth-operation-absent", operationId }],
@@ -158,7 +158,12 @@ export function createCanonicalAuthOperations({
   ): Promise<void> => {
     for (let attempt = 0; attempt < 3; attempt++) {
       const operation = await readCanonicalAuthOperation(db, operationId);
-      if (!operation || operation.status === "success") return;
+      if (
+        !operation ||
+        operation.status === "success" ||
+        operation.status === "cancelled"
+      )
+        return;
       const timestamp = now();
       const value = finishedAuthOperation(operation, outcome, timestamp);
       try {

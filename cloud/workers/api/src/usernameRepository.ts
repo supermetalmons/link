@@ -88,7 +88,7 @@ export function createUsernameRepository(
             if (usernameKey) {
               const existing = await d1
                 .prepare(
-                  "SELECT profile_id FROM profile_records WHERE username_key = ?",
+                  "SELECT profile_id FROM profile_records_canonical WHERE username_key = ?",
                 )
                 .bind(usernameKey)
                 .first<CanonicalUsernameOwnerRow>();

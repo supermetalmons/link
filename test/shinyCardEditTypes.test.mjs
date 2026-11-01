@@ -1,3 +1,4 @@
+import { PROFILE_STICKER_CATALOG } from "@mons/shared/appearance";
 import assert from "node:assert/strict";
 import path from "node:path";
 import test from "node:test";
@@ -23,6 +24,7 @@ const config = ts.getParsedCommandLineOfConfigFile(
 );
 assert.ok(config);
 assert.deepEqual(config.errors, []);
+const compilerOptions = config.options;
 
 const prelude = `
 import type {
@@ -47,29 +49,36 @@ declare let mutableEdit: ShinyCardEdit;
 declare let undoIntent: UndoIntent<number>;
 `;
 
+/** @type {readonly (keyof typeof PROFILE_STICKER_CATALOG)[]} */
+const stickerSlots = [
+  "big-mon-top-right",
+  "bottom-left",
+  "bottom-right",
+  "mana",
+  "middle-left",
+  "middle-right",
+  "mini-logo",
+  "type-logo",
+];
+
+/** @type {Array<[contentType: string, value: string]>} */
 const validChanges = [
-  ['"profileCounter"', '"legacy-counter"'],
-  ['"emojiAndAura"', '{ emojiId: "1009", aura: "legacy-aura" }'],
+  ['"profileCounter"', '"gp"'],
+  ['"emojiAndAura"', '{ emojiId: 0, aura: "none" }'],
   ['"emojiAndAura"', '{ emojiId: 1009, aura: "rainbow" }'],
   ['"bg"', "100"],
   ['"subtitle"', "0"],
-  ...["DEMON", "ANGEL", "DRAINER", "SPIRIT", "MYSTIC"].map((type) => [
-    `MonType.${type}`,
-    "1",
-  ]),
-  ...[
-    "big-mon-top-right",
-    "bottom-left",
-    "bottom-right",
-    "mana",
-    "middle-left",
-    "middle-right",
-    "mini-logo",
-    "type-logo",
-  ].flatMap((slot) => [
-    [JSON.stringify(slot), '"legacy-sticker"'],
-    [JSON.stringify(slot), "undefined"],
-  ]),
+  ...["DEMON", "ANGEL", "DRAINER", "SPIRIT", "MYSTIC"].map(
+    /** @returns {[contentType: string, value: string]} */
+    (type) => [`MonType.${type}`, "1"],
+  ),
+  ...stickerSlots.flatMap(
+    /** @returns {Array<[contentType: string, value: string]>} */
+    (slot) => [
+      [JSON.stringify(slot), JSON.stringify(PROFILE_STICKER_CATALOG[slot][0])],
+      [JSON.stringify(slot), "undefined"],
+    ],
+  ),
 ];
 
 const validSource =
@@ -91,8 +100,9 @@ const validSource =
     })
     .join("\n");
 
+/** @param {string} text */
 function diagnostics(text) {
-  const host = ts.createCompilerHost(config.options);
+  const host = ts.createCompilerHost(compilerOptions);
   const readFile = host.readFile;
   const fileExists = host.fileExists;
   host.readFile = (file) =>
@@ -101,12 +111,13 @@ function diagnostics(text) {
     path.resolve(file) === sourcePath || fileExists(file);
   const program = ts.createProgram(
     [sourcePath, path.join(repository, "src/vite-env.d.ts")],
-    config.options,
+    compilerOptions,
     host,
   );
   return ts.getPreEmitDiagnostics(program);
 }
 
+/** @param {readonly import("typescript").Diagnostic[]} items */
 const formatDiagnostics = (items) =>
   items.map((diagnostic) =>
     ts.flattenDiagnosticMessageText(diagnostic.messageText, "\n"),
@@ -117,6 +128,7 @@ test("card edit contracts accept every supported field, restore value, and undo 
 });
 
 test("card edit contracts reject mismatched payloads, undo values, and uncorrelated fields", () => {
+  /** @type {Array<[label: string, expression: string]>} */
   const invalid = [
     [
       "unknown field",
@@ -148,7 +160,7 @@ test("card edit contracts reject mismatched payloads, undo values, and uncorrela
     ],
     [
       "invalid emoji id",
-      'acceptEdit({ contentType: "emojiAndAura", value: { emojiId: false, aura: "" }, undo: { kind: "skip" } });',
+      'acceptEdit({ contentType: "emojiAndAura", value: { emojiId: false, aura: "none" }, undo: { kind: "skip" } });',
     ],
     [
       "invalid emoji aura",
@@ -164,7 +176,7 @@ test("card edit contracts reject mismatched payloads, undo values, and uncorrela
     ],
     [
       "wrong recorded emoji",
-      'acceptEdit({ contentType: "emojiAndAura", value: { emojiId: 1, aura: "" }, undo: { kind: "record", value: "1" } });',
+      'acceptEdit({ contentType: "emojiAndAura", value: { emojiId: 1, aura: "none" }, undo: { kind: "record", value: "1" } });',
     ],
     [
       "missing recorded value",
@@ -218,13 +230,16 @@ test("card edit contracts reject mismatched payloads, undo values, and uncorrela
     ],
   ];
   const lines = validSource.split("\n");
+  /** @type {Map<number, string>} */
   const expectedLines = new Map();
   for (const [label, expression] of invalid) {
     expectedLines.set(lines.length, label);
     lines.push(expression);
   }
   const errors = diagnostics(lines.join("\n"));
+  /** @type {Set<number>} */
   const reportedLines = new Set();
+  /** @type {import("typescript").Diagnostic[]} */
   const unrelated = [];
   for (const diagnostic of errors) {
     if (

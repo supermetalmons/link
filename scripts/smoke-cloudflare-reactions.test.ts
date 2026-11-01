@@ -14,7 +14,7 @@ const { parseArgs, smokeReactions } =
         connect: (
           url: string,
           options: import("ws").ClientOptions,
-          protocol: string,
+          protocol: string[],
         ) => import("ws").WebSocket;
         log: (message: string) => void;
         setTimeout: typeof setTimeout;
@@ -71,7 +71,7 @@ function harness(
   const requests: {
     url: string;
     options: import("ws").ClientOptions;
-    protocol: string;
+    protocol: string[];
   }[] = [];
   const logs: string[] = [];
   const timers = new Map<NodeJS.Timeout, () => void>();
@@ -79,11 +79,11 @@ function harness(
     connect: (
       url: string,
       options: import("ws").ClientOptions,
-      protocol: string,
+      protocol: string[],
     ) => {
       requests.push({ url, options, protocol });
       const socket = new FakeSocket();
-      socket.protocol = protocol || "";
+      socket.protocol = protocol[0] || "";
       sockets.push(socket);
       queueMicrotask(() => opened(socket));
       return socket as unknown as import("ws").WebSocket;
@@ -212,8 +212,8 @@ test("verifies a public snapshot, heartbeat and reconnect without publishing", a
   }
   assert.equal(state.timers.size, 0);
   assert.equal(state.logs.length, 1);
-  assert.match(state.logs[0], /read-only snapshot, heartbeat and reconnect/);
-  assert.equal(state.logs[0].includes(REACTION.uuid), false);
+  assert.match(state.logs[0]!, /read-only snapshot, heartbeat and reconnect/);
+  assert.equal(state.logs[0]!.includes(REACTION.uuid), false);
 });
 
 test("accepts empty snapshots and invite rematches", async () => {
@@ -263,7 +263,7 @@ test("rejects malformed, binary, oversized and out-of-order messages", async () 
       /invalid message|another invite/,
     );
     assert.equal(state.requests.length, 1);
-    assert.equal(state.sockets[0].terminated, 1);
+    assert.equal(state.sockets[0]!.terminated, 1);
     assert.equal(state.timers.size, 0);
   }
 });
@@ -317,7 +317,7 @@ test("stops on upgrade failures, early closure, send failures and duplicate snap
       fixture.expected,
     );
     assert.equal(state.requests.length, 1);
-    assert.equal(state.sockets[0].terminated, 1);
+    assert.equal(state.sockets[0]!.terminated, 1);
     assert.equal(state.timers.size, 0);
   }
 });
@@ -337,7 +337,7 @@ test("times out stalled handshakes and missing heartbeats and clears resources",
       timeout();
     }
     await assert.rejects(pending, /timed out/);
-    assert.equal(state.sockets[0].terminated, 1);
+    assert.equal(state.sockets[0]!.terminated, 1);
     assert.equal(state.timers.size, 0);
   }
 });
@@ -372,7 +372,13 @@ test("negotiates v2 and validates bounded match presentation on initial connecti
         aura: "rainbow",
         revision: 2,
       },
-      guest: { matchId, actorUid: "guest", emojiId: 3, aura: "", revision: 0 },
+      guest: {
+        matchId,
+        actorUid: "guest",
+        emojiId: 3,
+        aura: "none",
+        revision: 0,
+      },
     },
   };
   const state = harness((socket) => {
@@ -411,15 +417,15 @@ test("negotiates v2 and validates bounded match presentation on initial connecti
       request.url,
       "wss://api.mons.link/invites/invite1/reactions/socket?matchId=invite11",
     );
-    assert.equal(request.protocol, "mons-reactions-v2");
+    assert.deepEqual(request.protocol, ["mons-reactions-v2", "mons-data-v1"]);
     assert.equal(request.options.maxPayload, 16_384);
   }
   assert.deepEqual(
     state.sockets.map((socket) => socket.sent),
     [["ping"], ["ping"]],
   );
-  assert.match(state.logs[0], /v2 match presentation/);
-  assert.equal(state.logs[0].includes("rainbow"), false);
+  assert.match(state.logs[0]!, /v2 match presentation/);
+  assert.equal(state.logs[0]!.includes("rainbow"), false);
 });
 
 test("rejects foreign presentation, missing v2 negotiation, and v1 downgrade", async () => {

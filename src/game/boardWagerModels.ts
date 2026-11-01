@@ -85,7 +85,8 @@ export const computeWagerStackHeights = (
   const heights = Array.from({ length: safeStacks }, () => base);
   const order = getWagerStackTallOrder(safeStacks);
   for (let i = 0; i < extra; i += 1) {
-    heights[order[i]] += 1;
+    const stackIndex = order[i]!;
+    heights[stackIndex] = heights[stackIndex]! + 1;
   }
   return heights;
 };
@@ -131,8 +132,8 @@ export const generateWagerPositions = (count: number): WagerPosition[] => {
     Math.max(WAGER_STACK_TOP_V, Math.min(WAGER_STACK_BOTTOM_V, value));
   const positions: WagerPosition[] = [];
   for (let stackIndex = 0; stackIndex < stackCount; stackIndex += 1) {
-    const baseU = stackUs[stackIndex];
-    const height = stackHeights[stackIndex];
+    const baseU = stackUs[stackIndex]!;
+    const height = stackHeights[stackIndex]!;
     for (let index = 0; index < height; index += 1) {
       const jitter = (index % 2 === 0 ? -1 : 1) * WAGER_STACK_U_JITTER;
       positions.push({

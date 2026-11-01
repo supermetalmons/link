@@ -75,7 +75,7 @@ export function createSourceFinalization({
       );
     if (!target.profile || !target.recovery || !mergePath) return false;
     const live = canonicalRecoveryJob(target.recovery);
-    const firstTargetProfileId = mergePath[0].targetProfileId;
+    const firstTargetProfileId = mergePath[0]!.targetProfileId;
     const mergeExpectations = mergePath.map((mapping) => ({
       kind: "merge-target" as const,
       sourceProfileId: mapping.sourceProfileId,

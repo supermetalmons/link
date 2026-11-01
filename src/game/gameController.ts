@@ -1,3 +1,4 @@
+import type { Aura } from "@mons/shared/appearance";
 import * as MonsRules from "mons-rules";
 import {
   markMainGameContentReady,
@@ -254,11 +255,13 @@ const boardSquareTypeGridsEqual = (
     return false;
   }
   for (let row = 0; row < a.length; row += 1) {
-    if (a[row].length !== b[row].length) {
+    const aRow = a[row]!;
+    const bRow = b[row]!;
+    if (aRow.length !== bRow.length) {
       return false;
     }
-    for (let col = 0; col < a[row].length; col += 1) {
-      if (a[row][col] !== b[row][col]) {
+    for (let col = 0; col < aRow.length; col += 1) {
+      if (aRow[col] !== bRow[col]) {
         return false;
       }
     }
@@ -444,8 +447,10 @@ const remoteMoveSync = createRemoteMoveSyncController({
 });
 
 let lastReactionTime = 0;
-const botReactionVariationsWhenPlayerScores = [17, 20, 374, 429, 465, 900999];
-const botReactionVariationsWhenBotScores = [40, 63, 210, 900225];
+const botReactionVariationsWhenPlayerScores = [
+  17, 20, 374, 429, 465, 900999,
+] as const;
+const botReactionVariationsWhenBotScores = [40, 63, 210, 900225] as const;
 const botScoreReactionChance = 0.2;
 const botScoreReactionPlayedTurns = new Set<number>();
 const minimumIntervalBetweenBotMovesMs = 777;
@@ -459,9 +464,11 @@ const resetBotScoreReactionState = () => {
   botScoreReactionPlayedTurns.clear();
 };
 
-const getRandomReactionVariation = (variations: number[]): number => {
+const getRandomReactionVariation = (
+  variations: readonly [number, ...number[]],
+): number => {
   const variationIndex = Math.floor(Math.random() * variations.length);
-  return variations[variationIndex];
+  return variations[variationIndex]!;
 };
 
 const setCurrentVariant = (gameVariant: unknown): StoredGameVariant => {
@@ -1524,14 +1531,15 @@ export function getVerboseTrackingEntities(): MoveHistoryEntry[] {
 
 export function getFenForMoveHistoryIndex(index: number): string | null {
   const entities = getMoveHistorySourceGame().trackingEntries;
-  if (index < 0 || index >= entities.length) {
+  const entity = entities[index];
+  if (!entity) {
     return null;
   }
   const isLatest = index === entities.length - 1;
   if (isLatest) {
     return getMoveHistorySourceGame().toFen();
   }
-  return entities[index].fen;
+  return entity.fen;
 }
 
 export function didToggleMoveHistoryBoardFlip(
@@ -1584,7 +1592,8 @@ export function didToggleMoveHistoryBoardFlip(
 
 export function didSelectVerboseTrackingEntity(index: number) {
   const entities = getMoveHistorySourceGame().trackingEntries;
-  if (index < 0 || index >= entities.length) {
+  const entity = entities[index];
+  if (!entity) {
     return;
   }
 
@@ -1599,8 +1608,6 @@ export function didSelectVerboseTrackingEntity(index: number) {
     syncInviteBotIntoLocalGameButton();
     return;
   }
-
-  const entity = entities[index];
 
   flashbackMode = true;
   const gameFen = entity.fen;
@@ -2939,8 +2946,8 @@ export function canChangeEmoji(opponents: boolean): boolean {
   }
 }
 
-export function sendPlayerEmojiUpdate(newId: number, aura?: string) {
-  const auraToSend = aura ?? storage.getPlayerEmojiAura("");
+export function sendPlayerEmojiUpdate(newId: number, aura?: Aura) {
+  const auraToSend = aura ?? storage.getPlayerEmojiAura("none");
   connection.updateEmoji(newId, false, auraToSend);
 }
 
@@ -3045,7 +3052,7 @@ function getTurnConfirmationFinishLocation(
   events: readonly MonsRules.GameEvent[],
 ): Location | undefined {
   for (let index = events.length - 1; index >= 0; index -= 1) {
-    const event = events[index];
+    const event = events[index]!;
     if (event.kind === "mana-move") {
       return location(event.to);
     }
@@ -3140,7 +3147,7 @@ function applyOutput(
         assistedInputKind === AssistedInputKind.None &&
         currentInputs.length > 1 &&
         inputLocation &&
-        !currentInputs[0].equals(inputLocation);
+        !currentInputs[0]!.equals(inputLocation);
       const shouldHelpFindOptions =
         assistedInputKind === AssistedInputKind.None &&
         currentInputs.length === 1;
@@ -3920,6 +3927,10 @@ function applyWagerState() {
     return;
   }
 
+  if (currentWagerState.blocked) {
+    Board.clearWagerPiles();
+    return;
+  }
   if (currentWagerState.resolved) {
     if (isGameOver || isReconnect || isWatchOnly || isHistoricalView) {
       const outcomeState = syncWagerOutcome();
@@ -4371,7 +4382,7 @@ function setupWatchOnlyPlayersFromMatchPair(pair: HistoricalMatchPair): void {
     const isOpponentSide = player.match.color === "black";
     Board.setupPlayerId(player.uid, isOpponentSide);
     Board.updateEmojiAndAuraIfNeeded(
-      player.match.emojiId.toString(),
+      player.match.emojiId,
       player.match.aura,
       isOpponentSide,
     );
@@ -4459,7 +4470,7 @@ function didConnectTo(
       setupWatchOnlyPlayersFromMatchPair(trustedPair);
     } else {
       Board.updateEmojiAndAuraIfNeeded(
-        match.emojiId.toString(),
+        match.emojiId,
         match.aura,
         incomingIsOpponentSide,
       );
@@ -4814,7 +4825,7 @@ function showNextProblem(problem: Problem) {
 
 function getDisplayedMatchPresentation(actorUid: string): {
   emojiId: number;
-  aura: string;
+  aura: Aura;
 } | null {
   if (!actorUid) return null;
   const selection = rematchViewing.getSelection();
@@ -4834,7 +4845,7 @@ function getDisplayedMatchPresentation(actorUid: string): {
       : actorUid === pair.guestPlayerId
         ? pair.guestMatch
         : null;
-  return match ? { emojiId: match.emojiId, aura: match.aura ?? "" } : null;
+  return match ? { emojiId: match.emojiId, aura: match.aura ?? "none" } : null;
 }
 
 function refreshDisplayedMatchPresentation(): void {
@@ -4845,7 +4856,7 @@ function refreshDisplayedMatchPresentation(): void {
     const presentation = getDisplayedMatchPresentation(metadata.uid);
     if (presentation) {
       Board.updateEmojiAndAuraIfNeeded(
-        String(presentation.emojiId),
+        presentation.emojiId,
         presentation.aura,
         isOpponentSide,
       );
@@ -4872,7 +4883,7 @@ export function didReceiveMatchPresentationUpdate(
   const presentation = getDisplayedMatchPresentation(actorUid);
   if (!presentation) return;
   Board.updateEmojiAndAuraIfNeeded(
-    String(presentation.emojiId),
+    presentation.emojiId,
     presentation.aura,
     isOpponentSide,
   );
@@ -5052,11 +5063,7 @@ export function didReceiveMatchUpdate(
   );
   if (shouldRenderLiveBoard) {
     Board.setupPlayerId(matchPlayerUid, isOpponentSide);
-    Board.updateEmojiAndAuraIfNeeded(
-      match.emojiId.toString(),
-      match.aura,
-      isOpponentSide,
-    );
+    Board.updateEmojiAndAuraIfNeeded(match.emojiId, match.aura, isOpponentSide);
     applyWagerState();
     if (isGameOver) {
       syncWagerOutcome();
@@ -5141,11 +5148,7 @@ export function didRecoverMyMatch(match: Match, matchId: string) {
     }
     verifyMovesIfNeeded(matchId, match.flatMovesString, match.color);
     if (shouldRenderLiveBoard) {
-      Board.updateEmojiAndAuraIfNeeded(
-        match.emojiId.toString(),
-        match.aura,
-        false,
-      );
+      Board.updateEmojiAndAuraIfNeeded(match.emojiId, match.aura, false);
       applyWagerState();
       markKnownWagerInitialStateReceived();
     }

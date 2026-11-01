@@ -27,7 +27,7 @@ function fixture({
   beforeRead?: (count: number, signal?: AbortSignal) => void;
 } = {}) {
   const event: Record<string, unknown> = {
-    schemaVersion: 2,
+    schemaVersion: 3,
     eventId: EVENT_ID,
     status: "scheduled",
     startAtMs,
@@ -77,7 +77,13 @@ function fixture({
     if (lease && decision.decision === "acquired") {
       acquiredLeases.push(structuredClone(lease));
     }
-    return { committed: true, decision: decision.decision, value: lease };
+    return {
+      committed: true,
+      ...(decision.decision !== undefined
+        ? { decision: decision.decision }
+        : {}),
+      value: lease,
+    };
   };
   const env: Env = {
     ...TELEGRAM_TEST_ENV,
@@ -242,11 +248,11 @@ for (const capturedSignal of [undefined, new AbortController().signal]) {
         }
         assert.equal(accesses.length, index + 1);
         assert.equal(accesses[index], runtimeMethods[index]);
-        assert.equal(calls[index].method, runtimeMethods[index]);
+        assert.equal(calls[index]!.method, runtimeMethods[index]!);
         const expectedArgs = [...operation.args, capturedSignal];
-        assert.equal(calls[index].args.length, expectedArgs.length);
+        assert.equal(calls[index]!.args.length, expectedArgs.length);
         for (const [argumentIndex, expected] of expectedArgs.entries()) {
-          assert.equal(calls[index].args[argumentIndex], expected);
+          assert.equal(calls[index]!.args[argumentIndex]!, expected);
         }
       }
       if (outcome === "success") {
@@ -328,7 +334,7 @@ test("aborted event work releases its lease using the wall clock and an uncancel
   assert.deepEqual(memory.leaseSignals, [controller.signal, undefined]);
   assert.equal(memory.lease(), null);
   assert.equal(memory.acquiredLeases.length, 1);
-  assert.ok(memory.acquiredLeases[0].acquiredAtMs >= wallClockStartedAtMs);
+  assert.ok(memory.acquiredLeases[0]!.acquiredAtMs >= wallClockStartedAtMs);
   assert.equal(memory.commits.length, 0);
 });
 
@@ -348,15 +354,16 @@ test("the Workflow runtime commits and dispatches each event projection once", a
   assert.equal(memory.commits.length, 1);
   const commands = memory.commits[0];
   assert.equal(
-    commands.filter((command) => command.kind === "telegram-generation").length,
+    commands!.filter((command) => command.kind === "telegram-generation")
+      .length,
     1,
   );
   assert.equal(
-    commands.filter((command) => command.kind === "telegram-outbox").length,
+    commands!.filter((command) => command.kind === "telegram-outbox").length,
     1,
   );
   assert.equal(
-    commands.filter(
+    commands!.filter(
       (command) =>
         command.kind === "profile-game-outbox-field" &&
         command.field === "requestId",

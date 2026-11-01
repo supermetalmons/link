@@ -1,24 +1,25 @@
+import {
+  parseAutomatchRecord,
+  type AutomatchProfileOutboxRecord,
+  type AutomatchTelegramOutboxRecord,
+} from "../../../../runtime/automatchRecords.js";
 import type { AutomatchProjectionPort } from "../gameSessionContracts.ts";
 import { runOptimisticTransaction } from "../optimisticTransaction.ts";
 import {
   decideAutomatchProfileOutboxCompletion,
   parseAutomatchProfileGameProjectionOutbox,
 } from "../profileGameProjectionOutbox.ts";
-import { STATE_VALUE_FIELD } from "../stateCompatibility.ts";
 import { parseAutomatchTelegramProjectionOutbox } from "../telegramProjectionOutbox.ts";
 import {
-  encodeValue,
   isAutomatchRevisionConflict,
   requireKey,
   requireRoot,
-  resolveAutomatchServerValues,
   timestamp,
-  validateAutomatchJson,
 } from "./codec.ts";
 import type { createAutomatchReads } from "./reads.ts";
 import {
   AutomatchD1Failure,
-  type AutomatchRoot,
+  type AutomatchOutboxRoot,
   type AutomatchOutboxClaimSnapshot,
 } from "./types.ts";
 
@@ -42,48 +43,22 @@ type OutboxDecision<Result> = {
   write?: OutboxPatch | null;
 };
 
-function toRecord(value: unknown): Record<string, unknown> | null {
-  return value && typeof value === "object" && !Array.isArray(value)
-    ? (value as Record<string, unknown>)
-    : null;
-}
-
-function hasServerValues(value: unknown): boolean {
-  if (!value || typeof value !== "object") return false;
-  if (Array.isArray(value)) return value.some(hasServerValues);
-  if (Object.hasOwn(value, STATE_VALUE_FIELD)) return true;
-  let found = false;
-  for (const [key, child] of Object.entries(value)) {
-    requireKey(key);
-    if (hasServerValues(child)) found = true;
-  }
-  return found;
-}
-
 function prepareOutboxPatch(
+  root: AutomatchOutboxRoot,
   valueColumn: string,
-  current: unknown,
+  current: AutomatchProfileOutboxRecord | AutomatchTelegramOutboxRecord | null,
   patch: OutboxPatch | null,
   resolvedAtMs: number,
 ): { expression: string; values: Array<string | number | null> } {
   timestamp(resolvedAtMs);
   if (patch === null) return { expression: "NULL", values: [] };
-  const next = { ...toRecord(current), ...patch };
-  validateAutomatchJson(next);
-  if (hasServerValues(next)) {
-    return {
-      expression: "?",
-      values: [
-        encodeValue(resolveAutomatchServerValues(next, current, resolvedAtMs)),
-      ],
-    };
-  }
+  parseAutomatchRecord(root, { ...current, ...patch });
   const fields = Object.entries(patch);
   return {
     expression: `json_set(${valueColumn}, ${fields
       .map(
         ([key, value]) =>
-          `'$.${key}', ${typeof value === "number" ? "?" : "json(?)"}`,
+          `'$.${key}', ${typeof value === "number" ? "CAST(? AS INTEGER)" : "json(?)"}`,
       )
       .join(", ")})`,
     values: fields.map(([, value]) =>
@@ -104,10 +79,13 @@ export function createAutomatchProjectionOutboxes(
   },
 ): ProjectionMethods {
   async function mutate<Result>(
-    root: AutomatchRoot,
+    root: AutomatchOutboxRoot,
     inviteId: string,
     requestId: string,
-    decide: (current: unknown) => OutboxDecision<Result>,
+    decide: (
+      current:
+        AutomatchProfileOutboxRecord | AutomatchTelegramOutboxRecord | null,
+    ) => OutboxDecision<Result>,
     signal?: AbortSignal,
     initialSnapshot?: AutomatchOutboxClaimSnapshot,
   ): Promise<Result> {
@@ -135,6 +113,7 @@ export function createAutomatchProjectionOutboxes(
               const decision = decide(snapshot.value);
               if (decision.write !== undefined) {
                 prepareOutboxPatch(
+                  root,
                   valueColumn,
                   snapshot.value,
                   decision.write,
@@ -160,6 +139,7 @@ export function createAutomatchProjectionOutboxes(
           : { value: { result: decision.result, write: decision.write } },
       async write(current, decision) {
         const { expression, values } = prepareOutboxPatch(
+          root,
           valueColumn,
           current.value,
           decision.write,
@@ -216,7 +196,7 @@ export function createAutomatchProjectionOutboxes(
           throw error;
         }
         return {
-          applied: results[results.length - 1].results.length > 0,
+          applied: results[results.length - 1]!.results.length > 0,
           value: decision,
         };
       },
@@ -321,7 +301,7 @@ export function createAutomatchProjectionOutboxes(
         inviteId,
         requestId,
         (current) =>
-          toRecord(current)?.requestId === requestId
+          current?.status === "pending" && current.requestId === requestId
             ? { result: true, write: null }
             : { result: false },
         signal,

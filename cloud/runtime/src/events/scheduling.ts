@@ -325,7 +325,7 @@ const resolveScheduledDateTimeStartAtMs: Signature_resolveScheduledDateTimeStart
       }
     }
 
-    return matchingInstants[0];
+    return matchingInstants[0]!;
   };
 
 const assertScheduledStartWindow: Signature_assertScheduledStartWindow = (

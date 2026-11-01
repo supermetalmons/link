@@ -1,3 +1,5 @@
+import { required } from "./fixtures/canonicalData.mjs";
+import { browserServerOrigin } from "./browserViteServer.mjs";
 import assert from "node:assert/strict";
 import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
@@ -5,9 +7,11 @@ import test from "node:test";
 import { createBrowserViteServer } from "./browserViteServer.mjs";
 
 const require = createRequire(import.meta.url);
+/** @type {typeof import("playwright")} */
 const { chromium } = require(process.env.MONS_PLAYWRIGHT_PATH || "playwright");
 const repository = fileURLToPath(new URL("../", import.meta.url));
 
+/** @param {(page: import("playwright").Page) => Promise<void>} run */
 async function fixture(run) {
   const server = await createBrowserViteServer({
     root: repository,
@@ -35,10 +39,11 @@ async function fixture(run) {
       },
     ],
   });
+  /** @type {import("playwright").Browser | undefined} */
   let browser;
   try {
     await server.listen();
-    const origin = `http://127.0.0.1:${server.httpServer.address().port}`;
+    const origin = browserServerOrigin(server);
     browser = await chromium.launch({
       headless: true,
       ...(process.env.MONS_BROWSER_EXECUTABLE
@@ -47,10 +52,11 @@ async function fixture(run) {
     });
     const page = await browser.newPage();
     page.setDefaultTimeout(15000);
+    /** @type {string[]} */
     const errors = [];
     page.on("pageerror", (error) => errors.push(error.message));
     await page.goto(`${origin}/__event-create`);
-    await page.waitForFunction(() => !!window.harness);
+    await page.waitForFunction(() => !!window.eventCreateHarness);
     await run(page);
     assert.deepEqual(errors, []);
   } finally {
@@ -59,7 +65,9 @@ async function fixture(run) {
   }
 }
 
-const snapshot = (page) => page.evaluate(() => window.harness.snapshot());
+/** @param {import("playwright").Page} page */
+const snapshot = (page) =>
+  page.evaluate(() => window.eventCreateHarness.snapshot());
 
 test(
   "event form values survive conditional visibility and retain the existing experimental-open defaults",
@@ -128,19 +136,19 @@ test(
         .click();
       assert.equal((await snapshot(page)).error, "Enter at least 1 minute.");
       assert.equal((await snapshot(page)).requests.length, 0);
-      await page.evaluate(() => window.harness.setAllowed(false));
+      await page.evaluate(() => window.eventCreateHarness.setAllowed(false));
       assert.equal(await page.locator("#form button").count(), 0);
       assert.match(
-        await page.locator("#form").textContent(),
+        required(await page.locator("#form").textContent()),
         /Enter at least 1 minute/,
       );
-      await page.evaluate(() => window.harness.setAllowed(true));
+      await page.evaluate(() => window.eventCreateHarness.setAllowed(true));
       await page.locator('input[type="number"]').fill("7.9");
       assert.equal((await snapshot(page)).error, "");
       await page.getByLabel("Sunday Mons", { exact: true }).check();
       await page.getByLabel("Invite when created", { exact: true }).check();
       await page.getByLabel("Final results", { exact: true }).check();
-      await page.evaluate(() => window.harness.submitTwice());
+      await page.evaluate(() => window.eventCreateHarness.submitTwice());
       const pending = await snapshot(page);
       assert.equal(pending.starts, 1);
       assert.deepEqual(pending.requests, [
@@ -169,7 +177,10 @@ test(
         true,
       );
       await page.evaluate(() =>
-        window.harness.settle(0, { ok: true, eventId: "created-event" }),
+        window.eventCreateHarness.settle(0, {
+          ok: true,
+          eventId: "created-event",
+        }),
       );
       const completed = await snapshot(page);
       assert.equal(completed.isCreatingEvent, false);
@@ -188,8 +199,8 @@ test(
         .getByRole("button", { name: "Create Event", exact: true })
         .click();
       await page.evaluate(async () => {
-        await window.harness.dismiss();
-        await window.harness.settle(0, {
+        await window.eventCreateHarness.dismiss();
+        await window.eventCreateHarness.settle(0, {
           ok: true,
           eventId: "dismissed-event",
         });
@@ -202,8 +213,11 @@ test(
         .getByRole("button", { name: "Create Event", exact: true })
         .click();
       await page.evaluate(async () => {
-        window.harness.openEvent("other-event");
-        await window.harness.settle(1, { ok: true, eventId: "late-event" });
+        window.eventCreateHarness.openEvent("other-event");
+        await window.eventCreateHarness.settle(1, {
+          ok: true,
+          eventId: "late-event",
+        });
       });
       assert.equal((await snapshot(page)).modal.eventId, "other-event");
     });
@@ -218,7 +232,9 @@ test(
       await page
         .getByRole("button", { name: "Create Event", exact: true })
         .click();
-      await page.evaluate(() => window.harness.settle(0, { ok: false }));
+      await page.evaluate(() =>
+        window.eventCreateHarness.settle(0, { ok: false }),
+      );
       let failed = await snapshot(page);
       assert.equal(failed.modal.pendingCreateError, "Failed to create event.");
       assert.equal(failed.isCreatingEvent, false);
@@ -230,7 +246,11 @@ test(
         .click();
       assert.equal((await snapshot(page)).modal.pendingCreateError, null);
       await page.evaluate(() =>
-        window.harness.settle(1, { ok: false }, "Schedule is too far ahead."),
+        window.eventCreateHarness.settle(
+          1,
+          { ok: false },
+          "Schedule is too far ahead.",
+        ),
       );
       failed = await snapshot(page);
       assert.equal(
@@ -244,8 +264,12 @@ test(
         .getByRole("button", { name: "Create Event", exact: true })
         .click();
       await page.evaluate(async () => {
-        await window.harness.dismiss();
-        await window.harness.settle(2, { ok: false }, "Late failure");
+        await window.eventCreateHarness.dismiss();
+        await window.eventCreateHarness.settle(
+          2,
+          { ok: false },
+          "Late failure",
+        );
       });
       assert.equal((await snapshot(page)).modal.isOpen, false);
       assert.equal((await snapshot(page)).modal.pendingCreateError, null);

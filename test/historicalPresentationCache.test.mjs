@@ -1,3 +1,4 @@
+import { required, canonicalMatch } from "./fixtures/canonicalData.mjs";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { registerHooks } from "node:module";
@@ -47,34 +48,51 @@ const functions = [
       (statement) =>
         ts.isFunctionDeclaration(statement) && statement.name?.text === name,
     );
+    assert.ok(declaration && ts.isFunctionDeclaration(declaration));
     assert.ok(declaration, name);
     return declaration.getText(source).replace(/^export /, "");
   })
   .join("\n");
+/**
+ * @typedef {import("@mons/shared/game-sessions").HistoricalMatchPair} HistoricalPair
+ * @typedef {import("@mons/shared/game-sessions").GameSessionMatch} MatchRecord
+ * @typedef {HistoricalPair & { hostMatch: MatchRecord, guestMatch: MatchRecord }} Pair
+ * @typedef {{ select(pair: HistoricalPair): boolean, navigate: typeof import("../src/game/gameController.ts").didSelectRematchSeriesMatch, leave(): void }} HarnessApi
+ */
+/** @returns {Pair} */
 const pair = (emojiId = 1) => ({
   matchId: "invite",
   hostPlayerId: "host",
   guestPlayerId: "guest",
-  hostMatch: { emojiId, aura: "", fen: "local-host" },
-  guestMatch: { emojiId: 2, aura: "", fen: "local-guest" },
+  hostMatch: canonicalMatch({ emojiId, fen: "local-host" }),
+  guestMatch: canonicalMatch({
+    color: "black",
+    emojiId: 2,
+    fen: "local-guest",
+  }),
 });
+/** @template [T=HistoricalPair | null] @returns {Pick<PromiseWithResolvers<T>, "promise" | "resolve">} */
 const deferred = () => {
-  let resolve;
-  const promise = new Promise((done) => {
-    resolve = done;
-  });
-  return { promise, resolve };
+  /** @type {PromiseWithResolvers<T>} */
+  const pending = Promise.withResolvers();
+  return { promise: pending.promise, resolve: pending.resolve };
 };
 const flush = () => new Promise((resolve) => setImmediate(resolve));
 
+/** @param {(matchId: string) => Promise<HistoricalPair | null>} [load] @param {(pair: HistoricalPair) => Game} [buildGame] */
 function harness(load = async () => null, buildGame = () => new Game()) {
   const controlsStore = createGameControlsStore({
     duration: 90,
     progress: 0,
     requestDate: 1,
   });
+  /** @type {(Partial<import("../src/game/gameControlsModel.ts").GameControlsContext>)[]} */
   const contexts = [];
+  /** @type {({ id: number; callback: () => void; delay: number; })[]} */
   const timers = [];
+  /**
+   * @type {number[]}
+   */
   const retryWaits = [];
   let nextTimerId = 0;
   let loads = 0;
@@ -109,7 +127,9 @@ function harness(load = async () => null, buildGame = () => new Game()) {
     batchGameControlsUpdates: controlsStore.batchUpdates,
     getCurrentSessionId: () => sessionVersion,
     isGameConnectionBound: () => false,
-    updateGameControlsContext: (context) => {
+    updateGameControlsContext: (
+      /** @type {Partial<import("../src/game/gameControlsModel.ts").GameControlsContext>} */ context,
+    ) => {
       controlsStore.updateContext(context);
       contexts.push(context);
     },
@@ -157,9 +177,10 @@ function harness(load = async () => null, buildGame = () => new Game()) {
   `,
     { compilerOptions: { target: ts.ScriptTarget.ES2022 } },
   );
-  const api = new Function(
-    ...Object.keys(dependencies),
-    `${outputText}; return {
+  const api = /** @type {HarnessApi} */ (
+    new Function(
+      ...Object.keys(dependencies),
+      `${outputText}; return {
     select: (pair) => {
       const sessionId = boardRenderSessionId;
       return enterHistoricalView(
@@ -170,12 +191,13 @@ function harness(load = async () => null, buildGame = () => new Game()) {
     navigate: didSelectRematchSeriesMatch,
     leave: () => { nextBoardRenderSession(); boardViewMode = "activeLive"; rematchViewing.clearSelection(); }
   };`,
-  )(...Object.values(dependencies));
+    )(...Object.values(dependencies))
+  );
   return {
     ...api,
     contexts,
     provisional: rematchViewing.seedProvisional,
-    cached: (matchId) =>
+    cached: (/** @type {string} */ matchId) =>
       rematchViewing.getCachedSelection(matchId)?.pair ?? null,
     displayed: () => rematchViewing.getSelection()?.pair ?? null,
     displayedGame: () => rematchViewing.getSelection()?.game ?? null,
@@ -196,6 +218,7 @@ function harness(load = async () => null, buildGame = () => new Game()) {
   };
 }
 
+/** @returns {Pair} */
 function takebackPair() {
   const game = new Game();
   const moves = ["l10,5;l9,4", "l9,4;l8,5"];
@@ -207,16 +230,18 @@ function takebackPair() {
     assert.equal(output.kind, "complete");
     moves.push(output.inputFen);
   }
+  /** @type {MatchRecord} */
   const match = {
+    schemaVersion: 1,
     version: 2,
     color: "white",
     emojiId: 1,
-    aura: "",
+    aura: "none",
     gameVariant: game.variant,
     fen: game.toFen(),
     flatMovesString: moves.join("-"),
     status: "surrendered",
-    timer: "",
+    timer: { state: "idle" },
   };
   return {
     ...pair(),
@@ -226,15 +251,15 @@ function takebackPair() {
       color: "black",
       emojiId: 2,
       flatMovesString: "",
-      status: "",
+      status: "active",
     },
   };
 }
 
+/** @param {HistoricalPair} value */
 function verifiedGame(value) {
-  const trusted = getTrustedGameFromMatchPair(
-    value,
-    (fen) => Game.fromFen(fen) ?? null,
+  const trusted = getTrustedGameFromMatchPair(value, (fen) =>
+    typeof fen === "string" ? (Game.fromFen(fen) ?? null) : null,
   );
   assert.ok(trusted);
   return trusted.gameModel;
@@ -242,6 +267,7 @@ function verifiedGame(value) {
 
 test("short takeback history adopts refreshed archive cosmetics without replacing equal gameplay", async () => {
   const seed = takebackPair();
+  /** @type {Pair} */
   const archived = {
     ...seed,
     hostMatch: { ...seed.hostMatch, emojiId: 7 },
@@ -273,6 +299,7 @@ test("short takeback history still selects a refreshed model with more gameplay"
   const refreshedGame = verifiedGame(seed);
   const move = "l10,5;l9,4";
   assert.equal(refreshedGame.playFen(move).kind, "complete");
+  /** @type {Pair} */
   const archived = {
     ...seed,
     hostMatch: {
@@ -321,24 +348,29 @@ test("short takeback history remains provisional when the archive is absent or f
 
 test("instant provisional history retries archival and refreshes frozen cosmetics without replacing gameplay", async () => {
   let ready = false;
+  /** @type {Pair} */
   const archived = {
     ...pair(1001),
-    hostMatch: { emojiId: 1001, aura: "rainbow", fen: "archived-rating-host" },
+    hostMatch: canonicalMatch({
+      emojiId: 1001,
+      aura: "rainbow",
+      fen: "archived-rating-host",
+    }),
   };
   const h = harness(async () => (ready ? archived : null));
   const seed = pair();
   h.provisional(seed);
   assert.equal(h.select(seed), true);
-  assert.equal(h.contexts.at(-1).boardViewMode, "historicalView");
-  assert.equal(h.timers[0].delay, 250);
+  assert.equal(required(h.contexts.at(-1)).boardViewMode, "historicalView");
+  assert.equal(required(h.timers[0]).delay, 250);
   await h.runTimer();
-  assert.equal(h.timers[0].delay, 3000);
+  assert.equal(required(h.timers[0]).delay, 3000);
   ready = true;
   await h.runTimer();
   assert.equal(h.timers.length, 0);
   assert.equal(h.loads(), 2);
   assert.equal(h.paints(), 2);
-  assert.deepEqual(h.displayed().hostMatch, {
+  assert.deepEqual(required(h.displayed()).hostMatch, {
     ...seed.hostMatch,
     emojiId: 1001,
     aura: "rainbow",
@@ -355,7 +387,7 @@ test("archive completion cannot repaint a different board view", async () => {
   assert.equal(h.loads(), 1);
   const paints = h.paints();
   h.leave();
-  pending.resolve(pair(1001));
+  required(pending.resolve)(pair(1001));
   await flush();
   assert.equal(h.paints(), paints);
   assert.equal(h.timers.length, 0);
@@ -364,17 +396,18 @@ test("archive completion cannot repaint a different board view", async () => {
 test("failed history navigation preserves the displayed match's archive refresh", async () => {
   let ready = false;
   const seed = { ...pair(), matchId: "invite1" };
+  /** @type {Pair} */
   const archived = {
     ...seed,
     hostMatch: { ...seed.hostMatch, emojiId: 1001, aura: "rainbow" },
   };
-  const h = harness(async (matchId) =>
+  const h = harness(async (/** @type {string} */ matchId) =>
     matchId === seed.matchId && ready ? archived : null,
   );
   h.provisional(seed);
   h.select(seed);
   await h.runTimer();
-  assert.equal(h.timers[0].delay, 3000);
+  assert.equal(required(h.timers[0]).delay, 3000);
   assert.equal(await h.navigate("invite"), false);
   assert.equal(h.displayed(), seed);
   ready = true;
@@ -388,7 +421,7 @@ test("successful history navigation discards the previous view's pending archive
   const pending = deferred();
   const seed = { ...pair(), matchId: "invite1" };
   const older = pair(7);
-  const h = harness(async (matchId) =>
+  const h = harness(async (/** @type {string} */ matchId) =>
     matchId === seed.matchId ? pending.promise : older,
   );
   h.provisional(seed);
@@ -397,7 +430,10 @@ test("successful history navigation discards the previous view's pending archive
   assert.equal(await h.navigate(older.matchId), true);
   assert.equal(h.displayed(), older);
   const paints = h.paints();
-  pending.resolve({ ...seed, hostMatch: { ...seed.hostMatch, emojiId: 1001 } });
+  required(pending.resolve)({
+    ...seed,
+    hostMatch: { ...seed.hostMatch, emojiId: 1001 },
+  });
   await flush();
   assert.equal(h.displayed(), older);
   assert.equal(h.paints(), paints);
@@ -414,12 +450,12 @@ test("returning to the same cached historical pair does not revive the previous 
   h.leave();
   h.select(seed);
   const paints = h.paints();
-  pending.resolve(pair(1001));
+  required(pending.resolve)(pair(1001));
   await flush();
   assert.equal(h.displayed(), seed);
   assert.equal(h.paints(), paints);
   await h.runTimer();
-  assert.equal(h.displayed().hostMatch.emojiId, 1001);
+  assert.equal(required(required(h.displayed()).hostMatch).emojiId, 1001);
   assert.equal(h.paints(), paints + 1);
   assert.equal(h.timers.length, 0);
 });
@@ -431,7 +467,7 @@ test("session invalidation stops a queued historical archive refresh before it l
   const paints = h.paints();
   const queued = h.timers[0];
   h.invalidate();
-  queued.callback();
+  required(queued).callback();
   await flush();
   assert.equal(h.loads(), 0);
   assert.equal(h.paints(), paints);

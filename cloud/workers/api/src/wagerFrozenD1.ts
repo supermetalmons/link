@@ -4,10 +4,7 @@ import {
   MATERIAL_KEYS,
   type MiningMaterials,
 } from "@mons/shared/mining";
-import {
-  frozenOperationState,
-  parseFrozenOperation,
-} from "./wagerFrozenRecords.ts";
+import { frozenOperationState } from "./wagerFrozenRecords.ts";
 import {
   assertWagerFrozenKey,
   storedWagerFrozenOperation,
@@ -77,7 +74,7 @@ export async function readWagerReservationBalance(
            balance.player_uid AS balance_player_uid,
            balance.frozen_json, balance.revision
          FROM wager_reservation_runtime_control AS control
-         LEFT JOIN wager_frozen_balances AS balance ON balance.player_uid = ?
+         LEFT JOIN wager_frozen_balances_canonical AS balance ON balance.player_uid = ?
          WHERE control.singleton = 1`,
       )
       .bind(playerUid)
@@ -122,9 +119,9 @@ export function createWagerFrozenD1Store(
       .prepare(
         `SELECT balance.frozen_json, balance.revision, operation.record_json
          FROM (SELECT ? AS player_uid) AS requested
-         LEFT JOIN wager_frozen_balances AS balance
+         LEFT JOIN wager_frozen_balances_canonical AS balance
            ON balance.player_uid = requested.player_uid
-         LEFT JOIN wager_frozen_operations AS operation
+         LEFT JOIN wager_frozen_operations_canonical AS operation
            ON operation.player_uid = requested.player_uid
           AND operation.operation_id = ?`,
       )
@@ -164,7 +161,7 @@ export function createWagerFrozenD1Store(
         await db
           .withSession("first-primary")
           .prepare(
-            `SELECT frozen_json, revision FROM wager_frozen_balances
+            `SELECT frozen_json, revision FROM wager_frozen_balances_canonical
            WHERE player_uid = ?`,
           )
           .bind(playerUid)
@@ -177,19 +174,13 @@ export function createWagerFrozenD1Store(
     async transact(playerUid, operationId, update, signal) {
       return runOptimisticTransaction({
         maxAttempts: MAX_TRANSACTION_ATTEMPTS,
-        signal,
+        ...(signal === undefined ? {} : { signal }),
         read: () => read(playerUid, operationId),
         getValue: (current) => current.value,
         decide: update,
         async write(current, next) {
           assertMaterials(next.frozen);
           const operation = storedWagerFrozenOperation(next.operation);
-          if (
-            next.operation.status === "active" &&
-            !parseFrozenOperation(operation)
-          ) {
-            throw new Error("wager-operation-unavailable");
-          }
           const revision = current.revision + 1;
           const updatedAtMs = now();
           if (
@@ -201,13 +192,13 @@ export function createWagerFrozenD1Store(
           }
           const guard = db
             .prepare(
-              `INSERT INTO wager_frozen_balances
+              `INSERT INTO wager_frozen_balances_canonical
              (player_uid, frozen_json, revision, updated_at_ms)
            SELECT ?, ?, 0, 0
            WHERE ${
              current.revision === 0
-               ? "EXISTS (SELECT 1 FROM wager_frozen_balances WHERE player_uid = ?)"
-               : "NOT EXISTS (SELECT 1 FROM wager_frozen_balances WHERE player_uid = ? AND revision = ?)"
+               ? "EXISTS (SELECT 1 FROM wager_frozen_balances_canonical WHERE player_uid = ?)"
+               : "NOT EXISTS (SELECT 1 FROM wager_frozen_balances_canonical WHERE player_uid = ? AND revision = ?)"
            }`,
             )
             .bind(
@@ -220,7 +211,7 @@ export function createWagerFrozenD1Store(
             current.revision === 0
               ? db
                   .prepare(
-                    `INSERT INTO wager_frozen_balances
+                    `INSERT INTO wager_frozen_balances_canonical
                (player_uid, frozen_json, revision, updated_at_ms)
              VALUES (?, ?, ?, ?)`,
                   )
@@ -232,7 +223,7 @@ export function createWagerFrozenD1Store(
                   )
               : db
                   .prepare(
-                    `UPDATE wager_frozen_balances
+                    `UPDATE wager_frozen_balances_canonical
              SET frozen_json = ?, revision = ?, updated_at_ms = MAX(updated_at_ms, ?)
              WHERE player_uid = ?`,
                   )
@@ -246,12 +237,12 @@ export function createWagerFrozenD1Store(
             operation === null
               ? db
                   .prepare(
-                    "DELETE FROM wager_frozen_operations WHERE player_uid = ? AND operation_id = ?",
+                    "DELETE FROM wager_frozen_operations_canonical WHERE player_uid = ? AND operation_id = ?",
                   )
                   .bind(playerUid, operationId)
               : db
                   .prepare(
-                    `INSERT INTO wager_frozen_operations (player_uid, operation_id, record_json)
+                    `INSERT INTO wager_frozen_operations_canonical (player_uid, operation_id, record_json)
              VALUES (?, ?, ?)
              ON CONFLICT (player_uid, operation_id) DO UPDATE SET record_json = excluded.record_json`,
                   )

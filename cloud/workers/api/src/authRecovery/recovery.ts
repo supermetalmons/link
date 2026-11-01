@@ -78,8 +78,10 @@ async function sweepCanonicalAuthRecoveryJobs(
             scope: "auth",
             phase,
             itemIndex,
-            profileId:
-              quarantineReason === "invalid-profile-id" ? undefined : profileId,
+            ...(quarantineReason === "invalid-profile-id" ||
+            profileId === undefined
+              ? {}
+              : { profileId }),
           },
           error,
         );
@@ -87,7 +89,7 @@ async function sweepCanonicalAuthRecoveryJobs(
       }
     },
   );
-  if (failures.length > 0) throw failures[0].error;
+  if (failures.length > 0) throw failures[0]!.error;
   return successes.filter(({ value }) => value).length;
 }
 

@@ -20,6 +20,7 @@ import {
 
 export function createWithdrawalRecordCommands(
   storage: WithdrawalRecordStorage,
+  { now = Date.now }: { now?: () => number } = {},
 ): WithdrawalRecord {
   return {
     read: () => storage.read(),
@@ -28,7 +29,7 @@ export function createWithdrawalRecordCommands(
         const decision = decideWithdrawalClaim({
           ...input,
           current,
-          nowMs: Date.now(),
+          nowMs: now(),
         });
         return {
           value:
@@ -54,7 +55,7 @@ export function createWithdrawalRecordCommands(
           return { value: current ?? null };
         }
         return {
-          value: writeBlockedWithdrawal(current, observedOwner, Date.now()),
+          value: writeBlockedWithdrawal(current, observedOwner, now()),
         };
       });
     },
@@ -71,8 +72,8 @@ export function createWithdrawalRecordCommands(
           value: writeSubmittedWithdrawal(
             current,
             evidence,
-            withdrawalSubmittedAtForPersistence(current, Date.now),
-            Date.now(),
+            withdrawalSubmittedAtForPersistence(current, now),
+            now(),
           ),
         };
       });
@@ -118,8 +119,12 @@ const acquireWithdrawalClaim = async ({
       place,
       recipientAddress,
       requesterUid,
-      canonicalRecordProfileId,
-      canonicalRecordSourceProfileId,
+      ...(canonicalRecordProfileId === undefined
+        ? {}
+        : { canonicalRecordProfileId }),
+      ...(canonicalRecordSourceProfileId === undefined
+        ? {}
+        : { canonicalRecordSourceProfileId }),
       leaseId,
       nowMs: Date.now(),
     });
@@ -132,8 +137,12 @@ const acquireWithdrawalClaim = async ({
       place,
       recipientAddress,
       requesterUid,
-      canonicalRecordProfileId,
-      canonicalRecordSourceProfileId,
+      ...(canonicalRecordProfileId === undefined
+        ? {}
+        : { canonicalRecordProfileId }),
+      ...(canonicalRecordSourceProfileId === undefined
+        ? {}
+        : { canonicalRecordSourceProfileId }),
       leaseId,
     });
     const withdrawal = result.value;

@@ -1,4 +1,8 @@
 import {
+  retainEventProgressRecord,
+  type EventProgressDocument,
+} from "../../../../runtime/eventProgressRecords.js";
+import {
   isRecord,
   cloneJson,
   decodeJson,
@@ -25,6 +29,8 @@ import {
   readEventProfileGameProjectionOutbox,
 } from "./reads.ts";
 import type { EventPersistenceMutation as EventMutation } from "../eventPersistenceCommands.ts";
+import type { EventFieldMutation } from "../../../../runtime/eventCommands.js";
+import type { EventRecordFields } from "@mons/shared/events";
 import {
   readEventMutationSnapshots,
   requiredMutationSnapshot,
@@ -39,8 +45,11 @@ export type PreparedEventMutations = {
   telegramProjectionSnapshot: EventMutationOptions["telegramProjectionSnapshot"];
   eventStates: ReadonlyMap<string, EventMutationState>;
   profileStates: ReadonlyMap<string, ProfilePrizeMutationState>;
-  progressUpdates: ReadonlyMap<string, unknown>;
-  progressDeadUpdates: ReadonlyMap<string, unknown>;
+  progressUpdates: ReadonlyMap<string, EventProgressDocument<"pending"> | null>;
+  progressDeadUpdates: ReadonlyMap<
+    string,
+    EventProgressDocument<"dead"> | null
+  >;
   profileProjectionUpdates: ReadonlyMap<string, unknown>;
   telegramProjectionUpdates: ReadonlyMap<string, unknown>;
   telegramStateUpdates: ReadonlyMap<
@@ -56,7 +65,7 @@ function setNested(
 ): void {
   let current = root;
   for (let index = 0; index < parts.length - 1; index += 1) {
-    const part = parts[index];
+    const part = parts[index]!;
     const existing = current[part];
     if (!isRecord(existing)) current[part] = {};
     current = current[part] as Record<string, unknown>;
@@ -65,6 +74,70 @@ function setNested(
   if (!key) throw new EventD1Failure("invalid-event-path");
   if (value === null) delete current[key];
   else current[key] = cloneJson(value);
+}
+
+function applyEventField(
+  event: EventRecordFields,
+  change: EventFieldMutation,
+): void {
+  switch (change.field) {
+    case "createdAtMs":
+      event.createdAtMs = change.value;
+      break;
+    case "endedAtMs":
+      event.endedAtMs = change.value;
+      break;
+    case "participants":
+      event.participants = cloneJson(change.value);
+      break;
+    case "startAtMs":
+      event.startAtMs = change.value;
+      break;
+    case "startedAtMs":
+      event.startedAtMs = change.value;
+      break;
+    case "status":
+      event.status = change.value;
+      break;
+    case "winnerDisplayName":
+      event.winnerDisplayName = change.value;
+      break;
+    case "winnerProfileId":
+      event.winnerProfileId = change.value;
+      break;
+    case "currentRoundIndex":
+      event.currentRoundIndex = change.value;
+      break;
+    case "bracketSize":
+      event.bracketSize = change.value;
+      break;
+    case "roundCount":
+      event.roundCount = change.value;
+      break;
+    case "rounds":
+      event.rounds = cloneJson(change.value);
+      break;
+    case "thirdPlaceMatch":
+      event.thirdPlaceMatch = cloneJson(change.value);
+      break;
+    case "updatedAtMs":
+      event.updatedAtMs = change.value;
+      break;
+    case "prizeSelectionsLockedAtMs":
+      event.prizeSelectionsLockedAtMs = change.value;
+      break;
+    case "prizeAssignments":
+      event.prizeAssignments = cloneJson(change.value);
+      break;
+    case "isSundayMons":
+      event.isSundayMons = change.value;
+      break;
+    case "telegramAnnouncements":
+      event.telegramAnnouncements = cloneJson(change.value);
+      break;
+    default:
+      throw new EventD1Failure("invalid-event-field");
+  }
 }
 
 async function getEventMutationState(
@@ -141,25 +214,25 @@ export async function prepareEventMutations(
   if (
     progressOutboxSnapshot &&
     (changes.length !== 1 ||
-      changes[0].kind !== "progress-outbox" ||
-      changes[0].outboxId !== progressOutboxSnapshot.outboxId)
+      changes[0]!.kind !== "progress-outbox" ||
+      changes[0]!.outboxId !== progressOutboxSnapshot.outboxId)
   )
     throw new EventD1Failure("invalid-progress-outbox-snapshot-scope");
   const telegramProjectionSnapshot = options.telegramProjectionSnapshot;
   if (
     telegramProjectionSnapshot &&
     (changes.length !== 1 ||
-      (changes[0].kind !== "telegram-state" &&
-        changes[0].kind !== "telegram-generation") ||
-      changes[0].eventId !== telegramProjectionSnapshot.eventId)
+      (changes[0]!.kind !== "telegram-state" &&
+        changes[0]!.kind !== "telegram-generation") ||
+      changes[0]!.eventId !== telegramProjectionSnapshot.eventId)
   )
     throw new EventD1Failure("invalid-telegram-projection-snapshot-scope");
   const eventSnapshot = options.eventSnapshot;
   if (eventSnapshot) {
     if (
       changes.length !== 1 ||
-      !("eventId" in changes[0]) ||
-      changes[0].eventId !== eventSnapshot.eventId
+      !("eventId" in changes[0]!) ||
+      changes[0]!.eventId !== eventSnapshot.eventId
     )
       throw new EventD1Failure("invalid-event-snapshot-scope");
     eventStates.set(eventSnapshot.eventId, {
@@ -176,9 +249,9 @@ export async function prepareEventMutations(
   if (snapshot) {
     if (
       changes.length !== 1 ||
-      changes[0].kind !== "profile-prize" ||
-      changes[0].profileId !== snapshot.profileId ||
-      changes[0].eventId !== snapshot.eventId
+      changes[0]!.kind !== "profile-prize" ||
+      changes[0]!.profileId !== snapshot.profileId ||
+      changes[0]!.eventId !== snapshot.eventId
     )
       throw new EventD1Failure("invalid-profile-prize-snapshot-scope");
     const originalPrizes =
@@ -196,9 +269,15 @@ export async function prepareEventMutations(
     snapshot ? new Map() : profilePrizeReadTargets(changes),
   );
   const snapshots = await readEventMutationSnapshots(db, changes, options);
-  const progressUpdates = new Map<string, unknown>();
+  const progressUpdates = new Map<
+    string,
+    EventProgressDocument<"pending"> | null
+  >();
   const progressDispatchSnapshots = new Map<string, ProgressOutboxSnapshot>();
-  const progressDeadUpdates = new Map<string, unknown>();
+  const progressDeadUpdates = new Map<
+    string,
+    EventProgressDocument<"dead"> | null
+  >();
   const profileProjectionUpdates = new Map<string, unknown>();
   const telegramProjectionUpdates = new Map<string, unknown>();
   const telegramStateUpdates = new Map<
@@ -230,42 +309,35 @@ export async function prepareEventMutations(
           state.next = validateEventAggregate(eventId, value);
         } else {
           if (!state.next) throw new EventD1Failure("event-not-found");
-          if (change.kind === "event-round")
-            setNested(state.next, ["rounds", exactKey(change.roundKey)], value);
-          if (change.kind === "event-match-status")
-            setNested(
-              state.next,
-              [
-                "rounds",
-                exactKey(change.roundKey),
-                "matches",
-                exactKey(change.matchKey),
-                "status",
-              ],
-              value,
-            );
+          if (change.kind === "event-round") {
+            if (change.value === null)
+              delete state.next.rounds[change.roundKey];
+            else state.next.rounds[change.roundKey] = cloneJson(change.value);
+          }
+          if (change.kind === "event-match-status") {
+            const match =
+              state.next.rounds[change.roundKey]?.matches[change.matchKey];
+            if (!match) throw new EventD1Failure("event-match-not-found");
+            match.status = change.value;
+          }
           if (change.kind === "event-field")
-            setNested(state.next, [change.field], value);
-          if (change.kind === "event-participant")
-            setNested(
-              state.next,
-              ["participants", exactKey(change.profileId)],
-              value,
-            );
-          if (change.kind === "event-disqualification")
-            setNested(
-              state.next,
+            applyEventField(state.next, change);
+          if (change.kind === "event-participant") {
+            if (change.value === null)
+              delete state.next.participants[change.profileId];
+            else
+              state.next.participants[change.profileId] = cloneJson(
+                change.value,
+              );
+          }
+          if (change.kind === "event-disqualification") {
+            const match =
               change.roundKey === null
-                ? ["thirdPlaceMatch", "winnerDisqualified"]
-                : [
-                    "rounds",
-                    exactKey(change.roundKey),
-                    "matches",
-                    exactKey(change.matchKey),
-                    "winnerDisqualified",
-                  ],
-              value,
-            );
+                ? state.next.thirdPlaceMatch
+                : state.next.rounds[change.roundKey]?.matches[change.matchKey];
+            if (!match) throw new EventD1Failure("event-match-not-found");
+            match.winnerDisqualified = change.value;
+          }
         }
         break;
       }
@@ -346,23 +418,34 @@ export async function prepareEventMutations(
       }
       case "progress-outbox": {
         const outboxId = exactKey(change.outboxId);
-        progressUpdates.set(outboxId, value);
+        progressUpdates.set(
+          outboxId,
+          change.value === null ? null : cloneJson(change.value),
+        );
         progressDispatchSnapshots.delete(outboxId);
         break;
       }
       case "progress-dead":
-        progressDeadUpdates.set(exactKey(change.outboxId), value);
+        progressDeadUpdates.set(
+          exactKey(change.outboxId),
+          change.value === null ? null : cloneJson(change.value),
+        );
         break;
       case "progress-dispatched": {
         const outboxId = exactKey(change.outboxId);
         const snapshot = await readEventProgressOutboxSnapshot(db, outboxId);
         const current =
-          snapshot.recordJson === null ? null : decodeJson(snapshot.recordJson);
+          snapshot.recordJson === null
+            ? null
+            : retainEventProgressRecord(
+                "pending",
+                decodeJson(snapshot.recordJson),
+              );
         if (!current) throw new EventD1Failure("event-progress-not-found");
         progressDispatchSnapshots.set(outboxId, snapshot);
         progressUpdates.set(outboxId, {
-          ...(cloneJson(current) as object),
-          lastQueuedAtMs: value,
+          ...cloneJson(current),
+          lastQueuedAtMs: change.value,
         });
         break;
       }

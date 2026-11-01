@@ -1,3 +1,4 @@
+import type { Aura } from "@mons/shared/appearance";
 import * as MonsRules from "mons-rules";
 import { cropAddress } from "@mons/shared/profiles";
 import type { EmojiId } from "../content/emojis";
@@ -298,7 +299,8 @@ let talkingDudeIsTalking = true;
 let suppressBoardInputUntilMs = 0;
 const boardInputSuppressAfterOverlayDismissMs = 180;
 
-let assets: any;
+let assets: Awaited<ReturnType<typeof loadGameAssets>>["gameAssets"];
+const animatedSpriteSheets = new WeakSet<SVGElement>();
 let drainer: SVGElement;
 let angel: SVGElement;
 let demon: SVGElement;
@@ -556,7 +558,7 @@ function generateCloudPath(x: number, y: number, w: number, h: number): string {
     const sx = l + cr + i * topSeg;
     const ex = sx + topSeg;
     const mx = (sx + ex) / 2;
-    d += ` Q ${mx} ${t - bumpH * topAmps[i]} ${ex} ${t}`;
+    d += ` Q ${mx} ${t - bumpH * topAmps[i]!} ${ex} ${t}`;
   }
 
   d += ` Q ${r} ${t} ${r} ${t + cr}`;
@@ -574,7 +576,7 @@ function generateCloudPath(x: number, y: number, w: number, h: number): string {
     const sx = r - cr - i * topSeg;
     const ex = sx - topSeg;
     const mx = (sx + ex) / 2;
-    d += ` Q ${mx} ${b + bumpH * bottomAmps[i]} ${ex} ${b}`;
+    d += ` Q ${mx} ${b + bumpH * bottomAmps[i]!} ${ex} ${b}`;
   }
 
   d += ` Q ${l} ${b} ${l} ${b - cr}`;
@@ -1049,10 +1051,10 @@ function startAnimation(
     if (!keepStatic) {
       let currentFrame = 0;
       let lastUpdateTime = Date.now();
-      (image as any).__isAnimating = true;
+      animatedSpriteSheets.add(image);
 
       function animate() {
-        if (!(image as any).__isAnimating || !image.isConnected) {
+        if (!animatedSpriteSheets.has(image) || !image.isConnected) {
           return;
         }
 
@@ -1094,7 +1096,7 @@ function removeItemAndCleanUpAnimation(item: SVGElement): void {
   }
 
   if (spriteSheetItem) {
-    (spriteSheetItem as any).__isAnimating = false;
+    animatedSpriteSheets.delete(spriteSheetItem);
 
     const clipPathId = spriteSheetItem.getAttribute("data-clip-path-id");
     if (clipPathId) {
@@ -1246,23 +1248,23 @@ function syncAvatarForCurrentMetadata(
     metadata.uid,
   );
   if (presentation) {
-    metadata.emojiId = String(presentation.emojiId);
+    metadata.emojiId = presentation.emojiId;
     metadata.aura = presentation.aura;
   }
-  let emojiId = metadata.emojiId ?? "";
+  let emojiId = metadata.emojiId;
   let aura =
     metadata.aura ??
     (!opponent && !gameInputRuntime.isWatchOnly
-      ? storage.getPlayerEmojiAura("")
-      : "");
-  if (!opponent && !gameInputRuntime.isWatchOnly && emojiId === "") {
-    const storedEmojiId = storage.getPlayerEmojiId("");
-    if (storedEmojiId !== "") {
+      ? storage.getPlayerEmojiAura("none")
+      : "none");
+  if (!opponent && !gameInputRuntime.isWatchOnly && emojiId === null) {
+    const storedEmojiId = storage.getPlayerEmojiId(null);
+    if (storedEmojiId !== null) {
       emojiId = storedEmojiId;
       metadata.emojiId = storedEmojiId;
     }
-    if (aura === "") {
-      aura = storage.getPlayerEmojiAura("");
+    if (aura === "none") {
+      aura = storage.getPlayerEmojiAura("none");
       metadata.aura = aura;
     }
   }
@@ -1270,9 +1272,9 @@ function syncAvatarForCurrentMetadata(
     opponent &&
     !gameInputRuntime.isOnlineGame &&
     !gameInputRuntime.isGameWithBot &&
-    emojiId === ""
+    emojiId === null
   ) {
-    if (!localHumanSeriesOpponentEmojiId) {
+    if (localHumanSeriesOpponentEmojiId === null) {
       const [fallbackEmojiId] = emojis.getRandomEmojiUrlOtherThan(
         playerSideMetadata.emojiId,
         true,
@@ -1286,12 +1288,12 @@ function syncAvatarForCurrentMetadata(
     opponent &&
     !gameInputRuntime.isOnlineGame &&
     !gameInputRuntime.isGameWithBot &&
-    emojiId !== ""
+    emojiId !== null
   ) {
     localHumanSeriesOpponentEmojiId = emojiId;
   }
 
-  const emojiUrl = emojiId !== "" ? emojis.getEmojiUrl(emojiId) || "" : "";
+  const emojiUrl = emojiId !== null ? emojis.getEmojiUrl(emojiId) || "" : "";
   if (emojiUrl !== "") {
     const didSetEmojiImage = setAvatarUrlIfNeeded(avatar, emojiUrl);
     let didChangeVisibility = false;
@@ -1351,8 +1353,8 @@ export function resetLocalHumanSeriesOpponentAvatar() {
 export function resetPlayersMetadataForSession() {
   clearVoiceReactionState();
   const nextPlayerMetadata = newEmptyPlayerMetadata();
-  nextPlayerMetadata.emojiId = storage.getPlayerEmojiId("");
-  nextPlayerMetadata.aura = storage.getPlayerEmojiAura("");
+  nextPlayerMetadata.emojiId = storage.getPlayerEmojiId(null);
+  nextPlayerMetadata.aura = storage.getPlayerEmojiAura("none");
   playerSideMetadata = nextPlayerMetadata;
   opponentSideMetadata = newEmptyPlayerMetadata();
   updateWagerPlayerUids("", "");
@@ -1386,10 +1388,10 @@ export function resetForNewGame() {
       const playerAuraVisible =
         (playerSideMetadata.aura ??
           (!gameInputRuntime.isWatchOnly
-            ? storage.getPlayerEmojiAura("")
+            ? storage.getPlayerEmojiAura("none")
             : "")) === "rainbow";
       const opponentAuraVisible =
-        (opponentSideMetadata.aura ?? "") === "rainbow";
+        (opponentSideMetadata.aura ?? "none") === "rainbow";
       showRaibowAura(playerAuraVisible && playerUrl !== "", playerUrl, false);
       showRaibowAura(
         opponentAuraVisible && opponentUrl !== "",
@@ -1418,7 +1420,7 @@ export function resetForNewGame() {
 
 export function updateEmojiAndAuraIfNeeded(
   newEmojiId: EmojiId,
-  aura: string | undefined,
+  aura: Aura | undefined,
   isOpponentSide: boolean,
 ) {
   const targetMetadata = isOpponentSide
@@ -1427,17 +1429,15 @@ export function updateEmojiAndAuraIfNeeded(
   const presentation = gameInputRuntime.getDisplayedMatchPresentation(
     targetMetadata.uid,
   );
-  const currentId = targetMetadata.emojiId ?? "";
-  const nextId = presentation
-    ? String(presentation.emojiId)
-    : (newEmojiId ?? "");
+  const currentId = targetMetadata.emojiId;
+  const nextId = presentation ? presentation.emojiId : newEmojiId;
   const newAura =
     presentation?.aura ??
     aura ??
     (!isOpponentSide && !gameInputRuntime.isWatchOnly
-      ? storage.getPlayerEmojiAura("")
-      : "");
-  const currentAura = targetMetadata.aura ?? "";
+      ? storage.getPlayerEmojiAura("none")
+      : "none");
+  const currentAura = targetMetadata.aura ?? "none";
   if (currentId === nextId && currentAura === newAura) {
     syncAvatarForCurrentMetadata(isOpponentSide);
     return;
@@ -1454,12 +1454,12 @@ export function showRandomEmojisForLoopMode() {
   SVG.setImageUrl(playerAvatar, playerUrl);
   SVG.setImageUrl(opponentAvatar, opponentUrl);
   showRaibowAura(
-    (playerSideMetadata.aura ?? "") === "rainbow",
+    (playerSideMetadata.aura ?? "none") === "rainbow",
     playerUrl,
     false,
   );
   showRaibowAura(
-    (opponentSideMetadata.aura ?? "") === "rainbow",
+    (opponentSideMetadata.aura ?? "none") === "rainbow",
     opponentUrl,
     true,
   );
@@ -1470,11 +1470,7 @@ export function showOpponentAsBotPlayer() {
 }
 
 export function getPlayersEmojiId(): number {
-  return parseInt(
-    String(
-      playerSideMetadata.emojiId !== "" ? playerSideMetadata.emojiId : "1",
-    ),
-  );
+  return playerSideMetadata.emojiId ?? 1;
 }
 
 export function toggleBoardFlipped() {
@@ -1753,13 +1749,13 @@ function colorPixel(location: Location, white: boolean) {
 
 function cleanAllPixels() {
   for (const key in items) {
-    const element = items[key];
+    const element = items[key]!;
     removeItemAndCleanUpAnimation(element);
     delete items[key];
   }
 
   for (const key in basesPlaceholders) {
-    const element = basesPlaceholders[key];
+    const element = basesPlaceholders[key]!;
     removeItemAndCleanUpAnimation(element);
     delete basesPlaceholders[key];
   }
@@ -1776,9 +1772,9 @@ export function didGetPlayerProfile(
   recalculateDisplayNames();
 
   try {
-    const emojiId = profile.emoji?.toString();
+    const emojiId = profile.emoji;
     const aura = profile.aura;
-    if (emojiId) {
+    if (emojiId !== undefined) {
       const isOpponent = loginId === opponentSideMetadata.uid;
       const isPlayer =
         loginId === playerSideMetadata.uid ||
@@ -2085,8 +2081,8 @@ export function setupPlayerId(uid: string, opponent: boolean) {
     metadata.voiceReactionDate = undefined;
     metadata.rating = undefined;
     metadata.profile = null;
-    metadata.emojiId = "";
-    metadata.aura = "";
+    metadata.emojiId = null;
+    metadata.aura = "none";
     showRaibowAura(false, previousEmojiUrl, slotIsOpponent);
   } else {
     metadata.uid = uid;
@@ -2111,8 +2107,8 @@ function redirectToAddressOnExplorer(opponent: boolean) {
   const displayName = metadata.displayName;
   if (displayName !== undefined) {
     const profile = getStashedPlayerProfile(metadata.uid);
-    if (profile) {
-      profile.emoji = parseInt(String(metadata.emojiId), 10);
+    if (profile && metadata.emojiId !== null) {
+      profile.emoji = metadata.emojiId;
     }
     showShinyCard(profile ?? null, displayName, true);
   }
@@ -2134,7 +2130,7 @@ export function removeItemsNotPresentIn(locations: Location[]) {
 
   for (const key in items) {
     if (!locationSet.has(key)) {
-      const element = items[key];
+      const element = items[key]!;
       removeItemAndCleanUpAnimation(element);
       delete items[key];
     }
@@ -2142,7 +2138,7 @@ export function removeItemsNotPresentIn(locations: Location[]) {
 
   for (const key in basesPlaceholders) {
     if (!locationSet.has(key)) {
-      const element = basesPlaceholders[key];
+      const element = basesPlaceholders[key]!;
       removeItemAndCleanUpAnimation(element);
       delete basesPlaceholders[key];
     }
@@ -2394,6 +2390,7 @@ function createItemButton(
   button.style.overflow = "visible";
 
   let animationId: number | null = null;
+  let stopWiggle: (() => void) | undefined;
 
   if (wiggle) {
     const wigglePause = 1500;
@@ -2434,7 +2431,7 @@ function createItemButton(
     }
 
     animationId = setManagedBoardRaf(animateWiggle);
-    (button as any).__stopWiggle = () => {
+    stopWiggle = () => {
       if (animationId !== null) {
         cancelManagedBoardRaf(animationId);
         animationId = null;
@@ -2472,9 +2469,7 @@ function createItemButton(
   touchTarget.addEventListener(defaultInputEventName, (event) => {
     preventTouchstartIfNeeded(event);
     event.stopPropagation();
-    if ((button as any).__stopWiggle) {
-      (button as any).__stopWiggle();
-    }
+    stopWiggle?.();
 
     completion();
     closeItemSelectionOrConfirmationOverlay();
@@ -2520,7 +2515,7 @@ function addElementToItemsLayer(element: SVGElement, depth: number) {
     if (insertionIndex === -1) {
       itemsLayer.appendChild(element);
     } else {
-      itemsLayer.insertBefore(element, children[insertionIndex]);
+      itemsLayer.insertBefore(element, children[insertionIndex]!);
     }
   } else {
     itemsLayer.appendChild(element);
@@ -2723,8 +2718,8 @@ const updateLayout = () => {
 
     for (let x = 0; x < 9; x++) {
       const img = isOpponent
-        ? opponentMoveStatusItems[x]
-        : playerMoveStatusItems[x];
+        ? opponentMoveStatusItems[x]!
+        : playerMoveStatusItems[x]!;
       SVG.setFrame(
         img,
         11 - (1.15 * x + 1) * statusItemSize - statusItemsOffsetX,
@@ -2858,8 +2853,8 @@ export async function setupGameInfoElements(allHiddenInitially: boolean) {
     incrementLifecycleCounter("boardDomListeners");
   }
 
-  let playerEmojiId = storage.getPlayerEmojiId("");
-  if (playerEmojiId === "") {
+  let playerEmojiId = storage.getPlayerEmojiId(null);
+  if (playerEmojiId === null) {
     playerEmojiId = emojis.getRandomEmojiId();
     storage.setPlayerEmojiId(playerEmojiId);
   }
@@ -2913,12 +2908,12 @@ export async function setupGameInfoElements(allHiddenInitially: boolean) {
     const emojiUrl = isOpponent ? opponentEmojiUrl : playerEmojiUrl;
     SVG.setImageUrl(avatar, emojiUrl);
     if (isOpponent) {
-      opponentSideMetadata.aura = opponentSideMetadata.aura ?? "";
+      opponentSideMetadata.aura = opponentSideMetadata.aura ?? "none";
     } else {
       if (!gameInputRuntime.isWatchOnly) {
-        playerSideMetadata.aura = storage.getPlayerEmojiAura("") ?? "";
+        playerSideMetadata.aura = storage.getPlayerEmojiAura("none") ?? "";
       } else {
-        playerSideMetadata.aura = playerSideMetadata.aura ?? "";
+        playerSideMetadata.aura = playerSideMetadata.aura ?? "none";
       }
     }
     const shouldShowAura =
@@ -2986,7 +2981,7 @@ function pickAndDisplayDifferentEmoji(metadataIsOpponent: boolean) {
     );
     opponentSideMetadata.emojiId = newId;
     SVG.setImageUrl(avatar, newEmojiUrl);
-    const visible = (opponentSideMetadata.aura ?? "") === "rainbow";
+    const visible = (opponentSideMetadata.aura ?? "none") === "rainbow";
     showRaibowAura(visible, newEmojiUrl, slotIsOpponent);
     try {
       updateAuraForAvatarElement(slotIsOpponent, avatar);
@@ -3003,13 +2998,13 @@ function pickAndDisplayDifferentEmoji(metadataIsOpponent: boolean) {
 export function didClickAndChangePlayerEmoji(
   newId: EmojiId,
   _newEmojiUrl: string,
-  aura?: string,
+  aura?: Aura,
 ) {
   storage.setPlayerEmojiId(newId);
   if (aura !== undefined) {
     storage.setPlayerEmojiAura(aura);
   }
-  gameInputRuntime.sendPlayerEmojiUpdate(parseInt(String(newId)), aura);
+  gameInputRuntime.sendPlayerEmojiUpdate(newId, aura);
 
   if (!gameInputRuntime.isWatchOnly) {
     updateEmojiAndAuraIfNeeded(newId, aura, false);
@@ -3023,8 +3018,8 @@ export function setupBoard() {
   }
   boardRuntimeToken += 1;
   clearVoiceReactionState();
-  opponentSideMetadata.emojiId = "";
-  opponentSideMetadata.aura = "";
+  opponentSideMetadata.emojiId = null;
+  opponentSideMetadata.aura = "none";
   initializeBoardElements();
   const skipLayerRecreation =
     shouldPreserveAnimation && !!itemsLayer?.querySelector(".board-rect");
@@ -3431,7 +3426,7 @@ function placeItem(
   location = inBoardCoordinates(location);
   const key = location.toString();
   if (hasBasePlaceholder(logicalLocation)) {
-    SVG.setHidden(basesPlaceholders[key], true);
+    SVG.setHidden(basesPlaceholders[key]!, true);
   }
   const img = item.cloneNode(true) as SVGElement;
   setCenterTranformOrigin(img, location);
@@ -3667,7 +3662,7 @@ function setBase(item: SVGElement, location: Location) {
       startAnimation(img, true);
     }
   } else {
-    SVG.setHidden(basesPlaceholders[key], false);
+    SVG.setHidden(basesPlaceholders[key]!, false);
   }
 }
 
@@ -3848,7 +3843,7 @@ function highlightDestinationItem(
     const centerX = location.j + 0.5;
     const centerY = location.i + 0.5;
 
-    function scaledFrame(x: any, y: any, w: any, h: any) {
+    function scaledFrame(x: number, y: number, w: number, h: number) {
       return {
         x: centerX + (x - centerX) * scale,
         y: centerY + (y - centerY) * scale,
@@ -3946,7 +3941,7 @@ function highlightDestinationItem(
   }
 }
 
-function getTraceColors(): string[] {
+function getTraceColors(): [string, string] {
   const isGradient = !isPangchiuBoard();
 
   if (traceIndex === (isGradient ? 6 : 7)) {
@@ -3958,7 +3953,7 @@ function getTraceColors(): string[] {
   const a = colors.getRainbow(traceIndex.toString());
   const b = colors.getRainbow((traceIndex + (isGradient ? 1 : 0)).toString());
 
-  return [a, b];
+  return [a!, b!];
 }
 
 function addWaves(location: Location) {
@@ -4092,7 +4087,7 @@ function updateFlowingWavePathData(
       (i === 0 ? "M" : "L") +
       wave.xPoints[i] +
       " " +
-      (wave.yBase + wave.scaledAmplitudes[i] * sinPhase);
+      (wave.yBase + wave.scaledAmplitudes[i]! * sinPhase);
     const nextSin = sinPhase * smoothWaveCosStep + cosPhase * smoothWaveSinStep;
     const nextCos = cosPhase * smoothWaveCosStep - sinPhase * smoothWaveSinStep;
     sinPhase = nextSin;
@@ -4141,7 +4136,7 @@ function getWavesFrame(location: Location, frameIndex: number) {
       wavesFrames[key] = frame;
     } else {
       const prevKey = location.toString() + (frameIndex - 1).toString();
-      const frame = wavesFrames[prevKey].cloneNode(true) as SVGElement;
+      const frame = wavesFrames[prevKey]!.cloneNode(true) as SVGElement;
 
       const baseBottomRects = frame.querySelectorAll(
         ".wave-bottom:not(.poolBackground)",
@@ -4152,9 +4147,9 @@ function getWavesFrame(location: Location, frameIndex: number) {
       const slidingTopRects = frame.querySelectorAll(".wave-top");
 
       for (let i = 0; i < baseBottomRects.length; i++) {
-        const baseBottomRect = baseBottomRects[i];
-        const slidingBottomRect = slidingBottomRects[i];
-        const slidingTopRect = slidingTopRects[i];
+        const baseBottomRect = baseBottomRects[i]!;
+        const slidingBottomRect = slidingBottomRects[i]!;
+        const slidingTopRect = slidingTopRects[i]!;
         const baseX = parseFloat(baseBottomRect.getAttribute("x") ?? "0") / 100;
         const baseWidth =
           parseFloat(baseBottomRect.getAttribute("width") ?? "0") / 100;
@@ -4237,7 +4232,7 @@ export function didToggleBoardColors() {
 
   if (!isCustomPictureBoardEnabled()) {
     Object.entries(basesPlaceholders).forEach(([key, element]) => {
-      const [i, j] = key.split("-").map(Number);
+      const [i = NaN, j = NaN] = key.split("-").map(Number);
       const squareColor =
         ((i + j) % 2 === 0 ? colors.lightSquare : colors.darkSquare) + "85";
       const firstChild = element.children[0] as HTMLElement;
@@ -4305,8 +4300,9 @@ const smoothSparkle = (() => {
   return svg;
 })();
 
-let particleEffects: any = null;
-let particleEffectsLoading: Promise<any> | null = null;
+type ParticleEffects = typeof import("./particle-effects");
+let particleEffects: ParticleEffects | null = null;
+let particleEffectsLoading: Promise<ParticleEffects> | null = null;
 
 function preloadParticleEffects() {
   if (particleEffectsLoading) return particleEffectsLoading;

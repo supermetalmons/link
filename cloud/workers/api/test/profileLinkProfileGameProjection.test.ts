@@ -17,6 +17,7 @@ function discoveryDatabase(
   for (const migration of [
     "0014_login_match_discovery.sql",
     "0015_login_match_discovery_control.sql",
+    "0030_canonical_invite_generation.sql",
   ]) {
     database.exec(
       readFileSync(
@@ -33,7 +34,7 @@ function discoveryDatabase(
     );
   }
   const insert = database.prepare(
-    `INSERT INTO login_match_discovery (login_uid, match_id, match_sort_key,
+    `INSERT INTO login_match_discovery_canonical (login_uid, match_id, match_sort_key,
       invite_id, resolution, provenance, indexed_at_ms)
      VALUES ('login-uid', ?, ?, ?, ?, 'backfill', 1)`,
   );
@@ -254,7 +255,7 @@ test("D1 profile-link cleanup requests one match and advances past unresolved re
 
 test("D1 profile-link failures propagate without falling back to Firebase", async (t) => {
   for (const table of [
-    "login_match_discovery",
+    "login_match_discovery_canonical",
     "login_match_discovery_control",
   ]) {
     const { database, d1 } = discoveryDatabase("d1");

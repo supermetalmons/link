@@ -39,7 +39,7 @@ test("urgent and background allowances admit exact prefixes independently", () =
     selected: [],
     traversedCount: 0,
   });
-  const background = [urgent[450], ...ordinaryRows(100, "background")];
+  const background = [urgent[450]!, ...ordinaryRows(100, "background")];
   assert.deepEqual(budget.select(background, "background"), {
     selected: background.slice(0, 100),
     traversedCount: 100,

@@ -28,13 +28,13 @@ import type { WagerStateSnapshot } from "./wagerStateD1.ts";
 import type { SocketSessions } from "./socketSession.ts";
 import {
   readSocketAttachment,
-  retainedSocketCanReceiveInvite,
+  socketCanReceiveInvite,
   socketAttachmentChannel,
   untrimmedSocketInviteKey,
   type InviteChannel,
   type InviteSocketAccess,
   type InviteSocketAttachment,
-  type RetainedSocketAttachment,
+  type SocketAttachment,
   type SocketInviteKey,
 } from "./socketAttachmentRecords.ts";
 import {
@@ -78,18 +78,10 @@ type StoredInviteIdentity = {
 };
 
 export function canReceiveInvite(
-  attachment: InviteSocketAccess,
+  attachment: InviteSocketAccess | SocketAttachment,
   source: Extract<InviteMetadataReadResult, { status: "ok" }>,
-): boolean;
-export function canReceiveInvite(
-  attachment: RetainedSocketAttachment,
-  source: Extract<InviteMetadataReadResult, { status: "ok" }>,
-): unknown;
-export function canReceiveInvite(
-  attachment: InviteSocketAccess | RetainedSocketAttachment,
-  source: Extract<InviteMetadataReadResult, { status: "ok" }>,
-): unknown {
-  return retainedSocketCanReceiveInvite(attachment, source);
+): boolean {
+  return socketCanReceiveInvite(attachment, source);
 }
 
 function logWagersRefreshFailure(inviteId: string, error: unknown): void {
@@ -158,19 +150,19 @@ export class InviteChannelsRoom {
       return;
     }
     this.ctx.storage.sql.exec(
-      "INSERT OR IGNORE INTO invite_metadata (singleton, invite_id, snapshot_json, revision) VALUES (1, ?, NULL, 0)",
+      "INSERT OR IGNORE INTO invite_metadata_canonical (singleton, invite_id, snapshot_json, revision) VALUES (1, ?, NULL, 0)",
       inviteId,
     );
     const stored = this.ctx.storage.sql
       .exec<StoredInviteIdentity>(
-        "SELECT invite_id FROM invite_metadata WHERE singleton = 1",
+        "SELECT invite_id FROM invite_metadata_canonical WHERE singleton = 1",
       )
       .one();
     if (stored.invite_id !== inviteId) {
       throw new TypeError("metadata-invite-conflict");
     }
     this.ctx.storage.sql.exec(
-      "INSERT OR IGNORE INTO invite_wagers (singleton, invite_id, snapshot_json, revision, source_fingerprint) VALUES (1, ?, NULL, 0, NULL)",
+      "INSERT OR IGNORE INTO invite_wagers_canonical (singleton, invite_id, snapshot_json, revision, source_fingerprint) VALUES (1, ?, NULL, 0, NULL)",
       inviteId,
     );
     if (options.cache !== false) this.inviteId = inviteId;
@@ -179,7 +171,7 @@ export class InviteChannelsRoom {
   pinnedInviteId(): string {
     return this.ctx.storage.sql
       .exec<StoredInviteIdentity>(
-        "SELECT invite_id FROM invite_metadata WHERE singleton = 1",
+        "SELECT invite_id FROM invite_metadata_canonical WHERE singleton = 1",
       )
       .one().invite_id;
   }
@@ -234,7 +226,7 @@ export class InviteChannelsRoom {
 
   private async scheduleInviteRefresh(atMs: number): Promise<void> {
     this.ctx.storage.sql.exec(
-      "INSERT INTO invite_refresh_schedule (singleton, next_at_ms) VALUES (1, ?) ON CONFLICT(singleton) DO UPDATE SET next_at_ms = MIN(next_at_ms, excluded.next_at_ms)",
+      "INSERT INTO invite_refresh_schedule_canonical (singleton, next_at_ms) VALUES (1, ?) ON CONFLICT(singleton) DO UPDATE SET next_at_ms = MIN(next_at_ms, excluded.next_at_ms)",
       atMs,
     );
     await this.dependencies.scheduleAlarm(atMs);
@@ -540,12 +532,14 @@ export class InviteChannelsRoom {
   prepareAlarm(): InviteAlarmWork | null {
     const sockets = this.inviteSockets(undefined, true);
     if (sockets.length === 0 && this.pendingAdmissions === 0) {
-      this.ctx.storage.sql.exec("DELETE FROM invite_refresh_schedule");
+      this.ctx.storage.sql.exec(
+        "DELETE FROM invite_refresh_schedule_canonical",
+      );
       return null;
     }
     const [scheduled] = this.ctx.storage.sql
       .exec<{ next_at_ms: number }>(
-        "SELECT next_at_ms FROM invite_refresh_schedule WHERE singleton = 1",
+        "SELECT next_at_ms FROM invite_refresh_schedule_canonical WHERE singleton = 1",
       )
       .toArray();
     if (scheduled && scheduled.next_at_ms > Date.now()) return null;
@@ -553,7 +547,7 @@ export class InviteChannelsRoom {
       Date.now() +
       Math.min(INVITE_METADATA_REFRESH_MS, INVITE_WAGERS_REFRESH_MS);
     this.ctx.storage.sql.exec(
-      "INSERT INTO invite_refresh_schedule (singleton, next_at_ms) VALUES (1, ?) ON CONFLICT(singleton) DO UPDATE SET next_at_ms = excluded.next_at_ms",
+      "INSERT INTO invite_refresh_schedule_canonical (singleton, next_at_ms) VALUES (1, ?) ON CONFLICT(singleton) DO UPDATE SET next_at_ms = excluded.next_at_ms",
       nextAtMs,
     );
     const inviteId = this.pinnedInviteId();
@@ -593,7 +587,7 @@ export class InviteChannelsRoom {
   nextAlarm(): number | null {
     const [scheduled] = this.ctx.storage.sql
       .exec<{ next_at_ms: number }>(
-        "SELECT next_at_ms FROM invite_refresh_schedule WHERE singleton = 1",
+        "SELECT next_at_ms FROM invite_refresh_schedule_canonical WHERE singleton = 1",
       )
       .toArray();
     return scheduled?.next_at_ms ?? null;

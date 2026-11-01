@@ -83,7 +83,7 @@ export async function prepareEventProfileGameProjection(
     const participants =
       (event && plainEventParticipants(event)) ||
       createEventParticipantsDocument();
-    const eventId = tasks[index].eventId;
+    const eventId = tasks[index]!.eventId;
     commands.push(
       {
         kind: "profile-game-outbox-field",
@@ -101,7 +101,7 @@ export async function prepareEventProfileGameProjection(
         kind: "profile-game-outbox-field",
         eventId,
         field: "requestId",
-        value: tasks[index].requestId,
+        value: tasks[index]!.requestId,
       },
       {
         kind: "profile-game-outbox-field",
@@ -139,13 +139,13 @@ export async function prepareEventProfileGameProjection(
     async dispatch() {
       const results = await Promise.allSettled(tasks.map(enqueue));
       for (let index = 0; index < results.length; index += 1) {
-        if (results[index].status === "rejected") {
+        if (results[index]!.status === "rejected") {
           logger.error(
             JSON.stringify({
               event: "event_profile_game_projection_enqueue_failed",
-              kind: tasks[index].kind,
-              eventId: tasks[index].eventId,
-              requestId: tasks[index].requestId,
+              kind: tasks[index]!.kind,
+              eventId: tasks[index]!.eventId,
+              requestId: tasks[index]!.requestId,
               outcome: "failed",
             }),
           );

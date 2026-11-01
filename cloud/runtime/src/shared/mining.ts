@@ -26,8 +26,8 @@ export type MineRockResponse =
   | { ok: false; reason: MineRockFailureReason };
 
 export interface WagerProposalLike {
-  material?: string | null;
-  count?: unknown;
+  material: MiningMaterialName;
+  count: number;
 }
 
 export interface AcceptedMaterialReservation {
@@ -81,18 +81,6 @@ const cloneMaterials = (source: MiningMaterials): MiningMaterials => {
   return result;
 };
 
-const normalizeMaterials = (source?: unknown): MiningMaterials => {
-  const result = createEmptyMaterials();
-  MATERIAL_KEYS.forEach((key) => {
-    const raw = source ? (source as Record<string, unknown>)[key] : undefined;
-    const numeric = typeof raw === "number" ? raw : Number(raw);
-    result[key] = Number.isFinite(numeric)
-      ? Math.max(0, Math.round(numeric))
-      : 0;
-  });
-  return result;
-};
-
 const sumMaterials = (
   left: MiningMaterials,
   right: MiningMaterials,
@@ -102,19 +90,6 @@ const sumMaterials = (
     result[key] = (left[key] ?? 0) + (right[key] ?? 0);
   });
   return result;
-};
-
-const normalizeMiningSnapshot = (source?: unknown): MiningSnapshot => {
-  return {
-    lastRockDate:
-      source &&
-      typeof (source as Record<string, unknown>).lastRockDate === "string"
-        ? (source as { lastRockDate: string }).lastRockDate
-        : null,
-    materials: normalizeMaterials(
-      source && (source as Record<string, unknown>).materials,
-    ),
-  };
 };
 
 const isMiningMaterials = (value: unknown): value is MiningMaterials =>
@@ -129,6 +104,28 @@ const isMiningSnapshot = (value: unknown): value is MiningSnapshot =>
   hasExactKeys(value, ["lastRockDate", "materials"]) &&
   (value.lastRockDate === null || typeof value.lastRockDate === "string") &&
   isMiningMaterials(value.materials);
+
+const parseMiningMaterials = (value: unknown): MiningMaterials | null =>
+  isMiningMaterials(value) ? cloneMaterials(value) : null;
+
+const parseMiningSnapshot = (value: unknown): MiningSnapshot | null =>
+  isMiningSnapshot(value)
+    ? {
+        lastRockDate: value.lastRockDate,
+        materials: cloneMaterials(value.materials),
+      }
+    : null;
+
+const createEmptyMiningSnapshot = (): MiningSnapshot => ({
+  lastRockDate: null,
+  materials: createEmptyMaterials(),
+});
+
+const requireMiningMaterials = (value: unknown): MiningMaterials => {
+  const materials = parseMiningMaterials(value);
+  if (!materials) throw new TypeError("invalid-mining-materials");
+  return materials;
+};
 
 const isMineRockResponse = (value: unknown): value is MineRockResponse => {
   if (!isRecord(value)) {
@@ -174,12 +171,13 @@ const pickWeightedMaterial = (random: () => number): MiningMaterialName => {
   return "ice";
 };
 
-const isFirstMiningEvent = (source?: unknown): boolean => {
-  const normalized = normalizeMiningSnapshot(source);
-  if (normalized.lastRockDate) {
+const isFirstMiningEvent = (source: MiningSnapshot): boolean => {
+  const snapshot = parseMiningSnapshot(source);
+  if (!snapshot) throw new TypeError("invalid-mining-snapshot");
+  if (snapshot.lastRockDate) {
     return false;
   }
-  return !MATERIAL_KEYS.some((key) => normalized.materials[key] > 0);
+  return !MATERIAL_KEYS.some((key) => snapshot.materials[key] > 0);
 };
 
 const createFirstRockDrops = (): MiningDrops => {
@@ -213,7 +211,7 @@ const createDeterministicDrops = (
 const createDropsForMiningEvent = (
   profileId: string,
   date: string,
-  miningSnapshot?: unknown,
+  miningSnapshot: MiningSnapshot,
 ): MiningDrops => {
   if (isFirstMiningEvent(miningSnapshot)) {
     return createFirstRockDrops();
@@ -224,35 +222,39 @@ const createDropsForMiningEvent = (
 const isMaterialName = (value: unknown): value is MiningMaterialName =>
   (MATERIAL_KEYS as readonly unknown[]).includes(value);
 
-const normalizeCount = (value: unknown): number => {
-  const numeric = typeof value === "number" ? value : Number(value);
-  return Number.isFinite(numeric) ? Math.max(0, Math.round(numeric)) : 0;
-};
-
 const applyMaterialDeltas = (
-  source?: unknown,
-  deltas?: unknown,
+  source: MiningMaterials,
+  deltas?: Partial<MiningMaterials> | null,
 ): MiningMaterials => {
-  const result = normalizeMaterials(source);
+  const result = requireMiningMaterials(source);
+  if (
+    deltas !== undefined &&
+    deltas !== null &&
+    (!isRecord(deltas) ||
+      Object.keys(deltas).some((key) => !isMaterialName(key)))
+  )
+    throw new TypeError("invalid-mining-deltas");
   MATERIAL_KEYS.forEach((key) => {
-    const raw = deltas ? (deltas as Record<string, unknown>)[key] : undefined;
-    const delta = typeof raw === "number" ? raw : Number(raw);
-    const next = (result[key] ?? 0) + (Number.isFinite(delta) ? delta : 0);
-    result[key] = Math.max(0, Math.round(next));
+    const delta = deltas && Object.hasOwn(deltas, key) ? deltas[key] : 0;
+    if (typeof delta !== "number" || !Number.isInteger(delta))
+      throw new TypeError("invalid-mining-deltas");
+    const next = result[key] + delta;
+    if (!Number.isFinite(next)) throw new TypeError("invalid-mining-deltas");
+    result[key] = Math.max(0, next);
   });
   return result;
 };
 
 const applyMaterialDeltasWithCap = (
-  source: unknown,
-  deltas: unknown,
-  totalMaterials?: unknown,
+  source: MiningMaterials,
+  deltas: Partial<MiningMaterials> | null | undefined,
+  totalMaterials?: MiningMaterials,
 ): MiningMaterials => {
   const result = applyMaterialDeltas(source, deltas);
   if (!totalMaterials) {
     return result;
   }
-  const caps = normalizeMaterials(totalMaterials);
+  const caps = requireMiningMaterials(totalMaterials);
   MATERIAL_KEYS.forEach((key) => {
     result[key] = Math.min(result[key], caps[key] ?? 0);
   });
@@ -283,18 +285,28 @@ const computeAvailableMaterials = (
 };
 
 const computeAcceptedReservation = (
-  current: unknown,
-  material: string,
+  current: MiningMaterials,
+  material: MiningMaterialName,
   proposedCount: number,
   ownProposal: WagerProposalLike | null | undefined,
-  totalMaterials: unknown,
+  totalMaterials: MiningMaterials,
 ): AcceptedMaterialReservation => {
-  const normalized = normalizeMaterials(current);
-  const caps = normalizeMaterials(totalMaterials);
-  const next: MiningMaterials & Record<string, number> = { ...normalized };
+  const frozen = requireMiningMaterials(current);
+  const caps = requireMiningMaterials(totalMaterials);
+  if (
+    !isMaterialName(material) ||
+    !Number.isInteger(proposedCount) ||
+    proposedCount < 0 ||
+    (ownProposal &&
+      (!isMaterialName(ownProposal.material) ||
+        !Number.isInteger(ownProposal.count) ||
+        ownProposal.count < 0))
+  )
+    throw new TypeError("invalid-mining-reservation");
+  const next: MiningMaterials & Record<string, number> = { ...frozen };
   const ownMaterial =
     ownProposal && ownProposal.material ? ownProposal.material : null;
-  const ownCount = ownProposal ? normalizeCount(ownProposal.count) : 0;
+  const ownCount = ownProposal?.count ?? 0;
   if (ownMaterial) {
     next[ownMaterial] = Math.max(0, (next[ownMaterial] ?? 0) - ownCount);
   }
@@ -316,7 +328,7 @@ const computeAcceptedReservation = (
   );
   const appliedDelta = MATERIAL_KEYS.reduce<Partial<MiningMaterials>>(
     (result, key) => {
-      const difference = (next[key] ?? 0) - (normalized[key] ?? 0);
+      const difference = (next[key] ?? 0) - frozen[key];
       if (difference !== 0) {
         result[key] = difference;
       }
@@ -337,9 +349,10 @@ export {
   MINE_ROCK_FAILURE_REASONS,
   createEmptyMaterials,
   cloneMaterials,
-  normalizeMaterials,
   sumMaterials,
-  normalizeMiningSnapshot,
+  createEmptyMiningSnapshot,
+  parseMiningMaterials,
+  parseMiningSnapshot,
   isMiningMaterials,
   isMiningSnapshot,
   isMineRockResponse,
@@ -353,7 +366,6 @@ export {
   createDeterministicDrops,
   createDropsForMiningEvent,
   isMaterialName,
-  normalizeCount,
   applyMaterialDeltas,
   applyMaterialDeltasWithCap,
   computeAvailableCount,

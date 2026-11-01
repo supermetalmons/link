@@ -1,5 +1,19 @@
 import { createMatchTimerController } from "../../src/game/matchTimerController.ts";
 
+/**
+ * @typedef {import("../../src/game/matchTimerController.ts").MatchTimerContext} MatchTimerContext
+ * @typedef {Parameters<typeof createMatchTimerController>[0]} MatchTimerDependencies
+ * @typedef {["countdown", ...Parameters<MatchTimerDependencies["showCountdown"]>]
+ *   | ["hideCountdown"] | ["hideButtons"] | ["claim"]
+ *   | ["progress", ...Parameters<MatchTimerDependencies["showProgress"]>]
+ *   | ["terminal", ...Parameters<MatchTimerDependencies["onTerminal"]>]} MatchTimerEvent
+ */
+
+/**
+ * @param {Partial<MatchTimerContext>} [overrides]
+ * @param {() => Partial<MatchTimerContext>} [readContext]
+ * @param {(event: MatchTimerEvent) => void} [onEvent]
+ */
 export function createMatchTimerHarness(
   overrides = {},
   readContext = () => ({}),
@@ -8,13 +22,18 @@ export function createMatchTimerHarness(
   let now = 1_000;
   let session = 1;
   let nextTimer = 0;
+  /** @type {Set<string> | null} */
   let allowedMatchIds = null;
+  /** @type {Map<number, { delay: number; run(): void }>} */
   const timers = new Map();
+  /** @type {MatchTimerEvent[]} */
   const events = [];
+  /** @param {MatchTimerEvent} event */
   const emit = (event) => {
     events.push(event);
     onEvent(event);
   };
+  /** @type {MatchTimerContext} */
   const context = {
     isOnlineGame: true,
     isReconnect: false,
@@ -64,9 +83,12 @@ export function createMatchTimerHarness(
     context,
     timers,
     events,
+    /** @param {number} milliseconds */
     advance: (milliseconds) => (now += milliseconds),
+    /** @param {number} milliseconds */
     setNow: (milliseconds) => (now = milliseconds),
     invalidateSession: () => session++,
+    /** @param {...string} ids */
     allowMatches: (...ids) => (allowedMatchIds = new Set(ids)),
   };
 }

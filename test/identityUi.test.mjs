@@ -54,7 +54,7 @@ const {
 const { formatAuthCooldownErrorMessage } =
   await import("../src/connection/authCooldownErrors.ts");
 
-const intent = (expiresAtMs) => ({
+const intent = (/** @type {number} */ expiresAtMs) => ({
   ok: true,
   intentId: "intent",
   nonce: "nonce",
@@ -89,6 +89,7 @@ test("preserves Apple intent validity and auth button labels", () => {
 
 test("publishes settings Apple flow changes once per transition", () => {
   setSettingsAppleFlowInProgress(false);
+  /** @type {Array<boolean>} */
   const values = [];
   const unsubscribe = subscribeSettingsAppleFlowProgress((value) => {
     values.push(value);
@@ -106,6 +107,7 @@ test("publishes settings Apple flow changes once per transition", () => {
 });
 
 test("routes stable profile commands through the registered UI port", () => {
+  /** @type {Array<string[] | (string | undefined)[] | (string | number | (() => void))[]>} */
   const calls = [];
   let visible = true;
   const unregister = registerProfileSignInApi({
@@ -125,7 +127,7 @@ test("routes stable profile commands through the registered UI port", () => {
   handleLogout("logout-trigger");
   showSettings("settings-trigger");
   hideNotificationBanner();
-  showNotificationBanner("Title", "Subtitle", "emoji", successHandler);
+  showNotificationBanner("Title", "Subtitle", 1, successHandler);
   openProfileSignInPopup();
   openProfileSignInPopupForEvent();
 
@@ -138,7 +140,7 @@ test("routes stable profile commands through the registered UI port", () => {
     ["logout", "logout-trigger"],
     ["settings", "settings-trigger"],
     ["hide-notification"],
-    ["notification", "Title", "Subtitle", "emoji", successHandler],
+    ["notification", "Title", "Subtitle", 1, successHandler],
     ["sign-in", "inline"],
     ["sign-in", "event"],
   ]);
@@ -148,6 +150,7 @@ test("routes stable profile commands through the registered UI port", () => {
 });
 
 test("retains pending identity and inline errors until their views bind", () => {
+  /** @type {Array<string | null>} */
   const inlineErrors = [];
   setSignInInlineAuthError("pending");
   const unregisterInline = registerSignInInlineAuthErrorHandler((message) => {
@@ -162,7 +165,9 @@ test("retains pending identity and inline errors until their views bind", () => 
     },
   );
 
+  /** @type {Array<string>} */
   const displayNames = [];
+  /** @type {Array<string>} */
   const cardNames = [];
   updateProfileDisplayName("mons", null, null);
   const initialDisplayName = getInitialProfileDisplayName();
@@ -185,6 +190,7 @@ test("retains pending identity and inline errors until their views bind", () => 
   unregisterDisplay();
 
   updateProfileDisplayName(null, null, null);
+  /** @type {Array<string>} */
   const clearedDisplayNames = [];
   const unregisterClearedDisplay = registerProfileDisplayNameHandlers(
     (name) => clearedDisplayNames.push(name),
@@ -196,6 +202,7 @@ test("retains pending identity and inline errors until their views bind", () => 
 
 test("keeps logout attempts locked, ordered, and idempotent", () => {
   reconcileLogoutUiLockWithAuthStatus("unauthenticated");
+  /** @type {Array<boolean>} */
   const lockStates = [];
   const unsubscribe = subscribeToLogoutUiLock((isLocked) => {
     lockStates.push(isLocked);
@@ -224,13 +231,28 @@ test("keeps logout attempts locked, ordered, and idempotent", () => {
 test("preserves cooldown messaging for sign-in and profile linking", () => {
   assert.equal(
     formatAuthCooldownErrorMessage({
-      details: { reason: "method-reuse-cooldown", method: "apple" },
+      code: "failed-precondition",
+      details: {
+        reason: "method-reuse-cooldown",
+        scope: "method",
+        method: "apple",
+        retryAtMs: 0,
+        cooldownMs: 86400000,
+      },
     }),
     "This Apple sign-in was recently unlinked. Try again in up to 24 hours.",
   );
   assert.equal(
     formatAuthCooldownErrorMessage({
-      details: { reason: "profile-method-cooldown", method: "x" },
+      code: "failed-precondition",
+      details: {
+        reason: "profile-method-cooldown",
+        scope: "profile-method",
+        profileId: null,
+        method: "x",
+        retryAtMs: 0,
+        cooldownMs: 86400000,
+      },
     }),
     "You recently unlinked X on this profile. You can link it again in up to 24 hours.",
   );

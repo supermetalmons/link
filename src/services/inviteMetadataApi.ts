@@ -1,3 +1,4 @@
+import { APPLICATION_DATA_SOCKET_PROTOCOL } from "@mons/shared/data-contract";
 import type {
   ApiSocketUrl,
   ApiRoutePath,
@@ -26,8 +27,8 @@ export const INVITE_METADATA_REQUEST_TIMEOUT_MS = 10_000;
 
 export class InviteMetadataApiError extends Error {
   readonly code: string;
-  readonly status?: number;
-  readonly retryAfterMs?: number;
+  readonly status: number | undefined;
+  readonly retryAfterMs: number | undefined;
 
   constructor(code: string, status?: number, retryAfterMs?: number) {
     super(code);
@@ -60,6 +61,7 @@ export function createInviteMetadataSocketProtocols(token: string): string[] {
   return [
     INVITE_METADATA_SOCKET_PROTOCOL,
     `${REACTION_AUTH_PROTOCOL_PREFIX}${token}`,
+    APPLICATION_DATA_SOCKET_PROTOCOL,
   ];
 }
 
@@ -71,8 +73,8 @@ export async function readInviteMetadataViaApi(
   const path = metadataPath(inviteId);
   return readSnapshotJson({
     url: `${INVITE_METADATA_API_ROOT}${path}`,
-    tokenProvider,
-    signal: options.signal,
+    ...(tokenProvider ? { tokenProvider } : {}),
+    ...(options.signal ? { signal: options.signal } : {}),
     timeoutMs: INVITE_METADATA_REQUEST_TIMEOUT_MS,
     maxResponseBytes: INVITE_METADATA_MAX_MESSAGE_BYTES,
     validate: (payload): payload is ReadInviteMetadataResponse =>

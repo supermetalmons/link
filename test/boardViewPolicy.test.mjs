@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { deriveBoardViewControls } from "../src/game/boardViewPolicy.ts";
 
+/** @type {Parameters<typeof deriveBoardViewControls>[0]} */
 const context = {
   mode: "activeLive",
   isOnlineGame: false,
@@ -12,6 +13,7 @@ const context = {
   isSeriesEnded: false,
 };
 
+/** @param {Partial<Parameters<typeof deriveBoardViewControls>[0]>} overrides */
 const controls = (overrides) =>
   deriveBoardViewControls({ ...context, ...overrides });
 
@@ -79,6 +81,7 @@ test("waiting keeps end available without changing confirmation", () => {
 });
 
 test("historical participant controls follow terminal and pending state", () => {
+  /** @type {Partial<Parameters<typeof deriveBoardViewControls>[0]>} */
   const historical = { mode: "historicalView", isOnlineGame: true };
   assert.deepEqual(controls(historical), {
     endMatchVisible: false,

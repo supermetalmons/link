@@ -39,7 +39,7 @@ function participant(
     username: profileId,
     displayName: profileId,
     emojiId: 1,
-    aura: "",
+    aura: "none",
     joinedAtMs: 10,
     state: "active",
     eliminatedRoundIndex: null,
@@ -94,7 +94,7 @@ function ownershipSnapshot(
             profileId: profileId!,
             username: profileId!,
             emoji: 1,
-            aura: "",
+            aura: "none",
             eth: "",
             sol: "",
             rating: 1500,
@@ -167,7 +167,7 @@ test("join drafts preserve the source roster and isolate the settlement copy fro
   ]);
   const settlementParticipants = eventRecordFixture(draft.eventForSettlement)
     .participants as Record<string, EventParticipantSnapshot>;
-  settlementParticipants.creator.displayName = "mutated-by-due-builder";
+  settlementParticipants.creator!.displayName = "mutated-by-due-builder";
   delete settlementParticipants.guest;
   assert.equal(draft.participant.displayName, "creator");
   assert.deepEqual(source, original);

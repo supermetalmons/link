@@ -3,13 +3,14 @@ import test from "node:test";
 import { eventSnapshotEtag, type EventSnapshotSeed } from "@mons/shared/events";
 import { readOptionalEventSnapshotSeed } from "../src/eventSnapshotResponse.ts";
 import { TELEGRAM_TEST_ENV } from "./testEnv.ts";
+import { eventDocumentFixture } from "./eventCompatibilityFixture.ts";
 
 const seed: EventSnapshotSeed = {
   snapshot: {
     ok: true,
     eventId: "event-one",
     revision: 1,
-    event: { eventId: "event-one", status: "active" },
+    event: eventDocumentFixture({ eventId: "event-one", status: "active" }),
     prizeSelections: {},
   },
   etag: eventSnapshotEtag("event-one", 1),

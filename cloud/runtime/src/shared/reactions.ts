@@ -105,6 +105,10 @@ function hasReactionFields(value: unknown): value is Record<string, unknown> {
           VOICE_VARIATIONS[value.kind as keyof typeof VOICE_VARIATIONS];
 }
 
+export const isReaction = (value: unknown): value is Reaction =>
+  hasReactionFields(value) &&
+  hasExactKeys(value, ["uuid", "kind", "variation"]);
+
 const isInviteReaction = (value: unknown): value is InviteReaction =>
   hasReactionFields(value) &&
   hasExactKeys(value, ["uuid", "kind", "variation", "matchId"]) &&

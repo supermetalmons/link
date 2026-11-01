@@ -146,22 +146,23 @@ async function compileRuntime(runtimeDirectory: string, staging: string) {
       `Runtime configuration must cover every authored source. Omitted: ${omitted.join(", ")}; outside src: ${outside.join(", ")}`,
     );
 
-  const program = ts.createProgram(authored, {
+  const emitOptions: ts.CompilerOptions = {
     ...parsed.options,
     noEmit: false,
     noEmitOnError: true,
     declaration: true,
     emitDeclarationOnly: false,
-    declarationDir: undefined,
-    outFile: undefined,
     outDir: staging,
     sourceMap: false,
     inlineSourceMap: false,
     declarationMap: false,
     incremental: false,
     composite: false,
-    tsBuildInfoFile: undefined,
-  });
+  };
+  delete emitOptions.declarationDir;
+  delete emitOptions.outFile;
+  delete emitOptions.tsBuildInfoFile;
+  const program = ts.createProgram(authored, emitOptions);
   const dependencyPaths = await Promise.all(
     program.getSourceFiles().map((file) => realpath(file.fileName)),
   );
@@ -423,7 +424,10 @@ async function watchRuntime(): Promise<void> {
 
 async function main(): Promise<void> {
   const args = process.argv.slice(2);
-  if (args.length !== 1 || !["--write", "--check", "--watch"].includes(args[0]))
+  if (
+    args.length !== 1 ||
+    !["--write", "--check", "--watch"].includes(args[0]!)
+  )
     throw new Error("Usage: runtime-generation.ts --write|--check|--watch");
   if (args[0] === "--watch") return watchRuntime();
   const write = args[0] === "--write";

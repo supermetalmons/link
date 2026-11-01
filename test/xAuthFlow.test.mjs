@@ -1,3 +1,5 @@
+import { createTimerHandle } from "./fixtures/timerHandle.mjs";
+import { required } from "./fixtures/canonicalData.mjs";
 import assert from "node:assert/strict";
 import test from "node:test";
 import { createXAuthFlowController } from "../src/ui/identity/xAuthFlowController.ts";
@@ -6,18 +8,20 @@ const redirectStarted = Object.assign(new Error("redirect-started"), {
   code: "redirect-started",
 });
 
-const deferred = () => {
-  let resolve;
-  let reject;
-  const promise = new Promise((resolvePromise, rejectPromise) => {
-    resolve = resolvePromise;
-    reject = rejectPromise;
-  });
-  return { promise, resolve, reject };
-};
+/**
+ * @typedef {Parameters<typeof createXAuthFlowController>[0]} ControllerInput
+ * @typedef {ControllerInput["dependencies"]} Dependencies
+ * @typedef {import("../src/ui/identity/xAuthFlowController.ts").XAuthFlowOptions} Options
+ * @typedef {ReturnType<Dependencies["peekPendingResult"]>} PendingResult
+ * @typedef {ReturnType<Dependencies["consumeFeedback"]>} Feedback
+ * @typedef {["intent" | "clear-pending" | "consume-feedback" | "start" | "redirect-started" | "pending-signin" | "settings-return"] | ["redirect", Parameters<Dependencies["startRedirect"]>[0]] | ["error", ...Parameters<Options["onError"]>] | ["settled", Parameters<NonNullable<Options["onSettled"]>>[0]] | ["feedback", NonNullable<Feedback>]} RecordedCall
+ */
+/** @template [T={ intentId: string }] @returns {PromiseWithResolvers<T>} */
+const deferred = () => Promise.withResolvers();
 
 const flush = () => new Promise((resolve) => setImmediate(resolve));
 
+/** @param {{ source?: ControllerInput["consentSource"], pending?: PendingResult, feedback?: Feedback, visible?: boolean, dependencies?: Partial<Dependencies>, options?: Partial<Options>, attach?: boolean }} [input] */
 const harness = ({
   source = "signin",
   pending = null,
@@ -27,12 +31,16 @@ const harness = ({
   options = {},
   attach = true,
 } = {}) => {
+  /** @type {RecordedCall[]} */
   const calls = [];
+  /** @type {Map<ReturnType<typeof createTimerHandle>, { callback: () => void, delay: number }>} */
   const timers = new Map();
+  /** @type {Set<Parameters<Dependencies["subscribePendingResult"]>[0]>} */
   const pendingListeners = new Set();
+  /** @type {Set<Parameters<Dependencies["subscribeFeedback"]>[0]>} */
   const feedbackListeners = new Set();
+  /** @type {Set<() => void>} */
   const visibilityListeners = new Set();
-  let nextTimer = 0;
   const controller = createXAuthFlowController({
     consentSource: source,
     dependencies: {
@@ -46,7 +54,7 @@ const harness = ({
       },
       isRedirectStartedError: (error) => error === redirectStarted,
       formatError: (error, consentSource) =>
-        `${consentSource}:${typeof error === "string" ? error : error.message}`,
+        `${consentSource}:${typeof error === "string" ? error : error instanceof Error ? error.message : String(error)}`,
       peekPendingResult: () => pending,
       subscribePendingResult: (listener) => {
         pendingListeners.add(listener);
@@ -73,28 +81,40 @@ const harness = ({
         visibilityListeners.add(listener);
         return () => visibilityListeners.delete(listener);
       },
-      setTimeout: (callback, delay) => {
-        const id = ++nextTimer;
-        timers.set(id, { callback, delay });
-        return id;
+      setTimeout: new Proxy(setTimeout, {
+        apply(_target, _receiver, argumentsList) {
+          const [callback, delay = 0, ...args] =
+            /** @type {Parameters<typeof setTimeout>} */ (argumentsList);
+          const id = createTimerHandle();
+          timers.set(id, { callback: () => callback(...args), delay });
+          return id;
+        },
+      }),
+      clearTimeout: (id) => {
+        if (typeof id === "object" && id !== null) timers.delete(id);
       },
-      clearTimeout: (id) => timers.delete(id),
       ...dependencies,
     },
   });
+  /** @type {Options} */
   const callbacks = {
     authStatus: "unauthenticated",
     canStart: () => true,
     onStart: () => calls.push(["start"]),
     onError: (...args) => calls.push(["error", ...args]),
     onRedirectStarted: () => calls.push(["redirect-started"]),
-    onSettled: (result) => calls.push(["settled", result]),
+    onSettled: (result) => {
+      calls.push(["settled", result]);
+    },
     onPendingSignIn: () => calls.push(["pending-signin"]),
     onSettingsReturn: () => calls.push(["settings-return"]),
     onFeedback: (value) => calls.push(["feedback", value]),
     ...options,
   };
   controller.setOptions(callbacks);
+  /**
+   * @type {import("../src/ui/identity/xAuthFlowController.ts").XAuthFlowSnapshot[]}
+   */
   const snapshots = [];
   controller.subscribe(() => snapshots.push(controller.getSnapshot()));
   if (attach) controller.attach();
@@ -106,23 +126,23 @@ const harness = ({
     pendingListeners,
     feedbackListeners,
     visibilityListeners,
-    setOptions: (next) => {
+    setOptions: (/** @type {Partial<Options>} */ next) => {
       Object.assign(callbacks, next);
       controller.setOptions({ ...callbacks });
     },
-    emitPending: (next) => {
+    emitPending: (/** @type {PendingResult} */ next) => {
       pending = next;
       pendingListeners.forEach((listener) => listener(next));
     },
-    emitFeedback: (next) => {
+    emitFeedback: (/** @type {NonNullable<Feedback>} */ next) => {
       if (feedbackListeners.size === 0) feedback = next;
       else feedbackListeners.forEach((listener) => listener(next));
     },
-    setVisible: (next) => {
+    setVisible: (/** @type {boolean} */ next) => {
       visible = next;
       visibilityListeners.forEach((listener) => listener());
     },
-    fireTimer: (delay) => {
+    fireTimer: (/** @type {number} */ delay) => {
       const entry = [...timers].find(([, value]) => value.delay === delay);
       assert.ok(entry, `expected timer with ${delay}ms delay`);
       timers.delete(entry[0]);
@@ -138,7 +158,7 @@ test("one sign-in action starts one redirect and retains connecting until recove
   await h.controller.start();
   assert.equal(h.controller.getSnapshot().buttonState, "connecting");
   assert.equal(h.calls.filter(([name]) => name === "start").length, 1);
-  intent.resolve({ intentId: "one" });
+  required(intent.resolve)({ intentId: "one" });
   await start;
   await h.controller.start();
   assert.deepEqual(
@@ -162,7 +182,7 @@ test("the caller's start gate prevents any auth work", async () => {
   assert.equal(h.controller.getSnapshot().buttonState, "idle");
 });
 
-for (const source of ["signin", "settings"]) {
+for (const source of /** @type {const} */ (["signin", "settings"])) {
   for (const stage of ["intent", "redirect"]) {
     test(`${source} ${stage} failure preserves error and redirect-attempt metadata`, async () => {
       const error = new Error("cooldown");
@@ -258,7 +278,7 @@ test("pending sign-in becomes retryable after 20 seconds and only retry clears i
 
 test("completion and a newer pending callback invalidate older stale timers", () => {
   const h = harness({ pending: { consentSource: "signin" } });
-  const oldTimer = [...h.timers.values()][0].callback;
+  const oldTimer = required([...h.timers.values()][0]).callback;
   h.emitPending(null);
   assert.equal(h.timers.size, 0);
   oldTimer();
@@ -272,6 +292,7 @@ test("completion and a newer pending callback invalidate older stale timers", ()
 
 for (const feedbackFirst of [true, false]) {
   test(`settings return reopens once with feedback ${feedbackFirst ? "before" : "after"} result clearing`, () => {
+    /** @type {NonNullable<Feedback>} */
     const feedback = { target: "settings", kind: "error", message: "failed" };
     const h = harness({ pending: { consentSource: "settings" } });
     if (feedbackFirst) h.emitFeedback(feedback);
@@ -300,6 +321,7 @@ test("initial settings return is retained if it clears before subscriptions atta
 });
 
 test("strict lifecycle replay consumes initial feedback once and uses current callbacks", () => {
+  /** @type {NonNullable<Feedback>} */
   const feedback = { target: "signin", kind: "error", message: "failed" };
   const h = harness({ feedback });
   h.controller.detach();
@@ -308,6 +330,7 @@ test("strict lifecycle replay consumes initial feedback once and uses current ca
   assert.equal(h.pendingListeners.size, 1);
   assert.equal(h.feedbackListeners.size, 1);
   assert.equal(h.calls.filter(([name]) => name === "feedback").length, 1);
+  /** @type {NonNullable<Feedback>[]} */
   const received = [];
   h.setOptions({ onFeedback: (value) => received.push(value) });
   h.emitFeedback(feedback);
@@ -323,12 +346,12 @@ test("detaching clears pending timers and visibility recovery, including queued 
   h.fireTimer(1500);
   const visibilityCallback = [...h.visibilityListeners][0];
   h.emitPending({ consentSource: "signin" });
-  const timerCallback = [...h.timers.values()][0].callback;
+  const timerCallback = required([...h.timers.values()][0]).callback;
   h.controller.detach();
   assert.equal(h.timers.size, 0);
   assert.equal(h.visibilityListeners.size, 0);
   const before = h.snapshots.length;
-  visibilityCallback();
+  required(visibilityCallback)();
   timerCallback();
   assert.equal(h.snapshots.length, before);
 });
@@ -347,7 +370,7 @@ test("an initiated redirect continues after detach without disturbing a newer ac
   h.controller.detach();
   h.controller.attach();
   const newAction = h.controller.start();
-  oldIntent.resolve({ intentId: "old" });
+  required(oldIntent.resolve)({ intentId: "old" });
   await oldAction;
   assert.equal(h.controller.getSnapshot().buttonState, "connecting");
   assert.deepEqual(
@@ -363,7 +386,7 @@ test("an initiated redirect continues after detach without disturbing a newer ac
     false,
   );
   assert.equal(h.timers.size, 0);
-  newIntent.resolve({ intentId: "new" });
+  required(newIntent.resolve)({ intentId: "new" });
   await newAction;
   assert.deepEqual(
     h.calls.filter(([name]) => name === "redirect"),
@@ -375,6 +398,7 @@ test("an initiated redirect continues after detach without disturbing a newer ac
 });
 
 test("late redirect completion after detach cannot report errors or schedule recovery", async () => {
+  /** @type {PromiseWithResolvers<void>} */
   const redirect = deferred();
   const h = harness({
     dependencies: { startRedirect: () => redirect.promise },
@@ -383,7 +407,7 @@ test("late redirect completion after detach cannot report errors or schedule rec
   await flush();
   h.controller.detach();
   const before = h.calls.length;
-  redirect.reject(redirectStarted);
+  required(redirect.reject)(redirectStarted);
   await action;
   assert.equal(h.calls.length, before);
   assert.equal(h.timers.size, 0);
@@ -394,7 +418,7 @@ test("authentication cancels recovery while an initiated redirect can finish", a
   const h = harness({ dependencies: { beginIntent: () => intent.promise } });
   const action = h.controller.start();
   h.setOptions({ authStatus: "authenticated" });
-  intent.resolve({ intentId: "late" });
+  required(intent.resolve)({ intentId: "late" });
   await action;
   assert.deepEqual(
     h.calls.filter(([name]) => name === "redirect"),
@@ -417,7 +441,7 @@ test("authentication cancels recovery while an initiated redirect can finish", a
 test("a queued recovery from the previous attempt cannot reset a retry", async () => {
   const h = harness();
   await h.controller.start();
-  const oldRecovery = [...h.timers.values()][0].callback;
+  const oldRecovery = required([...h.timers.values()][0]).callback;
   h.fireTimer(1500);
   await h.controller.start();
   oldRecovery();

@@ -1,3 +1,5 @@
+import { inviteDocumentFixture } from "../cloud/workers/api/test/inviteDocumentFixture.ts";
+import { canonicalMatch, required } from "./fixtures/canonicalData.mjs";
 import assert from "node:assert/strict";
 import test from "node:test";
 import { registerHooks } from "node:module";
@@ -34,6 +36,7 @@ function moveSequence() {
     let output;
     if (step === 2) output = game.takeback();
     else {
+      /** @type {import("mons-rules").Input[]} */
       const inputs = [];
       for (let selection = 0; selection < 8; selection++) {
         const preview = game.preview(inputs);
@@ -41,9 +44,10 @@ function moveSequence() {
           output = game.play(inputs);
           break;
         }
+        /** @type {import("mons-rules").Input | undefined} */
         const input =
           preview.kind === "awaiting-start"
-            ? { kind: "position", position: preview.positions[0] }
+            ? { kind: "position", position: required(preview.positions[0]) }
             : preview.kind === "awaiting-input"
               ? preview.options[0]?.input
               : undefined;
@@ -54,42 +58,45 @@ function moveSequence() {
     assert.equal(output?.kind, "complete");
     outputs.push({ moveFen: output.inputFen, fen: game.toFen() });
   }
-  assert.equal(outputs[1].fen, outputs[3].fen);
-  assert.equal(outputs[2].moveFen, "z");
+  assert.equal(required(outputs[1]).fen, required(outputs[3]).fen);
+  assert.equal(required(outputs[2]).moveFen, "z");
   return { initial, outputs, finalFen: game.toFen() };
 }
 
 function harness() {
   const sequence = moveSequence();
+  /** @type {import("../cloud/workers/api/src/matchRecordCodec.ts").MatchDocument} */
   let stored = {
-    ...sequence.initial,
-    gameVariant: "Classic",
-    status: "",
-    timer: "preserved",
-    custom: { marker: 1 },
+    ...canonicalMatch(sequence.initial),
+    sessionCreation: null,
+    reaction: null,
   };
   let revision = 0;
+  /** @type {Map<string, string>} */
   const records = new Map();
+  /** @type {import("../src/connection/moveDelivery.ts").MoveDeliveryStorage} */
   const storage = {
     getItem: (key) => records.get(key) ?? null,
     setItem: (key, value) => records.set(key, value),
     removeItem: (key) => records.delete(key),
   };
+  /** @type {Parameters<typeof submitMove>[2]} */
   const repository = {
     readInviteMetadata: async (inviteId, signal) => {
       assert.equal(inviteId, scope.inviteId);
-      signal.throwIfAborted();
-      return {
+      required(signal).throwIfAborted();
+      return inviteDocumentFixture({
         hostId: scope.playerId,
         guestId: "opponent",
-        hostRematches: "",
-        guestRematches: "",
-      };
+        hostRematches: { state: "open", indices: [] },
+        guestRematches: { state: "open", indices: [] },
+      });
     },
     readProfileOwnershipSnapshot: () => {
       throw new Error("Unexpected linked identity lookup");
     },
   };
+  /** @param {Parameters<typeof submitMove>[1]} request */
   const service = (request) =>
     submitMove({ uid: scope.loginUid }, request, repository, {
       submitCanonical: async (input) => {
@@ -103,16 +110,22 @@ function harness() {
           inviteId: input.inviteId,
           matchId: input.matchId,
           actorUid: input.playerId,
-          outcome: decision.outcome,
           ...(decision.outcome === "superseded"
-            ? { fen: stored.fen, flatMovesString: stored.flatMovesString }
-            : {}),
+            ? {
+                outcome: decision.outcome,
+                fen: stored.fen,
+                flatMovesString: stored.flatMovesString,
+              }
+            : { outcome: decision.outcome }),
         };
       },
     });
   function delivery() {
+    /** @type {Array<{request: Parameters<typeof submitMove>[1], resolve: (value: Awaited<ReturnType<typeof submitMove>>) => void, reject: (error: Error) => void}>} */
     const requests = [];
+    /** @type {Array<{error: Error, kind: "storage" | "paused" | "conflict"}>} */
     const failures = [];
+    /** @type {boolean[]} */
     const advances = [];
     const outbox = new MoveDelivery(
       scope,
@@ -159,10 +172,12 @@ const settled = async () => {
   await setImmediate();
 };
 
+/** @param {MoveDelivery} outbox @param {ReturnType<typeof moveSequence>["outputs"]} outputs */
 function enqueueSequence(outbox, outputs) {
   for (const output of outputs) outbox.enqueue(output.moveFen, output.fen);
 }
 
+/** @param {ReturnType<typeof harness>} h */
 function assertFinalGame(h) {
   const replay = new Game();
   const history = h.stored().flatMovesString;
@@ -170,8 +185,8 @@ function assertFinalGame(h) {
     assert.equal(replay.playFen(action).kind, "complete");
   assert.equal(replay.toFen(), h.finalFen);
   assert.equal(h.stored().fen, h.finalFen);
-  assert.equal(h.stored().timer, "preserved");
-  assert.deepEqual(h.stored().custom, { marker: 1 });
+  assert.deepEqual(h.stored().timer, { state: "idle" });
+  assert.equal(h.stored().schemaVersion, 1);
   assert.deepEqual(
     history.split("-"),
     h.outputs.map((output) => output.moveFen),
@@ -186,14 +201,15 @@ test("actual outbox and API recover missing predecessors and ignore a stale supe
     const completed = client.outbox.flush();
     await settled();
     assert.equal(client.requests.length, 2);
-    const [first, second] = client.requests;
+    const first = required(client.requests[0]);
+    const second = required(client.requests[1]);
     second.resolve(await h.service(second.request));
     await settled();
     assert.equal(client.requests.length, 3);
     assert.equal(client.outbox.hasPendingMoves, true);
     const staleSuperseded = await h.service(first.request);
     assert.equal(staleSuperseded.outcome, "superseded");
-    const latest = client.requests[2];
+    const latest = required(client.requests[2]);
     latest.resolve(await h.service(latest.request));
     await completed;
     first.resolve(staleSuperseded);
@@ -216,7 +232,7 @@ test("reload after a committed response is lost resumes the remaining move and t
   try {
     enqueueSequence(firstClient.outbox, h.outputs);
     await settled();
-    await h.service(firstClient.requests[1].request);
+    await h.service(required(firstClient.requests[1]).request);
     assert.equal(h.records.size, 1);
     firstClient.outbox.pause();
     await settled();
@@ -227,8 +243,11 @@ test("reload after a committed response is lost resumes the remaining move and t
     const completed = secondClient.outbox.flush();
     await settled();
     assert.equal(secondClient.requests.length, 1);
-    const resumed = secondClient.requests[0];
-    assert.equal(resumed.request.previousStates[0].moveCount, 2);
+    const resumed = required(secondClient.requests[0]);
+    assert.equal(
+      required(required(resumed.request.previousStates)[0]).moveCount,
+      2,
+    );
     resumed.resolve(await h.service(resumed.request));
     await completed;
     assert.equal(secondClient.failures.length, 0);

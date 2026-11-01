@@ -85,7 +85,7 @@ export function upcomingEventGuard(
   return guardStatement(
     db,
     `NOT EXISTS (
-       SELECT 1 FROM event_records
+       SELECT 1 FROM event_records_canonical
        WHERE event_id = ? AND status = 'scheduled'
          AND start_at_ms > CAST(
            (julianday('now') - 2440587.5) * 86400000 AS INTEGER
@@ -138,7 +138,7 @@ export async function rethrowEventBatchFailure(
                  )
              )) AS lease_valid,
              (? IS NULL OR EXISTS (
-               SELECT 1 FROM event_records
+               SELECT 1 FROM event_records_canonical
                WHERE event_id = ? AND status = 'scheduled'
                  AND start_at_ms > CAST(
                    (julianday('now') - 2440587.5) * 86400000 AS INTEGER
@@ -191,13 +191,13 @@ export function eventRevisionGuard(
   return expectedRevision === 0
     ? guardStatement(
         db,
-        "EXISTS (SELECT 1 FROM event_records WHERE event_id = ?)",
+        "EXISTS (SELECT 1 FROM event_records_canonical WHERE event_id = ?)",
         [eventId],
       )
     : guardStatement(
         db,
         `NOT EXISTS (
-           SELECT 1 FROM event_records WHERE event_id = ? AND revision = ?
+           SELECT 1 FROM event_records_canonical WHERE event_id = ? AND revision = ?
          )`,
         [eventId, expectedRevision],
       );
@@ -212,7 +212,7 @@ export function eventMutationGuard(
   return guardStatement(
     db,
     `NOT EXISTS (
-       SELECT 1 FROM event_records
+       SELECT 1 FROM event_records_canonical
        WHERE event_id = ? AND revision = ? AND pending_transition_id IS ?
      )`,
     [eventId, state.revision, state.pendingTransitionId],
@@ -228,14 +228,14 @@ export function profileRevisionGuard(
     ? guardStatement(
         db,
         `EXISTS (
-           SELECT 1 FROM profile_event_prize_revisions WHERE profile_id = ?
+           SELECT 1 FROM profile_event_prize_revisions_canonical WHERE profile_id = ?
          )`,
         [profileId],
       )
     : guardStatement(
         db,
         `NOT EXISTS (
-           SELECT 1 FROM profile_event_prize_revisions
+           SELECT 1 FROM profile_event_prize_revisions_canonical
            WHERE profile_id = ? AND revision = ?
          )`,
         [profileId, expectedRevision],
@@ -245,15 +245,15 @@ export function profileRevisionGuard(
 export function recordJsonGuard(
   db: EventD1Connection,
   table:
-    | "event_progress_outboxes"
-    | "event_profile_game_projection_outboxes"
-    | "event_telegram_projection_outboxes",
+    | "event_progress_outboxes_canonical"
+    | "event_profile_game_projection_outboxes_canonical"
+    | "event_telegram_projection_outboxes_canonical",
   recordId: string,
   expected: unknown,
   status?: "dead" | "pending",
 ): D1PreparedStatement {
   const keyColumn =
-    table === "event_progress_outboxes" ? "outbox_id" : "event_id";
+    table === "event_progress_outboxes_canonical" ? "outbox_id" : "event_id";
   const statusPredicate = status ? " AND status = ?" : "";
   const keyValues = status ? [recordId, status] : [recordId];
   return expected === null
@@ -283,11 +283,11 @@ export function progressOutboxSnapshotGuard(
     db,
     snapshot.recordJson === null
       ? `EXISTS (
-           SELECT 1 FROM event_progress_outboxes
+           SELECT 1 FROM event_progress_outboxes_canonical
            WHERE outbox_id = ? AND status = 'pending'
          )`
       : `NOT EXISTS (
-           SELECT 1 FROM event_progress_outboxes
+           SELECT 1 FROM event_progress_outboxes_canonical
            WHERE outbox_id = ? AND status = 'pending' AND record_json = ?
          )`,
     snapshot.recordJson === null
@@ -304,13 +304,13 @@ export function telegramStateRevisionGuard(
   return expectedRevision === 0
     ? guardStatement(
         db,
-        "EXISTS (SELECT 1 FROM event_telegram_projection_state WHERE event_id = ?)",
+        "EXISTS (SELECT 1 FROM event_telegram_projection_state_canonical WHERE event_id = ?)",
         [eventId],
       )
     : guardStatement(
         db,
         `NOT EXISTS (
-           SELECT 1 FROM event_telegram_projection_state
+           SELECT 1 FROM event_telegram_projection_state_canonical
            WHERE event_id = ? AND revision = ?
          )`,
         [eventId, expectedRevision],

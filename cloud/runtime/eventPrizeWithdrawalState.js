@@ -66,6 +66,7 @@ Object.defineProperty(exports, "isWithdrawalRecordForPrize", {
   },
 });
 const solana_1 = require("@mons/shared/solana");
+const event_prizes_1 = require("@mons/shared/event-prizes");
 const EVENT_PRIZE_ADMIN_WALLET = "Ay1mgqJr6WmihsSYdMZ1dkHL5r25N7VhCGk7NpCJcPGi";
 exports.EVENT_PRIZE_ADMIN_WALLET = EVENT_PRIZE_ADMIN_WALLET;
 const WITHDRAWAL_LEASE_MS = 5 * 60 * 1000;
@@ -171,23 +172,26 @@ const buildWithdrawalCompletion = ({
     (0, records_js_1.withdrawalOwnership)(withdrawal).entitledProfileId ||
     (0, records_js_1.withdrawalOwnership)(withdrawal).profileId ||
     profileId;
+  const assetStandard = (0,
+  eventPrizeProjectionState_js_1.getEventPrizeAssetStandard)(eventId, prizeId);
+  if (!(0, event_prizes_1.isEventPrizeStandard)(assetStandard))
+    throw new TypeError("unsupported-withdrawal-standard");
   const completed = (0, records_js_1.writeCompletedWithdrawal)({
     eventId,
     prizeId,
     assetAddress,
-    assetStandard: (0,
-    eventPrizeProjectionState_js_1.getEventPrizeAssetStandard)(
-      eventId,
-      prizeId,
-    ),
+    assetStandard,
     profileId,
     entitledProfileId,
-    place: (0, records_js_1.withdrawalPlace)(withdrawal),
+    place: withdrawal.place,
     recipientAddress,
     requesterUid: (0, records_js_1.withdrawalOwnership)(withdrawal)
       .requesterUid,
     status: "completed",
     transactionSignature,
+    signedTransactionBase64: withdrawal.signedTransactionBase64,
+    blockhash: withdrawal.blockhash,
+    lastValidBlockHeight: withdrawal.lastValidBlockHeight,
     startedAtMs: (0, records_js_1.withdrawalStartedAtForCompletion)(
       withdrawal,
       completedAtMs,
@@ -216,9 +220,7 @@ const decideWithdrawalClaim = ({
   leaseId,
   nowMs,
 }) => {
-  const existing =
-    (0, records_js_1.readWithdrawalDocument)(current) ||
-    (0, records_js_1.readWithdrawalDocument)({});
+  const existing = current;
   const existingProfileId = (0, records_js_1.withdrawalOwnership)(
     existing,
   ).profileId;
@@ -243,17 +245,17 @@ const decideWithdrawalClaim = ({
     canonicalRecordProfileId,
     canonicalRecordSourceProfileId,
   );
-  if ((0, records_js_1.withdrawalStatus)(existing) === "completed") {
+  if (existing?.status === "completed") {
     return recordMatchesPrize && recordOwnedByRequest
       ? { kind: "completed", value: existing }
       : { kind: "forbidden", value: existing };
   }
-  if ((0, records_js_1.withdrawalStatus)(existing) === "blocked") {
+  if (existing?.status === "blocked") {
     return recordMatchesPrize && recordOwnedByRequest
       ? { kind: "blocked", value: existing }
       : { kind: "forbidden", value: existing };
   }
-  if ((0, records_js_1.withdrawalStatus)(existing) === "submitted") {
+  if (existing?.status === "submitted") {
     if (!recordMatchesPrize || !recordOwnedByRequest) {
       return { kind: "forbidden", value: existing };
     }
@@ -261,7 +263,7 @@ const decideWithdrawalClaim = ({
       return { kind: "destination-mismatch", value: existing };
     }
   } else if (
-    (0, records_js_1.withdrawalStatus)(existing) === "processing" &&
+    existing?.status === "processing" &&
     leaseExpiresAtMs > nowMs &&
     existingLeaseId &&
     existingLeaseId !== leaseId
@@ -274,10 +276,14 @@ const decideWithdrawalClaim = ({
       return { kind: "busy", value: existing };
     }
   }
-  const preserveSubmitted =
-    (0, records_js_1.withdrawalStatus)(existing) === "submitted";
+  const preserveSubmitted = existing?.status === "submitted";
   const assetStandard = (0,
   eventPrizeProjectionState_js_1.getEventPrizeAssetStandard)(eventId, prizeId);
+  if (
+    !(0, event_prizes_1.isEventPrizeStandard)(assetStandard) ||
+    (place !== 1 && place !== 2 && place !== 3)
+  )
+    throw new TypeError("invalid-withdrawal-claim");
   const claimed = {
     eventId,
     prizeId,

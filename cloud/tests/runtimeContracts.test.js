@@ -7,10 +7,25 @@ const os = require("node:os");
 const { spawnSync } = require("node:child_process");
 const test = require("node:test");
 
+/** @param {unknown} value @returns {Record<string, unknown>} */
+function object(value) {
+  assert.ok(
+    value !== null && typeof value === "object" && !Array.isArray(value),
+  );
+  return /** @type {Record<string, unknown>} */ (value);
+}
+/** @param {string} source */
+function jsonObject(source) {
+  return object(/** @type {unknown} */ (JSON.parse(source)));
+}
+
 const runtimeDirectory = path.resolve(__dirname, "../runtime");
 const sharedDirectory = path.join(runtimeDirectory, "shared");
 
 const expectedSharedExports = {
+  "./api-errors": "./api-errors.js",
+  "./appearance": "./appearance.js",
+  "./data-contract": "./data-contract.js",
   "./api-contracts": "./api-contracts.js",
   "./auth": "./auth.js",
   "./event-prizes": "./event-prizes.js",
@@ -28,6 +43,7 @@ const expectedSharedExports = {
   "./mining": "./mining.js",
   "./navigation": "./navigation.js",
   "./nfts": "./nfts.js",
+  "./profile-game-projections": "./profile-game-projections.js",
   "./profiles": "./profiles.js",
   "./ratings": "./ratings.js",
   "./reactions": "./reactions.js",
@@ -42,7 +58,7 @@ const expectedSharedExports = {
 };
 
 test("preserves the @mons/shared subpath export map and declarations", () => {
-  const packageJson = JSON.parse(
+  const packageJson = jsonObject(
     fs.readFileSync(path.join(sharedDirectory, "package.json"), "utf8"),
   );
 
@@ -79,17 +95,21 @@ test("keeps standard-specific Solana SDKs out of portable module loading", () =>
 });
 
 test("preserves every portable runtime and shared value export", () => {
-  const expected = JSON.parse(
+  const expected = jsonObject(
     fs.readFileSync(
       path.join(__dirname, "fixtures/runtime-value-exports.json"),
       "utf8",
     ),
   );
   const generatedModules = fs
-    .readdirSync(path.join(runtimeDirectory, "src"), { recursive: true })
+    .readdirSync(path.join(runtimeDirectory, "src"), {
+      recursive: true,
+      encoding: "utf8",
+    })
     .filter((file) => file.endsWith(".ts") && !file.endsWith(".d.ts"))
     .map((file) => file.replace(/\.ts$/, ".js").split(path.sep).join("/"))
     .sort();
+  /** @param {string} directory @param {string} [prefix] @returns {string[]} */
   const generatedFiles = (directory, prefix = "") =>
     fs.readdirSync(directory, { withFileTypes: true }).flatMap((entry) => {
       if (entry.name === "node_modules" || entry.name === "src") return [];
@@ -101,16 +121,19 @@ test("preserves every portable runtime and shared value export", () => {
   assert.deepEqual(Object.keys(expected).sort(), generatedModules);
   assert.deepEqual(generatedFiles(runtimeDirectory).sort(), generatedModules);
   for (const [modulePath, exports] of Object.entries(expected)) {
-    assert.deepEqual(
-      Object.keys(require(path.join(runtimeDirectory, modulePath))).sort(),
-      exports,
-      modulePath,
+    const actual = /** @type {unknown} */ (
+      require(path.join(runtimeDirectory, modulePath))
     );
+    assert.ok(
+      actual !== null &&
+        (typeof actual === "object" || typeof actual === "function"),
+    );
+    assert.deepEqual(Object.keys(actual).sort(), exports, modulePath);
   }
 });
 
 test("preserves event command identities, replacement order, and serialized plans", () => {
-  const fixture = JSON.parse(
+  const fixture = jsonObject(
     fs.readFileSync(
       path.join(__dirname, "fixtures/runtime-wire-compatibility.json"),
       "utf8",
@@ -122,20 +145,32 @@ test("preserves event command identities, replacement order, and serialized plan
     getEventField,
     mergeEventPlans,
   } = require("../runtime/eventCommands");
+  const eventPlan = fixture.eventPlan;
+  assert.ok(Array.isArray(eventPlan));
   assert.deepEqual(
-    fixture.eventPlan.map(eventCommandIdentity),
+    eventPlan.map((/** @type {unknown} */ command) =>
+      Reflect.apply(eventCommandIdentity, undefined, [command]),
+    ),
     fixture.eventCommandIdentities,
   );
   const replacement = eventField("event-é", "status", "ended");
   assert.deepEqual(replacement, fixture.replacement);
-  const merged = mergeEventPlans(fixture.eventPlan, [replacement]);
+  const merged = /** @type {unknown} */ (
+    Reflect.apply(mergeEventPlans, undefined, [eventPlan, [replacement]])
+  );
   assert.equal(JSON.stringify(merged), fixture.mergedPlanJson);
-  assert.equal(getEventField(merged, "event-é", "status"), "ended");
-  assert.equal(getEventField(merged, "missing", "status"), undefined);
+  assert.equal(
+    Reflect.apply(getEventField, undefined, [merged, "event-é", "status"]),
+    "ended",
+  );
+  assert.equal(
+    Reflect.apply(getEventField, undefined, [merged, "missing", "status"]),
+    undefined,
+  );
 });
 
-test("preserves Telegram task identities and stored payloads", () => {
-  const fixture = JSON.parse(
+test("preserves Telegram business hashes while versioning fresh task identities", () => {
+  const fixture = jsonObject(
     fs.readFileSync(
       path.join(__dirname, "fixtures/runtime-wire-compatibility.json"),
       "utf8",
@@ -145,11 +180,19 @@ test("preserves Telegram task identities and stored payloads", () => {
     buildTelegramDeliveryTaskId,
     normalizeTaskPayload,
   } = require("../runtime/telegram/taskIdentity");
-  for (const { payload, taskId } of fixture.telegramTasks) {
+  assert.ok(Array.isArray(fixture.telegramTasks));
+  const tasks = fixture.telegramTasks.map((/** @type {unknown} */ value) => {
+    const row = object(value);
+    const payload = normalizeTaskPayload(row.payload);
+    assert.deepEqual(payload, row.payload);
+    return { payload, taskId: row.taskId };
+  });
+  for (const { payload, taskId } of tasks) {
     assert.equal(buildTelegramDeliveryTaskId(payload), taskId);
     assert.deepEqual(normalizeTaskPayload(payload), payload);
   }
-  const { payload } = fixture.telegramTasks[0];
+  assert.ok(tasks[0]);
+  const { payload } = tasks[0];
   assert.throws(
     () => normalizeTaskPayload({ ...payload, taskKind: "rate-limit-proof" }),
     { message: "complete rate-limit proof is required" },
@@ -201,10 +244,10 @@ assert.equal(events.getEventBracketSize(5), 8);
 assert.equal(events.buildEventMatchKey(2, 3), "2_3");
 assert.equal(require("@mons/shared/usernames").buildUsernameLookupKey(" Player "), "player");
 assert.deepEqual(require("@mons/shared/match-protocol").buildFreshMatchRecord({
-  color: "white", emojiId: 7, aura: null, seed: { gameVariant: "Classic", fen: "seed" },
+  color: "white", emojiId: 7, aura: "none", seed: { gameVariant: "Classic", fen: "seed" },
 }), {
-  version: 2, color: "white", emojiId: 7, aura: null, gameVariant: "Classic", fen: "seed",
-  status: "", flatMovesString: "", timer: "",
+  schemaVersion: 1, version: 2, color: "white", emojiId: 7, aura: "none", gameVariant: "Classic", fen: "seed",
+  status: "active", flatMovesString: "", timer: { state: "idle" },
 });
 for (const filename of fs.readdirSync(packageDirectory, { recursive: true })) {
   const fullPath = path.join(packageDirectory, filename);

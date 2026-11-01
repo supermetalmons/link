@@ -1,3 +1,5 @@
+import { required } from "./fixtures/canonicalData.mjs";
+import { browserServerOrigin } from "./browserViteServer.mjs";
 import assert from "node:assert/strict";
 import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
@@ -5,11 +7,13 @@ import test from "node:test";
 import { createBrowserViteServer } from "./browserViteServer.mjs";
 
 const require = createRequire(import.meta.url);
+/** @type {typeof import("playwright")} */
 const { chromium } = require(process.env.MONS_PLAYWRIGHT_PATH || "playwright");
 const repository = fileURLToPath(new URL("../", import.meta.url));
 const svg =
   '<svg xmlns="http://www.w3.org/2000/svg" width="100" height="120"><rect width="100" height="120" fill="#88aa99"/></svg>';
 
+/** @param {(page: import("playwright").Page, releaseImage: () => void) => Promise<void>} run @param {{delayedPrize?: import("@mons/shared/event-prizes").EventPrizeId, viewport?: {width: number, height: number}}} [options] */
 async function fixture(
   run,
   { delayedPrize, viewport = { width: 1200, height: 900 } } = {},
@@ -48,10 +52,11 @@ async function fixture(
       },
     ],
   });
+  /** @type {import("playwright").Browser | undefined} */
   let browser;
   try {
     await server.listen();
-    const origin = `http://127.0.0.1:${server.httpServer.address().port}`;
+    const origin = browserServerOrigin(server);
     browser = await chromium.launch({
       headless: true,
       ...(process.env.MONS_BROWSER_EXECUTABLE
@@ -60,12 +65,13 @@ async function fixture(
     });
     const page = await browser.newPage({ viewport });
     page.setDefaultTimeout(10000);
+    /** @type {string[]} */
     const errors = [];
     page.on("pageerror", (error) => errors.push(error.message));
-    let releaseImage;
-    const imageGate = new Promise((resolve) => {
-      releaseImage = resolve;
-    });
+    /** @type {PromiseWithResolvers<void>} */
+    const image = Promise.withResolvers();
+    const imageGate = image.promise,
+      releaseImage = image.resolve;
     await page.route("**/*", async (route) => {
       const url = new URL(route.request().url());
       if (url.pathname.startsWith("/__prize/") || url.origin !== origin) {
@@ -80,9 +86,11 @@ async function fixture(
     await page.goto(`${origin}/__event-prizes`, {
       waitUntil: "domcontentloaded",
     });
-    await page.waitForFunction(() => !!window.harness);
+    await page.waitForFunction(() => !!window.eventPrizeSelectionHarness);
     await page.waitForFunction(
-      (count) => window.harness.snapshot().loadedImageIds.length === count,
+      (count) =>
+        window.eventPrizeSelectionHarness.snapshot().loadedImageIds.length ===
+        count,
       delayedPrize ? 2 : 3,
     );
     await run(page, releaseImage);
@@ -93,9 +101,13 @@ async function fixture(
   }
 }
 
-const snapshot = (page) => page.evaluate(() => window.harness.snapshot());
+/** @param {import("playwright").Page} page */
+const snapshot = (page) =>
+  page.evaluate(() => window.eventPrizeSelectionHarness.snapshot());
+/** @param {import("playwright").Page} page @param {import("@mons/shared/event-prizes").EventPrizeId} id */
 const prizeButton = (page, id) =>
   page.locator(`button:has(> img[src="/__prize/${id}.svg"])`);
+/** @param {import("playwright").Page} page */
 const row = (page) =>
   page.getByRole("group", { name: "Event prizes", exact: true });
 
@@ -115,7 +127,9 @@ test(
       );
 
       assert.equal(
-        await page.evaluate(() => window.harness.toggleImmediately("1111")),
+        await page.evaluate(() =>
+          window.eventPrizeSelectionHarness.toggleImmediately("1111"),
+        ),
         true,
       );
       assert.equal(await row(page).getAttribute("aria-busy"), "true");
@@ -123,17 +137,26 @@ test(
       await prizeButton(page, "1514").click();
       assert.deepEqual((await snapshot(page)).selections, { p1: "1514" });
       assert.equal((await snapshot(page)).mutations.length, 1);
-      await page.evaluate(() => window.harness.settle(0, "1111"));
-      assert.equal((await snapshot(page)).mutations[1].prizeId, "1514");
+      await page.evaluate(() =>
+        window.eventPrizeSelectionHarness.settle(0, "1111"),
+      );
+      assert.equal(
+        required((await snapshot(page)).mutations[1]).prizeId,
+        "1514",
+      );
       assert.equal((await snapshot(page)).isPending, true);
-      await page.evaluate(() => window.harness.settle(1, "1514"));
+      await page.evaluate(() =>
+        window.eventPrizeSelectionHarness.settle(1, "1514"),
+      );
       assert.equal((await snapshot(page)).isPending, false);
       await prizeButton(page, "1514").click();
       assert.deepEqual((await snapshot(page)).selections, {});
-      await page.evaluate(() => window.harness.settle(2, null));
+      await page.evaluate(() =>
+        window.eventPrizeSelectionHarness.settle(2, null),
+      );
       await prizeButton(page, "1092").click();
       await page.evaluate(() =>
-        window.harness.settle(3, null, "request failed"),
+        window.eventPrizeSelectionHarness.settle(3, null, "request failed"),
       );
       assert.deepEqual((await snapshot(page)).selections, {});
       assert.equal(await row(page).getAttribute("aria-busy"), null);
@@ -152,7 +175,8 @@ test(
       assert.equal(artwork.length, 3);
       for (const currentProfileId of ["p2", "", "p1"]) {
         await page.evaluate(
-          (currentProfileId) => window.harness.setView({ currentProfileId }),
+          (currentProfileId) =>
+            window.eventPrizeSelectionHarness.setView({ currentProfileId }),
           currentProfileId,
         );
         assert.equal((await snapshot(page)).loadedImageIds.length, 3);
@@ -167,7 +191,7 @@ test(
           true,
         );
         await page.evaluate(() =>
-          window.harness.emit({ p1: "1092", p2: "1111" }),
+          window.eventPrizeSelectionHarness.emit({ p1: "1092", p2: "1111" }),
         );
         assert.equal(
           await page
@@ -178,7 +202,11 @@ test(
         for (const image of artwork) {
           assert.equal(
             await image.evaluate(
-              (img) => img.isConnected && img.complete && img.naturalWidth > 0,
+              (img) =>
+                img instanceof HTMLImageElement &&
+                img.isConnected &&
+                img.complete &&
+                img.naturalWidth > 0,
             ),
             true,
           );
@@ -196,26 +224,41 @@ test(
       const oldIndex = (await snapshot(page)).subscriptions.findIndex(
         (s) => s.active,
       );
-      await page.evaluate(() => window.harness.toggleImmediately("1111"));
-      await page.evaluate(() => window.harness.setView({ otherEvent: true }));
+      await page.evaluate(() =>
+        window.eventPrizeSelectionHarness.toggleImmediately("1111"),
+      );
+      await page.evaluate(() =>
+        window.eventPrizeSelectionHarness.setView({ otherEvent: true }),
+      );
       await page.evaluate(
-        (index) => window.harness.emit({ p2: "1514" }, index),
+        (index) =>
+          window.eventPrizeSelectionHarness.emit({ p2: "1514" }, index),
         oldIndex,
       );
-      await page.evaluate(() => window.harness.settle(0, "1111"));
+      await page.evaluate(() =>
+        window.eventPrizeSelectionHarness.settle(0, "1111"),
+      );
       assert.deepEqual((await snapshot(page)).selections, { p1: "1092" });
       assert.equal((await snapshot(page)).isPending, false);
       await page.evaluate(() =>
-        window.harness.setView({ currentProfileId: "", canSelect: false }),
+        window.eventPrizeSelectionHarness.setView({
+          currentProfileId: "",
+          canSelect: false,
+        }),
       );
-      await page.evaluate(() => window.harness.emit({ p2: "1111" }));
+      await page.evaluate(() =>
+        window.eventPrizeSelectionHarness.emit({ p2: "1111" }),
+      );
       assert.deepEqual((await snapshot(page)).selections, { p2: "1111" });
       const anonymousIndex = (await snapshot(page)).subscriptions.findIndex(
         (s) => s.active,
       );
-      await page.evaluate(() => window.harness.setView({ isOpen: false }));
+      await page.evaluate(() =>
+        window.eventPrizeSelectionHarness.setView({ isOpen: false }),
+      );
       await page.evaluate(
-        (index) => window.harness.emit({ p3: "1514" }, index),
+        (index) =>
+          window.eventPrizeSelectionHarness.emit({ p3: "1514" }, index),
         anonymousIndex,
       );
       assert.deepEqual((await snapshot(page)).selections, {});
@@ -224,13 +267,16 @@ test(
         0,
       );
       await page.evaluate(() =>
-        window.harness.setView({ isOpen: true, currentProfileId: "p2" }),
+        window.eventPrizeSelectionHarness.setView({
+          isOpen: true,
+          currentProfileId: "p2",
+        }),
       );
       assert.equal(
         (await snapshot(page)).subscriptions.filter((s) => s.active).length,
         1,
       );
-      await page.evaluate(() => window.harness.dispose());
+      await page.evaluate(() => window.eventPrizeSelectionHarness.dispose());
       assert.equal(
         (await snapshot(page)).subscriptions.filter((s) => s.active).length,
         0,
@@ -245,46 +291,64 @@ test(
   { timeout: 60000 },
   async () => {
     await fixture(async (page) => {
-      await page.evaluate(() => window.harness.emit({ p1: "1111" }));
+      await page.evaluate(() =>
+        window.eventPrizeSelectionHarness.emit({ p1: "1111" }),
+      );
       assert.ok(
-        (await snapshot(page)).motions.some(
-          (motion) =>
+        (await snapshot(page)).motions.some((motion) => {
+          if (!Array.isArray(motion.frames)) return false;
+          const first = motion.frames[0],
+            last = motion.frames[1];
+          return (
             motion.target === "Open Player 1" &&
-            motion.frames[0].transform.startsWith("translate(") &&
-            motion.frames[1].transform === "translate(0, 0)",
-        ),
+            typeof first?.transform === "string" &&
+            first.transform.startsWith("translate(") &&
+            last?.transform === "translate(0, 0)"
+          );
+        }),
       );
-      await page.evaluate(() => window.harness.emit({}));
+      await page.evaluate(() => window.eventPrizeSelectionHarness.emit({}));
       assert.equal((await snapshot(page)).exitClones, 1);
-      await page.evaluate(() => window.harness.finishAnimations());
+      await page.evaluate(() =>
+        window.eventPrizeSelectionHarness.finishAnimations(),
+      );
       await page.waitForFunction(
-        () => window.harness.snapshot().exitClones === 0,
+        () => window.eventPrizeSelectionHarness.snapshot().exitClones === 0,
       );
-      await page.evaluate(() => window.harness.emit({ p1: "1111" }));
-      await page.evaluate(() => window.harness.emit({}));
+      await page.evaluate(() =>
+        window.eventPrizeSelectionHarness.emit({ p1: "1111" }),
+      );
+      await page.evaluate(() => window.eventPrizeSelectionHarness.emit({}));
       assert.equal((await snapshot(page)).exitClones, 1);
-      await page.evaluate(() => window.harness.setView({ concealed: true }));
+      await page.evaluate(() =>
+        window.eventPrizeSelectionHarness.setView({ concealed: true }),
+      );
       assert.equal((await snapshot(page)).exitClones, 0);
       await page.emulateMedia({ reducedMotion: "reduce" });
       await page.evaluate(() => {
-        window.harness.clearMotions();
-        window.harness.setView({ concealed: false });
-        window.harness.emit({ p2: "1092" });
-        window.harness.emit({ p2: "1111" });
-        window.harness.emit({});
+        window.eventPrizeSelectionHarness.clearMotions();
+        window.eventPrizeSelectionHarness.setView({ concealed: false });
+        window.eventPrizeSelectionHarness.emit({ p2: "1092" });
+        window.eventPrizeSelectionHarness.emit({ p2: "1111" });
+        window.eventPrizeSelectionHarness.emit({});
       });
       assert.deepEqual((await snapshot(page)).motions, []);
       await page.emulateMedia({ reducedMotion: "no-preference" });
-      await page.evaluate(() => window.harness.emit({ p2: "1092" }));
-      await page.evaluate(() => window.harness.emit({}));
+      await page.evaluate(() =>
+        window.eventPrizeSelectionHarness.emit({ p2: "1092" }),
+      );
+      await page.evaluate(() => window.eventPrizeSelectionHarness.emit({}));
       assert.equal((await snapshot(page)).exitClones, 1);
-      await page.evaluate(() => window.harness.setView({ isOpen: false }));
+      await page.evaluate(() =>
+        window.eventPrizeSelectionHarness.setView({ isOpen: false }),
+      );
       assert.equal((await snapshot(page)).exitClones, 0);
       await page.evaluate(() => {
-        Element.prototype.animate = undefined;
-        window.harness.setView({ isOpen: true });
-        window.harness.emit({ p3: "1111" });
-        window.harness.emit({});
+        if (!Reflect.set(Element.prototype, "animate", undefined))
+          throw new Error("fixture-animation-disable-failed");
+        window.eventPrizeSelectionHarness.setView({ isOpen: true });
+        window.eventPrizeSelectionHarness.emit({ p3: "1111" });
+        window.eventPrizeSelectionHarness.emit({});
       });
       assert.equal((await snapshot(page)).exitClones, 0);
     });
@@ -298,7 +362,11 @@ test(
     await fixture(
       async (page, releaseImage) => {
         await page.evaluate(() =>
-          window.harness.emit({ p1: "1092", p2: "1111", p8: "1514" }),
+          window.eventPrizeSelectionHarness.emit({
+            p1: "1092",
+            p2: "1111",
+            p8: "1514",
+          }),
         );
         assert.equal(
           await page
@@ -311,7 +379,7 @@ test(
           .getByRole("button", { name: "Open Player 2", exact: true })
           .waitFor();
         await page.evaluate(() =>
-          window.harness.setView({ participantCount: 8 }),
+          window.eventPrizeSelectionHarness.setView({ participantCount: 8 }),
         );
         await page
           .getByRole("button", { name: "Open Player 8", exact: true })
@@ -322,8 +390,9 @@ test(
             motions.some(
               (motion) =>
                 motion.target === name &&
-                motion.frames[0].opacity === 0 &&
-                motion.frames[1].opacity === 1,
+                Array.isArray(motion.frames) &&
+                motion.frames[0]?.opacity === 0 &&
+                motion.frames[1]?.opacity === 1,
             ),
           );
         }
@@ -342,15 +411,17 @@ test(
   { timeout: 60000 },
   async () => {
     await fixture(async (page) => {
-      for (const [count, gap, margin] of [
+      /** @type {[number, string, string][]} */
+      const densityCases = [
         [3, "4px", "0px"],
         [4, "1px", "-4px"],
         [6, "1px", "-4px"],
         [7, "0px", "-8px"],
-      ]) {
+      ];
+      for (const [count, gap, margin] of densityCases) {
         await page.evaluate(
           (count) =>
-            window.harness.emit(
+            window.eventPrizeSelectionHarness.emit(
               Object.fromEntries(
                 Array.from({ length: count }, (_, i) => [`p${i + 1}`, "1092"]),
               ),
@@ -370,18 +441,22 @@ test(
           margin,
         );
       }
-      const before = await row(page).boundingBox();
+      const before = required(await row(page).boundingBox());
       await page.setViewportSize({ width: 360, height: 740 });
-      const after = await row(page).boundingBox();
+      const after = required(await row(page).boundingBox());
       assert.ok(before.width > 0 && after.width > 0 && after.width <= 360);
       const artwork = await prizeButton(page, "1092")
         .locator("img")
-        .evaluate((img) => ({
-          width: img.width,
-          height: img.height,
-          declaredWidth: Number(img.getAttribute("width")),
-          declaredHeight: Number(img.getAttribute("height")),
-        }));
+        .evaluate((img) => {
+          if (!(img instanceof HTMLImageElement))
+            throw new Error("fixture-prize-image-missing");
+          return {
+            width: img.width,
+            height: img.height,
+            declaredWidth: Number(img.getAttribute("width")),
+            declaredHeight: Number(img.getAttribute("height")),
+          };
+        });
       assert.ok(artwork.declaredWidth > 0 && artwork.declaredHeight > 0);
       assert.ok(
         Math.abs(
@@ -389,7 +464,9 @@ test(
             artwork.declaredWidth / artwork.declaredHeight,
         ) < 0.03,
       );
-      await page.evaluate(() => window.harness.setView({ concealed: true }));
+      await page.evaluate(() =>
+        window.eventPrizeSelectionHarness.setView({ concealed: true }),
+      );
       assert.equal(
         await page
           .getByRole("button", {
@@ -410,10 +487,15 @@ test(
         7,
       );
       await page.evaluate(() =>
-        window.harness.setView({ concealed: false, canSelect: false }),
+        window.eventPrizeSelectionHarness.setView({
+          concealed: false,
+          canSelect: false,
+        }),
       );
       assert.equal(await prizeButton(page, "1092").isDisabled(), true);
-      await page.evaluate(() => window.harness.setView({ ended: true }));
+      await page.evaluate(() =>
+        window.eventPrizeSelectionHarness.setView({ ended: true }),
+      );
       assert.equal(
         await page.getByRole("group", { name: /^Selected by/ }).count(),
         0,
@@ -438,12 +520,16 @@ test(
         { width: 360, height: 740 },
       ]) {
         await page.setViewportSize(viewport);
-        for (const colorScheme of ["light", "dark"]) {
+        /** @type {("light" | "dark")[]} */
+        const colorSchemes = ["light", "dark"];
+        for (const colorScheme of colorSchemes) {
           await page.emulateMedia({ colorScheme });
           await page.evaluate(() =>
-            window.harness.setView({ concealed: true }),
+            window.eventPrizeSelectionHarness.setView({ concealed: true }),
           );
           const presentation = await image.evaluate((img) => {
+            if (!(img instanceof HTMLImageElement) || !img.parentElement)
+              throw new Error("fixture-prize-image-missing");
             const style = getComputedStyle(img);
             const filterId = style.filter.match(/#([^"')]+)["']?\)$/)?.[1];
             const imageBounds = img.getBoundingClientRect();
@@ -491,10 +577,12 @@ test(
               canvas.width = screenshot.naturalWidth;
               canvas.height = screenshot.naturalHeight;
               const context = canvas.getContext("2d");
+              if (!context) throw new Error("fixture-canvas-context-missing");
               context.drawImage(screenshot, 0, 0);
               const centerX = Math.floor(canvas.width / 2);
               const centerY = Math.floor(canvas.height / 2);
-              return [
+              /** @type {[number, number][]} */
+              const coordinates = [
                 [centerX, centerY],
                 [3, centerY],
                 [canvas.width - 4, centerY],
@@ -502,7 +590,8 @@ test(
                 [centerX, canvas.height - 4],
                 [8, 8],
                 [canvas.width - 9, canvas.height - 9],
-              ].map(([x, y]) => ({
+              ];
+              return coordinates.map(([x, y]) => ({
                 x,
                 y,
                 rgb: [...context.getImageData(x, y, 1, 1).data].slice(0, 3),
@@ -514,22 +603,26 @@ test(
             assert.ok(
               sample.rgb.every(
                 (channel, index) =>
-                  Math.abs(channel - [136, 170, 153][index]) <= 6,
+                  Math.abs(channel - required([136, 170, 153][index])) <= 6,
               ),
               `${colorScheme} ${viewport.width}px at ${sample.x},${sample.y}: ${sample.rgb}`,
             );
           }
           await page.evaluate(() =>
-            window.harness.setView({ concealed: false }),
+            window.eventPrizeSelectionHarness.setView({ concealed: false }),
           );
-          const revealed = await image.evaluate((img) => ({
-            filter: getComputedStyle(img).filter,
-            transform: getComputedStyle(img).transform,
-            width: img.width,
-            height: img.height,
-            declaredWidth: Number(img.getAttribute("width")),
-            declaredHeight: Number(img.getAttribute("height")),
-          }));
+          const revealed = await image.evaluate((img) => {
+            if (!(img instanceof HTMLImageElement))
+              throw new Error("fixture-prize-image-missing");
+            return {
+              filter: getComputedStyle(img).filter,
+              transform: getComputedStyle(img).transform,
+              width: img.width,
+              height: img.height,
+              declaredWidth: Number(img.getAttribute("width")),
+              declaredHeight: Number(img.getAttribute("height")),
+            };
+          });
           assert.equal(revealed.filter, "none");
           assert.equal(revealed.transform, "none");
           assert.ok(
@@ -549,10 +642,12 @@ test(
   { timeout: 60000 },
   async () => {
     await fixture(async (page) => {
-      await page.evaluate(() => window.harness.mountModal());
+      await page.evaluate(() => window.eventPrizeSelectionHarness.mountModal());
       await row(page).waitFor();
       assert.equal(await row(page).locator("img").count(), 3);
-      await page.evaluate(() => window.harness.finishEvent());
+      await page.evaluate(() =>
+        window.eventPrizeSelectionHarness.finishEvent(),
+      );
       await page.waitForFunction(
         () => !document.querySelector('[aria-label="Event prizes"]'),
       );
@@ -576,7 +671,7 @@ test(
         );
         assert.equal(await awards.locator("img").count(), 4);
       }
-      await page.evaluate(() => window.harness.closeModal());
+      await page.evaluate(() => window.eventPrizeSelectionHarness.closeModal());
       assert.equal(await awards.count(), 0);
       assert.equal(
         (await snapshot(page)).subscriptions.filter((s) => s.active).length,

@@ -1,39 +1,34 @@
+import type { AutomatchD1StoreOptions } from "./options.ts";
+import {
+  parseAutomatchRecord,
+  type AutomatchRecordMap,
+} from "../../../../runtime/automatchRecords.js";
 import type { GameSessionChange } from "../gameSessionContracts.ts";
 import type {
   TransactionDecision,
   TransactionResult,
 } from "../repositoryContracts.ts";
-import { validateTelegramTransactionDecision } from "../telegramTransaction.ts";
 import { runOptimisticTransaction } from "../optimisticTransaction.ts";
 import {
   AutomatchD1Failure,
   type AutomatchRecordMutation,
-  type RetainedAutomatchMutationBatch,
   type AutomatchRoot,
-  type AutomatchD1StoreOptions,
 } from "./types.ts";
 import {
   encodeValue,
-  retainAutomatchMutation,
+  createAutomatchMutation,
   isAutomatchRevisionConflict,
-  nestedValue,
   requireKey,
   requireRoot,
-  resolveAutomatchServerValues,
-  setNested,
   timestamp,
 } from "./codec.ts";
+import {
+  resolveSessionCounter,
+  resolveSessionTimestamp,
+} from "../sessionValueOperations.ts";
 import type { createAutomatchReads } from "./reads.ts";
 
-type MutationEvidence = {
-  current: {
-    root: AutomatchRoot;
-    key: string;
-    value: unknown;
-    revision: number;
-  };
-  value: unknown;
-};
+type MutationEvidence = AutomatchRecordMutation;
 
 export function createAutomatchMutations(
   db: D1Database,
@@ -77,6 +72,7 @@ export function createAutomatchMutations(
       ) {
         throw new TypeError("invalid-automatch-revision");
       }
+      parseAutomatchRecord(current.root, value);
       encodeValue(value);
       return db
         .prepare(
@@ -122,14 +118,6 @@ export function createAutomatchMutations(
     nowMs = now(),
   ) {
     return commitStatements(mutations, nowMs);
-  }
-
-  function buildRetainedCommitStatements(
-    mutations: RetainedAutomatchMutationBatch,
-    nowMs: number,
-  ): D1PreparedStatement[] {
-    const evidence: unknown = mutations;
-    return commitStatements(evidence as readonly MutationEvidence[], nowMs);
   }
 
   async function commit(
@@ -193,101 +181,178 @@ export function createAutomatchMutations(
     const entries = [...groups.values()];
     const snapshots = await readMutationRecords(entries, signal);
     return entries.map(({ root, changes }, index) => {
-      const current = snapshots[index];
+      const current = snapshots[index]!;
       let value: unknown = current.value;
-      for (const change of changes) {
+      for (const planned of changes) {
+        const change = structuredClone(planned);
         if (change.kind === "mutation-receipt") {
-          value = resolveAutomatchServerValues(
+          const receipt =
             root === "gameplayMutationReceipts"
               ? change.value
-              : change.expiration,
-            current.value,
-            nowMs,
+              : change.expiration;
+          value = {
+            ...receipt,
+            completedAtMs: resolveSessionTimestamp(
+              receipt.completedAtMs,
+              nowMs,
+            ),
+          };
+        } else if (change.kind === "profile-outbox-merge") {
+          const previous = parseAutomatchRecord(
+            "profileGameProjectionOutbox/automatch",
+            value,
           );
-        } else if (
-          change.kind === "telegram-source-merge" ||
-          change.kind === "profile-outbox-merge"
-        ) {
-          for (const [field, next] of Object.entries(change.value)) {
-            requireKey(field);
-            value = setNested(
-              value,
-              [field],
-              resolveAutomatchServerValues(
-                next,
-                nestedValue(current.value, [field]),
+          const metadata = parseAutomatchRecord(
+            "profileGameProjectionOutbox/automatch",
+            {
+              ...change.value,
+              sourceUpdatedAtMs: resolveSessionTimestamp(
+                change.value.sourceUpdatedAtMs,
                 nowMs,
               ),
-            );
-          }
-          if (change.kind === "profile-outbox-merge")
-            for (const [matchId, next] of Object.entries(
-              change.historicalMatches || {},
-            )) {
-              requireKey(matchId);
-              value = setNested(
-                value,
-                ["historicalMatches", matchId],
-                resolveAutomatchServerValues(
-                  next,
-                  nestedValue(current.value, ["historicalMatches", matchId]),
-                  nowMs,
-                ),
-              );
-            }
-        } else if (
-          change.kind === "automatch-entry" ||
-          change.kind === "telegram-source" ||
-          change.kind === "telegram-outbox" ||
-          change.kind === "profile-outbox"
-        ) {
-          value = resolveAutomatchServerValues(
-            change.value,
-            current.value,
-            nowMs,
+              lastQueuedAtMs: resolveSessionTimestamp(
+                change.value.lastQueuedAtMs,
+                nowMs,
+              ),
+            },
           );
+          if (metadata?.status !== "pending")
+            throw new TypeError("invalid-profile-projection-request");
+          const pending = previous?.status === "pending" ? previous : null;
+          const historicalMatches = {
+            ...pending?.historicalMatches,
+            ...change.value.historicalMatches,
+            ...change.historicalMatches,
+          };
+          for (const [matchId, descriptor] of Object.entries(
+            historicalMatches,
+          )) {
+            const existing = pending?.historicalMatches[matchId];
+            if (
+              existing &&
+              existing.hostPlayerId === descriptor.hostPlayerId &&
+              existing.guestPlayerId === descriptor.guestPlayerId &&
+              existing.finalizedAtMs === descriptor.finalizedAtMs &&
+              existing.source === descriptor.source &&
+              existing.retryNotBeforeMs !== null &&
+              descriptor.retryNotBeforeMs === null
+            )
+              historicalMatches[matchId] = {
+                ...descriptor,
+                retryNotBeforeMs: existing.retryNotBeforeMs,
+              };
+          }
+          value = {
+            ...metadata,
+            historicalMatches,
+            archiveRetry:
+              pending?.requestId === change.value.requestId
+                ? pending.archiveRetry
+                : null,
+          };
+        } else if (change.kind === "telegram-source-merge") {
+          const previous = parseAutomatchRecord("telegramAutomatches", value);
+          value = {
+            ...previous,
+            ...change.value,
+            ...(change.value.updatedAtMs === undefined
+              ? {}
+              : {
+                  updatedAtMs: resolveSessionTimestamp(
+                    change.value.updatedAtMs,
+                    nowMs,
+                  ),
+                }),
+            ...(change.value.generation === undefined
+              ? {}
+              : {
+                  generation: resolveSessionCounter(
+                    change.value.generation,
+                    parseAutomatchRecord("telegramAutomatches", current.value)
+                      ?.generation,
+                  ),
+                }),
+          };
+        } else if (change.kind === "automatch-entry") {
+          value =
+            change.value === null
+              ? null
+              : {
+                  ...change.value,
+                  timestamp: resolveSessionTimestamp(
+                    change.value.timestamp,
+                    nowMs,
+                  ),
+                };
+        } else if (change.kind === "telegram-source") {
+          value = {
+            ...change.value,
+            createdAtMs: resolveSessionTimestamp(
+              change.value.createdAtMs,
+              nowMs,
+            ),
+            updatedAtMs: resolveSessionTimestamp(
+              change.value.updatedAtMs,
+              nowMs,
+            ),
+          };
+        } else if (change.kind === "telegram-outbox") {
+          value =
+            change.value === null
+              ? null
+              : {
+                  ...change.value,
+                  updatedAtMs: resolveSessionTimestamp(
+                    change.value.updatedAtMs,
+                    nowMs,
+                  ),
+                };
+        } else if (change.kind === "profile-outbox") {
+          value =
+            change.value === null
+              ? null
+              : {
+                  ...change.value,
+                  sourceUpdatedAtMs: resolveSessionTimestamp(
+                    change.value.sourceUpdatedAtMs,
+                    nowMs,
+                  ),
+                  lastQueuedAtMs: resolveSessionTimestamp(
+                    change.value.lastQueuedAtMs,
+                    nowMs,
+                  ),
+                };
         }
       }
-      return retainAutomatchMutation(current, value);
+      return createAutomatchMutation(current, value);
     });
   }
 
-  async function transactRecord(
-    root: AutomatchRoot,
+  async function transactRecord<Root extends AutomatchRoot>(
+    root: Root,
     key: string,
-    update: (current: unknown) => TransactionDecision<unknown>,
+    update: (
+      current: AutomatchRecordMap[Root] | null,
+    ) => TransactionDecision<AutomatchRecordMap[Root]>,
     signal?: AbortSignal,
-  ): Promise<TransactionResult<unknown>> {
-    const nowMs = now();
+  ): Promise<TransactionResult<AutomatchRecordMap[Root]>> {
     return runOptimisticTransaction({
       maxAttempts: 25,
-      async read() {
-        const current = await read(root, key, signal);
-        return { record: current.value as unknown, version: current.revision };
-      },
-      getValue: (current) => current.record,
+      read: () => read(root, key, signal),
+      getValue: (current) => current.value,
       decide(current) {
-        const decision = validateTelegramTransactionDecision(
-          update(structuredClone(current)),
-        );
-        return decision.commit
-          ? { value: decision.value, decision: decision.decision }
-          : { commit: false, decision: decision.decision };
+        const decision = update(structuredClone(current));
+        return "commit" in decision
+          ? decision
+          : { ...decision, value: parseAutomatchRecord(root, decision.value) };
       },
       async write(current, next) {
-        const snapshot = {
-          root,
-          key,
-          value: current.record,
-          revision: current.version,
-        } as Awaited<ReturnType<typeof read>>;
-        const value = resolveAutomatchServerValues(next, snapshot.value, nowMs);
         return {
           applied: await commit(
-            [retainAutomatchMutation(snapshot, value)],
+            [createAutomatchMutation(current, next)],
             signal,
           ),
-          value,
+          value: next,
         };
       },
       conflictError: () =>
@@ -315,17 +380,17 @@ export function createAutomatchMutations(
       backendGuard(),
       db
         .prepare(
-          `UPDATE game_session_mutation_receipts
+          `UPDATE game_session_mutation_receipts_canonical
            SET payload_json = NULL, revision = revision + 1,
              expiration_json = NULL, expiration_revision = expiration_revision + 1,
              updated_at_ms = MAX(updated_at_ms, ?)
            WHERE record_key IN (
-             SELECT receipt.record_key FROM game_session_mutation_receipts AS receipt
+             SELECT receipt.record_key FROM game_session_mutation_receipts_canonical AS receipt
              WHERE expiration_json IS NOT NULL
                AND json_type(expiration_json, '$.completedAtMs') IN ('integer', 'real')
                AND json_extract(expiration_json, '$.completedAtMs') <= ?
                AND NOT EXISTS (
-                 SELECT 1 FROM game_session_transition_resources AS resource
+                 SELECT 1 FROM game_session_transition_resources_canonical AS resource
                  WHERE resource.resource_key = 'gameplay-operation:' || receipt.record_key
                )
              ORDER BY json_extract(expiration_json, '$.completedAtMs'), record_key
@@ -334,14 +399,13 @@ export function createAutomatchMutations(
         )
         .bind(timestamp(now()), cutoffMs, limit),
     ]);
-    return results[results.length - 1].results.length;
+    return results[results.length - 1]!.results.length;
   }
 
   return {
     buildWriteGuardStatements,
     buildRevisionGuardStatements,
     buildCommitStatements,
-    buildRetainedCommitStatements,
     commit,
     prepareChanges,
     transactRecord,

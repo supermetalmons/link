@@ -1,23 +1,27 @@
+import { applyCanonicalTestMigrations } from "./canonicalTestMigrations.ts";
+import { agreedWagerFixture } from "../test/wagerRecordFixture.ts";
+import { createDefaultProfileAppearance } from "@mons/shared/appearance";
+import {
+  createEmptyRatingPayload,
+  parseStoredGameplayEmoji,
+} from "../src/profileCanonical/contracts.ts";
+import { eventDocumentFixture } from "../test/eventCompatibilityFixture.ts";
+import { ratingProfileFromSnapshot } from "../src/ratingCanonical/codec.ts";
 import { retainedFixtureFields } from "../test/profileDataBoundaryFixture.ts";
 import { ratingPayloadFixture } from "../test/profileDataBoundaryFixture.ts";
-import { materializeProfileCompatibility as materializeCanonicalProfile } from "../test/profileDataBoundaryFixture.ts";
-import { profileLegacyFixture } from "../test/profileDataBoundaryFixture.ts";
+import { materializeProfileFixture as materializeCanonicalProfile } from "../test/profileDataBoundaryFixture.ts";
 import { retainedInviteSourceFixture } from "../test/inviteDocumentFixture.ts";
 import type { CompletePlayerProfile } from "@mons/shared/profiles";
-import { applyD1Migrations, type D1Migration } from "cloudflare:test";
+import type { D1Migration } from "cloudflare:test";
 import { env } from "cloudflare:workers";
 import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { loadEndedMatchResults } from "../../../runtime/telegram/eventProjectionCore.js";
 import { decodeAutomatchEntry } from "../../../runtime/automatchRecords.js";
 import { ProfileWritesDisabledFailure } from "../src/authErrors.ts";
 import { createEventProgressOutboxWriter } from "../src/eventRepository.ts";
-import {
-  canonicalProfileFields,
-  createCanonicalGameplayRepository,
-} from "../src/gameplayCanonicalRepository.ts";
+import { createCanonicalGameplayRepository } from "../src/gameplayCanonicalRepository.ts";
 import { createGameplayRepository } from "../src/gameplayRepository.ts";
 import { GameplayRepositoryFailure } from "../src/gameplayRepositoryPolicy.ts";
-import { createMiningRepository } from "../src/miningRepository.ts";
 import {
   CanonicalProfileConflict,
   CanonicalProfileCorruption,
@@ -159,7 +163,7 @@ type ObservedProfileWrite = { query: string; bindings: unknown[] };
 
 async function readRawProfileRow(profileId: string) {
   const row = await testEnv.PROFILE_DB.prepare(
-    "SELECT * FROM profile_records WHERE profile_id = ?",
+    "SELECT * FROM profile_records_canonical WHERE profile_id = ?",
   )
     .bind(profileId)
     .first<Record<string, unknown>>();
@@ -167,12 +171,17 @@ async function readRawProfileRow(profileId: string) {
   return row;
 }
 
-async function seedRetainedProfileFields(profileIds: readonly string[]) {
+async function seedLargeCanonicalProfileFields(profileIds: readonly string[]) {
   await testEnv.PROFILE_DB.batch(
     profileIds.map((profileId) =>
       testEnv.PROFILE_DB.prepare(
-        "UPDATE profile_records SET legacy_fields_json = ? WHERE profile_id = ?",
-      ).bind(JSON.stringify({ imported: "retained".repeat(512) }), profileId),
+        "UPDATE profile_records_canonical SET payload_json = json_set(payload_json, '$.completedProblemIds', json(?)) WHERE profile_id = ?",
+      ).bind(
+        JSON.stringify(
+          Array.from({ length: 512 }, (_, index) => `problem-${index}`),
+        ),
+        profileId,
+      ),
     ),
   );
   return Promise.all(profileIds.map(readRawProfileRow));
@@ -201,9 +210,7 @@ function expectNarrowProfileWrite(
   const fullBindings = Object.entries(after)
     .filter(([column]) => column !== "revision")
     .map(([, value]) => value);
-  const bytes = (values: unknown[]) =>
-    new TextEncoder().encode(JSON.stringify(values)).byteLength;
-  expect(bytes(write.bindings)).toBeLessThan(bytes(fullBindings) / 2);
+  expect(write.bindings.length).toBeLessThan(fullBindings.length);
 }
 
 function profile(
@@ -212,6 +219,7 @@ function profile(
 ): CompletePlayerProfile {
   return {
     id,
+    ...createDefaultProfileAppearance(2),
     nonce: 1,
     rating: 1500,
     totalManaPoints: 5,
@@ -235,8 +243,8 @@ async function insertProjectionRating(
 ) {
   const fields: Omit<CanonicalRatingUpdateValue, "operationId" | "payload"> = {
     status: "done",
-    inviteId: "projection-invite",
-    matchId: "projection-match",
+    inviteId: operationId.split("__")[0]!,
+    matchId: operationId.split("__")[1]!,
     playerId: "projection-player",
     opponentId: "projection-opponent",
     playerProfileId: null,
@@ -247,6 +255,8 @@ async function insertProjectionRating(
     updatedAtMs: 2_000,
     leaseExpiresAtMs: 2_000,
     completedAtMs: 2_000,
+    blockedAtMs: null,
+    blockReason: null,
     eventProgressState: "pending",
     eventProgressUpdatedAtMs: 2_000,
     eventProgressVersion: 1,
@@ -261,13 +271,32 @@ async function insertProjectionRating(
     operationId,
     ...fields,
     payload: ratingPayloadFixture({
-      ...fields,
-      retained: [null, { nested: "retained" }],
-      eventProgressReason: null,
-      profileGameProjectionReason: null,
-      telegramProjectionReason: null,
+      ...createEmptyRatingPayload(),
+      eventId: "projection-event",
+      eventOwned: true,
+      isEventMatch: true,
     }),
     ...overrides,
+    ...(overrides.status === "processing"
+      ? {
+          status: "processing" as const,
+          completedAtMs: null,
+          blockedAtMs: null,
+          blockReason: null,
+        }
+      : overrides.status === "blocked"
+        ? {
+            status: "blocked" as const,
+            completedAtMs: null,
+            blockedAtMs: overrides.blockedAtMs ?? 2_000,
+            blockReason: "canonical-data-cutover" as const,
+          }
+        : {
+            status: "done" as const,
+            completedAtMs: overrides.completedAtMs ?? 2_000,
+            blockedAtMs: null,
+            blockReason: null,
+          }),
   };
   await commitCanonicalPlan(testEnv.PROFILE_DB, {
     expectations: [{ kind: "rating-update-absent", operationId }],
@@ -355,6 +384,12 @@ function observeProfileReads(
           return (...values: unknown[]) =>
             wrap(target.bind(...values), query, values);
         }
+        if (property === "first" && mapRows) {
+          return async () => {
+            const result = await target.first<Record<string, unknown>>();
+            return result === null ? null : (mapRows([result])[0] ?? null);
+          };
+        }
         if (property === "all") {
           return async () => {
             await beforeRead?.(query);
@@ -382,6 +417,22 @@ function observeProfileReads(
           return wrap(target.prepare(query), query);
         };
       }
+      if (property === "withSession") {
+        return (constraint?: D1SessionBookmark | D1SessionConstraint) =>
+          new Proxy(target.withSession(constraint), {
+            get(session, key) {
+              if (key === "prepare")
+                return (query: string) => {
+                  queries.push(query);
+                  return wrap(session.prepare(query), query);
+                };
+              const member = Reflect.get(session, key, session);
+              return typeof member === "function"
+                ? member.bind(session)
+                : member;
+            },
+          });
+      }
       const value = Reflect.get(target, property, target);
       return typeof value === "function" ? value.bind(target) : value;
     },
@@ -398,14 +449,14 @@ async function insertProfile(
   >[0]["sortPresence"],
   winPresent = true,
   emojiPresent = true,
-  gameplayEmoji?: string | number,
+  gameplayEmoji?: number,
 ) {
   const completeProfile = profile(id, overrides);
   const value = materializeCanonicalProfile({
     profile: completeProfile,
     createdAtMs: 1_000,
     updatedAtMs: 1_000,
-    sortPresence,
+    ...(sortPresence === undefined ? {} : { sortPresence }),
     winPresent,
     emojiPresent,
     gameplayEmoji: gameplayEmoji ?? completeProfile.emoji,
@@ -480,7 +531,6 @@ async function retireProfileInto(
           targetProfileId,
           mergedAtMs,
           opId,
-          sourceLegacyFields: source.legacyFields,
         },
       },
     ],
@@ -489,37 +539,34 @@ async function retireProfileInto(
 
 async function resetCanonicalRows(db: D1Database): Promise<void> {
   await db.batch([
-    db.prepare("DELETE FROM rating_updates"),
-    db.prepare("DELETE FROM profile_auth_operations"),
+    db.prepare("DELETE FROM rating_updates_canonical"),
+    db.prepare("DELETE FROM profile_auth_operations_canonical"),
     db.prepare("DELETE FROM profile_auth_method_revocations"),
     db.prepare("DELETE FROM profile_auth_method_cooldowns"),
-    db.prepare("DROP TRIGGER profile_merge_targets_reject_delete"),
-    db.prepare("DROP TRIGGER wager_settlements_reject_delete"),
-    db.prepare("DROP TRIGGER profile_records_reject_active_delete"),
-    db.prepare("DELETE FROM profile_merge_targets"),
-    db.prepare("DELETE FROM wager_settlements"),
-    db.prepare("DELETE FROM profile_records"),
+    db.prepare("DROP TRIGGER profile_merge_targets_reject_delete_canonical"),
+    db.prepare("DROP TRIGGER wager_settlements_reject_delete_canonical"),
+    db.prepare("DROP TRIGGER profile_records_reject_active_delete_canonical"),
+    db.prepare("DELETE FROM profile_merge_targets_canonical"),
+    db.prepare("DELETE FROM wager_settlements_canonical"),
+    db.prepare("DELETE FROM profile_records_canonical"),
     db.prepare(
-      `CREATE TRIGGER profile_merge_targets_reject_delete
-       BEFORE DELETE ON profile_merge_targets
+      `CREATE TRIGGER profile_merge_targets_reject_delete_canonical
+       BEFORE DELETE ON profile_merge_targets_canonical
        BEGIN
          SELECT RAISE(ABORT, 'profile merge mappings are permanent');
        END`,
     ),
     db.prepare(
-      `CREATE TRIGGER wager_settlements_reject_delete
-       BEFORE DELETE ON wager_settlements
+      `CREATE TRIGGER wager_settlements_reject_delete_canonical
+       BEFORE DELETE ON wager_settlements_canonical
        BEGIN
          SELECT RAISE(ABORT, 'wager settlements are permanent');
        END`,
     ),
     db.prepare(
-      `CREATE TRIGGER profile_records_reject_active_delete
-       BEFORE DELETE ON profile_records
+      `CREATE TRIGGER profile_records_reject_active_delete_canonical
+       BEFORE DELETE ON profile_records_canonical
        WHEN OLD.state = 'active'
-       AND (
-         SELECT state FROM profile_canonical_control WHERE singleton = 1
-       ) != 'importing'
        BEGIN
          SELECT RAISE(ABORT, 'active profiles cannot be deleted');
        END`,
@@ -528,6 +575,30 @@ async function resetCanonicalRows(db: D1Database): Promise<void> {
 }
 
 describe("canonical gameplay repositories", () => {
+  it("reads rating wager agreements from canonical storage for the requested match", async () => {
+    const inviteId = "rating-wager-invite";
+    const matchId = "rating-wager-match";
+    const record = agreedWagerFixture();
+    await testEnv.PROFILE_DB.batch([
+      testEnv.PROFILE_DB.prepare(
+        "INSERT INTO invite_wager_states_canonical (invite_id, match_id, wager_json, resolution_marker, revision, updated_at_ms) VALUES (?, ?, ?, NULL, 1, 1000)",
+      ).bind(inviteId, matchId, JSON.stringify(record)),
+    ]);
+    const rating = projectionRatingRepository();
+    expect(await rating.readWagerAgreement(inviteId, matchId)).toEqual({
+      material: "dust",
+      count: 1,
+    });
+    expect(
+      await rating.readWagerAgreement(inviteId, "missing-match"),
+    ).toBeNull();
+    expect(
+      await testEnv.PROFILE_DB.prepare(
+        "SELECT name FROM sqlite_schema WHERE name = 'invite_wager_states'",
+      ).first(),
+    ).toBeNull();
+  });
+
   describe.each(["getMiningMaterials", "getMiningSnapshot"] as const)(
     "%s",
     (operation) => {
@@ -541,7 +612,10 @@ describe("canonical gameplay repositories", () => {
         await insertProfile(sourceId, null, { username: null });
         await insertProfile(targetId, null, { username: null, mining });
         await retireProfileInto(sourceId, targetId, 2_000, "mining-read-merge");
-        const before = await seedRetainedProfileFields([sourceId, targetId]);
+        const before = await seedLargeCanonicalProfileFields([
+          sourceId,
+          targetId,
+        ]);
         const observed = observeProfileReads(testEnv.PROFILE_DB);
         const repository = miningReadRepository(observed.database);
         for (const profileId of [sourceId, targetId]) {
@@ -567,29 +641,25 @@ describe("canonical gameplay repositories", () => {
         ).toEqual(before);
       });
 
-      it("ignores malformed write-only metadata while mutation snapshots still reject it", async () => {
+      it("rejects malformed canonical metadata without disturbing profile reads", async () => {
         const profileId = "mining-read-metadata";
         const loginUid = "mining-read-metadata-login";
         await insertProfile(profileId, loginUid);
-        await testEnv.PROFILE_DB.prepare(
-          "UPDATE profile_records SET merged_at_ms = 1.5 WHERE profile_id = ?",
-        )
-          .bind(profileId)
-          .run();
         const before = await readRawProfileRow(profileId);
+        await expect(
+          testEnv.PROFILE_DB.prepare(
+            "UPDATE profile_records_canonical SET merged_at_ms = 1.5 WHERE profile_id = ?",
+          )
+            .bind(profileId)
+            .run(),
+        ).rejects.toThrow();
+        expect(await readRawProfileRow(profileId)).toEqual(before);
         const mining = profile(profileId).mining;
         await expect(
           miningReadRepository()[operation](profileId),
         ).resolves.toEqual(
           operation === "getMiningMaterials" ? mining.materials : mining,
         );
-        await expect(
-          readCanonicalProfile(testEnv.PROFILE_DB, profileId),
-        ).rejects.toBeInstanceOf(CanonicalProfileCorruption);
-        await expect(
-          createMiningRepository(testEnv).getOwnedProfileSnapshot(loginUid),
-        ).rejects.toBeInstanceOf(CanonicalProfileCorruption);
-        expect(await readRawProfileRow(profileId)).toEqual(before);
       });
 
       it.each([
@@ -599,7 +669,7 @@ describe("canonical gameplay repositories", () => {
         const profileId = "mining-read-corrupt";
         await insertProfile(profileId, null);
         await testEnv.PROFILE_DB.prepare(
-          `UPDATE profile_records
+          `UPDATE profile_records_canonical
            SET payload_json = json_set(payload_json, '$.mining.materials.dust', ?)
            WHERE profile_id = ?`,
         )
@@ -635,7 +705,7 @@ describe("canonical gameplay repositories", () => {
           cause: expect.any(CanonicalProfileCorruption),
         });
         expect(observed.reads).toHaveLength(1);
-        expect(observed.reads[0].rowsWritten).toBe(0);
+        expect(observed.reads[0]!.rowsWritten).toBe(0);
       });
     },
   );
@@ -715,14 +785,14 @@ describe("canonical gameplay repositories", () => {
       testEnv.PROFILE_DB,
       (queries) =>
         queries.some((query) =>
-          query.includes("INSERT INTO wager_settlements"),
+          query.includes("INSERT INTO wager_settlements_canonical"),
         ),
       async () => {
         writeFailed = true;
         throw writeFailure;
       },
       (query) => {
-        if (writeFailed && query.includes("FROM wager_settlements")) {
+        if (writeFailed && query.includes("FROM wager_settlements_canonical")) {
           throw readFailure;
         }
       },
@@ -913,7 +983,7 @@ describe("canonical gameplay repositories", () => {
           throw writeFailure;
         },
         (query) => {
-          if (writeFailed && query.includes("FROM rating_updates")) {
+          if (writeFailed && query.includes("FROM rating_updates_canonical")) {
             throw readFailure;
           }
         },
@@ -978,7 +1048,7 @@ describe("canonical gameplay repositories", () => {
       for (const [profileId, loginUid] of [
         [playerId, playerLogin],
         [opponentId, opponentLogin],
-      ]) {
+      ] as const) {
         await insertProfile(
           profileId,
           loginUid,
@@ -1005,10 +1075,13 @@ describe("canonical gameplay repositories", () => {
           },
           false,
           false,
-          "",
+          0,
         );
       }
-      const before = await seedRetainedProfileFields([playerId, opponentId]);
+      const before = await seedLargeCanonicalProfileFields([
+        playerId,
+        opponentId,
+      ]);
       const gameplay = createGameplayRepository(testEnv, {
         stateClient: matchTestPort(state),
       });
@@ -1044,7 +1117,7 @@ describe("canonical gameplay repositories", () => {
         async () => {},
         (query) => queries.push(query),
         (query, bindings) => {
-          if (/^\s*UPDATE profile_records\b/.test(query)) {
+          if (/^\s*UPDATE profile_records_canonical\b/.test(query)) {
             writes.push({ query, bindings });
           }
         },
@@ -1118,7 +1191,7 @@ describe("canonical gameplay repositories", () => {
           ];
           expect(
             await testEnv.PROFILE_DB.prepare(
-              "SELECT status, revision FROM rating_updates WHERE operation_id = ?",
+              "SELECT status, revision FROM rating_updates_canonical WHERE operation_id = ?",
             )
               .bind(operationId)
               .first(),
@@ -1131,7 +1204,7 @@ describe("canonical gameplay repositories", () => {
           ];
           expect(
             await testEnv.PROFILE_DB.prepare(
-              "SELECT COUNT(*) AS count FROM profile_february_opponents",
+              "SELECT COUNT(*) AS count FROM profile_february_opponents_canonical",
             ).first("count"),
           ).toBe(2);
         }
@@ -1148,9 +1221,9 @@ describe("canonical gameplay repositories", () => {
         const after = await readRawProfileRow(profileId);
         expectNarrowProfileWrite(
           write!,
-          before[index],
+          before[index]!,
           after,
-          expectedColumns[index],
+          expectedColumns[index]!,
         );
         const payload = JSON.parse(String(after.payload_json));
         expect(payload.mining.materials.dust).toBe(
@@ -1178,7 +1251,7 @@ describe("canonical gameplay repositories", () => {
       testEnv.TEST_PROFILE_D1_MIGRATIONS,
       "c".repeat(64),
     );
-    await applyD1Migrations(
+    await applyCanonicalTestMigrations(
       testEnv.PROFILE_GAMES_DB,
       testEnv.TEST_D1_MIGRATIONS,
     );
@@ -1253,7 +1326,6 @@ describe("canonical gameplay repositories", () => {
             targetProfileId: "d1-game-winner",
             mergedAtMs: 2_000,
             opId: "d1-game-merge",
-            sourceLegacyFields: profileLegacyFixture({}),
           },
         },
       ],
@@ -1401,7 +1473,7 @@ describe("canonical gameplay repositories", () => {
     expect(
       await testEnv.PROFILE_DB.prepare(
         `SELECT fingerprint, outcome
-         FROM wager_settlements WHERE operation_id = ?`,
+         FROM wager_settlements_canonical WHERE operation_id = ?`,
       )
         .bind("d1-insufficient-wager")
         .first<{ fingerprint: string; outcome: string }>(),
@@ -1514,7 +1586,7 @@ describe("canonical gameplay repositories", () => {
             profileReadBatches.push([...queries]);
           }
           return queries.some((query) =>
-            query.includes("INSERT INTO wager_settlements"),
+            query.includes("INSERT INTO wager_settlements_canonical"),
           );
         },
         async () => {
@@ -1616,7 +1688,7 @@ describe("canonical gameplay repositories", () => {
       createdAtMs: 1_000,
       updatedAtMs: 1_000,
       emojiPresent: false,
-      gameplayEmoji: "",
+      gameplayEmoji: 0,
       sortPresence: { rating: true, nonce: true },
       sortValues: { rating: 0, nonce: null },
     });
@@ -1658,7 +1730,7 @@ describe("canonical gameplay repositories", () => {
     });
     expect(gameplayOwnership.profileById.get(profileId)?.profile).toMatchObject(
       {
-        emoji: "",
+        emoji: 0,
         rating: 0,
       },
     );
@@ -1667,7 +1739,7 @@ describe("canonical gameplay repositories", () => {
       profileIds: [],
     });
     expect(ratingOwnership.profileById.get(profileId)?.profile).toMatchObject({
-      emoji: "",
+      emoji: 0,
       rating: 0,
     });
     expect(ratingOwnership).toEqual(gameplayOwnership);
@@ -1675,7 +1747,7 @@ describe("canonical gameplay repositories", () => {
 
   it.each([
     { name: "absent", ratingPresent: false, emoji: 0 },
-    { name: "null", ratingPresent: true, emoji: "raw-emoji" },
+    { name: "null", ratingPresent: true, emoji: 7 },
   ])(
     "shares ownership mapping for merged and missing identities with $name ratings",
     async ({ ratingPresent, emoji }) => {
@@ -1761,7 +1833,7 @@ describe("canonical gameplay repositories", () => {
               profileId,
               {
                 profile: {
-                  aura: "",
+                  aura: "none",
                   emoji,
                   eth: "",
                   profileId,
@@ -1814,7 +1886,7 @@ describe("canonical gameplay repositories", () => {
     for (const read of observed.reads) {
       expect(read.query).toContain("roots.request_index");
       expect(read.query).not.toMatch(
-        /payload_json|legacy_fields_json|profile_login_owners/,
+        /payload_json|legacy_fields_json|profile_login_owners_canonical/,
       );
       expect(read.rowsWritten).toBe(0);
     }
@@ -1878,7 +1950,7 @@ describe("canonical gameplay repositories", () => {
       );
       expect(
         await testEnv.PROFILE_DB.prepare(
-          "SELECT COUNT(*) AS count FROM profile_february_opponents",
+          "SELECT COUNT(*) AS count FROM profile_february_opponents_canonical",
         ).first("count"),
       ).toBe(2);
     },
@@ -1934,7 +2006,6 @@ describe("canonical gameplay repositories", () => {
             targetProfileId,
             mergedAtMs: 2_000,
             opId: "d1-feb-merge",
-            sourceLegacyFields: source.legacyFields,
           },
         },
       ],
@@ -2054,7 +2125,7 @@ describe("canonical gameplay repositories", () => {
       testEnv.PROFILE_DB,
       (queries) =>
         queries.some((query) =>
-          query.includes("INSERT INTO profile_february_opponents"),
+          query.includes("INSERT INTO profile_february_opponents_canonical"),
         ),
       () =>
         retireProfileInto(
@@ -2156,7 +2227,6 @@ describe("canonical gameplay repositories", () => {
                   targetProfileId,
                   mergedAtMs: 2_000,
                   opId: "d1-feb-race-merge",
-                  sourceLegacyFields: source.legacyFields,
                 },
               },
               {
@@ -2264,7 +2334,7 @@ describe("canonical gameplay repositories", () => {
     }
     expect(
       await testEnv.PROFILE_DB.prepare(
-        "SELECT COUNT(*) AS count FROM profile_february_opponents",
+        "SELECT COUNT(*) AS count FROM profile_february_opponents_canonical",
       ).first("count"),
     ).toBe(0);
   });
@@ -2370,6 +2440,7 @@ describe("canonical gameplay repositories", () => {
             profileGameProjectionUpdatedAtMs: 2_000,
             profileGameProjectionVersion: 1,
             eventId: "event-1",
+            isEventMatch: true,
             eventProgressState: "pending",
             eventProgressUpdatedAtMs: 2_000,
             eventProgressVersion: 1,
@@ -2382,15 +2453,16 @@ describe("canonical gameplay repositories", () => {
       queries.every((query) => /^\s*SELECT\b/i.test(query)),
     );
     expect(snapshotBatches).toHaveLength(1);
-    expect(snapshotBatches[0]).toHaveLength(2);
+    expect(snapshotBatches[0]!).toHaveLength(2);
     expect(
       preparedQueries.filter(
         (query) =>
-          /^\s*SELECT\b/i.test(query) && !query.includes("rating_updates"),
+          /^\s*SELECT\b/i.test(query) &&
+          !query.includes("rating_updates_canonical"),
       ),
-    ).toEqual(snapshotBatches[0]);
-    expect(snapshotBatches[0].join("\n")).not.toMatch(
-      /profile_february_opponents|profile_auth_|profile_recovery_|profile_wallet_/,
+    ).toEqual(snapshotBatches[0]!);
+    expect(snapshotBatches[0]!.join("\n")).not.toMatch(
+      /profile_february_opponents_canonical|profile_auth_|profile_recovery_|profile_wallet_/,
     );
     expect(
       await readCanonicalProfile(testEnv.PROFILE_DB, "d1-rating-player"),
@@ -2416,7 +2488,7 @@ describe("canonical gameplay repositories", () => {
     expect(
       await rating.claimRatingEventProgress(
         operationId,
-        eventDue[0].revision,
+        eventDue[0]!.revision,
         3_000,
       ),
     ).toBe(true);
@@ -2427,7 +2499,7 @@ describe("canonical gameplay repositories", () => {
     expect(
       await rating.claimRatingProfileGameProjection(
         operationId,
-        gamesDue[0].revision,
+        gamesDue[0]!.revision,
         3_000,
       ),
     ).toBe(true);
@@ -2438,7 +2510,7 @@ describe("canonical gameplay repositories", () => {
     expect(
       await rating.claimRatingTelegramProjection(
         operationId,
-        telegramDue[0].revision,
+        telegramDue[0]!.revision,
         3_000,
       ),
     ).toBe(true);
@@ -2464,8 +2536,8 @@ describe("canonical gameplay repositories", () => {
     });
 
     it("preserves input order, duplicates, exact IDs and missing records without writes", async () => {
-      const firstId = "rating-batch-first";
-      const secondId = "rating-batch-second";
+      const firstId = "rating-batch-first__match";
+      const secondId = "rating-batch-second__match";
       await insertProjectionRating(firstId);
       await insertProjectionRating(secondId);
       const scalar = projectionRatingRepository();
@@ -2484,14 +2556,14 @@ describe("canonical gameplay repositories", () => {
         projectionRatingRepository(observed.database).readRatingUpdates(ids),
       ).resolves.toEqual([first, null, second, first, null]);
       expect(observed.reads).toHaveLength(1);
-      expect(observed.reads[0].bindings).toEqual([
+      expect(observed.reads[0]!.bindings).toEqual([
         firstId,
         "missing",
         secondId,
         ` ${firstId} `,
       ]);
-      expect(observed.reads[0].rowsWritten).toBe(0);
-      expect(observed.reads[0].query).not.toContain(firstId);
+      expect(observed.reads[0]!.rowsWritten).toBe(0);
+      expect(observed.reads[0]!.query).not.toContain(firstId);
     });
 
     it.each([100, 101])(
@@ -2499,19 +2571,19 @@ describe("canonical gameplay repositories", () => {
       async (count) => {
         const ids = Array.from(
           { length: count },
-          (_, index) => `batch-${index}`,
+          (_, index) => `batch-${index}__match`,
         );
-        const lastId = ids[ids.length - 1];
-        await insertProjectionRating(ids[0]);
+        const lastId = ids[ids.length - 1]!;
+        await insertProjectionRating(ids[0]!);
         await insertProjectionRating(lastId);
         const scalar = projectionRatingRepository();
-        const first = await scalar.readRatingUpdate(ids[0]);
+        const first = await scalar.readRatingUpdate(ids[0]!);
         const last = await scalar.readRatingUpdate(lastId);
         const observed = observeProfileReads(testEnv.PROFILE_DB);
         await expect(
           projectionRatingRepository(observed.database).readRatingUpdates([
             ...ids,
-            ids[0],
+            ids[0]!,
           ]),
         ).resolves.toEqual([
           first,
@@ -2541,7 +2613,7 @@ describe("canonical gameplay repositories", () => {
     });
 
     it("rejects corrupt canonical rows without changing stored ratings", async () => {
-      const operationId = "rating-batch-corrupt";
+      const operationId = "rating-batch-corrupt__match";
       await insertProjectionRating(operationId);
       const observed = observeProfileReads(
         testEnv.PROFILE_DB,
@@ -2554,7 +2626,7 @@ describe("canonical gameplay repositories", () => {
         ]),
       ).rejects.toBeInstanceOf(CanonicalProfileCorruption);
       expect(observed.reads).toHaveLength(1);
-      expect(observed.reads[0].rowsWritten).toBe(0);
+      expect(observed.reads[0]!.rowsWritten).toBe(0);
       await expect(
         projectionRatingRepository().readRatingUpdate(operationId),
       ).resolves.not.toBeNull();
@@ -2573,28 +2645,28 @@ describe("canonical gameplay repositories", () => {
       label: "absent",
       player: undefined,
       opponent: undefined,
-      expectedPlayer: undefined,
-      expectedOpponent: undefined,
+      expectedPlayer: null,
+      expectedOpponent: null,
     },
     {
       label: "null",
       player: null,
       opponent: null,
-      expectedPlayer: undefined,
-      expectedOpponent: undefined,
+      expectedPlayer: null,
+      expectedOpponent: null,
     },
     {
       label: "strings",
       player: "9",
       opponent: "0",
-      expectedPlayer: undefined,
-      expectedOpponent: undefined,
+      expectedPlayer: null,
+      expectedOpponent: null,
     },
     {
       label: "missing-player",
       player: undefined,
       opponent: 0,
-      expectedPlayer: undefined,
+      expectedPlayer: null,
       expectedOpponent: 0,
     },
     {
@@ -2602,7 +2674,7 @@ describe("canonical gameplay repositories", () => {
       player: 9,
       opponent: undefined,
       expectedPlayer: 9,
-      expectedOpponent: undefined,
+      expectedOpponent: null,
     },
   ])(
     "loads $label event scores through the canonical rating repository",
@@ -2651,35 +2723,25 @@ describe("canonical gameplay repositories", () => {
               completedAtMs: 2_000,
               updatedAtMs: 2_000,
               leaseExpiresAtMs: 2_000,
-              playerManaPoints: typeof player === "number" ? player : undefined,
-              opponentManaPoints:
-                typeof opponent === "number" ? opponent : undefined,
+              ...(typeof player === "number"
+                ? { playerManaPoints: player }
+                : {}),
+              ...(typeof opponent === "number"
+                ? { opponentManaPoints: opponent }
+                : {}),
             },
           }),
         ),
       ).resolves.toMatchObject({ status: "committed" });
 
-      if (
-        (player !== undefined && typeof player !== "number") ||
-        (opponent !== undefined && typeof opponent !== "number")
-      ) {
-        const stored = await testEnv.PROFILE_DB.prepare(
-          "SELECT payload_json FROM rating_updates WHERE operation_id = ?",
-        )
-          .bind(operationId)
-          .first<{ payload_json: string }>();
-        await testEnv.PROFILE_DB.prepare(
-          "UPDATE rating_updates SET payload_json = ? WHERE operation_id = ?",
-        )
-          .bind(
-            JSON.stringify({
-              ...JSON.parse(stored!.payload_json),
-              playerManaPoints: player,
-              opponentManaPoints: opponent,
-            }),
-            operationId,
-          )
-          .run();
+      if (typeof player === "string" || typeof opponent === "string") {
+        expect(() =>
+          ratingPayloadFixture({
+            ...createEmptyRatingPayload(),
+            playerManaPoints: player,
+            opponentManaPoints: opponent,
+          }),
+        ).toThrow(CanonicalProfileCorruption);
       }
 
       const update = await rating.readRatingUpdate(operationId);
@@ -2688,19 +2750,19 @@ describe("canonical gameplay repositories", () => {
       ]);
       expect(update?.playerManaPoints).toBe(expectedPlayer);
       expect(update?.opponentManaPoints).toBe(expectedOpponent);
-      expect(Object.hasOwn(update || {}, "playerManaPoints")).toBe(
-        expectedPlayer !== undefined,
-      );
-      expect(Object.hasOwn(update || {}, "opponentManaPoints")).toBe(
-        expectedOpponent !== undefined,
-      );
+      expect(Object.hasOwn(update || {}, "playerManaPoints")).toBe(true);
+      expect(Object.hasOwn(update || {}, "opponentManaPoints")).toBe(true);
 
       for (const playerIsHost of [true, false]) {
-        const event = {
+        const event = eventDocumentFixture({
+          status: "active",
           rounds: {
             0: {
               matches: {
                 "0_0": {
+                  status: "pending",
+                  hostProfileId: "score-host-profile",
+                  guestProfileId: "score-guest-profile",
                   inviteId,
                   hostLoginUid: playerIsHost
                     ? identity.playerId
@@ -2712,10 +2774,10 @@ describe("canonical gameplay repositories", () => {
               },
             },
           },
-        };
+        });
         expect(await loadEndedMatchResults(event, rating)).toEqual({
           "round:0:0_0":
-            expectedPlayer === undefined || expectedOpponent === undefined
+            expectedPlayer === null || expectedOpponent === null
               ? { status: "unavailable" }
               : {
                   status: "scored",
@@ -2730,49 +2792,29 @@ describe("canonical gameplay repositories", () => {
   it.each(ratingDiscoveryCases)(
     "discovers only due $field metadata with indexed reads",
     async ({ list, field, prefix }) => {
-      const archive = "retained-match-payload-".repeat(5_000);
-      for (const [operationId, timestamp, state, version] of [
-        ["tie-b", 2_000, "pending", 3],
-        ["future", 2_001, "pending", 1],
-        ["first", 1_500, "pending", null],
-        ["tie-a", 2_000, "pending", 0],
-        ["done", 1_000, "done", 1],
-        ["dead", 1_000, "dead", 1],
-        ["unmarked", 1_000, null, null],
-        ["processing", 1_800, "pending", 1],
+      for (const [id, timestamp, state] of [
+        ["tie-b", 2_000, "pending"],
+        ["future", 2_001, "pending"],
+        ["first", 1_500, "pending"],
+        ["tie-a", 2_000, "pending"],
+        ["done", 1_000, "done"],
+        ["dead", 1_000, "dead"],
+        ["unmarked", null, null],
       ] as const) {
-        await insertProjectionRating(operationId, {
-          inviteId: " projection-invite ",
-          matchId: " projection-match ",
-          payload: ratingPayloadFixture({
-            eventId: " \u2003projection-event\u00a0",
-            archive,
-          }),
+        await insertProjectionRating(`${id}__match`, {
           [`${field}State`]: state,
           [`${field}UpdatedAtMs`]: timestamp,
-          [`${field}Version`]: version,
-          ...(operationId === "processing"
-            ? { status: "processing", completedAtMs: null }
-            : {}),
+          [`${field}Version`]: state === null ? null : 1,
         });
       }
       const observed = observeProfileReads(testEnv.PROFILE_DB);
       const rating = projectionRatingRepository(observed.database);
-      const expected = [
-        ["first", 0],
-        ["processing", 1],
-        ["tie-a", 0],
-        ["tie-b", 3],
-      ].map(([operationId, version]) => ({
-        operationId,
+      const expected = ["first", "tie-a", "tie-b"].map((inviteId) => ({
+        operationId: `${inviteId}__match`,
         revision: 1,
         ...(field === "telegramProjection"
           ? {}
-          : {
-              inviteId: " projection-invite ",
-              matchId: " projection-match ",
-              version,
-            }),
+          : { inviteId, matchId: "match", version: 1 }),
         ...(field === "eventProgress" ? { eventId: "projection-event" } : {}),
       }));
       await expect(
@@ -2780,16 +2822,15 @@ describe("canonical gameplay repositories", () => {
       ).resolves.toEqual(expected);
       expect(observed.queries).toHaveLength(1);
       expect(observed.reads).toHaveLength(1);
-      const read = observed.reads[0];
+      const read = observed.reads[0]!;
       expect(read.rowsWritten).toBe(0);
-      expect(read.rows).toHaveLength(4);
+      expect(read.rows).toHaveLength(3);
       for (const row of read.rows) {
         expect(row).not.toHaveProperty("payload_json");
         expect(row).not.toHaveProperty("owner_token");
         expect(row).not.toHaveProperty("recovery_snapshot_token");
         expect(row).not.toHaveProperty("recovery_revision_hex");
       }
-      expect(JSON.stringify(read.rows)).not.toContain(archive);
       expect(JSON.stringify(read.rows).length).toBeLessThan(2_000);
       if (field === "eventProgress") {
         expect(read.query.match(/FROM json_each\(/g)).toHaveLength(1);
@@ -2808,7 +2849,7 @@ describe("canonical gameplay repositories", () => {
       ).resolves.toEqual(expected.slice(0, 1));
       await expect(
         rating[list](1_999, 100).then(recoveryCandidates),
-      ).resolves.toEqual(expected.slice(0, 2));
+      ).resolves.toEqual(expected.slice(0, 1));
       await expect(
         rating[list](0, 100).then(recoveryCandidates),
       ).resolves.toEqual([]);
@@ -2817,14 +2858,16 @@ describe("canonical gameplay repositories", () => {
 
   it("caps each rating discovery page at the maximum requested limit", async () => {
     for (let index = 0; index < 101; index++) {
-      await insertProjectionRating(`limit-${String(index).padStart(3, "0")}`);
+      await insertProjectionRating(
+        `limit-${String(index).padStart(3, "0")}__match`,
+      );
     }
     const rating = projectionRatingRepository();
     for (const { list } of ratingDiscoveryCases) {
       const page = await rating[list](2_000, 100).then(recoveryCandidates);
       expect(page).toHaveLength(100);
-      expect(page[0].operationId).toBe("limit-000");
-      expect(page.at(-1)?.operationId).toBe("limit-099");
+      expect(page[0]!.operationId).toBe("limit-000__match");
+      expect(page.at(-1)?.operationId).toBe("limit-099__match");
     }
   });
 
@@ -2842,7 +2885,7 @@ describe("canonical gameplay repositories", () => {
         [2_000, 101],
         [2_000, 1.5],
         [2_000, Infinity],
-      ]) {
+      ] as const) {
         await expect(
           rating[list](cutoff, limit).then(recoveryCandidates),
         ).rejects.toThrow("invalid-rating-projection-list");
@@ -2851,109 +2894,114 @@ describe("canonical gameplay repositories", () => {
     },
   );
 
-  it("keeps JSON event ID string and last-duplicate-key semantics", async () => {
-    const payloads = [
-      "{}",
-      '{"eventId":null}',
-      '{"eventId":12}',
-      '{"eventId":true}',
-      '{"eventId":[]}',
-      '{"eventId":{"nested":"value"}}',
-      JSON.stringify({ eventId: " \t\n " }),
-      JSON.stringify({ eventId: "\ufeff\u2003event-雪\u00a0" }),
-      JSON.stringify({ eventId: "event-\ud83d\ude00" }),
-      JSON.stringify({ eventId: "event\u0000suffix" }),
-      '{"eventId":"first","eventId":" last "}',
-      '{"eventId":"\\ud800","eventId":"last"}',
-      '{"eventId":"first","event\\u0049d":"last"}',
-      '{"eventId\\u0000suffix":"wrong"}',
-      '{"eventId":"right","eventId\\u0000suffix":"wrong"}',
-      '{"eventId\\u0000suffix":"wrong","eventId":"right"}',
-      '{"eventId":"first","eventId":null}',
-      '{"eventId":"first","eventId":12}',
-      '{"eventId":"first","eventId":true}',
-      '{"eventId":"first","eventId":[]}',
-      '{"eventId":"first","eventId":{}}',
-      '{"nested":{"eventId":"nested"},"eventId":"root"}',
-    ];
-    for (const [index, payload] of payloads.entries()) {
-      const operationId = `event-id-${String(index).padStart(2, "0")}`;
-      await insertProjectionRating(operationId);
-      await testEnv.PROFILE_DB.prepare(
-        "UPDATE rating_updates SET payload_json = ? WHERE operation_id = ?",
-      )
-        .bind(payload, operationId)
-        .run();
+  it("rejects retired event payload shapes and preserves immutable outcomes", async () => {
+    const operationId = "event-payload-shape__match";
+    const initial = await insertProjectionRating(operationId);
+    for (const payload of [
+      {},
+      { eventId: "event" },
+      { ...initial.payload, archive: "retired" },
+      { ...initial.payload, eventId: 12 },
+      { ...initial.payload, eventId: "event\u0000suffix" },
+    ]) {
+      expect(() => ratingPayloadFixture(payload)).toThrow(
+        CanonicalProfileCorruption,
+      );
     }
-    const records = await projectionRatingRepository()
-      .scanDueRatingEventProgress(2_000, 100)
-      .then(recoveryCandidates);
-    expect(records.map((record) => record.eventId)).toEqual(
-      payloads.map((payload) => {
-        const value = JSON.parse(payload).eventId;
-        return typeof value === "string" ? value.trim() : "";
-      }),
-    );
+    await expect(
+      testEnv.PROFILE_DB.prepare(
+        "UPDATE rating_updates_canonical SET payload_json = ? WHERE operation_id = ?",
+      )
+        .bind(
+          JSON.stringify({ ...initial.payload, eventId: "changed-event" }),
+          operationId,
+        )
+        .run(),
+    ).rejects.toThrow("immutable");
+    expect(
+      await projectionRatingRepository().readRatingUpdate(operationId),
+    ).toMatchObject({ eventId: "projection-event" });
   });
 
-  it.each([
-    '{"eventId":"\\ud800"}',
-    '{"eventId":"\\udfff"}',
-    '{"eventId":"first","eventId":"\\ud800"}',
-  ])(
-    "isolates invalid Unicode event IDs before claiming: %s",
-    async (payload) => {
-      const operationId = "invalid-unicode-event";
+  it.each(["eda080", "edbfbf", "ff"])(
+    "isolates invalid Unicode event ID bytes before claiming: %s",
+    async (bytes) => {
+      const operationId = "invalid-unicode-event__match";
       await insertProjectionRating(operationId);
-      await testEnv.PROFILE_DB.prepare(
-        "UPDATE rating_updates SET payload_json = ? WHERE operation_id = ?",
-      )
-        .bind(payload, operationId)
-        .run();
-      const observed = observeD1FailureDatabase(testEnv.PROFILE_DB);
+      const observed = observeProfileReads(
+        testEnv.PROFILE_DB,
+        undefined,
+        (rows) =>
+          rows.map((row) => ({
+            ...row,
+            event_id_bytes: Array.from(bytes.matchAll(/../g), ([byte]) =>
+              Number.parseInt(byte!, 16),
+            ),
+            ...(Object.hasOwn(row, "recovery_type_5")
+              ? {
+                  recovery_type_5: "blob",
+                  recovery_bytes_5: Array.from(
+                    bytes.matchAll(/../g),
+                    ([byte]) => Number.parseInt(byte!, 16),
+                  ),
+                  recovery_real_5: null,
+                }
+              : {}),
+          })),
+      );
       await expect(
         projectionRatingRepository(
           observed.database,
         ).scanDueRatingEventProgress(2_000, 100),
       ).resolves.toMatchObject([{ kind: "invalid", reason: "invalid-record" }]);
-      expect(observed.batches).toEqual([]);
-      await expect(
-        testEnv.PROFILE_DB.prepare(
-          "SELECT revision FROM rating_updates WHERE operation_id = ?",
-        )
-          .bind(operationId)
-          .first<number>("revision"),
-      ).resolves.toBe(1);
+      expect(
+        await projectionRatingRepository().readRatingUpdate(operationId),
+      ).toMatchObject({ eventProgressState: "pending" });
     },
   );
 
   it.each(ratingDiscoveryCases)(
     "isolates malformed selected $field discovery metadata",
-    async ({ list, prefix, field }) => {
-      const operationId = "invalid-discovery-metadata";
+    async ({ list, field }) => {
+      const operationId = "invalid-discovery-metadata__match";
       await insertProjectionRating(operationId);
       const columns = [
         "revision",
-        ...(field === "telegramProjection" ? [] : [`${prefix}_version`]),
+        ...(field === "telegramProjection" ? [] : ["version"]),
       ];
       for (const column of columns) {
         for (const value of [1.5, Number.MAX_SAFE_INTEGER + 1]) {
-          await testEnv.PROFILE_DB.prepare(
-            `UPDATE rating_updates SET ${column} = ? WHERE operation_id = ?`,
-          )
-            .bind(value, operationId)
-            .run();
+          const observed = observeProfileReads(
+            testEnv.PROFILE_DB,
+            undefined,
+            (rows) =>
+              rows.map((row) => ({
+                ...row,
+                [column]: value,
+                ...(Object.hasOwn(row, "recovery_type_1")
+                  ? {
+                      [`recovery_type_${column === "revision" ? 1 : 4}`]:
+                        "real",
+                      [`recovery_bytes_${column === "revision" ? 1 : 4}`]:
+                        Array.from(new TextEncoder().encode(String(value))),
+                      [`recovery_real_${column === "revision" ? 1 : 4}`]: value,
+                      ...(column === "revision"
+                        ? {
+                            recovery_revision_bytes: Array.from(
+                              new TextEncoder().encode(String(value)),
+                            ),
+                          }
+                        : {}),
+                    }
+                  : {}),
+              })),
+          );
           await expect(
-            projectionRatingRepository()[list](2_000, 10),
+            projectionRatingRepository(observed.database)[list](2_000, 10),
           ).resolves.toMatchObject([
             { kind: "invalid", reason: "invalid-record" },
           ]);
         }
-        await testEnv.PROFILE_DB.prepare(
-          `UPDATE rating_updates SET ${column} = 1 WHERE operation_id = ?`,
-        )
-          .bind(operationId)
-          .run();
       }
     },
   );
@@ -2961,10 +3009,10 @@ describe("canonical gameplay repositories", () => {
   it.each(ratingDiscoveryCases)(
     "validates unrelated corrupt rating fields before $field claims mutate",
     async ({ list, claim }) => {
-      const operationId = "corrupt-rating-claim";
+      const operationId = "corrupt-rating-claim__match";
       await insertProjectionRating(operationId);
       await testEnv.PROFILE_DB.prepare(
-        "UPDATE rating_updates SET lease_expires_at_ms = ? WHERE operation_id = ?",
+        "UPDATE rating_updates_canonical SET lease_expires_at_ms = ? WHERE operation_id = ?",
       )
         .bind(Number.MAX_SAFE_INTEGER + 1, operationId)
         .run();
@@ -2973,12 +3021,12 @@ describe("canonical gameplay repositories", () => {
       const records = await rating[list](2_000, 10).then(recoveryCandidates);
       expect(records).toHaveLength(1);
       await expect(
-        rating[claim](operationId, records[0].revision, 3_000),
+        rating[claim](operationId, records[0]!.revision, 3_000),
       ).rejects.toBeInstanceOf(CanonicalProfileCorruption);
       expect(observed.batches).toEqual([]);
       await expect(
         testEnv.PROFILE_DB.prepare(
-          "SELECT revision FROM rating_updates WHERE operation_id = ?",
+          "SELECT revision FROM rating_updates_canonical WHERE operation_id = ?",
         )
           .bind(operationId)
           .first<number>("revision"),
@@ -3008,11 +3056,11 @@ describe("canonical gameplay repositories", () => {
   ] as const)(
     "narrows $field writes while preserving the rating and other projections",
     async ({ claim, mark, prefix, field }) => {
-      const operationId = `narrow-${prefix}`;
+      const operationId = `narrow-${prefix}__match`;
       const initial = await insertProjectionRating(operationId);
       const readRow = () =>
         testEnv.PROFILE_DB.prepare(
-          "SELECT * FROM rating_updates WHERE operation_id = ?",
+          "SELECT * FROM rating_updates_canonical WHERE operation_id = ?",
         )
           .bind(operationId)
           .first<Record<string, unknown>>();
@@ -3030,31 +3078,26 @@ describe("canonical gameplay repositories", () => {
         ...original,
         payload_json: JSON.stringify({
           ...initial.payload,
-          [`${field}UpdatedAtMs`]: 3_000,
         }),
         [`${prefix}_updated_at_ms`]: 3_000,
         revision: 2,
       });
-      await rating[mark](operationId, "dead", 4_000, "  failed delivery  ");
+      await rating[mark](operationId, "dead", 4_000, "failed delivery");
       expect(await readRow()).toEqual({
         ...original,
         payload_json: JSON.stringify({
           ...initial.payload,
-          [`${field}State`]: "dead",
-          [`${field}UpdatedAtMs`]: 4_000,
           [`${field}Reason`]: "failed delivery",
         }),
         [`${prefix}_state`]: "dead",
         [`${prefix}_updated_at_ms`]: 4_000,
         revision: 3,
       });
-      await rating[mark](operationId, "done", 5_000, "  ");
+      await rating[mark](operationId, "done", 5_000);
       expect(await readRow()).toEqual({
         ...original,
         payload_json: JSON.stringify({
           ...initial.payload,
-          [`${field}State`]: "done",
-          [`${field}UpdatedAtMs`]: 5_000,
           [`${field}Reason`]: null,
         }),
         [`${prefix}_state`]: "done",
@@ -3062,11 +3105,11 @@ describe("canonical gameplay repositories", () => {
         revision: 4,
       });
       const updates = queries.filter((query) =>
-        /^\s*UPDATE rating_updates\b/.test(query),
+        /^\s*UPDATE rating_updates_canonical\b/.test(query),
       );
       expect(updates).toHaveLength(3);
       for (const update of updates) {
-        const assignments = update.split("SET")[1].split("WHERE")[0];
+        const assignments = update.split("SET")[1]!.split("WHERE")[0]!;
         expect(
           [...assignments.matchAll(/\b([a-z_]+)\s*=/g)].map(
             (match) => match[1],
@@ -3081,218 +3124,92 @@ describe("canonical gameplay repositories", () => {
       }
       expect(
         queries.filter((query) =>
-          /^\s*SELECT \* FROM rating_updates\b/.test(query),
+          /^\s*SELECT \* FROM rating_updates_canonical\b/.test(query),
         ),
       ).toHaveLength(3);
     },
   );
 
   it.each(ratingDiscoveryCases)(
-    "patches $field JSON with exact scalar bytes and bounded write bindings",
+    "preserves canonical scalar reasons and bounds $field writes",
     async ({ claim, mark, field, prefix }) => {
-      const operationId = `projection-json-${prefix}`;
+      const operationId = `projection-json-${prefix}__match`;
       const initial = await insertProjectionRating(operationId);
-      const archive = "retained-match-payload-".repeat(5_000);
-      let expectedPayload = {
-        ...initial.payload,
-        archive,
-        retained: {
-          text: 'snow-雪 😀\n\u0000quote"slash\\lone-\ud800',
-          numbers: [1.2e-7, 1e21, 1.2345678901234567, Number.MAX_SAFE_INTEGER],
-          values: [null, true, false],
-        },
-      };
-      await testEnv.PROFILE_DB.prepare(
-        "UPDATE rating_updates SET payload_json = ? WHERE operation_id = ?",
-      )
-        .bind(JSON.stringify(expectedPayload), operationId)
-        .run();
-      const readRow = () =>
-        testEnv.PROFILE_DB.prepare(
-          "SELECT * FROM rating_updates WHERE operation_id = ?",
-        )
-          .bind(operationId)
-          .first<Record<string, unknown>>();
-      const original = await readRow();
-      const queries: string[] = [];
       const writes: Array<{ query: string; bindings: unknown[] }> = [];
       const db = beforeMatchingBatch(
         testEnv.PROFILE_DB,
         () => false,
         async () => {},
-        (query) => queries.push(query),
+        undefined,
         (query, bindings) => {
-          if (/^\s*UPDATE rating_updates\b/.test(query)) {
+          if (/^\s*UPDATE rating_updates_canonical\b/.test(query))
             writes.push({ query, bindings });
-          }
         },
       );
       const rating = projectionRatingRepository(db);
       await expect(
         rating[claim](operationId, 1, Number.MAX_SAFE_INTEGER),
       ).resolves.toBe(true);
-      expectedPayload = {
-        ...expectedPayload,
-        [`${field}UpdatedAtMs`]: Number.MAX_SAFE_INTEGER,
-      };
-      expect(await readRow()).toEqual({
-        ...original,
-        payload_json: JSON.stringify(expectedPayload),
-        [`${prefix}_updated_at_ms`]: Number.MAX_SAFE_INTEGER,
-        revision: 2,
-      });
-      const reasons = [
-        undefined,
-        " \t ",
-        ' snow-雪 😀\n\u0000quote"slash\\ ',
-        "lone-\ud800",
-        "[1]",
-        "null",
-      ];
+      const reasons = [undefined, 'snow-雪 😀quote"slash\\', "[1]", "null"];
       for (const [index, reason] of reasons.entries()) {
         const state = index % 2 === 0 ? "done" : "dead";
         const updatedAtMs = 3_000 + index;
         await rating[mark](operationId, state, updatedAtMs, reason);
-        expectedPayload = {
-          ...expectedPayload,
-          [`${field}State`]: state,
-          [`${field}UpdatedAtMs`]: updatedAtMs,
-          [`${field}Reason`]: reason?.trim() || null,
-        };
-        expect(await readRow()).toEqual({
-          ...original,
-          payload_json: JSON.stringify(expectedPayload),
-          [`${prefix}_state`]: state,
-          [`${prefix}_updated_at_ms`]: updatedAtMs,
+        const row = await testEnv.PROFILE_DB.prepare(
+          `SELECT payload_json, ${prefix}_state AS state, ${prefix}_updated_at_ms AS updated_at_ms, revision FROM rating_updates_canonical WHERE operation_id = ?`,
+        )
+          .bind(operationId)
+          .first();
+        expect(row).toEqual({
+          payload_json: JSON.stringify({
+            ...initial.payload,
+            [`${field}Reason`]: reason?.trim() || null,
+          }),
+          state,
+          updated_at_ms: updatedAtMs,
           revision: index + 3,
         });
       }
       expect(writes).toHaveLength(reasons.length + 1);
-      expect(
-        queries.filter((query) =>
-          /^\s*SELECT \* FROM rating_updates\b/.test(query),
-        ),
-      ).toHaveLength(reasons.length + 1);
       for (const { query, bindings } of writes) {
-        expect(query).toContain("json_set(payload_json,");
-        expect(query.match(/json\(\?\)/g)).toHaveLength(3);
-        const encoded = JSON.stringify(bindings);
-        expect(encoded).not.toContain("retained-match-payload-");
-        expect(new TextEncoder().encode(encoded).byteLength).toBeLessThan(512);
+        expect(query).not.toContain("invite_id =");
+        expect(bindings.length).toBeLessThan(28);
       }
     },
   );
 
   it.each(ratingDiscoveryCases)(
-    "preserves $field legacy JSON through the full-payload fallback",
+    "rejects retired $field fields and invalid reasons without projection writes",
     async ({ mark, field, prefix }) => {
-      const variants = [
-        "whitespace",
-        "duplicate key",
-        "escaped key",
-        "numeric spelling",
-        "escaped text",
-        "missing reason",
-        "missing timestamp fallback",
-        "unrelated normalization",
-        "NUL state key",
-        "NUL timestamp key",
-        "NUL reason key",
-      ] as const;
-      for (const [index, variant] of variants.entries()) {
-        const operationId = `projection-legacy-json-${prefix}-${index}`;
-        const initial = await insertProjectionRating(operationId);
-        const payload = { ...retainedFixtureFields(initial.payload) };
-        if (variant === "missing reason") delete payload[`${field}Reason`];
-        if (variant === "missing timestamp fallback")
-          delete payload.updatedAtMs;
-        if (variant === "unrelated normalization") {
-          delete payload[
-            field === "telegramProjection"
-              ? "profileGameProjectionState"
-              : "telegramProjectionState"
-          ];
-        }
-        let raw = JSON.stringify(payload);
-        if (variant === "whitespace") raw = JSON.stringify(payload, null, 2);
-        if (variant === "duplicate key") {
-          raw = raw.replace(
-            `"${field}State":"pending"`,
-            `"${field}State":"dead","${field}State":"pending"`,
-          );
-        }
-        if (variant === "escaped key") {
-          raw = raw.replace(`"${field}State"`, `"${field}Stat\\u0065"`);
-        }
-        if (variant === "numeric spelling") {
-          raw = raw.replace('"updatedAtMs":2000', '"updatedAtMs":2e3');
-        }
-        if (variant === "escaped text") {
-          raw = raw.replace('"nested":"retained"', '"nested":"r\\u0065tained"');
-        }
-        const nulField =
-          variant === "NUL state key"
-            ? `${field}State`
-            : variant === "NUL timestamp key"
-              ? `${field}UpdatedAtMs`
-              : variant === "NUL reason key"
-                ? `${field}Reason`
-                : null;
-        if (nulField) {
-          raw = JSON.stringify({
-            [`${nulField}\u0000suffix`]: "retained",
-            ...payload,
-          });
-        }
-        await testEnv.PROFILE_DB.prepare(
-          "UPDATE rating_updates SET payload_json = ? WHERE operation_id = ?",
-        )
-          .bind(raw, operationId)
-          .run();
-        const writes: Array<{ query: string; bindings: unknown[] }> = [];
-        const db = beforeMatchingBatch(
-          testEnv.PROFILE_DB,
-          () => false,
-          async () => {},
-          undefined,
-          (query, bindings) => {
-            if (/^\s*UPDATE rating_updates\b/.test(query)) {
-              writes.push({ query, bindings });
-            }
-          },
+      const operationId = `projection-rejected-${prefix}__match`;
+      const initial = await insertProjectionRating(operationId);
+      for (const payload of [
+        { ...initial.payload, [`${field}State`]: "pending" },
+        { ...initial.payload, [`${field}UpdatedAtMs`]: 2_000 },
+        { ...initial.payload, [`${field}Reason`]: undefined },
+      ]) {
+        expect(() => ratingPayloadFixture(payload)).toThrow(
+          CanonicalProfileCorruption,
         );
-        await projectionRatingRepository(db)[mark](
-          operationId,
-          "done",
-          3_000,
-          " reason ",
-        );
-        const expected = JSON.stringify({
-          ...JSON.parse(raw),
-          updatedAtMs: initial.updatedAtMs,
-          [`${field}State`]: "done",
-          [`${field}UpdatedAtMs`]: 3_000,
-          [`${field}Reason`]: "reason",
-        });
-        expect(writes, variant).toHaveLength(1);
-        expect(writes[0].query, variant).not.toContain("json_set(");
-        expect(writes[0].bindings, variant).toContain(expected);
-        expect(
-          await testEnv.PROFILE_DB.prepare(
-            `SELECT payload_json, revision, ${prefix}_state AS state,
-                    ${prefix}_updated_at_ms AS updated_at_ms
-             FROM rating_updates WHERE operation_id = ?`,
-          )
-            .bind(operationId)
-            .first(),
-          variant,
-        ).toEqual({
-          payload_json: expected,
-          revision: 2,
-          state: "done",
-          updated_at_ms: 3_000,
-        });
       }
+      const observed = observeD1FailureDatabase(testEnv.PROFILE_DB);
+      for (const reason of ["bad\nreason", "bad\u0000reason"]) {
+        await expect(
+          projectionRatingRepository(observed.database)[mark](
+            operationId,
+            "done",
+            3_000,
+            reason,
+          ),
+        ).rejects.toBeInstanceOf(CanonicalProfileCorruption);
+      }
+      expect(observed.batches).toEqual([]);
+      expect(
+        await projectionRatingRepository().readRatingUpdate(operationId),
+      ).toMatchObject({
+        [`${field}State`]: "pending",
+        [`${field}UpdatedAtMs`]: 2_000,
+      });
     },
   );
 
@@ -3336,7 +3253,7 @@ describe("canonical gameplay repositories", () => {
   );
 
   it("keeps projection preflight misses and missing mark errors unchanged", async () => {
-    const operationId = "projection-preflight";
+    const operationId = "projection-preflight__match";
     await insertProjectionRating(operationId);
     const observed = observeD1FailureDatabase(testEnv.PROFILE_DB);
     const rating = projectionRatingRepository(observed.database);
@@ -3355,7 +3272,7 @@ describe("canonical gameplay repositories", () => {
   it.each(["unavailable", "conflict"] as const)(
     "does not retry a projection snapshot read that throws %s",
     async (kind) => {
-      const operationId = `projection-read-${kind}`;
+      const operationId = `projection-read-${kind}__match`;
       await insertProjectionRating(operationId);
       const failure =
         kind === "conflict"
@@ -3368,7 +3285,7 @@ describe("canonical gameplay repositories", () => {
         () => false,
         async () => {},
         (query) => {
-          expect(query).toMatch(/^\s*SELECT \* FROM rating_updates/);
+          expect(query).toMatch(/^\s*SELECT \* FROM rating_updates_canonical/);
           reads++;
           throw failure;
         },
@@ -3391,7 +3308,7 @@ describe("canonical gameplay repositories", () => {
   it.each(["claim", "mark"] as const)(
     "preserves global revision conflicts during projection %s",
     async (operation) => {
-      const operationId = `projection-revision-${operation}`;
+      const operationId = `projection-revision-${operation}__match`;
       await insertProjectionRating(operationId);
       const observed = observeD1FailureDatabase(testEnv.PROFILE_DB, {
         async beforeBatch(attempt) {
@@ -3415,28 +3332,30 @@ describe("canonical gameplay repositories", () => {
       expect(observed.errors).toHaveLength(1);
       expect(observed.batches).toHaveLength(operation === "claim" ? 1 : 2);
       const row = await testEnv.PROFILE_DB.prepare(
-        "SELECT payload_json, revision FROM rating_updates WHERE operation_id = ?",
+        "SELECT payload_json, revision FROM rating_updates_canonical WHERE operation_id = ?",
       )
         .bind(operationId)
         .first<{ payload_json: string; revision: number }>();
       expect(row?.revision).toBe(operation === "claim" ? 2 : 3);
       expect(JSON.parse(row?.payload_json || "{}")).toMatchObject({
+        telegramProjectionReason: "concurrent delivery",
+      });
+      expect(await rating.readRatingUpdate(operationId)).toMatchObject({
         eventProgressState: operation === "claim" ? "pending" : "done",
         eventProgressUpdatedAtMs: operation === "claim" ? 2_000 : 3_000,
         telegramProjectionState: "done",
         telegramProjectionUpdatedAtMs: 2_500,
-        telegramProjectionReason: "concurrent delivery",
       });
     },
   );
 
   it("exhausts projection mark retries without hiding revision conflicts", async () => {
-    const operationId = "projection-retry-limit";
+    const operationId = "projection-retry-limit__match";
     await insertProjectionRating(operationId);
     const observed = observeD1FailureDatabase(testEnv.PROFILE_DB, {
       async beforeBatch() {
         await testEnv.PROFILE_DB.prepare(
-          "UPDATE rating_updates SET revision = revision + 1 WHERE operation_id = ?",
+          "UPDATE rating_updates_canonical SET revision = revision + 1 WHERE operation_id = ?",
         )
           .bind(operationId)
           .run();
@@ -3455,64 +3374,30 @@ describe("canonical gameplay repositories", () => {
     ).toMatchObject({ eventProgressState: "pending" });
   });
 
-  it.each(["normalization", "invalid payload"] as const)(
-    "preserves legacy projection %s through the full-write fallback",
+  it.each(["missing reason", "retired field"] as const)(
+    "rejects a projection payload with %s before persistence",
     async (mode) => {
-      const operationId = `projection-legacy-${mode}`;
+      const operationId = `projection-invalid-${mode}__match`;
       const initial = await insertProjectionRating(operationId);
       const payload = { ...retainedFixtureFields(initial.payload) };
-      delete payload.telegramProjectionState;
-      if (mode === "invalid payload") delete payload.inviteId;
-      await testEnv.PROFILE_DB.prepare(
-        "UPDATE rating_updates SET payload_json = ? WHERE operation_id = ?",
-      )
-        .bind(JSON.stringify(payload), operationId)
-        .run();
-      const queries: string[] = [];
-      const db = beforeMatchingBatch(
-        testEnv.PROFILE_DB,
-        () => false,
-        async () => {},
-        (query) => queries.push(query),
+      if (mode === "missing reason") delete payload.telegramProjectionReason;
+      else payload.telegramProjectionState = "pending";
+      expect(() => ratingPayloadFixture(payload)).toThrow(
+        CanonicalProfileCorruption,
       );
-      const result = projectionRatingRepository(db).markRatingEventProgress(
-        operationId,
-        "done",
-        3_000,
-      );
-      if (mode === "invalid payload") {
-        await expect(result).rejects.toBeInstanceOf(CanonicalProfileCorruption);
-      } else {
-        await result;
-      }
       expect(
-        queries.find((query) => /^\s*UPDATE rating_updates\b/.test(query)),
-      ).toContain("invite_id = ?");
-      const row = await testEnv.PROFILE_DB.prepare(
-        "SELECT telegram_projection_state, event_progress_state, revision FROM rating_updates WHERE operation_id = ?",
-      )
-        .bind(operationId)
-        .first();
-      expect(row).toEqual(
-        mode === "invalid payload"
-          ? {
-              telegram_projection_state: "pending",
-              event_progress_state: "pending",
-              revision: 1,
-            }
-          : {
-              telegram_projection_state: null,
-              event_progress_state: "done",
-              revision: 2,
-            },
-      );
+        await projectionRatingRepository().readRatingUpdate(operationId),
+      ).toMatchObject({
+        telegramProjectionState: "pending",
+        eventProgressState: "pending",
+      });
     },
   );
 
   it.each(["claim", "mark"] as const)(
     "retains frozen-control failures for projection %s",
     async (operation) => {
-      const operationId = `projection-frozen-${operation}`;
+      const operationId = `projection-frozen-${operation}__match`;
       await insertProjectionRating(operationId);
       const observed = observeD1FailureDatabase(testEnv.PROFILE_DB, {
         async beforeBatch() {
@@ -3542,107 +3427,47 @@ describe("canonical gameplay repositories", () => {
     },
   );
 
-  it("preserves imported rating timestamp fallbacks during projection writes", async () => {
-    const operationId = "d1-imported-rating-invite__d1-imported-rating-match";
-    await commitCanonicalPlan(testEnv.PROFILE_DB, {
-      expectations: [{ kind: "rating-update-absent", operationId }],
-      mutations: [
-        {
-          kind: "insert-rating-update",
-          value: {
-            operationId,
-            payload: ratingPayloadFixture({
-              status: "processing",
-              inviteId: "d1-imported-rating-invite",
-              matchId: "d1-imported-rating-match",
-              playerId: "d1-imported-rating-player",
-              opponentId: "d1-imported-rating-opponent",
-              ownerUid: "d1-imported-rating-player",
-              ownerToken: "d1-imported-rating-owner",
-              startedAtMs: 1_000,
-              leaseExpiresAtMs: 5_000,
-              eventProgressState: "pending",
-              eventProgressUpdatedAtMs: 1_200,
-              eventProgressVersion: 1,
-            }),
-            status: "processing",
-            inviteId: "d1-imported-rating-invite",
-            matchId: "d1-imported-rating-match",
-            playerId: "d1-imported-rating-player",
-            opponentId: "d1-imported-rating-opponent",
-            playerProfileId: null,
-            opponentProfileId: null,
-            ownerUid: "d1-imported-rating-player",
-            ownerToken: "d1-imported-rating-owner",
-            startedAtMs: 1_000,
-            updatedAtMs: 1_500,
-            leaseExpiresAtMs: 5_000,
-            completedAtMs: null,
-            telegramProjectionState: null,
-            telegramProjectionUpdatedAtMs: null,
-            telegramProjectionVersion: null,
-            profileGameProjectionState: null,
-            profileGameProjectionUpdatedAtMs: null,
-            profileGameProjectionVersion: null,
-            eventProgressState: "pending",
-            eventProgressUpdatedAtMs: 1_200,
-            eventProgressVersion: 1,
-          },
-        },
-      ],
+  it("keeps rating timestamps separate from projection progress", async () => {
+    const operationId = "rating-timestamps__match";
+    const initial = await insertProjectionRating(operationId, {
+      updatedAtMs: 1_500,
+      completedAtMs: 1_500,
+      eventProgressUpdatedAtMs: 1_200,
     });
-    const gameplay = createGameplayRepository(testEnv, {
-      stateClient: matchTestPort(state),
-    });
-    const rating = createCanonicalRatingRepository(
-      testEnv.PROFILE_DB,
-      gameplay,
-      {
-        createFailure: () => new Error("rating-unavailable"),
-        maxAttempts: 5,
-        now: () => 2_000,
-      },
-    );
-    const due = await rating
+    const rating = projectionRatingRepository();
+    const [entry] = await rating
       .scanDueRatingEventProgress(1_200, 100)
       .then(recoveryCandidates);
-    const imported = due.find((entry) => entry.operationId === operationId);
-    expect(imported).toBeDefined();
+    expect(entry).toBeDefined();
     expect(
       await rating.claimRatingEventProgress(
         operationId,
-        imported?.revision || 0,
+        entry!.revision,
         2_000,
       ),
     ).toBe(true);
     await rating.markRatingEventProgress(operationId, "done", 3_000);
-
-    const row = await testEnv.PROFILE_DB.prepare(
-      `SELECT payload_json, updated_at_ms, event_progress_state,
-              event_progress_updated_at_ms
-       FROM rating_updates WHERE operation_id = ?`,
+    expect(await rating.readRatingUpdate(operationId)).toMatchObject({
+      completedAtMs: 1_500,
+      eventProgressState: "done",
+      eventProgressUpdatedAtMs: 3_000,
+    });
+    const payload = await testEnv.PROFILE_DB.prepare(
+      "SELECT payload_json FROM rating_updates_canonical WHERE operation_id = ?",
     )
       .bind(operationId)
-      .first<{
-        event_progress_state: string;
-        event_progress_updated_at_ms: number;
-        payload_json: string;
-        updated_at_ms: number;
-      }>();
-    expect(row).not.toBeNull();
-    const payload = JSON.parse(row?.payload_json || "{}") as Record<
-      string,
-      unknown
-    >;
-    expect(payload.updatedAtMs).toBe(1_500);
-    expect(row?.updated_at_ms).toBe(1_500);
-    expect(payload.eventProgressState).toBe("done");
-    expect(payload.eventProgressUpdatedAtMs).toBe(3_000);
-    expect(row?.event_progress_state).toBe("done");
-    expect(row?.event_progress_updated_at_ms).toBe(3_000);
+      .first<string>("payload_json");
+    expect(JSON.parse(payload!)).toEqual(initial.payload);
+    expect(
+      await testEnv.PROFILE_DB.prepare(
+        "SELECT updated_at_ms FROM rating_updates_canonical WHERE operation_id = ?",
+      )
+        .bind(operationId)
+        .first<number>("updated_at_ms"),
+    ).toBe(1_500);
   });
 
-  it("rebuilds a rating plan after a profile edit and preserves sparse legacy fields", async () => {
+  it("rebuilds a rating plan after a profile edit and preserves canonical fields", async () => {
     const profileId = "d1-edit-player";
     await insertProfile(
       profileId,
@@ -3651,7 +3476,7 @@ describe("canonical gameplay repositories", () => {
       { nonce: false, mp: false, dust: false, slime: false },
       false,
       false,
-      "",
+      0,
     );
     await insertProfile("d1-edit-opponent", "d1-edit-opponent-login");
     const gameplay = createGameplayRepository(testEnv, {
@@ -3681,7 +3506,9 @@ describe("canonical gameplay repositories", () => {
     const racedDb = beforeMatchingBatch(
       testEnv.PROFILE_DB,
       (queries) =>
-        queries.some((query) => query.includes("UPDATE rating_updates")),
+        queries.some((query) =>
+          query.includes("UPDATE rating_updates_canonical"),
+        ),
       async () => {
         const current = await readCanonicalProfile(
           testEnv.PROFILE_DB,
@@ -3718,7 +3545,7 @@ describe("canonical gameplay repositories", () => {
                   },
                 },
                 updatedAtMs: 2_500,
-                legacyFields: { imported: { untouched: [1, "two", null] } },
+
                 sortValues: {
                   ...current.sortValues,
                   rating: 1700,
@@ -3798,8 +3625,7 @@ describe("canonical gameplay repositories", () => {
       },
       winPresent: false,
       emojiPresent: false,
-      gameplayEmoji: "",
-      legacyFields: { imported: { untouched: [1, "two", null] } },
+      gameplayEmoji: 0,
     });
   });
 
@@ -3851,7 +3677,7 @@ describe("canonical gameplay repositories", () => {
       (queries) => {
         profileWrites.push(
           ...queries.filter((query) =>
-            /UPDATE profile_records\s+SET/.test(query),
+            /UPDATE profile_records_canonical\s+SET/.test(query),
           ),
         );
         return false;
@@ -3943,7 +3769,9 @@ describe("canonical gameplay repositories", () => {
     const racedDb = beforeMatchingBatch(
       testEnv.PROFILE_DB,
       (queries) =>
-        queries.some((query) => query.includes("UPDATE rating_updates")),
+        queries.some((query) =>
+          query.includes("UPDATE rating_updates_canonical"),
+        ),
       async () => {
         await insertProfile("d1-created-player", "d1-created-player-login");
       },
@@ -4024,7 +3852,9 @@ describe("canonical gameplay repositories", () => {
     const racedDb = beforeMatchingBatch(
       testEnv.PROFILE_DB,
       (queries) =>
-        queries.some((query) => query.includes("UPDATE rating_updates")),
+        queries.some((query) =>
+          query.includes("UPDATE rating_updates_canonical"),
+        ),
       async () => {
         const source = await readCanonicalProfile(
           testEnv.PROFILE_DB,
@@ -4066,7 +3896,7 @@ describe("canonical gameplay repositories", () => {
                 profile: source.profile,
                 createdAtMs: source.createdAtMs,
                 updatedAtMs: 3_000,
-                legacyFields: source.legacyFields,
+
                 state: "retiring",
                 mergedAtMs: 3_000,
                 mergedIntoProfileId: target.profileId,
@@ -4080,7 +3910,6 @@ describe("canonical gameplay repositories", () => {
                 targetProfileId: target.profileId,
                 mergedAtMs: 3_000,
                 opId: "d1-race-merge",
-                sourceLegacyFields: source.legacyFields,
               },
             },
             {
@@ -4145,35 +3974,23 @@ describe("canonical gameplay repositories", () => {
     });
   });
 
-  it("uses modeled gameplay emoji without interpreting legacy fields", () => {
-    const value = materializeCanonicalProfile({
-      profile: profile("d1-legacy-emoji", { emoji: 13 }),
-      createdAtMs: 1_000,
-      updatedAtMs: 1_000,
-      legacyFields: { emoji: 99 },
-      emojiPresent: false,
-      gameplayEmoji: 13,
-    });
-    const snapshot = { ...value, profileId: value.profile.id, revision: 1 };
-    expect(canonicalProfileFields(snapshot)).toMatchObject({
-      custom: {},
-      emoji: 13,
-    });
-    const blockedByCustomNull = materializeCanonicalProfile({
-      profile: profile("d1-null-custom-emoji", { emoji: 42 }),
-      createdAtMs: 1_000,
-      updatedAtMs: 1_000,
-      legacyFields: { emoji: 13 },
-      emojiPresent: false,
-      gameplayEmoji: "",
-    });
-    const fields = canonicalProfileFields({
-      ...blockedByCustomNull,
-      profileId: blockedByCustomNull.profile.id,
-      revision: 1,
-    });
-    expect(fields.custom).toEqual({});
-    expect(Object.hasOwn(fields, "emoji")).toBe(false);
+  it("uses canonical gameplay emoji independently from the presentation fallback", () => {
+    for (const gameplayEmoji of [0, 13]) {
+      const snapshot = materializeCanonicalProfile({
+        profile: profile("canonical-emoji", { emoji: 42 }),
+        createdAtMs: 1_000,
+        updatedAtMs: 1_000,
+        emojiPresent: false,
+        gameplayEmoji,
+      });
+      expect(ratingProfileFromSnapshot({ profile: snapshot })?.emoji).toBe(
+        gameplayEmoji,
+      );
+    }
+    for (const emoji of ["", "13", "raw-emoji", null])
+      expect(() => parseStoredGameplayEmoji(emoji)).toThrow(
+        CanonicalProfileCorruption,
+      );
   });
 
   it("reconciles ambiguous rating lease and finalize responses", async () => {

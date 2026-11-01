@@ -120,7 +120,7 @@ export function createAutomatchReads(db: D1Database) {
     const results = await session.batch<MutationRecordRow>(statements);
     signal?.throwIfAborted();
     return locations.map(({ root, key, index }) => {
-      const row = results[index].results[0];
+      const row = results[index]!.results[0];
       if (!row)
         return decodeSnapshot(root, {
           record_key: key,
@@ -213,7 +213,7 @@ export function createAutomatchReads(db: D1Database) {
     }
     return readValues(
       "automatch",
-      `SELECT record_key, payload_json, revision FROM automatch_entries
+      `SELECT record_key, payload_json, revision FROM automatch_entries_canonical
        WHERE payload_json IS NOT NULL
          AND json_extract(payload_json, '$.uid') = ?
          AND json_type(payload_json, '$.uid') = 'text'
@@ -226,7 +226,7 @@ export function createAutomatchReads(db: D1Database) {
   async function readFirstAutomatchEntry(signal?: AbortSignal) {
     return readValues(
       "automatch",
-      `SELECT record_key, payload_json, revision FROM automatch_entries
+      `SELECT record_key, payload_json, revision FROM automatch_entries_canonical
        WHERE payload_json IS NOT NULL
        ORDER BY ${keyOrderSql("record_key")} LIMIT 1`,
       [],
@@ -256,8 +256,9 @@ export function createAutomatchReads(db: D1Database) {
       "telegramProjectionOutbox/automatch",
       `SELECT record_key, payload_json, revision,
          ${recoveryScanIdentitySql("record_key")} AS recovery_scan_identity
-       FROM automatch_telegram_projection_outbox
+       FROM automatch_telegram_projection_outbox_canonical
        WHERE payload_json IS NOT NULL
+         AND json_extract(payload_json, '$.status') = 'pending'
          AND recovery_sort_rank = 3
          AND recovery_sort_value >= 0
          AND recovery_sort_value <= ?1
@@ -291,8 +292,9 @@ export function createAutomatchReads(db: D1Database) {
       "profileGameProjectionOutbox/automatch",
       `SELECT record_key, payload_json, revision,
          ${recoveryScanIdentitySql("record_key")} AS recovery_scan_identity
-       FROM game_session_projection_outbox
+       FROM game_session_projection_outbox_canonical
        WHERE payload_json IS NOT NULL
+         AND json_extract(payload_json, '$.status') = 'pending'
          AND (recovery_sort_rank, recovery_sort_value) <= (3, ?1)
          ${recoveryScanExclusionSql("record_key", excludedIdentities, 3)}
        ORDER BY ${RECOVERY_ORDER_SQL} LIMIT ?2`,
@@ -320,8 +322,9 @@ export function createAutomatchReads(db: D1Database) {
       "profileGameProjectionOutbox/automatch",
       `SELECT record_key, payload_json, revision,
          ${recoveryScanIdentitySql("record_key")} AS recovery_scan_identity
-       FROM game_session_projection_outbox
+       FROM game_session_projection_outbox_canonical
        WHERE payload_json IS NOT NULL
+         AND json_extract(payload_json, '$.status') = 'pending'
          AND recovery_sort_rank >= 4
          ${recoveryScanExclusionSql("record_key", excludedIdentities, 2)}
        ORDER BY ${RECOVERY_ORDER_SQL} LIMIT ?1`,
@@ -357,7 +360,7 @@ export function createAutomatchReads(db: D1Database) {
               ORDER BY ${keyOrderSql("entry.record_key")}
             ) AS login_rank
           FROM json_each(?) AS requested
-          CROSS JOIN automatch_entries AS entry INDEXED BY idx_automatch_entries_uid
+          CROSS JOIN automatch_entries_canonical AS entry INDEXED BY idx_automatch_entries_uid_canonical
           WHERE entry.payload_json IS NOT NULL
             AND json_extract(entry.payload_json, '$.uid') = requested.value
             AND json_type(entry.payload_json, '$.uid') = 'text'

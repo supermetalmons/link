@@ -33,10 +33,8 @@ import {
   readRatingLeaseSnapshot,
 } from "../ratingCompletionD1.ts";
 import {
-  number,
   ratingData,
-  ratingValue,
-  ratingLeasePayload,
+  ratingLeaseValue,
   mergedRatingValue,
   ratingProfileFromSnapshot,
 } from "./codec.ts";
@@ -117,6 +115,7 @@ export function createRatingOperations(
         }
         if (initial.legacyCompleted || data?.status === "done")
           return { status: "done", data };
+        if (data?.status === "blocked") return { status: "blocked", data };
         const attemptNowMs = options.now();
         if (
           data?.status === "processing" &&
@@ -126,7 +125,7 @@ export function createRatingOperations(
         ) {
           return { status: "busy", data };
         }
-        const fields = ratingLeasePayload(snapshot, input, data, attemptNowMs);
+        const value = ratingLeaseValue(snapshot, input, attemptNowMs);
         try {
           await commitCanonicalPlan(db, {
             expectations: [
@@ -143,7 +142,7 @@ export function createRatingOperations(
                 kind: snapshot
                   ? ("update-rating-update" as const)
                   : ("insert-rating-update" as const),
-                value: ratingValue(operationId, fields),
+                value,
               },
             ],
           });
@@ -293,7 +292,7 @@ export function createRatingOperations(
             buildMutableGameplayProfileMutation(
               snapshot,
               patch,
-              number(plan.ratingUpdate.updatedAtMs) || options.now(),
+              plan.ratingUpdate.updatedAtMs,
             ),
           );
         }

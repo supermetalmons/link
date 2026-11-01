@@ -1,3 +1,5 @@
+import { isSessionCreateRequest } from "@mons/shared/session-auth";
+import { browserServerOrigin } from "./browserViteServer.mjs";
 import assert from "node:assert/strict";
 import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
@@ -5,9 +7,14 @@ import test from "node:test";
 import { createBrowserViteServer as createServer } from "./browserViteServer.mjs";
 
 const require = createRequire(import.meta.url);
+/** @type {typeof import("playwright")} */
 const { chromium } = require(process.env.MONS_PLAYWRIGHT_PATH || "playwright");
 const repository = fileURLToPath(new URL("../", import.meta.url));
 
+/**
+ * @typedef {{sessionId: string, uid: string}} FixtureSession
+ * @param {(fixture: {context: import("playwright").BrowserContext, open: () => Promise<import("playwright").Page>, origin: string, sessions: Map<string, FixtureSession>, refreshes: string[], revoked: Set<string>}) => Promise<void>} run
+ */
 async function fixture(run) {
   const server = await createServer({
     root: repository,
@@ -20,10 +27,11 @@ async function fixture(run) {
     },
     logLevel: "error",
   });
+  /** @type {import("playwright").Browser | undefined} */
   let browser;
   try {
     await server.listen();
-    const origin = `http://127.0.0.1:${server.httpServer.address().port}`;
+    const origin = browserServerOrigin(server);
     browser = await chromium.launch({
       headless: true,
       ...(process.env.MONS_BROWSER_EXECUTABLE
@@ -35,6 +43,55 @@ async function fixture(run) {
     });
     context.setDefaultTimeout(15_000);
     await context.addInitScript(() => {
+      globalThis.requireSessionUser = (auth = globalThis.testSessionAuth) => {
+        const user = auth.currentUser;
+        if (!user) throw new Error("fixture-session-user-missing");
+        return user;
+      };
+      globalThis.sessionStoreForTest = (auth) => {
+        /** @type {unknown} */
+        const dependencies = Reflect.get(auth, "dependencies");
+        if (
+          !dependencies ||
+          typeof dependencies !== "object" ||
+          !("store" in dependencies)
+        )
+          throw new Error("fixture-session-store-missing");
+        /** @param {unknown} value @returns {value is import("../src/session/sessionStore.ts").SessionStore} */
+        const isStore = (value) =>
+          value !== null &&
+          typeof value === "object" &&
+          "update" in value &&
+          typeof value.update === "function";
+        if (!isStore(dependencies.store))
+          throw new Error("fixture-session-store-invalid");
+        return dependencies.store;
+      };
+      globalThis.connectionLoginUidForTest = (connection) => {
+        /** @type {unknown} */
+        const context = Reflect.get(connection, "activeContext");
+        if (
+          !context ||
+          typeof context !== "object" ||
+          !("loginUid" in context) ||
+          typeof context.loginUid !== "string"
+        )
+          throw new Error("fixture-active-context-missing");
+        return context.loginUid;
+      };
+      globalThis.connectionSubscriptionsForTest = (connection) => {
+        /** @type {unknown} */
+        const client = Reflect.get(connection, "wagerClient");
+        if (!client || typeof client !== "object")
+          throw new Error("fixture-wager-client-missing");
+        /** @type {unknown} */
+        const metadata = Reflect.get(connection, "inviteMetadataSubscription");
+        /** @type {unknown} */
+        const wagers = Reflect.get(client, "inviteWagersSubscription");
+        /** @type {unknown} */
+        const match = Reflect.get(connection, "matchSyncSubscription");
+        return { metadata, wagers, match };
+      };
       globalThis.failSessionStorage = (once = false) => {
         const open = indexedDB.open;
         const transaction = IDBDatabase.prototype.transaction;
@@ -50,15 +107,20 @@ async function fixture(run) {
           if (args[0] === "mons-link-sessions-v1") fail();
           return open.apply(this, args);
         };
-        IDBDatabase.prototype.transaction = function (...args) {
+        /** @this {IDBDatabase} @param {Parameters<IDBDatabase["transaction"]>} args */
+        function trackedTransaction(...args) {
           if (this.name === "mons-link-sessions-v1") fail();
           return transaction.apply(this, args);
-        };
+        }
+        IDBDatabase.prototype.transaction = trackedTransaction;
         return restore;
       };
     });
+    /** @type {Map<string, FixtureSession>} */
     const sessions = new Map();
+    /** @type {Set<string>} */
     const revoked = new Set();
+    /** @type {string[]} */
     const refreshes = [];
     await context.route("**/*", async (route) => {
       const request = route.request();
@@ -67,18 +129,32 @@ async function fixture(run) {
       if (url.origin !== "https://api.mons.link") return route.abort();
       const headers = {
         "Access-Control-Allow-Origin": origin,
-        "Access-Control-Allow-Headers": "Content-Type, Authorization",
+        "Access-Control-Allow-Headers":
+          "Content-Type, Authorization, X-Mons-Data-Epoch",
         "Access-Control-Allow-Methods": "POST, GET, OPTIONS",
       };
       if (request.method() === "OPTIONS")
         return route.fulfill({ status: 204, headers });
+      if (url.pathname === "/release")
+        return route.fulfill({
+          status: 200,
+          headers,
+          json: { state: "active", dataEpoch: 1, generation: 1 },
+        });
       if (url.pathname === "/auth/session/logout") {
-        revoked.add(request.headers().authorization.split(".")[1]);
+        const authorization = request.headers().authorization;
+        assert.ok(authorization);
+        const sessionId = authorization.split(".")[1];
+        assert.ok(sessionId);
+        revoked.add(sessionId);
         return route.fulfill({ status: 204, headers });
       }
+      /** @type {FixtureSession | undefined} */
       let session;
       if (url.pathname === "/auth/session/anonymous") {
+        /** @type {unknown} */
         const input = request.postDataJSON();
+        assert.ok(isSessionCreateRequest(input));
         session = sessions.get(input.sessionId);
         if (!session) {
           session = {
@@ -88,7 +164,10 @@ async function fixture(run) {
           sessions.set(input.sessionId, session);
         }
       } else if (url.pathname === "/auth/session/refresh") {
-        const sessionId = request.headers().authorization.split(".")[1];
+        const authorization = request.headers().authorization;
+        assert.ok(authorization);
+        const sessionId = authorization.split(".")[1];
+        assert.ok(sessionId);
         refreshes.push(sessionId);
         session = sessions.get(sessionId);
       }
@@ -145,32 +224,37 @@ test(
       const page = await open();
       const old = await page.evaluate(async () => {
         const { sessionAuth } = await import("/src/session/sessionAuth.ts");
-        globalThis.oldSessionUser = sessionAuth.currentUser;
+        globalThis.oldSessionUser = globalThis.requireSessionUser(sessionAuth);
         await globalThis.oldSessionUser.getIdToken();
         return {
-          uid: sessionAuth.currentUser.uid,
-          sessionId: sessionAuth.currentUser.sessionId,
+          uid: globalThis.requireSessionUser(sessionAuth).uid,
+          sessionId: globalThis.requireSessionUser(sessionAuth).sessionId,
         };
       });
       const second = await open();
       const secondSessionId = await second.evaluate(async () => {
         const { sessionAuth } = await import("/src/session/sessionAuth.ts");
-        globalThis.oldSessionUser = sessionAuth.currentUser;
+        globalThis.oldSessionUser = globalThis.requireSessionUser(sessionAuth);
         await globalThis.oldSessionUser.getIdToken();
-        return sessionAuth.currentUser.sessionId;
+        return globalThis.requireSessionUser(sessionAuth).sessionId;
       });
       assert.equal(secondSessionId, old.sessionId);
       const previousRefreshes = refreshes.length;
       await page.evaluate(
         () =>
-          new Promise((resolve, reject) => {
-            const request = indexedDB.deleteDatabase("mons-link-sessions-v1");
-            request.onsuccess = () => resolve();
-            request.onerror = () =>
-              reject(new Error("native-session-clear-failed"));
-            request.onblocked = () =>
-              reject(new Error("native-session-clear-blocked"));
-          }),
+          new Promise(
+            /** @param {(value?: void) => void} resolve */ (
+              resolve,
+              reject,
+            ) => {
+              const request = indexedDB.deleteDatabase("mons-link-sessions-v1");
+              request.onsuccess = () => resolve();
+              request.onerror = () =>
+                reject(new Error("native-session-clear-failed"));
+              request.onblocked = () =>
+                reject(new Error("native-session-clear-blocked"));
+            },
+          ),
       );
       for (const tab of [page, second]) {
         const cleared = await tab.evaluate(async () => {
@@ -181,6 +265,7 @@ test(
               await globalThis.oldSessionUser.getIdToken(force);
               outcomes.push("token-returned");
             } catch (error) {
+              if (!(error instanceof Error)) throw error;
               outcomes.push(error.message);
             }
           }
@@ -225,7 +310,7 @@ test(
       const page = await open();
       const first = await page.evaluate(async () => {
         const auth = globalThis.testSessionAuth;
-        const token = await auth.currentUser.getIdToken();
+        const token = await globalThis.requireSessionUser(auth).getIdToken();
         return { token, remaining: auth.getTokenRemainingMs(token) };
       });
       assert.ok(first.remaining > 250_000 && first.remaining <= 299_000);
@@ -233,7 +318,7 @@ test(
       const afterClockChange = await page.evaluate(async () => {
         globalThis.testClockSkew = -24 * 60 * 60_000;
         const auth = globalThis.testSessionAuth;
-        const token = await auth.currentUser.getIdToken();
+        const token = await globalThis.requireSessionUser(auth).getIdToken();
         return { token, remaining: auth.getTokenRemainingMs(token) };
       });
       assert.equal(afterClockChange.token, first.token);
@@ -248,7 +333,9 @@ test(
         globalThis.testClockSkew = -10 * 60_000;
         const { sessionAuth } = await import("/src/session/sessionAuth.ts");
         await sessionAuth.signInAnonymously();
-        const token = await sessionAuth.currentUser.getIdToken(true);
+        const token = await globalThis
+          .requireSessionUser(sessionAuth)
+          .getIdToken(true);
         if (sessionAuth.getTokenRemainingMs(token) <= 0)
           throw new Error("clock-skew-token-unusable");
       });
@@ -262,14 +349,21 @@ test(
   async () => {
     await fixture(async ({ open, revoked }) => {
       const page = await open();
+      /** @type {string[]} */
       const errors = [];
       page.on("pageerror", (error) => errors.push(error.message));
       await page.clock.install();
       const original = await page.evaluate(async () => {
         const auth = globalThis.testSessionAuth;
         await auth.flushRevocations();
-        localStorage.setItem("loginId", auth.currentUser.uid);
-        localStorage.setItem("profileId", "prior-linked-profile");
+        localStorage.setItem(
+          "mons:data:v1:loginId",
+          JSON.stringify(globalThis.requireSessionUser(auth).uid),
+        );
+        localStorage.setItem(
+          "mons:data:v1:profileId",
+          JSON.stringify("prior-linked-profile"),
+        );
         const { setAuthStatusGlobally } =
           await import("/src/connection/authentication.ts");
         const { handleLogout } =
@@ -282,17 +376,19 @@ test(
           restoreSessionStorage();
           Storage.prototype.setItem = setItem;
         };
-        Storage.prototype.setItem = function (key, value) {
+        /** @this {Storage} @param {string} key @param {string} value */
+        function trackedSetItem(key, value) {
           if (key.startsWith("__mons_link_session_logout__:"))
             throw new DOMException(
               "Storage quota exhausted",
               "QuotaExceededError",
             );
           return setItem.call(this, key, value);
-        };
+        }
+        Storage.prototype.setItem = trackedSetItem;
         return {
-          uid: auth.currentUser.uid,
-          sessionId: auth.currentUser.sessionId,
+          uid: globalThis.requireSessionUser(auth).uid,
+          sessionId: globalThis.requireSessionUser(auth).sessionId,
         };
       });
       await page.getByRole("button", { name: "Log Out", exact: true }).click();
@@ -334,7 +430,7 @@ test(
         await sessionAuth.signInAnonymously();
         await sessionAuth.flushRevocations();
         return {
-          uid: sessionAuth.currentUser.uid,
+          uid: globalThis.requireSessionUser(sessionAuth).uid,
           profileId: storage.getProfileId(""),
         };
       });
@@ -358,16 +454,25 @@ test(
       const original = await page.evaluate(async () => {
         const auth = globalThis.testSessionAuth;
         await auth.flushRevocations();
-        localStorage.setItem("loginId", auth.currentUser.uid);
-        localStorage.setItem("profileId", "prior-linked-profile");
-        localStorage.setItem("username", "Prior player");
         localStorage.setItem(
-          "playerMiningMaterials",
+          "mons:data:v1:loginId",
+          JSON.stringify(globalThis.requireSessionUser(auth).uid),
+        );
+        localStorage.setItem(
+          "mons:data:v1:profileId",
+          JSON.stringify("prior-linked-profile"),
+        );
+        localStorage.setItem(
+          "mons:data:v1:username",
+          JSON.stringify("Prior player"),
+        );
+        localStorage.setItem(
+          "mons:data:v1:playerMiningMaterials",
           JSON.stringify({ dust: 7 }),
         );
         return {
-          uid: auth.currentUser.uid,
-          sessionId: auth.currentUser.sessionId,
+          uid: globalThis.requireSessionUser(auth).uid,
+          sessionId: globalThis.requireSessionUser(auth).sessionId,
           generation: auth.generation,
         };
       });
@@ -396,8 +501,8 @@ test(
         await sessionAuth.signInAnonymously();
         await sessionAuth.flushRevocations();
         return {
-          uid: sessionAuth.currentUser.uid,
-          sessionId: sessionAuth.currentUser.sessionId,
+          uid: globalThis.requireSessionUser(sessionAuth).uid,
+          sessionId: globalThis.requireSessionUser(sessionAuth).sessionId,
           loginId: storage.getLoginId(""),
           profileId: storage.getProfileId(""),
           username: storage.getUsername(""),
@@ -424,11 +529,14 @@ test(
       const oldUid = await page.evaluate(async () => {
         const { connection } = await import("/src/connection/connection.ts");
         const auth = globalThis.testSessionAuth;
-        const uid = auth.currentUser.uid;
-        localStorage.setItem("loginId", uid);
-        localStorage.setItem("profileId", "prior-linked-profile");
+        const uid = globalThis.requireSessionUser(auth).uid;
+        localStorage.setItem("mons:data:v1:loginId", JSON.stringify(uid));
         localStorage.setItem(
-          "playerMiningMaterials",
+          "mons:data:v1:profileId",
+          JSON.stringify("prior-linked-profile"),
+        );
+        localStorage.setItem(
+          "mons:data:v1:playerMiningMaterials",
           JSON.stringify({ dust: 7 }),
         );
         await connection.signOut();
@@ -452,7 +560,7 @@ test(
           await import("/src/services/rocksMiningService.ts");
         await sessionAuth.signInAnonymously();
         return {
-          uid: sessionAuth.currentUser.uid,
+          uid: globalThis.requireSessionUser(sessionAuth).uid,
           stopped: sessionAuth.isStoppedForLogout,
           loginId: storage.getLoginId(""),
           profileId: storage.getProfileId(""),
@@ -477,7 +585,7 @@ test(
       const original = await first.evaluate(async () => {
         const { connection } = await import("/src/connection/connection.ts");
         const { sessionAuth } = await import("/src/session/sessionAuth.ts");
-        const sessionId = sessionAuth.currentUser.sessionId;
+        const sessionId = globalThis.requireSessionUser(sessionAuth).sessionId;
         const applied = await connection.signOut();
         await sessionAuth.flushRevocations();
         return { applied, sessionId, stopped: sessionAuth.isStoppedForLogout };
@@ -490,8 +598,8 @@ test(
         const { sessionAuth } = await import("/src/session/sessionAuth.ts");
         localStorage.setItem("new-session-marker", "preserve");
         return {
-          uid: sessionAuth.currentUser.uid,
-          sessionId: sessionAuth.currentUser.sessionId,
+          uid: globalThis.requireSessionUser(sessionAuth).uid,
+          sessionId: globalThis.requireSessionUser(sessionAuth).sessionId,
         };
       });
       assert.notEqual(replacement.sessionId, original.sessionId);
@@ -517,9 +625,9 @@ test(
       }, replacement.sessionId);
       const restored = await first.evaluate(async () => {
         const { sessionAuth } = await import("/src/session/sessionAuth.ts");
-        await sessionAuth.currentUser.getIdToken(true);
+        await globalThis.requireSessionUser(sessionAuth).getIdToken(true);
         return {
-          uid: sessionAuth.currentUser.uid,
+          uid: globalThis.requireSessionUser(sessionAuth).uid,
           marker: localStorage.getItem("new-session-marker"),
         };
       });
@@ -570,7 +678,8 @@ for (const [scenario, name] of [
           const pathname = new URL(request.url()).pathname;
           const headers = {
             "Access-Control-Allow-Origin": origin,
-            "Access-Control-Allow-Headers": "Content-Type, Authorization",
+            "Access-Control-Allow-Headers":
+              "Content-Type, Authorization, X-Mons-Data-Epoch",
             "Access-Control-Allow-Methods": "POST, GET, OPTIONS",
           };
           if (request.method() === "OPTIONS")
@@ -586,8 +695,8 @@ for (const [scenario, name] of [
                 hostId: "host",
                 guestId: "guest",
                 hostColor: "white",
-                hostRematches: "",
-                guestRematches: "",
+                hostRematches: { state: "open", indices: [] },
+                guestRematches: { state: "open", indices: [] },
                 automatchStateHint: null,
                 eventId: null,
                 eventOwned: false,
@@ -617,8 +726,8 @@ for (const [scenario, name] of [
                 hostId: "host",
                 guestId: "guest",
                 hostColor: "white",
-                hostRematches: "",
-                guestRematches: "",
+                hostRematches: { state: "open", indices: [] },
+                guestRematches: { state: "open", indices: [] },
                 automatchStateHint: null,
                 eventId: null,
                 eventOwned: false,
@@ -654,6 +763,7 @@ for (const [scenario, name] of [
         },
       );
       const first = await open();
+      /** @type {string[]} */
       const errors = [];
       first.on("pageerror", (error) => errors.push(error.message));
       await first.evaluate(async (inviteId) => {
@@ -665,7 +775,9 @@ for (const [scenario, name] of [
         (inviteId) =>
           globalThis.testSessionConnection.getActiveContextSnapshot()
             ?.matchId === inviteId &&
-          globalThis.testSessionConnection.matchSyncSubscription !== null,
+          globalThis.connectionSubscriptionsForTest(
+            globalThis.testSessionConnection,
+          ).match !== null,
         inviteId,
       );
       const original = await first.evaluate(async () => {
@@ -673,8 +785,8 @@ for (const [scenario, name] of [
         await auth.flushRevocations();
         const { isWatchOnly } = await import("/src/game/gameController.ts");
         return {
-          uid: auth.currentUser.uid,
-          sessionId: auth.currentUser.sessionId,
+          uid: globalThis.requireSessionUser(auth).uid,
+          sessionId: globalThis.requireSessionUser(auth).sessionId,
           watching: isWatchOnly,
         };
       });
@@ -682,8 +794,14 @@ for (const [scenario, name] of [
       const second = await open();
       await first.evaluate(async (scenario) => {
         const auth = globalThis.testSessionAuth;
-        localStorage.setItem("loginId", auth.currentUser.uid);
-        localStorage.setItem("profileId", "original-profile");
+        localStorage.setItem(
+          "mons:data:v1:loginId",
+          JSON.stringify(globalThis.requireSessionUser(auth).uid),
+        );
+        localStorage.setItem(
+          "mons:data:v1:profileId",
+          JSON.stringify("original-profile"),
+        );
         const { setAuthStatusGlobally } =
           await import("/src/connection/authentication.ts");
         const { handleLogout } =
@@ -697,21 +815,22 @@ for (const [scenario, name] of [
           await auth.flushRevocations();
         }
         if (scenario !== "failed") {
-          const update = auth.dependencies.store.update.bind(
-            auth.dependencies.store,
-          );
+          const store = globalThis.sessionStoreForTest(auth);
+          const update = store.update.bind(store);
           const waitForStopped =
             scenario === "signal" || scenario === "finalizer";
           const heldOperation = scenario === "finalizer" ? 2 : 1;
           let operations = 0;
-          auth.dependencies.store.update = (change) => {
+          store.update = (change) => {
             if (
               (!waitForStopped || auth.isStoppedForLogout) &&
               ++operations === heldOperation
             ) {
-              return new Promise((resolve) => {
-                globalThis.resumeLogoutStorage = resolve;
-              }).then(() => update(change));
+              return new Promise(
+                /** @param {(value?: void) => void} resolve */ (resolve) => {
+                  globalThis.resumeLogoutStorage = resolve;
+                },
+              ).then(() => update(change));
             }
             return update(change);
           };
@@ -728,14 +847,16 @@ for (const [scenario, name] of [
           restoreSessionStorage();
           Storage.prototype.setItem = setItem;
         };
-        Storage.prototype.setItem = function (key, value) {
+        /** @this {Storage} @param {string} key @param {string} value */
+        function trackedSetItem(key, value) {
           if (key.startsWith("__mons_link_session_logout__:"))
             throw new DOMException(
               "Storage quota exhausted",
               "QuotaExceededError",
             );
           return setItem.call(this, key, value);
-        };
+        }
+        Storage.prototype.setItem = trackedSetItem;
       }, scenario);
       if (scenario === "failed" || scenario === "concurrent") {
         await first
@@ -750,10 +871,15 @@ for (const [scenario, name] of [
           () =>
             globalThis.resumeLogoutStorage &&
             globalThis.testSessionAuth.isStoppedForLogout &&
-            !globalThis.testSessionConnection.inviteMetadataSubscription &&
-            !globalThis.testSessionConnection.wagerClient
-              .inviteWagersSubscription &&
-            !globalThis.testSessionConnection.matchSyncSubscription,
+            !globalThis.connectionSubscriptionsForTest(
+              globalThis.testSessionConnection,
+            ).metadata &&
+            !globalThis.connectionSubscriptionsForTest(
+              globalThis.testSessionConnection,
+            ).wagers &&
+            !globalThis.connectionSubscriptionsForTest(
+              globalThis.testSessionConnection,
+            ).match,
         );
       if (scenario !== "signal" && scenario !== "late-signal") {
         await waitForStoppedLogout();
@@ -786,8 +912,8 @@ for (const [scenario, name] of [
         await sessionAuth.flushRevocations();
         localStorage.setItem("new-session-marker", "preserve");
         return {
-          uid: sessionAuth.currentUser.uid,
-          sessionId: sessionAuth.currentUser.sessionId,
+          uid: globalThis.requireSessionUser(sessionAuth).uid,
+          sessionId: globalThis.requireSessionUser(sessionAuth).sessionId,
         };
       });
       assert.notEqual(replacement.uid, original.uid);
@@ -813,7 +939,11 @@ for (const [scenario, name] of [
             response.status() === 200,
         ),
       );
-      await first.evaluate(() => globalThis.resumeLogoutStorage());
+      await first.evaluate(() => {
+        if (!globalThis.resumeLogoutStorage)
+          throw new Error("fixture-logout-resume-missing");
+        globalThis.resumeLogoutStorage();
+      });
       if (scenario === "failed") {
         await dialog
           .getByRole("button", { name: "Retry Log Out", exact: true })
@@ -830,13 +960,20 @@ for (const [scenario, name] of [
           globalThis.testSessionConnection.getActiveContextSnapshot()
             ?.matchId === inviteId &&
           Boolean(
-            globalThis.testSessionConnection.inviteMetadataSubscription,
+            globalThis.connectionSubscriptionsForTest(
+              globalThis.testSessionConnection,
+            ).metadata,
           ) &&
           Boolean(
-            globalThis.testSessionConnection.wagerClient
-              .inviteWagersSubscription,
+            globalThis.connectionSubscriptionsForTest(
+              globalThis.testSessionConnection,
+            ).wagers,
           ) &&
-          Boolean(globalThis.testSessionConnection.matchSyncSubscription),
+          Boolean(
+            globalThis.connectionSubscriptionsForTest(
+              globalThis.testSessionConnection,
+            ).match,
+          ),
         inviteId,
       );
       const restored = await first.evaluate(async () => {
@@ -844,11 +981,13 @@ for (const [scenario, name] of [
         const { isWatchOnly } = await import("/src/game/gameController.ts");
         const { getCurrentRouteState } =
           await import("/src/navigation/routeState.ts");
-        await sessionAuth.currentUser.getIdToken(true);
+        await globalThis.requireSessionUser(sessionAuth).getIdToken(true);
         return {
-          uid: sessionAuth.currentUser.uid,
-          sessionId: sessionAuth.currentUser.sessionId,
-          contextUid: globalThis.testSessionConnection.activeContext.loginUid,
+          uid: globalThis.requireSessionUser(sessionAuth).uid,
+          sessionId: globalThis.requireSessionUser(sessionAuth).sessionId,
+          contextUid: globalThis.connectionLoginUidForTest(
+            globalThis.testSessionConnection,
+          ),
           stopped: sessionAuth.isStoppedForLogout,
           inviteId: getCurrentRouteState().inviteId,
           watching: isWatchOnly,

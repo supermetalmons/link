@@ -55,7 +55,7 @@ describe("wager reservation maintenance", () => {
       now,
     );
     expect(observed.queries).toHaveLength(1);
-    expect(isWagerAdmissionInsert(observed.queries[0])).toBe(true);
+    expect(isWagerAdmissionInsert(observed.queries[0]!)).toBe(true);
     expect(observed.sessions).toEqual([]);
     expect(admission).toEqual({
       admissionId: expect.any(String),

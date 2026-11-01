@@ -156,11 +156,11 @@ export function getNextProblem(id: string): Problem | null {
 
   if (completedSet.size === problems.length) {
     const nextIndex = currentIndex + 1;
-    return nextIndex < problems.length ? problems[nextIndex] : null;
+    return nextIndex < problems.length ? problems[nextIndex]! : null;
   }
 
   for (let i = currentIndex + 1; i < problems.length; i++) {
-    const candidate = problems[i];
+    const candidate = problems[i]!;
     if (!completedSet.has(candidate.id)) {
       return candidate;
     }

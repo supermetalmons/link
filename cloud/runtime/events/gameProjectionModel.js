@@ -17,6 +17,7 @@ exports.shouldProjectInvite =
   exports.deriveProjectionStatus =
   exports.PROJECTOR_SCHEMA_VERSION =
     void 0;
+const appearance_js_1 = require("../shared/appearance.js");
 const invite_records_1 = require("@mons/shared/invite-records");
 Object.defineProperty(exports, "isEventOwnedInvite", {
   enumerable: true,
@@ -34,11 +35,7 @@ Object.defineProperty(exports, "getNavigationSortBucket", {
 });
 const profiles_1 = require("@mons/shared/profiles");
 const ids_1 = require("@mons/shared/ids");
-const profileEvidence = (value) => {
-  const retained = value;
-  return retained;
-};
-const PROJECTOR_SCHEMA_VERSION = 2;
+const PROJECTOR_SCHEMA_VERSION = 3;
 exports.PROJECTOR_SCHEMA_VERSION = PROJECTOR_SCHEMA_VERSION;
 const normalizeString = (value) =>
   typeof value === "string" && value.trim() !== "" ? value.trim() : null;
@@ -57,7 +54,7 @@ const truncateAddress = (address) => {
   return (0, profiles_1.cropAddress)(address);
 };
 const getProfileDisplayName = (source) => {
-  const profileData = profileEvidence(source);
+  const profileData = source;
   if (!profileData || typeof profileData !== "object") {
     return "anon";
   }
@@ -76,41 +73,10 @@ const getProfileDisplayName = (source) => {
   return "anon";
 };
 exports.getProfileDisplayName = getProfileDisplayName;
-const getProfileEmoji = (document) => {
-  const profileData = profileEvidence(document);
-  if (!profileData || typeof profileData !== "object") {
-    return null;
-  }
-  const customEmoji =
-    profileData.custom && typeof profileData.custom === "object"
-      ? profileData.custom.emoji
-      : undefined;
-  const fallbackEmoji = profileData.emoji;
-  const source = customEmoji !== undefined ? customEmoji : fallbackEmoji;
-  if (typeof source === "number" && Number.isFinite(source)) {
-    return Math.floor(source);
-  }
-  if (typeof source === "string" && source.trim() !== "") {
-    const parsed = Number(source);
-    if (Number.isFinite(parsed)) {
-      return Math.floor(parsed);
-    }
-  }
-  return null;
-};
+const getProfileEmoji = (document) => document?.emoji ?? null;
 exports.getProfileEmoji = getProfileEmoji;
-const getEmojiId = (value) => {
-  if (typeof value === "number" && Number.isFinite(value)) {
-    return Math.floor(value);
-  }
-  if (typeof value === "string" && value.trim() !== "") {
-    const parsed = Number(value);
-    if (Number.isFinite(parsed)) {
-      return Math.floor(parsed);
-    }
-  }
-  return null;
-};
+const getEmojiId = (value) =>
+  (0, appearance_js_1.isEmojiId)(value) ? value : null;
 exports.getEmojiId = getEmojiId;
 const deriveProjectionStatus = ({
   inviteId,

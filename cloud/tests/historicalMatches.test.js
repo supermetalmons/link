@@ -17,16 +17,18 @@ const {
   parseRematchIndices,
 } = require("@mons/shared/rematches");
 
+/** @param {string} color */
 const match = (color) => ({
+  schemaVersion: 1,
   version: 2,
   color,
   emojiId: color === "white" ? 1 : 2,
-  aura: "",
+  aura: "none",
   gameVariant: "Classic",
   fen: "fen",
   status: "surrendered",
   flatMovesString: "move",
-  timer: "",
+  timer: { state: "idle" },
 });
 
 const pair = {
@@ -84,35 +86,53 @@ test("validates exact historical match contracts", () => {
     true,
   );
   assert.equal(isGameSessionMatch({ ...pair.hostMatch, fen: "" }), false);
+  const archived = normalizeHistoricalMatchRecord(pair.hostMatch);
+  assert.deepEqual(archived, pair.hostMatch);
+  assert.notStrictEqual(archived, pair.hostMatch);
   assert.deepEqual(
     normalizeHistoricalMatchRecord({
       ...pair.hostMatch,
-      version: undefined,
-      emojiId: "3",
-      aura: "x".repeat(33),
-      gameVariant: "x".repeat(MAX_GAME_SESSION_GAME_VARIANT_BYTES + 1),
-      status: "x".repeat(2_000),
-      timer: "x".repeat(2_000),
+      sessionCreation: null,
+      reaction: null,
     }),
-    {
-      ...pair.hostMatch,
-      version: 2,
-      emojiId: 3,
-      aura: "",
-      gameVariant: "Classic",
-      status: "",
-      timer: "",
-    },
+    pair.hostMatch,
   );
+  for (const patch of [
+    { schemaVersion: undefined },
+    { version: undefined },
+    { emojiId: "3" },
+    { aura: "" },
+    { aura: "x".repeat(33) },
+    { gameVariant: "x".repeat(MAX_GAME_SESSION_GAME_VARIANT_BYTES + 1) },
+    { status: "" },
+    { status: "x".repeat(2_000) },
+    { timer: "" },
+    { timer: "x".repeat(2_000) },
+  ])
+    assert.equal(
+      normalizeHistoricalMatchRecord({ ...pair.hostMatch, ...patch }),
+      null,
+    );
 });
 
 test("accepts only canonical rematch indices", () => {
   assert.deepEqual(
-    parseRematchIndices(
-      `1;01;2junk;${Number.MAX_SAFE_INTEGER};${Number.MAX_SAFE_INTEGER + 1}`,
-    ),
+    parseRematchIndices({
+      state: "open",
+      indices: [1, Number.MAX_SAFE_INTEGER],
+    }),
     [1, Number.MAX_SAFE_INTEGER],
   );
+  for (const value of [
+    "1;01;2junk",
+    { state: "open", indices: [1, 1] },
+    { state: "open", indices: [2, 1] },
+    { state: "open", indices: [1, Number.MAX_SAFE_INTEGER + 1] },
+  ])
+    assert.throws(
+      () => Reflect.apply(parseRematchIndices, undefined, [value]),
+      /invalid-rematch-series/,
+    );
   assert.equal(parseInviteMatchIndex("invite", "invite1"), 1);
   assert.equal(parseInviteMatchIndex("invite", "invite01"), null);
   assert.equal(
@@ -125,8 +145,8 @@ test("accepts only canonical rematch indices", () => {
 test("finds the latest mutually approved rematch", () => {
   assert.equal(
     getLatestApprovedRematchIndex({
-      hostRematches: "1;2",
-      guestRematches: "1",
+      hostRematches: { state: "open", indices: [1, 2] },
+      guestRematches: { state: "open", indices: [1] },
     }),
     1,
   );

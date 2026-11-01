@@ -1,6 +1,7 @@
+import { applyCanonicalTestMigrations } from "./canonicalTestMigrations.ts";
 import { beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { env } from "cloudflare:workers";
-import { applyD1Migrations, type D1Migration } from "cloudflare:test";
+import type { D1Migration } from "cloudflare:test";
 import {
   createProfileGameProjectionLockStore,
   PROFILE_GAME_PROJECTION_LOCK_MS,
@@ -49,7 +50,7 @@ function row(lock = invite) {
 
 describe("D1 profile game projection locks", () => {
   beforeAll(async () => {
-    await applyD1Migrations(db, testEnv.TEST_D1_MIGRATIONS);
+    await applyCanonicalTestMigrations(db, testEnv.TEST_D1_MIGRATIONS);
   });
 
   beforeEach(async () => {
@@ -77,7 +78,7 @@ describe("D1 profile game projection locks", () => {
       expires_at_ms: 100 + PROFILE_GAME_PROJECTION_LOCK_MS,
     });
     await expect(
-      stores[winner].acquire(invite, `owner-${winner}`, 101),
+      stores[winner]!.acquire(invite, `owner-${winner}`, 101),
     ).rejects.toMatchObject({
       message: "profile-game-projection-lock-busy",
       scope: "invite",

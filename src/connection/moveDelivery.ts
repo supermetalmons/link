@@ -1,3 +1,4 @@
+import { applicationStorageKey } from "../session/applicationDataStorage.ts";
 import {
   countMoveHistory,
   isMoveHistoryPrefix,
@@ -101,7 +102,7 @@ export function moveDeliveryStorageKey(scope: MoveDeliveryScope): string {
 }
 
 function storedMoveScopeKey(scope: MoveScopeFields): string {
-  return `mons:pending-moves:v1:${JSON.stringify([
+  return `${applicationStorageKey("pending-moves:")}${JSON.stringify([
     scope.loginUid,
     scope.inviteId,
     scope.matchId,
@@ -110,13 +111,37 @@ function storedMoveScopeKey(scope: MoveScopeFields): string {
 }
 
 function validState(value: unknown): value is MoveDeliveryState {
-  if (!value || typeof value !== "object") return false;
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
   const state = value as { fen?: unknown; flatMovesString?: unknown };
   return (
     typeof state.fen === "string" &&
     state.fen !== "" &&
     isMatchFenWithinLimit(state.fen) &&
     isMatchHistoryWithinLimits(state.flatMovesString)
+  );
+}
+
+function validStoredState(value: unknown): value is MoveDeliveryState {
+  return validState(value) && Object.keys(value).length === 2;
+}
+
+function validStoredScope(value: unknown): value is MoveDeliveryScope {
+  if (
+    !value ||
+    typeof value !== "object" ||
+    Array.isArray(value) ||
+    Object.keys(value).length !== 4
+  )
+    return false;
+  const fields = value as MoveScopeFields;
+  return [
+    fields.loginUid,
+    fields.inviteId,
+    fields.matchId,
+    fields.playerId,
+  ].every(
+    (field) =>
+      typeof field === "string" && field !== "" && field === field.trim(),
   );
 }
 
@@ -130,6 +155,9 @@ function hasPendingMoveRecords(
         { moveFen?: unknown; fen?: unknown } | null | undefined;
       return (
         !move ||
+        typeof move !== "object" ||
+        Array.isArray(move) ||
+        Object.keys(move).length !== 2 ||
         typeof move.moveFen !== "string" ||
         !move.moveFen ||
         move.moveFen.includes("-") ||
@@ -184,7 +212,7 @@ export class MoveDelivery {
   readonly scope: MoveDeliveryScope;
   private confirmed: MoveDeliveryState;
   private pending: PendingMove[] = [];
-  private gameVariant?: string;
+  private gameVariant: string | undefined;
   private readonly dependencies: MoveDeliveryDependencies;
   private readonly key: string;
   private readonly attempts = new Set<Attempt>();
@@ -807,13 +835,30 @@ export class MoveDelivery {
       const text = this.dependencies.storage?.getItem(this.key);
       if (!text) return;
       const parsed: unknown = JSON.parse(text);
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+        throw new MoveDeliveryError("invalid-stored-moves");
+      }
       const value = parsed as StoredMoveFields;
       if (
+        Object.keys(value).some(
+          (key) =>
+            ![
+              "version",
+              "scope",
+              "confirmed",
+              "pending",
+              "gameVariant",
+              "finished",
+            ].includes(key),
+        ) ||
         value.version !== 1 ||
-        !value.scope ||
-        storedMoveScopeKey(value.scope as MoveScopeFields) !== this.key ||
-        !validState(value.confirmed) ||
-        !hasPendingMoveRecords(value)
+        !validStoredScope(value.scope) ||
+        storedMoveScopeKey(value.scope) !== this.key ||
+        !validStoredState(value.confirmed) ||
+        !hasPendingMoveRecords(value) ||
+        (Object.hasOwn(value, "gameVariant") &&
+          typeof value.gameVariant !== "string") ||
+        (Object.hasOwn(value, "finished") && value.finished !== true)
       ) {
         throw new MoveDeliveryError("invalid-stored-moves");
       }
@@ -856,9 +901,17 @@ export class MoveDelivery {
   private stored(): StoredMoves {
     return {
       version: 1,
-      scope: this.scope,
-      confirmed: this.confirmed,
-      pending: this.pending,
+      scope: {
+        loginUid: this.scope.loginUid,
+        inviteId: this.scope.inviteId,
+        matchId: this.scope.matchId,
+        playerId: this.scope.playerId,
+      },
+      confirmed: {
+        fen: this.confirmed.fen,
+        flatMovesString: this.confirmed.flatMovesString,
+      },
+      pending: this.pending.map(({ moveFen, fen }) => ({ moveFen, fen })),
       ...(this.gameVariant ? { gameVariant: this.gameVariant } : {}),
       ...(this.finished ? { finished: true } : {}),
     };

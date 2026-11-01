@@ -110,7 +110,7 @@ function shuffle<T>(
   const next = items.slice();
   for (let index = next.length - 1; index > 0; index -= 1) {
     const swapIndex = Math.floor(random() * (index + 1));
-    [next[index], next[swapIndex]] = [next[swapIndex], next[index]];
+    [next[index], next[swapIndex]] = [next[swapIndex]!, next[index]!];
   }
   return next;
 }

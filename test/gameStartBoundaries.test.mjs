@@ -1,3 +1,4 @@
+import { required } from "./fixtures/canonicalData.mjs";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { registerHooks } from "node:module";
@@ -31,6 +32,7 @@ const source = ts.createSourceFile(
   true,
 );
 
+/** @param {string[]} names @param {Record<string, unknown>} initial @param {Record<string, unknown>} dependencies @returns {unknown} */
 function instantiate(names, initial, dependencies) {
   const declarations = names.map((name) => {
     const node = source.statements.find(
@@ -63,32 +65,45 @@ function harness({ started = false, puzzle = false } = {}) {
     botGameVisible: true,
     navigationVisible: true,
   });
+  /**
+   * @type {import("../src/game/gameControlsModel.ts").GameControlsSnapshot[]}
+   */
   const notifications = [];
   store.subscribe(() => notifications.push(store.getSnapshot()));
+  /** @type {Array<{ name: string; value: unknown; snapshot: import("../src/game/gameControlsModel.ts").GameControlsSnapshot; notifications: number; }>} */
   const effects = [];
-  const record = (name, value) =>
+  const record = (
+    /** @type {string} */ name,
+    /** @type {unknown} */ value = undefined,
+  ) =>
     effects.push({
       name,
       value,
       snapshot: store.getSnapshot(),
       notifications: notifications.length,
     });
-  const commands = Object.fromEntries(
-    Object.entries({
-      setHomeVisible: "homeVisible",
-      setInviteLinkActionVisible: "inviteLinkVisible",
-      setBotGameOptionVisible: "botGameVisible",
-      setNavigationListButtonVisible: "navigationVisible",
-      showMoveHistoryButton: "moveHistoryVisible",
-    }).map(([name, key]) => [
-      name,
-      (value) => {
-        store.updatePresentation({ [key]: value });
-        record(name, value);
-      },
-    ]),
-  );
-  Object.assign(commands, {
+  /** @type {Parameters<typeof createSessionControlsPresenter>[0]} */
+  const commands = {
+    setHomeVisible(value) {
+      store.updatePresentation({ homeVisible: value });
+      record("setHomeVisible", value);
+    },
+    setInviteLinkActionVisible(value) {
+      store.updatePresentation({ inviteLinkVisible: value });
+      record("setInviteLinkActionVisible", value);
+    },
+    setBotGameOptionVisible(value) {
+      store.updatePresentation({ botGameVisible: value });
+      record("setBotGameOptionVisible", value);
+    },
+    setNavigationListButtonVisible(value) {
+      store.updatePresentation({ navigationVisible: value });
+      record("setNavigationListButtonVisible", value);
+    },
+    showMoveHistoryButton(value) {
+      store.updatePresentation({ moveHistoryVisible: value });
+      record("showMoveHistoryButton", value);
+    },
     setBrushAndNavigationButtonDimmed: (dimmed) => {
       store.updatePresentation({
         navigationDimmed: dimmed,
@@ -100,68 +115,93 @@ function harness({ started = false, puzzle = false } = {}) {
     setAutomoveActionVisible: (visible) =>
       store.dispatchGameControls({ type: "setAutomoveVisible", visible }),
     showResignButton: () => store.dispatchGameControls({ type: "showResign" }),
-    setIslandButtonDimmed: (value) => record("island", value),
-    setAutomatchVisible: (value) => record("automatch-visible", value),
-    setAutomatchEnabled: (value) => record("automatch-enabled", value),
-    setAutomatchWaitingState: (value) => record("automatch-waiting", value),
-  });
+    setIslandButtonDimmed: (value) => {
+      record("island", value);
+    },
+    setAutomatchVisible: (value) => {
+      record("automatch-visible", value);
+    },
+    setAutomatchEnabled: (value) => {
+      record("automatch-enabled", value);
+    },
+    setAutomatchWaitingState: (value) => {
+      record("automatch-waiting", value);
+    },
+    setPlaySamePuzzleAgainButtonVisible: () =>
+      assert.fail("unexpected puzzle controls"),
+    setAutomoveActionEnabled: () => assert.fail("unexpected automove controls"),
+    setUndoEnabled: () => assert.fail("unexpected undo controls"),
+    setWatchOnlyVisible: () => assert.fail("unexpected watch controls"),
+    showVoiceReactionButton: () => assert.fail("unexpected reaction controls"),
+    hideTimerButtons: () => assert.fail("unexpected timer controls"),
+    disableAndHideUndoResignAndTimerControls: () =>
+      assert.fail("unexpected hidden controls"),
+    setEndMatchVisible: () => assert.fail("unexpected end controls"),
+    setEndMatchConfirmed: () => assert.fail("unexpected end confirmation"),
+    showWaitingStateText: () => assert.fail("unexpected waiting controls"),
+    showPrimaryAction: () => assert.fail("unexpected primary action"),
+  };
+  /** @type {PromiseWithResolvers<{ok: true; inviteId: string}>} */
   const request = Promise.withResolvers();
   let epoch = 0;
   const game = { toFen: () => "game", activeColor: "white", turnNumber: 1 };
-  const api = instantiate(
-    [
-      "applyOutput",
-      "didClickAutomatchButton",
-      "dismissPendingAutomatchTransition",
-    ],
-    {
-      game,
-      isOnlineGame: false,
-      isGameWithBot: false,
-      isGameOver: false,
-      didStartLocalGame: started,
-      puzzleMode: puzzle,
-      flashbackMode: false,
-      currentInputs: ["old-input"],
-      didMakeFirstLocalPlayerMoveOnLocalBoard: false,
-      isWaitingForInviteToGetAccepted: false,
-      pendingAutomatchTransition: false,
-    },
-    {
-      ...commands,
-      ...createSessionControlsPresenter(commands),
-      batchGameControlsUpdates: store.batchUpdates,
-      ensureLocalRematchSeriesInitialized: () => record("local-history"),
-      dismissNotificationBannerIfNeeded: () => record("dismiss-banner"),
-      handleStaleOnlineLocalOutput: () => false,
-      isCreateInviteRoute: () => true,
-      isBotsRoute: () => false,
-      MonsRules: { Color: { White: "white", Black: "black" } },
-      Board: Object.fromEntries(
+  const api =
+    /** @type {Pick<typeof import("../src/game/gameController.ts"), "didClickAutomatchButton" | "dismissPendingAutomatchTransition"> & {applyOutput(previous: readonly string[], fen: string, output: MonsRulesInputResolution, remote: boolean, bot: boolean, assistance: "none"): boolean; state(): {didStartLocalGame: boolean; currentInputs: unknown[]; pendingAutomatchTransition: boolean; isWaitingForInviteToGetAccepted: boolean}}} */ (
+      instantiate(
         [
-          "removeHighlights",
-          "hideBoardPlayersInfo",
-          "hideAllMoveStatuses",
-          "runMonsBoardAsDisplayWaitingAnimation",
-        ].map((name) => [name, () => record(name)]),
-      ),
-      updateBoardMoveStatuses: () => record("move-statuses"),
-      updateUndoButtonBasedOnGameState: () => record("undo-sync"),
-      syncInviteBotIntoLocalGameButton: () => record("bot-sync"),
-      triggerMoveHistoryPopupReload: () => record("history-reload"),
-      playSounds: () => {},
-      getSessionGuard: () => {
-        const expected = epoch;
-        return () => expected === epoch;
-      },
-      connection: {
-        automatch: () => request.promise,
-        connectToAutomatch: (inviteId) => {
-          record("connect", inviteId);
+          "applyOutput",
+          "didClickAutomatchButton",
+          "dismissPendingAutomatchTransition",
+        ],
+        {
+          game,
+          isOnlineGame: false,
+          isGameWithBot: false,
+          isGameOver: false,
+          didStartLocalGame: started,
+          puzzleMode: puzzle,
+          flashbackMode: false,
+          currentInputs: ["old-input"],
+          didMakeFirstLocalPlayerMoveOnLocalBoard: false,
+          isWaitingForInviteToGetAccepted: false,
+          pendingAutomatchTransition: false,
         },
-      },
-    },
-  );
+        {
+          ...commands,
+          ...createSessionControlsPresenter(commands),
+          batchGameControlsUpdates: store.batchUpdates,
+          ensureLocalRematchSeriesInitialized: () => record("local-history"),
+          dismissNotificationBannerIfNeeded: () => record("dismiss-banner"),
+          handleStaleOnlineLocalOutput: () => false,
+          isCreateInviteRoute: () => true,
+          isBotsRoute: () => false,
+          MonsRules: { Color: { White: "white", Black: "black" } },
+          Board: Object.fromEntries(
+            [
+              "removeHighlights",
+              "hideBoardPlayersInfo",
+              "hideAllMoveStatuses",
+              "runMonsBoardAsDisplayWaitingAnimation",
+            ].map((name) => [name, () => record(name)]),
+          ),
+          updateBoardMoveStatuses: () => record("move-statuses"),
+          updateUndoButtonBasedOnGameState: () => record("undo-sync"),
+          syncInviteBotIntoLocalGameButton: () => record("bot-sync"),
+          triggerMoveHistoryPopupReload: () => record("history-reload"),
+          playSounds: () => {},
+          getSessionGuard: () => {
+            const expected = epoch;
+            return () => expected === epoch;
+          },
+          connection: {
+            automatch: () => request.promise,
+            connectToAutomatch: (/** @type {string} */ inviteId) => {
+              record("connect", inviteId);
+            },
+          },
+        },
+      )
+    );
   return {
     ...api,
     store,
@@ -172,7 +212,8 @@ function harness({ started = false, puzzle = false } = {}) {
   };
 }
 
-const firstMove = (h) =>
+/** @typedef {import("mons-rules").InputResolution} MonsRulesInputResolution */
+const firstMove = (/** @type {ReturnType<typeof harness>} */ h) =>
   h.applyOutput(
     [],
     "",
@@ -189,7 +230,7 @@ test("the first local move publishes initialized controls once before ordinary m
   assert.equal(h.state().didStartLocalGame, true);
   assert.deepEqual(h.state().currentInputs, []);
   assert.deepEqual(h.notifications, [h.store.getSnapshot()]);
-  const { presentation } = h.notifications[0];
+  const { presentation } = required(h.notifications[0]);
   assert.equal(presentation.homeVisible, true);
   assert.equal(presentation.inviteLinkVisible, false);
   assert.equal(presentation.botGameVisible, false);
@@ -199,12 +240,21 @@ test("the first local move publishes initialized controls once before ordinary m
   assert.equal(presentation.gameControls.automove.visible, true);
   assert.equal(presentation.gameControls.resignVisible, true);
   const initialization = h.effects.find(
-    (effect) => effect.name === "showMoveHistoryButton",
+    (/** @type {{ name: string; }} */ effect) =>
+      effect.name === "showMoveHistoryButton",
   );
-  assert.equal(initialization.snapshot.presentation.moveHistoryVisible, true);
-  assert.equal(initialization.notifications, 0);
   assert.equal(
-    h.effects.find((effect) => effect.name === "move-statuses").notifications,
+    required(initialization).snapshot.presentation.moveHistoryVisible,
+    true,
+  );
+  assert.equal(required(initialization).notifications, 0);
+  assert.equal(
+    required(
+      h.effects.find(
+        (/** @type {{ name: string; }} */ effect) =>
+          effect.name === "move-statuses",
+      ),
+    ).notifications,
     1,
   );
 
@@ -213,7 +263,10 @@ test("the first local move publishes initialized controls once before ordinary m
   assert.strictEqual(h.store.getSnapshot(), snapshot);
   assert.equal(h.notifications.length, 1);
   assert.equal(
-    h.effects.filter((effect) => effect.name === "local-history").length,
+    h.effects.filter(
+      (/** @type {{ name: string; }} */ effect) =>
+        effect.name === "local-history",
+    ).length,
     1,
   );
 });
@@ -243,11 +296,19 @@ test("automatch request and response publish separately without holding a batch 
   h.request.resolve({ ok: true, inviteId: "auto-game" });
   await settle();
   assert.equal(h.notifications.length, 3);
-  assert.equal(h.notifications.at(-1).presentation.homeVisible, false);
-  assert.equal(h.notifications.at(-1).presentation.waitingText, "matched");
-  const connect = h.effects.find((effect) => effect.name === "connect");
-  assert.equal(connect.notifications, 2);
-  assert.equal(connect.snapshot.presentation.waitingText, "matched");
+  assert.equal(
+    required(h.notifications.at(-1)).presentation.homeVisible,
+    false,
+  );
+  assert.equal(
+    required(h.notifications.at(-1)).presentation.waitingText,
+    "matched",
+  );
+  const connect = h.effects.find(
+    (/** @type {{ name: string; }} */ effect) => effect.name === "connect",
+  );
+  assert.equal(required(connect).notifications, 2);
+  assert.equal(required(connect).snapshot.presentation.waitingText, "matched");
 });
 
 for (const outcome of ["resolve", "reject"]) {
@@ -260,7 +321,7 @@ for (const outcome of ["resolve", "reject"]) {
         h.dismissPendingAutomatchTransition();
         assert.equal(h.state().pendingAutomatchTransition, false);
         assert.equal(h.state().isWaitingForInviteToGetAccepted, false);
-        assert.equal(h.effects.at(-1).name, "automatch-enabled");
+        assert.equal(required(h.effects.at(-1)).name, "automatch-enabled");
         const effectCount = h.effects.length;
         h.dismissPendingAutomatchTransition();
         assert.equal(h.effects.length, effectCount);
@@ -269,11 +330,9 @@ for (const outcome of ["resolve", "reject"]) {
       }
       const snapshot = h.store.getSnapshot();
       const effectCount = h.effects.length;
-      h.request[outcome](
-        outcome === "resolve"
-          ? { ok: true, inviteId: "stale" }
-          : new Error("offline"),
-      );
+      if (outcome === "resolve")
+        h.request.resolve({ ok: true, inviteId: "stale" });
+      else h.request.reject(new Error("offline"));
       await settle();
       assert.equal(responses, 0);
       assert.equal(h.effects.length, effectCount);
@@ -289,8 +348,8 @@ test("automatch request failure clears pending state and reenables its separate 
   h.request.reject(new Error("offline"));
   await settle();
   assert.equal(h.state().pendingAutomatchTransition, false);
-  assert.equal(h.effects.at(-1).name, "automatch-enabled");
-  assert.equal(h.effects.at(-1).value, true);
+  assert.equal(required(h.effects.at(-1)).name, "automatch-enabled");
+  assert.equal(required(h.effects.at(-1)).value, true);
   assert.equal(h.notifications.length, 1);
   h.store.updatePresentation({ waitingText: "retry" });
   assert.equal(h.notifications.length, 2);

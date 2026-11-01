@@ -10,9 +10,7 @@ import {
   writeCleanup,
   writeDelivery,
   DeliverySnapshot,
-  PendingDeleteSnapshot,
   deliveryDocument,
-  pendingDeleteDocument,
 } from "./deliveryState.js";
 import { omitRetryState } from "./deliveryPolicy.js";
 
@@ -21,7 +19,8 @@ import type {
   TelegramMessageDocument,
   TelegramAppliedDocument,
 } from "./records.js";
-type RawRecord = Record<string, unknown>;
+import { requireTelegramMessageDocument } from "./recordCodec.js";
+import { documentFields } from "./deliveryState.js";
 
 type MarkSendInFlightRecordInput = {
   desired: { readonly revision: string };
@@ -33,7 +32,7 @@ export function markSendInFlightRecord(
   input: MarkSendInFlightRecordInput,
 ): TelegramMessageDocument {
   const { desired, marker } = input;
-  const apply = (record: RawRecord) => {
+  const apply = (record: TelegramMessageDocument) => {
     if (
       normalizeString(readProperty(record.desired, "revision")) !==
       desired.revision
@@ -55,8 +54,7 @@ export function markSendInFlightRecord(
       },
     };
   };
-  const output: unknown = apply(asObject(current));
-  return output as TelegramMessageDocument;
+  return requireTelegramMessageDocument(apply(current));
 }
 
 type AcknowledgeSendRecordInput = {
@@ -82,14 +80,16 @@ export function acknowledgeSendRecord(
     previousApplied: retainedPreviousApplied,
     result,
   } = input;
-  const applied = asObject(retainedApplied);
+  const applied = documentFields(retainedApplied);
   const previousApplied =
-    retainedPreviousApplied === null ? null : asObject(retainedPreviousApplied);
-  const apply = (record: RawRecord) => {
+    retainedPreviousApplied === null
+      ? null
+      : documentFields(retainedPreviousApplied);
+  const apply = (record: TelegramMessageDocument) => {
     const latestRevision = normalizeString(
       readProperty(record.desired, "revision"),
     );
-    const nextDelivery = asObject(
+    const nextDelivery = documentFields(
       writeDelivery({
         ...omitRetryState(
           omitKeys(delivery, [
@@ -150,18 +150,5 @@ export function acknowledgeSendRecord(
       delivery: nextDelivery,
     };
   };
-  const output: unknown = apply(asObject(current));
-  return output as TelegramMessageDocument;
+  return requireTelegramMessageDocument(apply(current));
 }
-
-const asObject = (value: unknown): Record<string, unknown> => {
-  const retained =
-    value instanceof DeliverySnapshot
-      ? deliveryDocument(value)
-      : value instanceof PendingDeleteSnapshot
-        ? pendingDeleteDocument(value)
-        : value;
-  return retained && typeof retained === "object" && !Array.isArray(retained)
-    ? (retained as Record<string, unknown>)
-    : {};
-};

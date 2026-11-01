@@ -43,7 +43,7 @@ async function inspectMatchDiscovery(
 ): Promise<void> {
   const control = await readControl(dependencies);
   const counts = await dependencies.run(
-    "SELECT provenance, resolution, count(*) AS count FROM login_match_discovery GROUP BY provenance, resolution",
+    "SELECT provenance, resolution, count(*) AS count FROM login_match_discovery_canonical GROUP BY provenance, resolution",
     DATABASE,
   );
   dependencies.log({ operation: "status", control, counts });

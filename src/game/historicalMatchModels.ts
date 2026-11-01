@@ -1,5 +1,4 @@
 import * as MonsRules from "mons-rules";
-import { MATCH_TIMER_TERMINAL } from "@mons/shared/timers";
 
 import type {
   HistoricalMatchPair,
@@ -7,6 +6,7 @@ import type {
 } from "../connection/connectionModels";
 import {
   createGameModelForStoredVariant,
+  legacyDefaultGameVariant,
   normalizeStoredGameVariant,
   type StoredGameVariant,
 } from "./gameVariants";
@@ -22,9 +22,6 @@ export type TrustedMatchPairGame = {
 export const normalizePersistedMoveHistory = (
   value: unknown,
 ): string | null => {
-  if (value === null || value === undefined) {
-    return "";
-  }
   return typeof value === "string" ? value : null;
 };
 
@@ -140,6 +137,7 @@ export const buildGameFromMoveStreams = (
   whiteMovesString: string,
   blackMovesString: string,
 ): MonsRules.Game | null => {
+  if (typeof gameVariant !== "string" || gameVariant === "") return null;
   const gameFromMoves = createGameModelForStoredVariant(gameVariant);
   const whiteMoves = movesArrayFromFlatString(whiteMovesString);
   const blackMoves = movesArrayFromFlatString(blackMovesString);
@@ -151,7 +149,7 @@ export const buildGameFromMoveStreams = (
       if (whiteIndex >= whiteMoves.length) {
         return null;
       }
-      const output = gameFromMoves.playFen(whiteMoves[whiteIndex]);
+      const output = gameFromMoves.playFen(whiteMoves[whiteIndex]!);
       if (output.kind === "invalid") {
         return null;
       }
@@ -160,7 +158,7 @@ export const buildGameFromMoveStreams = (
       if (blackIndex >= blackMoves.length) {
         return null;
       }
-      const output = gameFromMoves.playFen(blackMoves[blackIndex]);
+      const output = gameFromMoves.playFen(blackMoves[blackIndex]!);
       if (output.kind === "invalid") {
         return null;
       }
@@ -176,7 +174,9 @@ export const getHistoricalPairGameVariant = (
   pair: HistoricalMatchPair,
 ): StoredGameVariant => {
   return normalizeStoredGameVariant(
-    pair.hostMatch?.gameVariant ?? pair.guestMatch?.gameVariant,
+    pair.hostMatch?.gameVariant ??
+      pair.guestMatch?.gameVariant ??
+      legacyDefaultGameVariant,
   );
 };
 
@@ -317,6 +317,6 @@ export const getHistoricalWinnerByTimerColor = (
   return getHistoricalTerminalColor(
     pair,
     hostColorBySeries,
-    (match) => match?.timer === MATCH_TIMER_TERMINAL,
+    (match) => match?.timer.state === "finished",
   );
 };

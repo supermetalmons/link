@@ -1,3 +1,4 @@
+import { required } from "./fixtures/canonicalData.mjs";
 import assert from "node:assert/strict";
 import { registerHooks } from "node:module";
 import test from "node:test";
@@ -32,6 +33,7 @@ const success = {
   },
 };
 
+/** @param {unknown} body */
 const jsonResponse = (body, status = 200) =>
   new Response(JSON.stringify(body), {
     status,
@@ -43,9 +45,10 @@ test.afterEach(() => {
 });
 
 test("sends the exact authenticated mining request and validates responses", async () => {
+  /** @type {{ input: string, init: RequestInit }[]} */
   const calls = [];
   globalThis.fetch = async (input, init) => {
-    calls.push({ input: String(input), init });
+    calls.push({ input: String(input), init: required(init) });
     return jsonResponse(success);
   };
 
@@ -54,12 +57,12 @@ test("sends the exact authenticated mining request and validates responses", asy
     success,
   );
   assert.equal(calls.length, 1);
-  assert.equal(calls[0].input, "https://api.mons.link/mining/rock");
-  assert.equal(calls[0].init.method, "POST");
-  assert.equal(calls[0].init.cache, "no-store");
-  assert.ok(calls[0].init.signal instanceof AbortSignal);
-  assert.deepEqual(JSON.parse(calls[0].init.body), request);
-  const headers = new Headers(calls[0].init.headers);
+  assert.equal(required(calls[0]).input, "https://api.mons.link/mining/rock");
+  assert.equal(required(calls[0]).init.method, "POST");
+  assert.equal(required(calls[0]).init.cache, "no-store");
+  assert.ok(required(calls[0]).init.signal instanceof AbortSignal);
+  assert.deepEqual(JSON.parse(String(required(calls[0]).init.body)), request);
+  const headers = new Headers(required(calls[0]).init.headers);
   assert.equal(headers.get("Accept"), "application/json");
   assert.equal(headers.get("Authorization"), "Bearer session-token");
   assert.equal(headers.get("Content-Type"), "application/json");
@@ -73,10 +76,12 @@ test("sends the exact authenticated mining request and validates responses", asy
 });
 
 test("refreshes the session token exactly once after a 401", async () => {
+  /** @type {(boolean | undefined)[]} */
   const refreshes = [];
+  /** @type {(string | null)[]} */
   const tokens = [];
   globalThis.fetch = async (_input, init) => {
-    tokens.push(new Headers(init.headers).get("Authorization"));
+    tokens.push(new Headers(required(init).headers).get("Authorization"));
     if (tokens.length === 1) {
       return jsonResponse(
         {
@@ -102,10 +107,12 @@ test("refreshes the session token exactly once after a 401", async () => {
 
 test("serializes mining input after acquiring each attempt's token", async () => {
   const input = { ...request, materials: { ...request.materials } };
+  /** @type {unknown[]} */
   const bodies = [];
+  /** @type {(boolean | undefined)[]} */
   const refreshes = [];
   globalThis.fetch = async (_url, init) => {
-    bodies.push(JSON.parse(init.body));
+    bodies.push(JSON.parse(String(required(init).body)));
     return bodies.length === 1
       ? jsonResponse({ ok: false }, 401)
       : jsonResponse(success);
@@ -135,9 +142,13 @@ test("masks auth token failures as mining service errors", async () => {
   await assert.rejects(
     mineRockViaApi(request, async () => {
       tokenCalls++;
-      throw new AuthApiError("unauthenticated", "authentication-changed", {
-        reason: "private-session-detail",
-      });
+      throw Reflect.construct(AuthApiError, [
+        "unauthenticated",
+        "authentication-changed",
+        {
+          reason: "private-session-detail",
+        },
+      ]);
     }),
     (error) =>
       error instanceof MiningApiError &&
@@ -201,7 +212,7 @@ test("rejects malformed and oversized responses", async () => {
     }),
     new Response("{"),
   ];
-  globalThis.fetch = async () => responses.shift();
+  globalThis.fetch = async () => required(responses.shift());
   for (let index = 0; index < 4; index++) {
     await assert.rejects(
       mineRockViaApi(request, async () => "token"),
@@ -226,13 +237,12 @@ test("applies one deadline to token acquisition and response reading", async (t)
   t.mock.timers.runAll();
   await tokenRejection;
 
-  let signal;
-  let bodyStarted;
-  const started = new Promise((resolve) => {
-    bodyStarted = resolve;
-  });
+  /** @type {{ signal?: AbortSignal | null | undefined }} */
+  const captured = {};
+  /** @type {PromiseWithResolvers<void>} */
+  const { promise: started, resolve: bodyStarted } = Promise.withResolvers();
   globalThis.fetch = async (_input, init) => {
-    signal = init.signal;
+    captured.signal = required(init).signal;
     return new Response(
       new ReadableStream({
         start(controller) {
@@ -250,8 +260,8 @@ test("applies one deadline to token acquisition and response reading", async (t)
       error instanceof MiningApiError &&
       error.message === "Mining request timed out.",
   );
-  assert.equal(signal.aborted, false);
+  assert.equal(required(captured.signal).aborted, false);
   t.mock.timers.runAll();
   await bodyRejection;
-  assert.equal(signal.aborted, true);
+  assert.equal(required(captured.signal).aborted, true);
 });

@@ -1,3 +1,5 @@
+import { createDefaultProfileAppearance } from "@mons/shared/appearance";
+import { applicationRequest } from "./testEnv.ts";
 import { retainedInviteSourceFixture } from "./inviteDocumentFixture.ts";
 import { socketTestIdentity } from "./socketTestSession.ts";
 import assert from "node:assert/strict";
@@ -28,8 +30,8 @@ const metadata: InviteMetadataSnapshot = {
   hostId: "host-login",
   guestId: "guest-login",
   hostColor: "white",
-  hostRematches: "1",
-  guestRematches: "1",
+  hostRematches: { state: "open", indices: [1] },
+  guestRematches: { state: "open", indices: [1] },
   automatchStateHint: null,
   eventId: null,
   eventOwned: false,
@@ -39,6 +41,10 @@ const snapshot: InviteWagersSnapshot = {
   revision: 7,
   wagers: {
     "invite-one": {
+      schemaVersion: 1,
+      state: "settled",
+      proposals: {},
+      blocked: null,
       proposedBy: { "host-login": true, "guest-login": true },
       agreed: {
         material: "dust",
@@ -58,6 +64,11 @@ const snapshot: InviteWagersSnapshot = {
       },
     },
     "invite-one1": {
+      schemaVersion: 1,
+      state: "proposed",
+      agreed: null,
+      resolved: null,
+      blocked: null,
       proposals: {
         "host-login": { material: "slime", count: 2, createdAt: 300 },
       },
@@ -79,7 +90,7 @@ function request({
   method?: string;
   headers?: Record<string, string>;
 } = {}): Request {
-  return new Request(
+  return applicationRequest(
     `https://api.mons.link${path ?? `/invites/invite-one/wagers${socket ? "/socket" : ""}`}`,
     {
       method,
@@ -275,7 +286,7 @@ test("HTTP and socket access preserve pending open, private and paired invite pe
             JSON.stringify({ socket, guestId, passwordProtected, caller }),
           );
           if (socket && allowed) {
-            const forwarded = h.calls.sockets[0];
+            const forwarded = h.calls.sockets[0]!;
             assert.equal(
               forwarded.headers.get("X-Mons-Wagers-Authenticated"),
               caller ? "1" : "0",
@@ -323,8 +334,7 @@ test("private linked-host admission resolves canonical D1 ownership without Fire
               revision: 1,
               profile: {
                 profileId: "profile-one",
-                aura: "",
-                emoji: 1000,
+                ...createDefaultProfileAppearance(0),
                 eth: "",
                 sol: "",
                 username: "",
@@ -346,11 +356,11 @@ test("private linked-host admission resolves canonical D1 ownership without Fire
     assert.equal(h.calls.sources, 1);
     if (socket) {
       assert.equal(
-        h.calls.sockets[0].headers.get("X-Mons-Wagers-Role"),
+        h.calls.sockets[0]!.headers.get("X-Mons-Wagers-Role"),
         "host",
       );
       assert.equal(
-        h.calls.sockets[0].headers.get("X-Mons-Wagers-Actor"),
+        h.calls.sockets[0]!.headers.get("X-Mons-Wagers-Actor"),
         "host-login",
       );
     }
@@ -379,7 +389,7 @@ test("upgrade strips caller credentials and spoofed admission headers", async ()
     h.dependencies,
   );
   assert.equal(response.status, 200);
-  const forwarded = h.calls.sockets[0];
+  const forwarded = h.calls.sockets[0]!;
   assert.equal(forwarded.url, "https://reactions.internal/wagers/socket");
   assert.deepEqual(Object.fromEntries(forwarded.headers), {
     "sec-websocket-protocol": INVITE_WAGERS_SOCKET_PROTOCOL,
@@ -407,7 +417,7 @@ test("Authorization-only socket authentication uses the wager protocol and verif
   );
   assert.equal(response.status, 200);
   assert.equal(h.calls.auth, 1);
-  assert.equal(h.calls.sockets[0].headers.get("Authorization"), null);
+  assert.equal(h.calls.sockets[0]!.headers.get("Authorization"), null);
 });
 
 test("malformed routes, origins, protocols and socket tokens fail before auth or storage", async () => {
@@ -490,7 +500,7 @@ test("invalid HTTP bearer tokens fail authentication before any source read", as
     "Bearer ",
   ]) {
     const h = setup();
-    h.dependencies.verifyIdentity = undefined;
+    delete h.dependencies.verifyIdentity;
     const response = await handleInviteWagersRoute(
       request({ headers: { Authorization: authorization } }),
       h.env,
@@ -525,7 +535,7 @@ test("missing invites and failed existence checks never allocate a room", async 
     ]) {
       const h = setup();
       let allocations = 0;
-      h.dependencies.room = undefined;
+      delete h.dependencies.room;
       Object.defineProperty(h.env, "INVITE_REACTIONS", {
         value: {
           getByName: () => {

@@ -1,3 +1,4 @@
+import { CanonicalProfileCorruption } from "./types.ts";
 export const CANONICAL_PROFILE_AGGREGATE_PARTS = [
   "profile",
   "loginOwners",
@@ -25,5 +26,8 @@ export function canonicalProfileAggregatePart<T>(
   values: readonly T[],
   part: CanonicalProfileAggregatePart,
 ): T {
-  return values[CANONICAL_PROFILE_AGGREGATE_PARTS.indexOf(part)];
+  const index = CANONICAL_PROFILE_AGGREGATE_PARTS.indexOf(part);
+  if (index < 0 || index >= values.length)
+    throw new CanonicalProfileCorruption();
+  return values[index]!;
 }

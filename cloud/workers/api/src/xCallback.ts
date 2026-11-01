@@ -109,7 +109,7 @@ function terminalFlowRedirect(
       consentSource,
     });
   }
-  if (flow.status === "failed") {
+  if (flow.status === "failed" || flow.status === "cancelled") {
     return redirectResponse({
       returnUrl,
       flowId,
@@ -157,6 +157,9 @@ export async function handleXCallback(
   if (!flow) {
     return textResponse("X auth session not found.", 400);
   }
+
+  if (flow.dataEpoch !== 1)
+    return textResponse("X auth session must be restarted.", 400);
 
   const existingRedirect = terminalFlowRedirect(flowId, flow);
   if (existingRedirect) {
@@ -230,6 +233,10 @@ export async function handleXCallback(
     if (!current) {
       return { response: textResponse("X auth session not found.", 400) };
     }
+    if (current.dataEpoch !== 1)
+      return {
+        response: textResponse("X auth session must be restarted.", 400),
+      };
     const authoritativeRedirect = terminalFlowRedirect(flowId, current);
     if (authoritativeRedirect) {
       return { response: authoritativeRedirect };

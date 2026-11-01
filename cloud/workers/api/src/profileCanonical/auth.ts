@@ -1,7 +1,3 @@
-import {
-  retainCanonicalAuthMetadata,
-  retainCanonicalAuthResult,
-} from "./retainedRecords.ts";
 import { type AuthMethodKey } from "@mons/shared/auth";
 import { canonicalProfileRedirectCte } from "./redirectSql.ts";
 import {
@@ -18,7 +14,6 @@ import {
   type CanonicalAuthOperationSnapshot,
   type AuthOperationRow,
   type CanonicalAuthRecoverySnapshot,
-  type RecoveryRow,
   type CanonicalProfileSnapshot,
   type CanonicalPublicProfileSnapshot,
   type CanonicalProfileAggregateSnapshot,
@@ -32,16 +27,7 @@ import {
   type CanonicalProfileOwnershipSnapshot,
   type CanonicalResolvedProfileAggregateSnapshot,
 } from "./types.ts";
-import {
-  record,
-  nonempty,
-  safeInteger,
-  authMethod,
-  nullableString,
-  nullableSafeInteger,
-  parseNullableObjectJson,
-  parseStringArrayJson,
-} from "./validation.ts";
+import { record, nonempty, safeInteger, nullableString } from "./validation.ts";
 import {
   CANONICAL_PUBLIC_PROFILE_COLUMNS,
   resolveCanonicalProfile,
@@ -50,6 +36,12 @@ import {
   parseCanonicalProfileRow,
   parseCanonicalMergeTargetRow,
 } from "./profiles.ts";
+import {
+  parseCanonicalLoginOwnerRow,
+  parseCanonicalAuthMethodRow,
+  parseCanonicalAuthOperationRow,
+  parseCanonicalAuthRecoveryRow,
+} from "./authRecords.ts";
 
 const CANONICAL_OWNERSHIP_PROFILE_COLUMNS = [
   ...CANONICAL_PUBLIC_PROFILE_COLUMNS.split(",").map(
@@ -58,126 +50,19 @@ const CANONICAL_OWNERSHIP_PROFILE_COLUMNS = [
   "profile.revision",
 ].join(", ");
 
-export function parseCanonicalLoginOwnerRow(
-  value: unknown,
-): CanonicalLoginOwnerSnapshot {
-  const row = record(value) as LoginOwnerRow | null;
-  if (!row) throw new CanonicalProfileCorruption();
-  return {
-    loginUid: nonempty(row.login_uid),
-    profileId: nonempty(row.profile_id),
-    revision: safeInteger(row.revision, 1),
-    createdAtMs: safeInteger(row.created_at_ms),
-    updatedAtMs: safeInteger(row.updated_at_ms),
-  };
-}
-
-export function parseCanonicalAuthMethodRow(
-  value: unknown,
-): CanonicalAuthMethodSnapshot {
-  const row = record(value) as AuthMethodRow | null;
-  if (!row) throw new CanonicalProfileCorruption();
-  const method = authMethod(row.method);
-  if (
-    (method !== "apple" && row.apple_email_masked !== null) ||
-    (method !== "x" && row.x_username !== null)
-  ) {
-    throw new CanonicalProfileCorruption();
-  }
-  const consentSource = row.consent_source;
-  if (
-    consentSource !== null &&
-    consentSource !== "signin" &&
-    consentSource !== "settings"
-  ) {
-    throw new CanonicalProfileCorruption();
-  }
-  return {
-    method,
-    normalizedValue: nonempty(row.normalized_value),
-    profileId: nonempty(row.profile_id),
-    rawValue: nonempty(row.raw_value),
-    appleEmailMasked: nullableString(row.apple_email_masked),
-    xUsername: nullableString(row.x_username),
-    linkedAtMs: nullableSafeInteger(row.linked_at_ms),
-    consentAtMs: nullableSafeInteger(row.consent_at_ms),
-    consentSource,
-    revision: safeInteger(row.revision, 1),
-    createdAtMs: safeInteger(row.created_at_ms),
-    updatedAtMs: safeInteger(row.updated_at_ms),
-  };
-}
-
-function retainNullableAuthMetadata(value: unknown) {
-  const parsed = parseNullableObjectJson(value);
-  return parsed === null ? null : retainCanonicalAuthMetadata(parsed);
-}
-function retainNullableAuthResult(value: unknown) {
-  const parsed = parseNullableObjectJson(value);
-  return parsed === null ? null : retainCanonicalAuthResult(parsed);
-}
-
-export function parseCanonicalAuthOperationRow(
-  value: unknown,
-): CanonicalAuthOperationSnapshot {
-  const row = record(value) as AuthOperationRow | null;
-  if (!row) throw new CanonicalProfileCorruption();
-  if (
-    (row.kind !== "unlink" && row.kind !== "verify") ||
-    (row.status !== "started" &&
-      row.status !== "failed" &&
-      row.status !== "success")
-  ) {
-    throw new CanonicalProfileCorruption();
-  }
-  return {
-    operationId: nonempty(row.operation_id),
-    kind: row.kind,
-    method: authMethod(row.method),
-    loginUid: nonempty(row.login_uid),
-    status: row.status,
-    meta: retainNullableAuthMetadata(row.meta_json),
-    result: retainNullableAuthResult(row.result_json),
-    errorCode: nullableString(row.error_code),
-    errorMessage: nullableString(row.error_message),
-    startedAtMs: safeInteger(row.started_at_ms),
-    updatedAtMs: safeInteger(row.updated_at_ms),
-    revision: safeInteger(row.revision, 1),
-  };
-}
-
-export function parseCanonicalAuthRecoveryRow(
-  value: unknown,
-): CanonicalAuthRecoverySnapshot {
-  const row = record(value) as RecoveryRow | null;
-  if (!row) throw new CanonicalProfileCorruption();
-  if (
-    row.source_phase !== "prizes" &&
-    row.source_phase !== "games" &&
-    row.source_phase !== "finalize"
-  ) {
-    throw new CanonicalProfileCorruption();
-  }
-  return {
-    profileId: nonempty(row.profile_id),
-    loginUids: parseStringArrayJson(row.login_uids_json),
-    sourceProfileIds: parseStringArrayJson(row.source_profile_ids_json),
-    sourcePhase: row.source_phase,
-    prizeCursor: nullableString(row.prize_cursor),
-    phaseStartedAtMs: safeInteger(row.phase_started_at_ms),
-    lastEnqueuedAtMs: safeInteger(row.last_enqueued_at_ms),
-    createdAtMs: safeInteger(row.created_at_ms),
-    updatedAtMs: safeInteger(row.updated_at_ms),
-    revision: safeInteger(row.revision, 1),
-  };
-}
+export {
+  parseCanonicalLoginOwnerRow,
+  parseCanonicalAuthMethodRow,
+  parseCanonicalAuthOperationRow,
+  parseCanonicalAuthRecoveryRow,
+} from "./authRecords.ts";
 
 export async function readCanonicalLoginOwner(
   db: D1Database,
   loginUid: string,
 ): Promise<CanonicalLoginOwnerSnapshot | null> {
   const row = await db
-    .prepare("SELECT * FROM profile_login_owners WHERE login_uid = ?")
+    .prepare("SELECT * FROM profile_login_owners_canonical WHERE login_uid = ?")
     .bind(loginUid)
     .first<LoginOwnerRow>();
   return row ? parseCanonicalLoginOwnerRow(row) : null;
@@ -190,7 +75,7 @@ export async function readCanonicalAuthMethod(
 ): Promise<CanonicalAuthMethodSnapshot | null> {
   const row = await db
     .prepare(
-      `SELECT * FROM profile_auth_methods
+      `SELECT * FROM profile_auth_methods_canonical
        WHERE method = ? AND normalized_value = ?`,
     )
     .bind(method, normalizedValue)
@@ -221,10 +106,10 @@ export async function readCanonicalPublicProfileByLogin(
               owner.created_at_ms AS lookup_created_at_ms,
               owner.updated_at_ms AS lookup_updated_at_ms,
               mapping.source_profile_id AS lookup_merge_source_profile_id
-       FROM profile_login_owners AS owner
-       LEFT JOIN profile_records AS profile
+       FROM profile_login_owners_canonical AS owner
+       LEFT JOIN profile_records_canonical AS profile
          ON profile.profile_id = owner.profile_id
-       LEFT JOIN profile_merge_targets AS mapping
+       LEFT JOIN profile_merge_targets_canonical AS mapping
          ON mapping.source_profile_id = owner.profile_id
        WHERE owner.login_uid = ?`,
     )
@@ -254,19 +139,19 @@ function canonicalProfileAggregateStatements(
   const profileIdSql =
     "profileId" in source
       ? "?"
-      : "(SELECT profile_id FROM profile_login_owners WHERE login_uid = ?)";
+      : "(SELECT profile_id FROM profile_login_owners_canonical WHERE login_uid = ?)";
   const key = "profileId" in source ? source.profileId : source.loginUid;
   const queries: CanonicalProfileAggregateParts<string> = {
-    profile: `SELECT * FROM profile_records WHERE profile_id = ${profileIdSql}`,
-    loginOwners: `SELECT * FROM profile_login_owners
+    profile: `SELECT * FROM profile_records_canonical WHERE profile_id = ${profileIdSql}`,
+    loginOwners: `SELECT * FROM profile_login_owners_canonical
      WHERE profile_id = ${profileIdSql} ORDER BY login_uid ASC`,
-    authMethods: `SELECT * FROM profile_auth_methods
+    authMethods: `SELECT * FROM profile_auth_methods_canonical
      WHERE profile_id = ${profileIdSql} ORDER BY method ASC`,
-    februaryOpponentProfileIds: `SELECT opponent_profile_id FROM profile_february_opponents
+    februaryOpponentProfileIds: `SELECT opponent_profile_id FROM profile_february_opponents_canonical
      WHERE profile_id = ${profileIdSql} ORDER BY opponent_profile_id ASC`,
     mergeTarget: `SELECT source_profile_id, target_profile_id, merged_at_ms, op_id
-     FROM profile_merge_targets WHERE source_profile_id = ${profileIdSql}`,
-    recovery: `SELECT * FROM profile_auth_recovery_jobs WHERE profile_id = ${profileIdSql}`,
+     FROM profile_merge_targets_canonical WHERE source_profile_id = ${profileIdSql}`,
+    recovery: `SELECT * FROM profile_auth_recovery_jobs_canonical WHERE profile_id = ${profileIdSql}`,
   };
   return canonicalProfileAggregateValues(queries).map((query) =>
     db.prepare(query).bind(key),
@@ -306,7 +191,7 @@ export async function readCanonicalProfileAggregate(
   profileId: string,
 ): Promise<CanonicalProfileAggregateSnapshot> {
   const [aggregate] = await readCanonicalProfileAggregates(db, [profileId]);
-  return aggregate;
+  return aggregate!;
 }
 
 export async function readCanonicalProfileAggregates(
@@ -324,7 +209,7 @@ export async function readCanonicalProfileAggregates(
       results.slice(offset, offset + statements.length),
     );
     offset += statements.length;
-    return aggregate;
+    return aggregate!;
   });
 }
 
@@ -333,7 +218,9 @@ export async function readCanonicalAuthRecoveryJob(
   profileId: string,
 ): Promise<CanonicalAuthRecoverySnapshot | null> {
   const row = await db
-    .prepare("SELECT * FROM profile_auth_recovery_jobs WHERE profile_id = ?")
+    .prepare(
+      "SELECT * FROM profile_auth_recovery_jobs_canonical WHERE profile_id = ?",
+    )
     .bind(profileId)
     .first();
   return row === null ? null : parseCanonicalAuthRecoveryRow(row);
@@ -383,7 +270,7 @@ export async function readCanonicalProfileAggregateSnapshot(
   const [aggregate] = await readCanonicalProfileAggregateSnapshots(db, [
     profileId,
   ]);
-  return aggregate;
+  return aggregate!;
 }
 
 export async function readCanonicalProfileAggregateSnapshots(
@@ -392,7 +279,7 @@ export async function readCanonicalProfileAggregateSnapshots(
 ): Promise<CanonicalProfileAggregateSnapshot[]> {
   const aggregates = await readCanonicalProfileAggregates(db, profileIds);
   aggregates.forEach((aggregate, index) =>
-    assertCanonicalAggregateTopology(profileIds[index], aggregate),
+    assertCanonicalAggregateTopology(profileIds[index]!, aggregate),
   );
   return aggregates;
 }
@@ -433,9 +320,9 @@ function canonicalOwnershipResolutionStatement(
        FROM roots
        LEFT JOIN chain
          ON chain.request_index = roots.request_index
-       LEFT JOIN profile_records profile
+       LEFT JOIN profile_records_canonical profile
          ON profile.profile_id = chain.chain_profile_id
-       LEFT JOIN profile_merge_targets target
+       LEFT JOIN profile_merge_targets_canonical target
          ON target.source_profile_id = chain.chain_profile_id
        ORDER BY roots.request_index ASC, chain.depth ASC`,
     )
@@ -461,21 +348,22 @@ function parseCanonicalOwnershipResolutions(
     ) {
       throw new CanonicalProfileCorruption();
     }
-    grouped[requestIndex].push(row);
+    grouped[requestIndex]!.push(row);
   }
   return grouped.map((group, requestIndex) => {
     if (group.length === 0) throw new CanonicalProfileCorruption();
-    const requestKey = requestKeys[requestIndex];
-    const rootProfileId = nullableString(group[0].root_profile_id);
+    const requestKey = requestKeys[requestIndex]!;
+    const first = group[0]!;
+    const rootProfileId = nullableString(first.root_profile_id);
     if (!rootProfileId) {
       if (
         kind !== "login" ||
         group.length !== 1 ||
-        group[0].owner_revision !== null ||
-        group[0].owner_created_at_ms !== null ||
-        group[0].owner_updated_at_ms !== null ||
-        group[0].chain_profile_id !== null ||
-        group[0].depth !== null
+        first.owner_revision !== null ||
+        first.owner_created_at_ms !== null ||
+        first.owner_updated_at_ms !== null ||
+        first.chain_profile_id !== null ||
+        first.depth !== null
       ) {
         throw new CanonicalProfileCorruption();
       }
@@ -486,29 +374,29 @@ function parseCanonicalOwnershipResolutions(
         ? parseCanonicalLoginOwnerRow({
             login_uid: requestKey,
             profile_id: rootProfileId,
-            revision: group[0].owner_revision,
-            created_at_ms: group[0].owner_created_at_ms,
-            updated_at_ms: group[0].owner_updated_at_ms,
+            revision: first.owner_revision,
+            created_at_ms: first.owner_created_at_ms,
+            updated_at_ms: first.owner_updated_at_ms,
           })
         : null;
     if (
       kind === "profile" &&
-      (group[0].owner_revision !== null ||
-        group[0].owner_created_at_ms !== null ||
-        group[0].owner_updated_at_ms !== null)
+      (first.owner_revision !== null ||
+        first.owner_created_at_ms !== null ||
+        first.owner_updated_at_ms !== null)
     ) {
       throw new CanonicalProfileCorruption();
     }
     const visited = new Set<string>();
     let canonicalProfileId: string | null = null;
     for (let index = 0; index < group.length; index += 1) {
-      const row = group[index];
+      const row = group[index]!;
       if (
         row.request_key !== requestKey ||
         row.root_profile_id !== rootProfileId ||
-        row.owner_revision !== group[0].owner_revision ||
-        row.owner_created_at_ms !== group[0].owner_created_at_ms ||
-        row.owner_updated_at_ms !== group[0].owner_updated_at_ms
+        row.owner_revision !== first.owner_revision ||
+        row.owner_created_at_ms !== first.owner_created_at_ms ||
+        row.owner_updated_at_ms !== first.owner_updated_at_ms
       ) {
         throw new CanonicalProfileCorruption();
       }
@@ -549,7 +437,7 @@ function parseCanonicalOwnershipResolutions(
         nullableString(row.merge_target_op_id);
         if (
           index + 1 >= group.length ||
-          group[index + 1].chain_profile_id !== mergeTargetProfileId
+          group[index + 1]!.chain_profile_id !== mergeTargetProfileId
         ) {
           throw new CanonicalProfileCorruption();
         }
@@ -566,7 +454,7 @@ function parseCanonicalOwnershipResolutions(
           profileState !== "retiring" ||
           mergedIntoProfileId !== mergeTargetProfileId ||
           index + 1 >= group.length ||
-          group[index + 1].chain_profile_id !== mergeTargetProfileId
+          group[index + 1]!.chain_profile_id !== mergeTargetProfileId
         ) {
           throw new CanonicalProfileCorruption();
         }
@@ -599,7 +487,7 @@ function canonicalOwnershipTerminalsCte(): string {
           roots(root_profile_id) AS (
             SELECT owner.profile_id
             FROM requested_login requested
-            JOIN profile_login_owners owner
+            JOIN profile_login_owners_canonical owner
               ON owner.login_uid = requested.request_key
             UNION
             SELECT request_key FROM requested_profile
@@ -609,14 +497,14 @@ function canonicalOwnershipTerminalsCte(): string {
             UNION ALL
             SELECT target.target_profile_id, chain.depth + 1
             FROM chain
-            JOIN profile_merge_targets target
+            JOIN profile_merge_targets_canonical target
               ON target.source_profile_id = chain.chain_profile_id
             WHERE chain.depth <= ?
           ),
           terminals(profile_id) AS (
             SELECT DISTINCT chain.chain_profile_id
             FROM chain
-            LEFT JOIN profile_merge_targets target
+            LEFT JOIN profile_merge_targets_canonical target
               ON target.source_profile_id = chain.chain_profile_id
             WHERE target.source_profile_id IS NULL
           )`;
@@ -644,7 +532,7 @@ function canonicalOwnershipProfilesStatement(
       `${canonicalOwnershipTerminalsCte()}
        SELECT ${CANONICAL_OWNERSHIP_PROFILE_COLUMNS}
        FROM terminals
-       JOIN profile_records profile ON profile.profile_id = terminals.profile_id
+       JOIN profile_records_canonical profile ON profile.profile_id = terminals.profile_id
        ORDER BY profile.profile_id ASC`,
     ),
     loginUids,
@@ -667,7 +555,7 @@ function canonicalOwnershipOwnersStatement(
          owner.created_at_ms AS owner_created_at_ms,
          owner.updated_at_ms AS owner_updated_at_ms
        FROM terminals
-       JOIN profile_login_owners owner
+       JOIN profile_login_owners_canonical owner
          ON owner.profile_id = terminals.profile_id
        ORDER BY owner.profile_id ASC, owner.login_uid ASC`,
     ),
@@ -811,7 +699,7 @@ export async function readCanonicalProfileOwnershipSnapshot(
   const loginResolutions = parseCanonicalOwnershipResolutions(
     loginResolutionIndex === null
       ? []
-      : (results[loginResolutionIndex]
+      : (results[loginResolutionIndex]!
           .results as CanonicalOwnershipResolutionRow[]),
     loginUids,
     "login",
@@ -819,17 +707,17 @@ export async function readCanonicalProfileOwnershipSnapshot(
   const profileResolutions = parseCanonicalOwnershipResolutions(
     profileResolutionIndex === null
       ? []
-      : (results[profileResolutionIndex]
+      : (results[profileResolutionIndex]!
           .results as CanonicalOwnershipResolutionRow[]),
     profileIds,
     "profile",
   );
   const profileById = parseCanonicalOwnershipProfiles(
-    results[profilesIndex].results as CanonicalOwnershipProfileRow[],
+    results[profilesIndex]!.results as CanonicalOwnershipProfileRow[],
   );
   const { aggregateOwnerByUid, loginOwnersByProfileId } =
     parseCanonicalOwnershipOwners(
-      results[ownersIndex].results as CanonicalOwnershipOwnerRow[],
+      results[ownersIndex]!.results as CanonicalOwnershipOwnerRow[],
       profileById,
     );
   const canonicalProfileIds = new Set<string>();
@@ -838,7 +726,7 @@ export async function readCanonicalProfileOwnershipSnapshot(
     Readonly<{ profileId: string; revision: number }> | null
   >();
   for (let index = 0; index < loginUids.length; index += 1) {
-    const loginUid = loginUids[index];
+    const loginUid = loginUids[index]!;
     const resolution = loginResolutions[index];
     if (!resolution) {
       loginOwnerByUid.set(loginUid, null);
@@ -867,7 +755,7 @@ export async function readCanonicalProfileOwnershipSnapshot(
   }
   const canonicalProfileIdByProfileId = new Map<string, string | null>();
   for (let index = 0; index < profileIds.length; index += 1) {
-    const profileId = profileIds[index];
+    const profileId = profileIds[index]!;
     const resolution = profileResolutions[index];
     if (resolution?.owner) throw new CanonicalProfileCorruption();
     const canonicalProfileId = resolution?.profileId || null;
@@ -898,11 +786,13 @@ export async function readCanonicalProfileAggregateByLogin(
 ): Promise<CanonicalResolvedProfileAggregateSnapshot | null> {
   const [ownerResult, ...aggregateResults] = await db.batch([
     db
-      .prepare("SELECT * FROM profile_login_owners WHERE login_uid = ?")
+      .prepare(
+        "SELECT * FROM profile_login_owners_canonical WHERE login_uid = ?",
+      )
       .bind(loginUid),
     ...canonicalProfileAggregateStatements(db, { loginUid }),
   ]);
-  const ownerRow = ownerResult.results[0];
+  const ownerRow = ownerResult!.results[0];
   if (!ownerRow) return null;
   const owner = parseCanonicalLoginOwnerRow(ownerRow);
   const aggregate = parseCanonicalProfileAggregateResults(aggregateResults);
@@ -924,7 +814,9 @@ export async function readCanonicalAuthOperation(
   operationId: string,
 ): Promise<CanonicalAuthOperationSnapshot | null> {
   const row = await db
-    .prepare("SELECT * FROM profile_auth_operations WHERE operation_id = ?")
+    .prepare(
+      "SELECT * FROM profile_auth_operations_canonical WHERE operation_id = ?",
+    )
     .bind(operationId)
     .first<AuthOperationRow>();
   return row ? parseCanonicalAuthOperationRow(row) : null;

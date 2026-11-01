@@ -1,3 +1,4 @@
+import { required } from "./fixtures/canonicalData.mjs";
 import assert from "node:assert/strict";
 import test from "node:test";
 import { setImmediate } from "node:timers/promises";
@@ -7,6 +8,16 @@ import {
   moveDeliveryStorageKey,
 } from "../src/connection/moveDelivery.ts";
 
+/**
+ * @typedef {ConstructorParameters<typeof MoveDelivery>[2]} DeliveryDependencies
+ * @typedef {Parameters<DeliveryDependencies["read"]>[0]} ReadOptions
+ * @typedef {Awaited<ReturnType<DeliveryDependencies["read"]>>} ReadValue
+ * @typedef {Parameters<DeliveryDependencies["submit"]>[1] & {request: Parameters<DeliveryDependencies["submit"]>[0]}} SubmitOptions
+ * @typedef {Awaited<ReturnType<DeliveryDependencies["submit"]>>} SubmitValue
+ */
+/** @template Value @template {{signal: AbortSignal}} Details
+ * @typedef {Details & {startedAt: number; active: boolean; resolve(value: Value): void; reject(error: unknown): void}} PendingEntry */
+/** @typedef {{status: "pending" | "fulfilled" | "rejected"; error?: unknown; done: Promise<void>}} FlushResult */
 const scope = {
   loginUid: "login",
   playerId: "actor",
@@ -24,15 +35,29 @@ function harness({ windowMs = 3500, ignoreReadAbort = false } = {}) {
   let now = 10_000;
   let timerId = 0;
   let authorized = true;
+  /** @type {Map<Parameters<NonNullable<DeliveryDependencies["clearTimer"]>>[0], {callback: () => void; at: number}>} */
   const timers = new Map();
+  /**
+   * @type {number[]}
+   */
   const delays = [];
+  /** @type {Array<PendingEntry<ReadValue, ReadOptions>>} */
   const reads = [];
+  /** @type {Array<PendingEntry<SubmitValue, SubmitOptions>>} */
   const submissions = [];
+  /**
+   * @type {{ error: Error; kind: "storage" | "paused" | "conflict"; }[]}
+   */
   const errors = [];
+  /** @type {Map<string, string>} */
   const records = new Map();
   const key = moveDeliveryStorageKey(scope);
+  /** @template Value @template {{signal: AbortSignal}} Details
+   * @param {Array<PendingEntry<Value, Details>>} entries @param {Details} details
+   * @param {boolean} [ignoreAbort] @returns {Promise<Value>} */
   const pending = (entries, details, ignoreAbort = false) =>
     new Promise((resolve, reject) => {
+      /** @type {PendingEntry<Value, Details>} */
       const entry = {
         ...details,
         startedAt: now,
@@ -91,12 +116,15 @@ function harness({ windowMs = 3500, ignoreReadAbort = false } = {}) {
     key,
     delays,
     now: () => now,
-    elapse: (milliseconds) => {
+    elapse: (/** @type {number} */ milliseconds) => {
       now += milliseconds;
     },
-    setAuthorized: (value) => {
+    setAuthorized: (/** @type {boolean} */ value) => {
       authorized = value;
     },
+    /**
+     * @param {number} milliseconds
+     */
     async advance(milliseconds) {
       const end = now + milliseconds;
       let steps = 0;
@@ -114,10 +142,12 @@ function harness({ windowMs = 3500, ignoreReadAbort = false } = {}) {
       now = end;
       await settle();
     },
+    /** @returns {Promise<FlushResult>} */
     async begin() {
       outbox.enqueue("second", target.fen);
+      /** @type {Omit<FlushResult, "done">} */
       const result = { status: "pending" };
-      result.done = outbox.flush().then(
+      const done = outbox.flush().then(
         () => {
           result.status = "fulfilled";
         },
@@ -127,21 +157,22 @@ function harness({ windowMs = 3500, ignoreReadAbort = false } = {}) {
         },
       );
       h.elapse(20);
-      submissions[0].reject(
+      required(submissions[0]).reject(
         Object.assign(new Error("uncertain-move-result"), {
           code: "unavailable",
         }),
       );
       await settle();
       assert.equal(reads.length, 1);
-      return result;
+      return Object.assign(result, { done });
     },
   };
   return h;
 }
 
+/** @param {ReturnType<typeof harness>} h @param {(read: PendingEntry<ReadValue, ReadOptions>) => void} respond */
 async function exhaust(h, respond) {
-  const end = h.reads[0].startedAt + 3500;
+  const end = required(h.reads[0]).startedAt + 3500;
   while (h.now() < end) {
     const read = h.reads.find((entry) => entry.active);
     assert.ok(read);
@@ -155,9 +186,9 @@ test("uncertain delivery accepts a matching snapshot and clears the persisted jo
   const h = harness();
   t.after(() => h.outbox.pause());
   const completed = await h.begin();
-  assert.equal(h.reads[0].timeoutMs, 1200);
-  assert.equal(h.reads[0].startedAt, 10_020);
-  h.reads[0].resolve(target);
+  assert.equal(required(h.reads[0]).timeoutMs, 1200);
+  assert.equal(required(h.reads[0]).startedAt, 10_020);
+  required(h.reads[0]).resolve(target);
   await completed.done;
   assert.equal(completed.status, "fulfilled");
   assert.equal(h.outbox.hasPendingMoves, false);
@@ -167,18 +198,23 @@ test("uncertain delivery accepts a matching snapshot and clears the persisted jo
   assert.deepEqual(h.errors, []);
 });
 
-for (const [label, snapshot] of [
+/** @type {Array<[string, NonNullable<ReadValue>]>} */
+const conflictingSnapshots = [
   ["different target FEN", { ...target, fen: "other-fen" }],
   ["divergent move chain", { ...target, flatMovesString: "first-other" }],
-]) {
+];
+for (const [label, snapshot] of conflictingSnapshots) {
   test(`verification cannot acknowledge a ${label}`, async (t) => {
     const h = harness();
     t.after(() => h.outbox.pause());
     const completed = await h.begin();
-    h.reads[0].resolve(snapshot);
+    required(h.reads[0]).resolve(snapshot);
     await completed.done;
     assert.equal(completed.status, "rejected");
-    assert.equal(completed.error.message, "move-delivery-conflict");
+    assert.equal(
+      readFailure(completed.error).message,
+      "move-delivery-conflict",
+    );
     assert.equal(h.outbox.hasPendingMoves, true);
     assert.equal(h.outbox.isConflicted, true);
     assert.equal(h.outbox.confirmationVersion, 0);
@@ -187,14 +223,16 @@ for (const [label, snapshot] of [
   });
 }
 
-for (const [label, respond] of [
+/** @type {Array<[string, (read: PendingEntry<ReadValue, ReadOptions>) => void]>} */
+const retryResponses = [
   ["unchanged history", (read) => read.resolve(initial)],
   ["missing match", (read) => read.resolve(null)],
   [
     "unavailable snapshot",
     (read) => read.reject(new Error("snapshot-unavailable")),
   ],
-]) {
+];
+for (const [label, respond] of retryResponses) {
   test(`${label} exhausts verification while retaining pending actions and the flush barrier`, async (t) => {
     const h = harness();
     t.after(() => h.outbox.pause());
@@ -208,7 +246,10 @@ for (const [label, respond] of [
     assert.ok(h.reads.length > 1);
     assert.ok(h.reads.every(({ timeoutMs }) => timeoutMs <= 1200));
     assert.ok(h.reads.every(({ startedAt }) => startedAt < 13_520));
-    assert.equal(h.errors.at(-1).error.message, "move-delivery-unavailable");
+    assert.equal(
+      required(h.errors.at(-1)).error.message,
+      "move-delivery-unavailable",
+    );
     assert.equal(h.delays.at(-1), 15_000);
   });
 }
@@ -217,10 +258,10 @@ test("verification tolerates an unavailable read and confirms a later matching s
   const h = harness();
   t.after(() => h.outbox.pause());
   const completed = await h.begin();
-  h.reads[0].reject(new Error("snapshot-unavailable"));
+  required(h.reads[0]).reject(new Error("snapshot-unavailable"));
   await settle();
   await h.advance(350);
-  h.reads[1].resolve(target);
+  required(h.reads[1]).resolve(target);
   await completed.done;
   assert.equal(completed.status, "fulfilled");
   assert.equal(h.reads.length, 2);
@@ -234,9 +275,9 @@ test("each snapshot timeout is capped by 1200 ms and the remaining verification 
   const completed = await h.begin();
   for (const timeoutMs of [1200, 1200, 400]) {
     const read = h.reads.at(-1);
-    assert.equal(read.timeoutMs, timeoutMs);
+    assert.equal(required(read).timeoutMs, timeoutMs);
     h.elapse(timeoutMs);
-    read.resolve(null);
+    required(read).resolve(null);
     await settle();
     if (timeoutMs !== 400) await h.advance(350);
   }
@@ -254,8 +295,8 @@ test("verification honors a sub-1200 ms remaining window", async (t) => {
   const h = harness({ windowMs: 900 });
   t.after(() => h.outbox.pause());
   const completed = await h.begin();
-  assert.equal(h.reads[0].timeoutMs, 900);
-  h.reads[0].resolve(target);
+  assert.equal(required(h.reads[0]).timeoutMs, 900);
+  required(h.reads[0]).resolve(target);
   await completed.done;
   assert.equal(completed.status, "fulfilled");
 });
@@ -264,9 +305,9 @@ test("a late matching proof may confirm the same generation without starting wor
   const h = harness({ windowMs: 900 });
   t.after(() => h.outbox.pause());
   const completed = await h.begin();
-  assert.equal(h.reads[0].timeoutMs, 900);
+  assert.equal(required(h.reads[0]).timeoutMs, 900);
   h.elapse(900);
-  h.reads[0].resolve(target);
+  required(h.reads[0]).resolve(target);
   await completed.done;
   assert.equal(completed.status, "fulfilled");
   assert.equal(h.reads.length, 1);
@@ -280,11 +321,14 @@ test("a snapshot received after account pause cannot acknowledge accepted moves"
   const completed = await h.begin();
   h.setAuthorized(false);
   h.outbox.pause();
-  h.reads[0].resolve(target);
+  required(h.reads[0]).resolve(target);
   await settle();
   assert.equal(completed.status, "rejected");
-  assert.equal(completed.error.message, "move-authentication-changed");
-  assert.equal(h.reads[0].signal.aborted, true);
+  assert.equal(
+    readFailure(completed.error).message,
+    "move-authentication-changed",
+  );
+  assert.equal(required(h.reads[0]).signal.aborted, true);
   assert.equal(h.outbox.confirmationVersion, 0);
   assert.equal(h.outbox.hasPendingMoves, true);
   assert.equal(h.records.has(h.key), true);
@@ -300,7 +344,7 @@ test("a stale verification read cannot replace or pause a reset delivery generat
   h.outbox.resetAfterConflict(branch);
   h.outbox.enqueue("new", "new-fen");
   const before = h.errors.length;
-  h.reads[0].resolve(target);
+  required(h.reads[0]).resolve(target);
   await settle();
   assert.equal(h.errors.length, before);
   assert.equal(h.outbox.isConflicted, false);
@@ -310,7 +354,7 @@ test("a stale verification read cannot replace or pause a reset delivery generat
   });
   assert.equal(h.submissions.length, 2);
   assert.equal(
-    h.submissions[1].request.previousFlatMovesString,
+    required(h.submissions[1]).request.previousFlatMovesString,
     branch.flatMovesString,
   );
 });
@@ -328,7 +372,7 @@ test("an old refresh cannot change a replacement delivery generation", async (t)
   h.outbox.resetAfterConflict(branch);
   h.outbox.enqueue("new", "new-fen");
   const before = h.errors.length;
-  h.reads[0].resolve(target);
+  required(h.reads[0]).resolve(target);
   await refreshed;
   await settle();
   assert.equal(h.errors.length, before);
@@ -347,7 +391,7 @@ test("a late lower snapshot cannot reverse progress confirmed while verification
   h.outbox.reconcile(target);
   await completed.done;
   const confirmedVersion = h.outbox.confirmationVersion;
-  h.reads[0].resolve(initial);
+  required(h.reads[0]).resolve(initial);
   await settle();
   assert.equal(completed.status, "fulfilled");
   assert.equal(h.outbox.confirmationVersion, confirmedVersion);
@@ -359,9 +403,14 @@ test("a late lower snapshot cannot reverse progress confirmed while verification
 test("transient exhaustion never reloads the page or deletes its pending journal", async (t) => {
   const previousWindow = globalThis.window;
   let reloads = 0;
-  globalThis.window = { location: { reload: () => reloads++ } };
+  Object.defineProperty(globalThis, "window", {
+    configurable: true,
+    writable: true,
+    value: { location: { reload: () => reloads++ } },
+  });
   t.after(() => {
-    if (previousWindow === undefined) delete globalThis.window;
+    if (previousWindow === undefined)
+      Reflect.deleteProperty(globalThis, "window");
     else globalThis.window = previousWindow;
   });
   const h = harness();
@@ -370,7 +419,13 @@ test("transient exhaustion never reloads the page or deletes its pending journal
   await exhaust(h, (read) => read.resolve(null));
   assert.equal(reloads, 0);
   assert.equal(completed.status, "pending");
-  const stored = JSON.parse(h.records.get(h.key));
+  const stored = JSON.parse(required(h.records.get(h.key)));
   assert.deepEqual(stored.confirmed, initial);
   assert.deepEqual(stored.pending, [{ moveFen: "second", fen: target.fen }]);
 });
+
+/** @param {unknown} error @returns {Error} */
+function readFailure(error) {
+  assert.ok(error instanceof Error);
+  return error;
+}

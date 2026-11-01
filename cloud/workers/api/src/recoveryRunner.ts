@@ -28,7 +28,7 @@ export async function collectRecoveryItems<T, Result>(
     async () => {
       while (index < items.length) {
         const itemIndex = index++;
-        const item = items[itemIndex];
+        const item = items[itemIndex]!;
         try {
           const value = await operation(item, itemIndex);
           successes.push({ item, index: itemIndex, value });
@@ -57,7 +57,7 @@ export async function runRecoveryItems<T>(
   const { failures } = await collectRecoveryItems(items, operation, {
     concurrency,
   });
-  if (failures.length === 1) throw failures[0].error;
+  if (failures.length === 1) throw failures[0]!.error;
   if (failures.length > 1) {
     throw new AggregateError(
       failures.map(({ error }) => error),

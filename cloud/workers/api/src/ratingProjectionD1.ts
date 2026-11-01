@@ -185,11 +185,11 @@ async function inspectSweepRating<Row extends RatingRecoveryRow, Value>(
       .prepare(
         `WITH observed AS MATERIALIZED (
            SELECT ${sourceColumns}
-           FROM rating_updates AS rating
+           FROM rating_updates_canonical AS rating
            WHERE rating.operation_id = CASE WHEN ? = 'blob' THEN ? ELSE CAST(? AS TEXT) END
              AND rating.${prefix}_state = 'pending' AND rating.${prefix}_updated_at_ms <= ?
              AND NOT EXISTS (
-               SELECT 1 FROM rating_projection_recovery_quarantine AS quarantine
+               SELECT 1 FROM rating_projection_recovery_quarantine_canonical AS quarantine
                WHERE quarantine.operation_id = rating.operation_id
                  AND quarantine.projection_kind = '${projectionKind}'
                  AND quarantine.revision_token = CAST(rating.revision AS TEXT)
@@ -250,10 +250,10 @@ async function scanDueRatingsPage<Row extends RatingRecoveryRow, Value>(
     .prepare(
       `WITH observed AS MATERIALIZED (
          SELECT ${sourceColumns}
-         FROM rating_updates AS rating
+         FROM rating_updates_canonical AS rating
          WHERE rating.${prefix}_state = 'pending' AND rating.${prefix}_updated_at_ms <= ?1
            AND NOT EXISTS (
-             SELECT 1 FROM rating_projection_recovery_quarantine AS quarantine
+             SELECT 1 FROM rating_projection_recovery_quarantine_canonical AS quarantine
              WHERE quarantine.operation_id = rating.operation_id
                AND quarantine.projection_kind = '${projectionKind}'
                AND quarantine.revision_token = CAST(rating.revision AS TEXT)
@@ -376,7 +376,7 @@ export async function quarantineRatingRecoveryEntry(
     beforeInsert: {
       sql: `WITH observed AS MATERIALIZED (
          SELECT ${sourceColumns}
-         FROM rating_updates AS rating
+         FROM rating_updates_canonical AS rating
          WHERE rating.operation_id = CASE WHEN ? = 'blob' THEN ? ELSE CAST(? AS TEXT) END
            AND rating.${prefix}_state = 'pending'
            AND EXISTS (

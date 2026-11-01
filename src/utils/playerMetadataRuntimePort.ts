@@ -1,11 +1,12 @@
+import type { Aura } from "@mons/shared/appearance";
 import type { PlayerProfile } from "../connection/connectionModels";
 
 export type PlayerMetadataRuntime = {
   createSessionGuard(): () => boolean;
   getProfileByLoginId(loginId: string): Promise<PlayerProfile>;
   updateEmojiAndAuraIfNeeded(
-    emojiId: string,
-    aura: string | null | undefined,
+    emojiId: number,
+    aura: Aura | undefined,
     isOpponentSide: boolean,
   ): void;
   isWatchOnly(): boolean;
@@ -44,8 +45,8 @@ export const getPlayerProfileByLoginId = (
 ): Promise<PlayerProfile> => getRuntime().getProfileByLoginId(loginId);
 
 export const updatePlayerEmojiAndAura = (
-  emojiId: string,
-  aura: string | null | undefined,
+  emojiId: number,
+  aura: Aura | undefined,
   isOpponentSide: boolean,
 ): void =>
   getRuntime().updateEmojiAndAuraIfNeeded(emojiId, aura, isOpponentSide);

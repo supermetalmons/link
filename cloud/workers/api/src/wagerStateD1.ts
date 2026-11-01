@@ -1,6 +1,6 @@
 import { isSafeRecordKey } from "./recordKeys.ts";
 import { classifyD1Failure } from "./d1Failure.ts";
-import { validateStoredJson } from "./jsonValidation.ts";
+import { parseWagerRecord, type WagerRecord } from "./wagerModel.ts";
 
 export const WAGER_STATE_WRITER_EPOCH = 1;
 
@@ -10,7 +10,7 @@ export type WagerStateKey = {
 };
 
 export type WagerStateValue = {
-  wager: unknown;
+  wager: WagerRecord | null;
   resolutionMarker: boolean | null;
 };
 
@@ -82,7 +82,10 @@ function decodeState(row: StateRow): WagerStateSnapshot {
   try {
     return {
       ...key,
-      wager: row.wager_json === null ? null : JSON.parse(row.wager_json),
+      wager:
+        row.wager_json === null
+          ? null
+          : parseWagerRecord(JSON.parse(row.wager_json)),
       resolutionMarker:
         row.resolution_marker === null ? null : row.resolution_marker === 1,
       revision: Number(row.revision),
@@ -92,9 +95,9 @@ function decodeState(row: StateRow): WagerStateSnapshot {
   }
 }
 
-function encodeWager(value: unknown): string | null {
+function encodeWager(value: WagerRecord | null): string | null {
   if (value === null) return null;
-  validateStoredJson(value, "invalid-wager-state-json");
+  parseWagerRecord(value);
   return JSON.stringify(value);
 }
 
@@ -116,7 +119,7 @@ export function createWagerStateD1Store(
              activation.activated_at_ms, state.invite_id, state.match_id,
              state.wager_json, state.resolution_marker, state.revision
            FROM wager_state_activation AS activation
-           LEFT JOIN invite_wager_states AS state
+           LEFT JOIN invite_wager_states_canonical AS state
              ON state.invite_id = ? AND state.match_id = ?
            WHERE activation.singleton = 1`,
         )
@@ -144,7 +147,7 @@ export function createWagerStateD1Store(
              state.wager_json AS wager_json,
              state.resolution_marker, state.revision
            FROM wager_state_activation AS activation
-           LEFT JOIN invite_wager_states AS state ON state.invite_id = ?
+           LEFT JOIN invite_wager_states_canonical AS state ON state.invite_id = ?
            WHERE activation.singleton = 1 ORDER BY state.match_id`,
         )
         .bind(inviteId)
@@ -190,8 +193,8 @@ export function createWagerStateD1Store(
               `INSERT INTO wager_state_revision_guards (singleton)
              SELECT 0 WHERE ${
                current.revision === 0
-                 ? "EXISTS (SELECT 1 FROM invite_wager_states WHERE invite_id = ? AND match_id = ?)"
-                 : "NOT EXISTS (SELECT 1 FROM invite_wager_states WHERE invite_id = ? AND match_id = ? AND revision = ?)"
+                 ? "EXISTS (SELECT 1 FROM invite_wager_states_canonical WHERE invite_id = ? AND match_id = ?)"
+                 : "NOT EXISTS (SELECT 1 FROM invite_wager_states_canonical WHERE invite_id = ? AND match_id = ? AND revision = ?)"
              }`,
             )
             .bind(
@@ -203,14 +206,14 @@ export function createWagerStateD1Store(
         writes.push(
           db
             .prepare(
-              `INSERT INTO invite_wager_states
+              `INSERT INTO invite_wager_states_canonical
                (invite_id, match_id, wager_json, resolution_marker, revision, updated_at_ms)
              VALUES (?, ?, ?, ?, ?, ?)
              ON CONFLICT (invite_id, match_id) DO UPDATE SET
                wager_json = excluded.wager_json,
                resolution_marker = excluded.resolution_marker,
                revision = excluded.revision,
-               updated_at_ms = MAX(invite_wager_states.updated_at_ms, excluded.updated_at_ms)`,
+               updated_at_ms = MAX(invite_wager_states_canonical.updated_at_ms, excluded.updated_at_ms)`,
             )
             .bind(
               current.inviteId,

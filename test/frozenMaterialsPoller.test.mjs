@@ -1,3 +1,5 @@
+import { createTimerHandle } from "./fixtures/timerHandle.mjs";
+import { required } from "./fixtures/canonicalData.mjs";
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
@@ -6,6 +8,8 @@ import {
   FrozenMaterialsPoller,
 } from "../src/connection/frozenMaterialsPoller.ts";
 
+/** @typedef {import("@mons/shared/wagers").WagerFrozenReadResponse} Snapshot */
+/** @returns {Snapshot} */
 const snapshot = (revision = 1, dust = 2, playerUid = "actor") => ({
   ok: true,
   playerUid,
@@ -14,25 +18,32 @@ const snapshot = (revision = 1, dust = 2, playerUid = "actor") => ({
 });
 
 const flush = () => new Promise((resolve) => setImmediate(resolve));
-const deferred = () => {
-  let resolve;
-  let reject;
-  const promise = new Promise((resolvePromise, rejectPromise) => {
-    resolve = resolvePromise;
-    reject = rejectPromise;
-  });
-  return { promise, resolve, reject };
-};
+/** @template [T=Snapshot] @returns {PromiseWithResolvers<T>} */
+const deferred = () => Promise.withResolvers();
 
+/** @param {(signal: AbortSignal) => Snapshot | Promise<Snapshot>} [load] */
 function harness(load = async () => snapshot()) {
   let active = true;
   let visible = true;
-  let nextTimer = 1;
+  /**
+   * @type {(() => void) | null}
+   */
   let visibilityListener;
+  /**
+   * @type {(() => void) | null}
+   */
   let onlineListener;
+  /** @type {Map<ReturnType<typeof createTimerHandle>, { callback: () => void, delayMs: number }>} */
   const timers = new Map();
+  /**
+   * @type {import("@mons/shared/wagers").WagerFrozenReadResponse[]}
+   */
   const updates = [];
+  /** @type {{ error: unknown, confirmed: Snapshot | null, refreshRequired: boolean }[]} */
   const errors = [];
+  /**
+   * @type {AbortSignal[]}
+   */
   const signals = [];
   let pending = 0;
   const poller = new FrozenMaterialsPoller({
@@ -48,7 +59,7 @@ function harness(load = async () => snapshot()) {
     clearTimer: (timer) => timers.delete(timer),
     isActive: () => active,
     isVisible: () => visible,
-    load: (signal) => {
+    load: async (signal) => {
       signals.push(signal);
       return load(signal);
     },
@@ -57,7 +68,7 @@ function harness(load = async () => snapshot()) {
     onError: (error, confirmed, refreshRequired) =>
       errors.push({ error, confirmed, refreshRequired }),
     setTimer(callback, delayMs) {
-      const id = nextTimer++;
+      const id = createTimerHandle();
       timers.set(id, { callback, delayMs });
       return id;
     },
@@ -71,14 +82,19 @@ function harness(load = async () => snapshot()) {
     pending: () => pending,
     listenerCount: () =>
       Number(!!visibilityListener) + Number(!!onlineListener),
-    setActive: (value) => (active = value),
+    setActive: (/** @type {boolean} */ value) => (active = value),
+    /**
+     * @param {boolean} value
+     */
     setVisible(value) {
       visible = value;
       visibilityListener?.();
     },
     online: () => onlineListener?.(),
     async next() {
-      const [id, { callback, delayMs }] = timers.entries().next().value;
+      const [id, { callback, delayMs }] = required(
+        timers.entries().next().value,
+      );
       timers.delete(id);
       callback();
       await flush();
@@ -113,8 +129,8 @@ test("coalesces invalidations and never overlaps reads", async () => {
   h.poller.refresh();
   await h.next();
   assert.equal(loads, 1);
-  assert.equal(h.signals[0].aborted, true);
-  pending.resolve(snapshot(1));
+  assert.equal(required(h.signals[0]).aborted, true);
+  required(pending.resolve)(snapshot(1));
   await flush();
   assert.equal(loads, 2);
   assert.deepEqual(h.updates, [snapshot(2)]);
@@ -131,10 +147,10 @@ test("keeps the confirmed balance on failures and uses bounded backoff", async (
   failed = true;
   await h.next();
   assert.equal(h.pending(), 1);
-  assert.equal(h.errors.at(-1).refreshRequired, false);
+  assert.equal(required(h.errors.at(-1)).refreshRequired, false);
   for (const expectedDelay of FROZEN_MATERIALS_BACKOFF_MS) {
     assert.equal(await h.next(), expectedDelay);
-    assert.deepEqual(h.errors.at(-1).confirmed, snapshot());
+    assert.deepEqual(required(h.errors.at(-1)).confirmed, snapshot());
   }
   assert.equal(await h.next(), 30_000);
   failed = false;
@@ -156,7 +172,7 @@ test("requires the first authoritative snapshot before sending or accepting", as
     /wager-balance-unavailable/,
   );
   assert.equal(mutations, 0);
-  assert.equal(h.errors[0].confirmed, null);
+  assert.equal(required(h.errors[0]).confirmed, null);
   assert.equal(h.updates.length, 0);
   assert.equal(
     await h.poller.runMutation(async () => "cancelled", {
@@ -170,6 +186,7 @@ test("requires the first authoritative snapshot before sending or accepting", as
 
 test("a pre-mutation response cannot overwrite optimistic state or double-apply the server count", async () => {
   const oldRead = deferred();
+  /** @type {PromiseWithResolvers<{ ok: true, count: number }>} */
   const mutation = deferred();
   let loads = 0;
   const h = harness(() => {
@@ -185,14 +202,14 @@ test("a pre-mutation response cannot overwrite optimistic state or double-apply 
     isCurrent: () => true,
   });
   await flush();
-  assert.equal(h.signals[1].aborted, true);
-  oldRead.resolve(snapshot(2, 3));
+  assert.equal(required(h.signals[1]).aborted, true);
+  required(oldRead.resolve)(snapshot(2, 3));
   await flush();
   assert.deepEqual(h.updates, [snapshot(1, 2)]);
   assert.equal(h.timers.size, 0);
   h.poller.refresh();
   assert.equal(h.timers.size, 0);
-  mutation.resolve({ ok: true, count: 3 });
+  required(mutation.resolve)({ ok: true, count: 3 });
   assert.deepEqual(await action, { ok: true, count: 3 });
   assert.equal(await h.next(), 0);
   assert.deepEqual(h.updates, [snapshot(1, 2), snapshot(3, 5)]);
@@ -200,7 +217,9 @@ test("a pre-mutation response cannot overwrite optimistic state or double-apply 
 });
 
 test("serializes mutations and refreshes after rejected results and thrown requests", async () => {
+  /** @type {PromiseWithResolvers<void>} */
   const first = deferred();
+  /** @type {(string)[]} */
   const order = [];
   const h = harness();
   await h.next();
@@ -223,7 +242,7 @@ test("serializes mutations and refreshes after rejected results and thrown reque
   const cancellation = assert.rejects(cancel, /ambiguous-request/);
   await flush();
   assert.deepEqual(order, ["send-start"]);
-  first.resolve();
+  required(first.resolve)();
   assert.deepEqual(await send, { ok: false });
   await cancellation;
   assert.deepEqual(order, ["send-start", "send-end", "cancel"]);
@@ -248,7 +267,7 @@ test("a later reserve waits for a post-mutation snapshot instead of stale optimi
   );
   await flush();
   assert.equal(accepted, false);
-  refresh.resolve(snapshot(2, 5));
+  required(refresh.resolve)(snapshot(2, 5));
   await next;
   assert.equal(accepted, true);
   h.poller.stop();
@@ -272,8 +291,8 @@ test("a failed post-mutation refresh retains confirmed counts and keeps new rese
     /ambiguous-write/,
   );
   assert.equal(await h.next(), 0);
-  assert.deepEqual(h.errors.at(-1).confirmed, snapshot());
-  assert.equal(h.errors.at(-1).refreshRequired, true);
+  assert.deepEqual(required(h.errors.at(-1)).confirmed, snapshot());
+  assert.equal(required(h.errors.at(-1)).refreshRequired, true);
   await assert.rejects(
     h.poller.runMutation(async () => assert.fail("unconfirmed reserve"), {
       requiresSnapshot: true,
@@ -297,7 +316,7 @@ test("ignores old actor/session responses and prevents queued old-context action
   const h = harness(() => read.promise);
   await h.next();
   h.setActive(false);
-  read.resolve(snapshot());
+  required(read.resolve)(snapshot());
   await flush();
   assert.equal(h.updates.length, 0);
   await assert.rejects(
@@ -308,6 +327,7 @@ test("ignores old actor/session responses and prevents queued old-context action
   );
   h.poller.stop();
 
+  /** @type {PromiseWithResolvers<void>} */
   const first = deferred();
   let current = true;
   const next = harness();
@@ -321,7 +341,7 @@ test("ignores old actor/session responses and prevents queued old-context action
   const rejection = assert.rejects(queued, /wager-session-changed/);
   await flush();
   current = false;
-  first.resolve();
+  required(first.resolve)();
   await running;
   await rejection;
   next.poller.stop();
@@ -336,7 +356,7 @@ test("rejects actor mismatches and revision regression, while allowing bridge re
     snapshot(4, 4, "other"),
     snapshot(4, 0),
   ];
-  const h = harness(async () => results.shift());
+  const h = harness(async () => required(results.shift()));
   for (let index = 0; index < 6; index += 1) await h.next();
   assert.deepEqual(h.updates, [
     snapshot(0, 1),
@@ -345,7 +365,7 @@ test("rejects actor mismatches and revision regression, while allowing bridge re
     snapshot(4, 0),
   ]);
   assert.equal(h.errors.length, 2);
-  assert.deepEqual(h.errors[0].confirmed, snapshot(3, 3));
+  assert.deepEqual(required(h.errors[0]).confirmed, snapshot(3, 3));
   h.poller.stop();
 });
 
@@ -354,8 +374,8 @@ test("stopping during a request aborts it and rejects its late completion", asyn
   const h = harness(() => read.promise);
   await h.next();
   h.poller.stop();
-  assert.equal(h.signals[0].aborted, true);
-  read.resolve(snapshot());
+  assert.equal(required(h.signals[0]).aborted, true);
+  required(read.resolve)(snapshot());
   await flush();
   assert.equal(h.updates.length, 0);
   assert.equal(h.timers.size, 0);

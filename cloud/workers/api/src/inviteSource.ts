@@ -28,18 +28,18 @@ export function createInviteSourceReader(
         prepareGameSessionResourceTransitionRead(session, inviteId),
         prepareInviteSourceSnapshotRead(session, inviteId),
       ]);
-    const mode = parseAutomatchRuntimeControlRow(modeRows.results[0]);
-    const control = parseInviteSourceControlRow(controlRows.results[0]);
+    const mode = parseAutomatchRuntimeControlRow(modeRows!.results[0]);
+    const control = parseInviteSourceControlRow(controlRows!.results[0]);
     if (mode.backend !== "d1" && control.backend === "d1") {
       throw new InviteSourceFailure("invite-source-session-backend-conflict");
     }
     if (control.backend !== "d1") {
       throw new InviteSourceFailure("invite-source-not-activated");
     }
-    assertNoGameSessionResourceTransition(transitionRows.results[0]);
+    assertNoGameSessionResourceTransition(transitionRows!.results[0]);
     const snapshot = decodeInviteSourceSnapshot(
       inviteId,
-      sourceRows.results[0],
+      sourceRows!.results[0],
     );
     await assertGameSessionResourceAvailable(db, inviteId);
     return snapshot.value;

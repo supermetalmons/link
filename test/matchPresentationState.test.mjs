@@ -1,34 +1,42 @@
+import { required } from "./fixtures/canonicalData.mjs";
 import assert from "node:assert/strict";
 import test from "node:test";
 import { MatchPresentationState } from "../src/connection/matchPresentationState.ts";
 
+/**
+ * @typedef {import("@mons/shared/match-presentation").MatchPresentation} Presentation
+ * @typedef {import("@mons/shared/match-presentation").MatchPresentationSnapshot} Snapshot
+ * @typedef {ConstructorParameters<typeof MatchPresentationState>[0]} Dependencies
+ */
+/** @param {Partial<Presentation>} [overrides] @returns {Presentation} */
 const presentation = (overrides = {}) => ({
   matchId: "invite",
   actorUid: "host",
   emojiId: 1,
-  aura: "",
+  aura: "none",
   revision: 0,
   ...overrides,
 });
+/** @param {...Presentation} players @returns {Snapshot} */
 const snapshot = (...players) => ({
   matchId: "invite",
   players: Object.fromEntries(players.map((value) => [value.actorUid, value])),
 });
-const deferred = () => {
-  let resolve;
-  let reject;
-  const promise = new Promise((done, fail) => {
-    resolve = done;
-    reject = fail;
-  });
-  return { promise, resolve, reject };
-};
+/** @template [T=Presentation] @returns {PromiseWithResolvers<T>} */
+const deferred = () => Promise.withResolvers();
 const flush = () => new Promise((resolve) => setImmediate(resolve));
 
+/** @param {Partial<Dependencies>} [overrides] */
 function harness(overrides = {}) {
+  /** @type {{ actorUid: string, value: Presentation | null }[]} */
   const changes = [];
+  /** @type {unknown[]} */
   const errors = [];
+  /** @type {{ request: Parameters<Dependencies["save"]>[0], signal: AbortSignal }[]} */
   const saves = [];
+  /**
+   * @type {AbortSignal[]}
+   */
   const loads = [];
   let current = presentation();
   let active = true;
@@ -63,8 +71,8 @@ function harness(overrides = {}) {
     errors,
     saves,
     loads,
-    setCurrent: (value) => (current = value),
-    setActive: (value) => (active = value),
+    setCurrent: (/** @type {Presentation} */ value) => (current = value),
+    setActive: (/** @type {boolean} */ value) => (active = value),
   };
 }
 
@@ -81,13 +89,14 @@ test("hydrates both players and rejects stale or foreign presentation without ch
     h.state.get("host"),
     presentation({ revision: 3, emojiId: 1001, aura: "rainbow" }),
   );
-  assert.equal(h.state.get("guest").emojiId, 7);
+  assert.equal(required(h.state.get("guest")).emojiId, 7);
   assert.equal(h.saves.length, 0);
   assert.equal(h.changes.length, 3);
 });
 
 test("serializes writes and coalesces rapid choices while older responses cannot undo optimism", async () => {
   const first = deferred();
+  /** @type {Parameters<Dependencies["save"]>[0][]} */
   const calls = [];
   const h = harness({
     save: async (request) => {
@@ -100,13 +109,13 @@ test("serializes writes and coalesces rapid choices while older responses cannot
       });
     },
   });
-  h.state.update(2, "");
+  h.state.update(2, "none");
   await flush();
   assert.equal(calls.length, 1);
-  h.state.update(3, "");
+  h.state.update(3, "none");
   h.state.update(1001, "rainbow");
   h.state.acceptSnapshot(snapshot(presentation()));
-  assert.equal(h.state.get("host").emojiId, 1001);
+  assert.equal(required(h.state.get("host")).emojiId, 1001);
   first.resolve(presentation({ emojiId: 2, revision: 1 }));
   await flush();
   assert.deepEqual(
@@ -128,14 +137,14 @@ test("clears aura explicitly and suppresses updates equal to canonical state", a
   const h = harness();
   h.setCurrent(presentation({ emojiId: 1001, aura: "rainbow", revision: 2 }));
   await h.state.refresh();
-  h.state.update(1001, "");
+  h.state.update(1001, "none");
   await flush();
-  assert.equal(h.saves[0].request.aura, "");
+  assert.equal(required(h.saves[0]).request.aura, "none");
   assert.deepEqual(
     h.state.get("host"),
     presentation({ emojiId: 1001, revision: 3 }),
   );
-  h.state.update(1001, "");
+  h.state.update(1001, "none");
   await flush();
   assert.equal(h.saves.length, 1);
 });
@@ -152,7 +161,7 @@ test("reconciles a conflict without blindly retrying the rejected choice", async
       });
     },
   });
-  h.state.update(2, "");
+  h.state.update(2, "none");
   await flush();
   assert.deepEqual(h.state.get("host"), current);
   assert.equal(calls, 1);
@@ -160,8 +169,10 @@ test("reconciles a conflict without blindly retrying the rejected choice", async
 
 test("refreshes after timeout before sending a distinct newer choice", async () => {
   const first = deferred();
+  /** @type {PromiseWithResolvers<Snapshot>} */
   const reconcile = deferred();
   let loads = 0;
+  /** @type {Parameters<Dependencies["save"]>[0][]} */
   const calls = [];
   const h = harness({
     load: async () =>
@@ -176,9 +187,9 @@ test("refreshes after timeout before sending a distinct newer choice", async () 
           });
     },
   });
-  h.state.update(2, "");
+  h.state.update(2, "none");
   await flush();
-  h.state.update(3, "");
+  h.state.update(3, "none");
   first.reject(Object.assign(new Error("timeout"), { code: "timeout" }));
   await flush();
   assert.equal(loads, 2);
@@ -186,8 +197,8 @@ test("refreshes after timeout before sending a distinct newer choice", async () 
   reconcile.resolve(snapshot(presentation({ emojiId: 2, revision: 1 })));
   await flush();
   assert.equal(calls.length, 2);
-  assert.equal(calls[1].expectedRevision, 1);
-  assert.equal(h.state.get("host").emojiId, 3);
+  assert.equal(required(calls[1]).expectedRevision, 1);
+  assert.equal(required(h.state.get("host")).emojiId, 3);
 });
 
 test("failed reconciliation parks the newest choice until an uncertain write is retired", async () => {
@@ -209,12 +220,12 @@ test("failed reconciliation parks the newest choice until an uncertain write is 
             }),
           ),
   });
-  h.state.update(2, "");
+  h.state.update(2, "none");
   await flush();
-  h.state.update(3, "");
+  h.state.update(3, "none");
   first.reject(new Error("offline"));
   await flush();
-  assert.equal(h.state.get("host").emojiId, 3);
+  assert.equal(required(h.state.get("host")).emojiId, 3);
   assert.equal(saves, 1);
   h.state.accept(presentation({ emojiId: 2, revision: 1 }));
   await flush();
@@ -227,10 +238,14 @@ test("failed reconciliation parks the newest choice until an uncertain write is 
 
 test("retires a timed-out write before skipping a newer choice that matches the old snapshot", async () => {
   const first = deferred();
+  /** @type {PromiseWithResolvers<void>} */
   const retirement = deferred();
+  /** @type {Parameters<Dependencies["save"]>[0][]} */
   const calls = [];
   let stored = presentation();
+  /** @type {string | undefined} */
   let lastOperation;
+  /** @param {Parameters<Dependencies["save"]>[0]} request */
   const apply = (request) => {
     if (lastOperation !== request.operationId) {
       if (request.expectedRevision !== stored.revision) {
@@ -257,21 +272,26 @@ test("retires a timed-out write before skipping a newer choice that matches the 
       return apply(request);
     },
   });
-  h.state.update(2, "");
+  h.state.update(2, "none");
   await flush();
-  h.state.update(1, "");
+  h.state.update(1, "none");
   first.reject(Object.assign(new Error("timeout"), { code: "timeout" }));
   await flush();
   assert.equal(calls.length, 2);
   assert.deepEqual(calls[1], calls[0]);
-  assert.equal(h.state.get("host").emojiId, 1);
+  assert.equal(required(h.state.get("host")).emojiId, 1);
   retirement.resolve();
   await flush();
   assert.equal(calls.length, 3);
-  assert.equal(calls[2].emojiId, 1);
-  assert.equal(calls[2].expectedRevision, 1);
-  assert.notEqual(calls[2].operationId, calls[0].operationId);
-  assert.throws(() => apply(calls[0]), { code: "presentation-conflict" });
+  assert.equal(required(calls[2]).emojiId, 1);
+  assert.equal(required(calls[2]).expectedRevision, 1);
+  assert.notEqual(
+    required(calls[2]).operationId,
+    required(calls[0]).operationId,
+  );
+  assert.throws(() => apply(required(calls[0])), {
+    code: "presentation-conflict",
+  });
   h.state.accept(stored);
   assert.deepEqual(
     h.state.get("host"),
@@ -281,6 +301,7 @@ test("retires a timed-out write before skipping a newer choice that matches the 
 
 test("repeated uncertain responses do not loop or discard the latest choice", async () => {
   const first = deferred();
+  /** @type {Parameters<Dependencies["save"]>[0][]} */
   const calls = [];
   let available = false;
   let stored = presentation();
@@ -299,26 +320,27 @@ test("repeated uncertain responses do not loop or discard the latest choice", as
       return stored;
     },
   });
-  h.state.update(2, "");
+  h.state.update(2, "none");
   await flush();
-  h.state.update(1, "");
+  h.state.update(1, "none");
   first.reject(Object.assign(new Error("timeout"), { code: "timeout" }));
   await flush();
   assert.equal(calls.length, 2);
-  assert.equal(h.state.get("host").emojiId, 1);
+  assert.equal(required(h.state.get("host")).emojiId, 1);
   await flush();
   assert.equal(calls.length, 2);
   available = true;
   await h.state.refresh();
   await flush();
   assert.deepEqual(calls[2], calls[0]);
-  assert.equal(calls[3].emojiId, 1);
-  assert.equal(h.state.get("host").emojiId, 1);
-  assert.equal(h.state.get("host").revision, 2);
+  assert.equal(required(calls[3]).emojiId, 1);
+  assert.equal(required(h.state.get("host")).emojiId, 1);
+  assert.equal(required(h.state.get("host")).revision, 2);
 });
 
 test("an unchanged reconnect snapshot resumes the parked operation and newest choice", async () => {
   const first = deferred();
+  /** @type {Parameters<Dependencies["save"]>[0][]} */
   const calls = [];
   let available = false;
   let stored = presentation();
@@ -342,14 +364,14 @@ test("an unchanged reconnect snapshot resumes the parked operation and newest ch
       return stored;
     },
   });
-  h.state.update(2, "");
+  h.state.update(2, "none");
   await flush();
-  h.state.update(3, "");
+  h.state.update(3, "none");
   first.reject(Object.assign(new Error("timeout"), { code: "timeout" }));
   await flush();
   assert.equal(calls.length, 2);
   assert.equal(stored.emojiId, 1);
-  assert.equal(h.state.get("host").emojiId, 3);
+  assert.equal(required(h.state.get("host")).emojiId, 3);
 
   available = true;
   h.state.acceptSnapshot({ matchId: "other", players: {} });
@@ -363,9 +385,12 @@ test("an unchanged reconnect snapshot resumes the parked operation and newest ch
   assert.equal(reads, readsBeforeReconnect);
   assert.equal(calls.length, 4);
   assert.deepEqual(calls[2], calls[0]);
-  assert.equal(calls[3].emojiId, 3);
-  assert.equal(calls[3].expectedRevision, 1);
-  assert.notEqual(calls[3].operationId, calls[0].operationId);
+  assert.equal(required(calls[3]).emojiId, 3);
+  assert.equal(required(calls[3]).expectedRevision, 1);
+  assert.notEqual(
+    required(calls[3]).operationId,
+    required(calls[0]).operationId,
+  );
   assert.deepEqual(stored, presentation({ emojiId: 3, revision: 2 }));
   assert.deepEqual(h.state.get("host"), stored);
 
@@ -383,7 +408,9 @@ for (const wake of [
   test(`${wake} is preserved while an uncertain retry is draining`, async () => {
     const first = deferred();
     const retry = deferred();
+    /** @type {PromiseWithResolvers<Snapshot>} */
     const foregroundRead = deferred();
+    /** @type {Parameters<Dependencies["save"]>[0][]} */
     const calls = [];
     let holdRead = false;
     let stored = presentation();
@@ -408,19 +435,19 @@ for (const wake of [
         return stored;
       },
     });
-    h.state.update(2, "");
+    h.state.update(2, "none");
     await flush();
-    h.state.update(3, "");
+    h.state.update(3, "none");
     first.reject(new Error("timeout"));
     await flush();
     assert.equal(calls.length, 2);
 
     holdRead = true;
     const refreshing = wake === "refresh" ? h.state.refresh() : null;
-    if (wake === "selection during retry") h.state.update(4, "");
+    if (wake === "selection during retry") h.state.update(4, "none");
     retry.reject(new Error("timeout"));
     await flush();
-    if (wake === "selection during read") h.state.update(4, "");
+    if (wake === "selection during read") h.state.update(4, "none");
     foregroundRead.resolve(snapshot(stored));
     await refreshing;
     await flush();
@@ -428,8 +455,8 @@ for (const wake of [
     const desiredEmoji = wake === "refresh" ? 3 : 4;
     assert.equal(calls.length, 4);
     assert.deepEqual(calls[2], calls[0]);
-    assert.equal(calls[3].expectedRevision, 1);
-    assert.equal(calls[3].emojiId, desiredEmoji);
+    assert.equal(required(calls[3]).expectedRevision, 1);
+    assert.equal(required(calls[3]).emojiId, desiredEmoji);
     assert.deepEqual(
       stored,
       presentation({ emojiId: desiredEmoji, revision: 2 }),
@@ -444,6 +471,7 @@ for (const wake of [
 test("a selection wake preserves the fresh-read requirement and does not create a retry loop", async () => {
   const first = deferred();
   const retry = deferred();
+  /** @type {Parameters<Dependencies["save"]>[0][]} */
   const calls = [];
   let reads = 0;
   let available = false;
@@ -465,17 +493,17 @@ test("a selection wake preserves the fresh-read requirement and does not create 
       return stored;
     },
   });
-  h.state.update(2, "");
+  h.state.update(2, "none");
   await flush();
-  h.state.update(3, "");
+  h.state.update(3, "none");
   first.reject(new Error("timeout"));
   await flush();
-  h.state.update(4, "");
+  h.state.update(4, "none");
   retry.reject(new Error("timeout"));
   await flush();
   assert.equal(reads, 4);
   assert.equal(calls.length, 2);
-  assert.equal(h.state.get("host").emojiId, 4);
+  assert.equal(required(h.state.get("host")).emojiId, 4);
   await flush();
   assert.equal(reads, 4);
 
@@ -492,7 +520,9 @@ for (const recovery of ["unchanged snapshot", "advanced snapshot", "event"]) {
   for (const failedAttempt of [1, 2]) {
     test(`${recovery} survives a failing reconciliation after uncertain attempt ${failedAttempt}`, async () => {
       const first = deferred();
+      /** @type {PromiseWithResolvers<Snapshot>} */
       const staleRead = deferred();
+      /** @type {Parameters<Dependencies["save"]>[0][]} */
       const calls = [];
       let reads = 0;
       let available = false;
@@ -513,9 +543,9 @@ for (const recovery of ["unchanged snapshot", "advanced snapshot", "event"]) {
           return stored;
         },
       });
-      h.state.update(2, "");
+      h.state.update(2, "none");
       await flush();
-      h.state.update(3, "");
+      h.state.update(3, "none");
       first.reject(new Error("timeout"));
       await flush();
       assert.equal(calls.length, failedAttempt);
@@ -536,8 +566,8 @@ for (const recovery of ["unchanged snapshot", "advanced snapshot", "event"]) {
       } else {
         assert.equal(recoveredCalls.length, 1);
       }
-      assert.equal(recoveredCalls.at(-1).expectedRevision, 1);
-      assert.equal(recoveredCalls.at(-1).emojiId, 3);
+      assert.equal(required(recoveredCalls.at(-1)).expectedRevision, 1);
+      assert.equal(required(recoveredCalls.at(-1)).emojiId, 3);
       assert.deepEqual(stored, presentation({ emojiId: 3, revision: 2 }));
       assert.deepEqual(h.state.get("host"), stored);
       h.state.stop();
@@ -547,6 +577,7 @@ for (const recovery of ["unchanged snapshot", "advanced snapshot", "event"]) {
 
 test("socket recovery received before reconciliation starts is not lost when that read fails", async () => {
   const first = deferred();
+  /** @type {Parameters<Dependencies["save"]>[0][]} */
   const calls = [];
   let reads = 0;
   let stored = presentation();
@@ -566,9 +597,9 @@ test("socket recovery received before reconciliation starts is not lost when tha
       return stored;
     },
   });
-  h.state.update(2, "");
+  h.state.update(2, "none");
   await flush();
-  h.state.update(3, "");
+  h.state.update(3, "none");
   h.state.acceptSnapshot(snapshot(stored));
   first.reject(new Error("timeout"));
   await flush();
@@ -582,8 +613,10 @@ test("socket recovery received before reconciliation starts is not lost when tha
 
 test("timeout reconciliation starts a fresh read after an older overlapping refresh completes", async () => {
   const failedSave = deferred();
+  /** @type {PromiseWithResolvers<Snapshot>} */
   const oldRefresh = deferred();
   let loads = 0;
+  /** @type {Parameters<Dependencies["save"]>[0][]} */
   const calls = [];
   const h = harness({
     load: async () => {
@@ -601,10 +634,10 @@ test("timeout reconciliation starts a fresh read after an older overlapping refr
       });
     },
   });
-  h.state.update(2, "");
+  h.state.update(2, "none");
   await flush();
   const waking = h.state.refresh();
-  h.state.update(3, "");
+  h.state.update(3, "none");
   failedSave.reject(Object.assign(new Error("timeout"), { code: "timeout" }));
   await flush();
   assert.equal(loads, 2);
@@ -616,12 +649,13 @@ test("timeout reconciliation starts a fresh read after an older overlapping refr
     calls.map((request) => request.expectedRevision),
     [0, 1],
   );
-  assert.equal(h.state.get("host").emojiId, 3);
-  assert.equal(h.state.get("host").revision, 2);
+  assert.equal(required(h.state.get("host")).emojiId, 3);
+  assert.equal(required(h.state.get("host")).revision, 2);
 });
 
 test("teardown aborts work and discards queued choices, late responses, and retained state", async () => {
   const first = deferred();
+  /** @type {AbortSignal[]} */
   const signals = [];
   const h = harness({
     save: async (_request, signal) => {
@@ -629,14 +663,14 @@ test("teardown aborts work and discards queued choices, late responses, and reta
       return first.promise;
     },
   });
-  h.state.update(2, "");
+  h.state.update(2, "none");
   await flush();
-  h.state.update(3, "");
+  h.state.update(3, "none");
   h.state.stop();
   const changeCount = h.changes.length;
   first.resolve(presentation({ emojiId: 2, revision: 1 }));
   await flush();
-  assert.equal(signals[0].aborted, true);
+  assert.equal(required(signals[0]).aborted, true);
   assert.equal(h.changes.length, changeCount);
   assert.equal(h.state.get("host"), null);
 });
@@ -644,13 +678,14 @@ test("teardown aborts work and discards queued choices, late responses, and reta
 test("read-only spectators hydrate but cannot submit cosmetic changes", async () => {
   const h = harness({ actorUid: null });
   await h.state.refresh();
-  h.state.update(2, "");
+  h.state.update(2, "none");
   await flush();
   assert.deepEqual(h.state.get("host"), presentation());
   assert.equal(h.saves.length, 0);
 });
 
 test("deduplicates overlapping HTTP hydration and preserves a newer socket revision", async () => {
+  /** @type {PromiseWithResolvers<Snapshot>} */
   const pending = deferred();
   let loads = 0;
   const h = harness({
@@ -665,5 +700,5 @@ test("deduplicates overlapping HTTP hydration and preserves a newer socket revis
   pending.resolve(snapshot(presentation()));
   await Promise.all([first, second]);
   assert.equal(loads, 1);
-  assert.equal(h.state.get("host").revision, 4);
+  assert.equal(required(h.state.get("host")).revision, 4);
 });

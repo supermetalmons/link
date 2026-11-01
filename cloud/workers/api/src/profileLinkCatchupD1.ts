@@ -211,11 +211,11 @@ async function inspectSweepJob(
       .withSession("first-primary")
       .prepare(
         `SELECT ${recoveryObservationColumns(JOB_EXPRESSIONS, JOB_REVISION_INDEX)}
-         FROM profile_link_catchup_jobs AS job
+         FROM profile_link_catchup_jobs_canonical AS job
          WHERE job.login_uid = CASE WHEN ? = 'blob' THEN ? ELSE CAST(? AS TEXT) END
            AND job.last_queued_at_ms <= ?
            AND NOT EXISTS (
-             SELECT 1 FROM profile_link_catchup_quarantine AS quarantine
+             SELECT 1 FROM profile_link_catchup_quarantine_canonical AS quarantine
              WHERE quarantine.login_uid = job.login_uid
                AND quarantine.revision_token = CAST(job.revision AS TEXT)
            )`,
@@ -259,10 +259,10 @@ export function createProfileLinkCatchupStore(
         `SELECT job.*, CAST(job.login_uid AS BLOB) AS recovery_key_bytes,
                 typeof(job.login_uid) AS recovery_key_type,
                 ${recoveryScanIdentitySql("job.login_uid")} AS recovery_scan_identity
-         FROM profile_link_catchup_jobs AS job
+         FROM profile_link_catchup_jobs_canonical AS job
          WHERE job.last_queued_at_ms <= ?1
            AND NOT EXISTS (
-             SELECT 1 FROM profile_link_catchup_quarantine AS quarantine
+             SELECT 1 FROM profile_link_catchup_quarantine_canonical AS quarantine
              WHERE quarantine.login_uid = job.login_uid
                AND quarantine.revision_token = CAST(job.revision AS TEXT)
            )${exclusions}
@@ -282,7 +282,9 @@ export function createProfileLinkCatchupStore(
   };
   const read = async (loginUid: string) => {
     const row = await db
-      .prepare("SELECT * FROM profile_link_catchup_jobs WHERE login_uid = ?")
+      .prepare(
+        "SELECT * FROM profile_link_catchup_jobs_canonical WHERE login_uid = ?",
+      )
       .bind(loginUid)
       .first<JobRow>();
     return row ? parseJob(row) : null;
@@ -296,10 +298,10 @@ export function createProfileLinkCatchupStore(
   ): Promise<boolean> => {
     const result = await db
       .prepare(
-        `DELETE FROM profile_link_catchup_jobs
+        `DELETE FROM profile_link_catchup_jobs_canonical
          WHERE login_uid = ? AND request_id = ? AND match_cursor IS ?
            AND ${ACTIVE_CONTROL}
-           ${requireMissingOwner ? "AND NOT EXISTS (SELECT 1 FROM profile_login_owners WHERE login_uid = ?)" : ""}`,
+           ${requireMissingOwner ? "AND NOT EXISTS (SELECT 1 FROM profile_login_owners_canonical WHERE login_uid = ?)" : ""}`,
       )
       .bind(
         loginUid,
@@ -324,8 +326,8 @@ export function createProfileLinkCatchupStore(
         session
           .prepare(
             `SELECT ${ACTIVE_CONTROL} AND EXISTS (
-               SELECT 1 FROM profile_login_owners AS owner
-               JOIN profile_records AS profile ON profile.profile_id = owner.profile_id
+               SELECT 1 FROM profile_login_owners_canonical AS owner
+               JOIN profile_records_canonical AS profile ON profile.profile_id = owner.profile_id
                WHERE owner.login_uid = ? AND owner.profile_id = ?
                  AND profile.state = 'active'
              ) AS owner_valid`,
@@ -333,15 +335,15 @@ export function createProfileLinkCatchupStore(
           .bind(loginUid, profileId),
         session
           .prepare(
-            "SELECT * FROM profile_link_catchup_jobs WHERE login_uid = ?",
+            "SELECT * FROM profile_link_catchup_jobs_canonical WHERE login_uid = ?",
           )
           .bind(loginUid),
       ]);
-      const owner = ownership.results[0];
+      const owner = ownership!.results[0];
       if (!owner || !("owner_valid" in owner) || owner.owner_valid !== 1) {
         throw new CanonicalProfileConflict();
       }
-      const row = jobs.results[0];
+      const row = jobs!.results[0];
       if (!row) return null;
       if (!("login_uid" in row)) throw new CanonicalProfileCorruption();
       const job = parseJob(row);
@@ -361,7 +363,7 @@ export function createProfileLinkCatchupStore(
         target: "profile-link",
         select: {
           sql: `SELECT job.login_uid, CAST(job.revision AS TEXT), ?, ?
-           FROM profile_link_catchup_jobs AS job
+           FROM profile_link_catchup_jobs_canonical AS job
            WHERE job.login_uid = CASE WHEN ? = 'blob' THEN ? ELSE CAST(? AS TEXT) END
              AND ${guard.sql}
              AND ${ACTIVE_CONTROL}`,
@@ -393,7 +395,7 @@ export function createProfileLinkCatchupStore(
       if (nowMs <= expectedLastQueuedAtMs) return false;
       const result = await db
         .prepare(
-          `UPDATE profile_link_catchup_jobs
+          `UPDATE profile_link_catchup_jobs_canonical
            SET last_queued_at_ms = ?, revision = revision + 1
            WHERE login_uid = ? AND request_id = ? AND last_queued_at_ms = ?
              AND ${ACTIVE_CONTROL}`,
@@ -412,7 +414,7 @@ export function createProfileLinkCatchupStore(
       }
       const result = await db
         .prepare(
-          `UPDATE profile_link_catchup_jobs
+          `UPDATE profile_link_catchup_jobs_canonical
            SET match_cursor = ?, last_queued_at_ms = ?, revision = revision + 1
            WHERE login_uid = ? AND request_id = ? AND match_cursor IS ?
              AND ${ACTIVE_CONTROL}`,

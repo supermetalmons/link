@@ -1,23 +1,31 @@
+import { required } from "./fixtures/canonicalData.mjs";
+import { browserServerOrigin } from "./browserViteServer.mjs";
 import assert from "node:assert/strict";
+import { rm } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
 import { after, before, test } from "node:test";
 import { createBrowserViteServer } from "./browserViteServer.mjs";
 
 const require = createRequire(import.meta.url);
+/** @type {typeof import("playwright")} */
 const { chromium } = require(process.env.MONS_PLAYWRIGHT_PATH || "playwright");
 const root = fileURLToPath(new URL("../", import.meta.url));
+const cacheDir = `node_modules/.vite-event-modal-${process.pid}`;
 const environmentPath = fileURLToPath(
   new URL("./fixtures/eventModalEnvironment.ts", import.meta.url),
 );
+/** @type {import("vite").ViteDevServer | undefined} */
 let server;
+/** @type {import("playwright").Browser | undefined} */
 let browser;
+/** @type {string} */
 let origin;
 
 before(async () => {
   server = await createBrowserViteServer({
     root,
-    cacheDir: `node_modules/.vite-event-modal-${process.pid}`,
+    cacheDir,
     server: {
       host: "127.0.0.1",
       port: 0,
@@ -50,7 +58,7 @@ before(async () => {
     ],
   });
   await server.listen();
-  origin = `http://127.0.0.1:${server.httpServer.address().port}`;
+  origin = browserServerOrigin(server);
   browser = await chromium.launch({
     headless: true,
     ...(process.env.MONS_BROWSER_EXECUTABLE
@@ -61,20 +69,36 @@ before(async () => {
 after(async () => {
   await browser?.close();
   await server?.close();
+  await rm(`${root}${cacheDir}`, { recursive: true, force: true });
 });
 
+/**
+ * @typedef {typeof import("./fixtures/eventModalHarness.tsx").harness} EventHarness
+ */
+/**
+ * @template {keyof Omit<EventHarness, "prizeEventId">} K
+ * @param {import("playwright").Page} page
+ * @param {K} method
+ * @param {Parameters<EventHarness[K]>} args
+ * @returns {Promise<Awaited<ReturnType<EventHarness[K]>>>}
+ */
 const call = (page, method, ...args) =>
-  page.evaluate(({ method, args }) => window.eventHarness[method](...args), {
-    method,
-    args,
-  });
+  page.evaluate(
+    ({ method, args }) =>
+      Reflect.apply(window.eventHarness[method], window.eventHarness, args),
+    { method, args },
+  );
+/** @param {import("playwright").Page} page */
 const snapshot = (page) => call(page, "snapshot");
+/** @param {import("playwright").Page} page @param {string} kind */
 const calls = async (page, kind) =>
   (await snapshot(page)).requests
     .filter((request) => request.kind === kind)
     .map((request) => request.args);
+/** @param {(page: import("playwright").Page) => Promise<void>} run */
 async function fixture(run) {
-  const page = await browser.newPage();
+  const page = await required(browser).newPage();
+  /** @type {string[]} */
   const errors = [];
   page.on("pageerror", (error) => errors.push(error.message));
   await page.route("**/*", (route) => {
@@ -96,10 +120,23 @@ async function fixture(run) {
     await page.close();
   }
 }
+/** @param {unknown} profile */
+const profileId = (profile) => {
+  assert.ok(
+    profile !== null &&
+      typeof profile === "object" &&
+      "id" in profile &&
+      typeof profile.id === "string",
+  );
+  return profile.id;
+};
+/** @param {string} name @param {(page: import("playwright").Page) => Promise<void>} run */
 const mounted = (name, run) =>
   test(name, { timeout: 60000 }, () => fixture(run));
+/** @param {import("playwright").Page} page @param {import("./fixtures/eventModalHarness.tsx").ActionsPatch} [overrides] @param {Parameters<EventHarness["mount"]>[0]} [options] */
 const mountActions = (page, overrides = {}, options = {}) =>
   call(page, "mount", { mode: "actions", overrides, ...options });
+/** @param {import("playwright").Page} page @param {string} [id] @param {import("./fixtures/eventModalHarness.tsx").EventPatch} [patch] */
 async function openEvent(page, id = "event-a", patch = {}) {
   await call(page, "open", id);
   await call(page, "receive", id, patch);
@@ -252,10 +289,11 @@ mounted(
           requestAnimationFrame(() => requestAnimationFrame(resolve)),
         ),
     );
-    const bottomTop = await copyLink.evaluate(
-      (element) =>
-        element.parentElement.parentElement.getBoundingClientRect().top,
-    );
+    const bottomTop = await copyLink.evaluate((element) => {
+      const parent = element.parentElement?.parentElement;
+      if (!parent) throw new Error("missing controls parent");
+      return parent.getBoundingClientRect().top;
+    });
     const last = page.locator('button[data-player-card-trigger="true"]').last();
     const bounds = await last.boundingBox();
     assert.ok(bounds && bounds.y + bounds.height <= bottomTop);
@@ -390,7 +428,7 @@ mounted(
 mounted(
   "leaving immediately uses the sharing colors while freshness and profiles resolve",
   async (page) => {
-    for (const colorScheme of ["light", "dark"]) {
+    for (const colorScheme of /** @type {const} */ (["light", "dark"])) {
       await page.emulateMedia({ colorScheme });
       await call(page, "mount", {
         mode: "view",
@@ -402,6 +440,7 @@ mounted(
       const copy = page.getByRole("button", { name: "Copy Link", exact: true });
       await leave.waitFor();
       assert.equal(await leave.isDisabled(), false);
+      /** @param {Element} element */
       const colors = (element) => {
         const style = getComputedStyle(element);
         return {
@@ -507,15 +546,18 @@ mounted(
 mounted(
   "joining remains blocked when another event fails to replace displayed content",
   async (page) => {
-    for (const profileId of ["p2", ""]) {
+    for (const profileId of /** @type {const} */ (["p2", ""])) {
       await call(page, "mount", { profileId });
       await call(page, "receive", "event-a");
       assert.equal((await snapshot(page)).joinDisabled, false);
       await call(page, "open", "event-b");
       await call(page, "fail", "event-b");
       const state = await snapshot(page);
-      assert.equal(state.session.eventRecord.eventId, "event-a");
-      assert.equal(state.session.isLoading, false);
+      assert.equal(
+        required(required(state.session).eventRecord).eventId,
+        "event-a",
+      );
+      assert.equal(required(state.session).isLoading, false);
       assert.equal(state.joinDisabled, true);
       await call(page, "invoke", "join");
       assert.deepEqual(await calls(page, "join"), []);
@@ -621,7 +663,10 @@ mounted(
 mounted(
   "successful joins wait for fresh canonical membership and allow a resolved nonmember to retry",
   async (page) => {
-    for (const canonicalId of ["p2", "retired-profile"]) {
+    for (const canonicalId of /** @type {const} */ ([
+      "p2",
+      "retired-profile",
+    ])) {
       await call(page, "mount", {
         fresh: false,
         deferredCanonicalIds: true,
@@ -669,11 +714,12 @@ mounted(
 mounted(
   "join callbacks from a previous or closed modal cannot submit",
   async (page) => {
-    for (const next of ["open", "close"]) {
+    for (const next of /** @type {const} */ (["open", "close"])) {
       await call(page, "mount");
       await call(page, "receive", "event-a");
       await call(page, "capture", "join");
-      await call(page, next, "event-b");
+      if (next === "open") await call(page, "open", "event-b");
+      else await call(page, "close");
       await call(page, "invokeSaved", "join");
       assert.deepEqual(await calls(page, "join"), []);
     }
@@ -692,7 +738,10 @@ mounted(
     await call(page, "open", "event-a");
     await call(page, "fail", "event-a");
     await call(page, "auth", "p2");
-    assert.equal((await snapshot(page)).session.eventRecord.eventId, "event-b");
+    assert.equal(
+      required(required((await snapshot(page)).session).eventRecord).eventId,
+      "event-b",
+    );
     assert.equal((await snapshot(page)).intervals, 0);
     assert.deepEqual(await calls(page, "join"), []);
     await call(page, "receive", "event-a");
@@ -720,9 +769,9 @@ mounted(
 mounted(
   "pending joins survive background refreshes and prevent repeat submissions",
   async (page) => {
-    for (const profileId of ["p2", ""])
-      for (const refresh of ["receive", "fail"])
-        for (const outcome of ["resolve", "reject"]) {
+    for (const profileId of /** @type {const} */ (["p2", ""]))
+      for (const refresh of /** @type {const} */ (["receive", "fail"]))
+        for (const outcome of /** @type {const} */ (["resolve", "reject"])) {
           await call(page, "mount", { profileId });
           await call(page, "receive", "event-a");
           await call(page, "capture", "join");
@@ -733,7 +782,10 @@ mounted(
           }
           assert.equal((await snapshot(page)).joinDisabled, true);
           await call(page, refresh, "event-a");
-          assert.equal((await snapshot(page)).session.isLoading, false);
+          assert.equal(
+            required((await snapshot(page)).session).isLoading,
+            false,
+          );
           assert.equal((await snapshot(page)).joinDisabled, true);
           await call(page, "invokeSaved", "join");
           await call(page, "invoke", "join");
@@ -752,7 +804,7 @@ mounted(
 mounted(
   "late join completions cannot release a newer modal's pending join",
   async (page) => {
-    for (const outcome of ["resolve", "reject"]) {
+    for (const outcome of /** @type {const} */ (["resolve", "reject"])) {
       await call(page, "mount");
       await call(page, "receive", "event-a");
       await call(page, "invoke", "join");
@@ -793,7 +845,7 @@ mounted(
       const h = window.eventHarness;
       await h.override({
         eventRecord: {
-          schemaVersion: 2,
+          schemaVersion: 3,
           eventId: "event-a",
           status: "scheduled",
           startAtMs: 1_100_000,
@@ -835,7 +887,7 @@ mounted(
 mounted(
   "late leave responses cannot update another modal or a newer request",
   async (page) => {
-    for (const outcome of ["resolve", "reject"]) {
+    for (const outcome of /** @type {const} */ (["resolve", "reject"])) {
       await mountActions(page);
       await call(page, "invoke", "leave");
       await call(page, "open", "event-b");
@@ -894,7 +946,11 @@ mounted(
     assert.equal((await snapshot(page)).copyState, "idle");
   },
 );
-for (const behavior of ["unavailable", "unsupported", "rejected"])
+for (const behavior of /** @type {const} */ ([
+  "unavailable",
+  "unsupported",
+  "rejected",
+]))
   mounted(
     `event Share falls back to the same view URL when ${behavior}`,
     async (page) => {
@@ -980,8 +1036,8 @@ mounted(
     state = await snapshot(page);
     assert.deepEqual(state.activeEvents, []);
     assert.deepEqual(state.activeFreshness, []);
-    assert.equal(state.session.eventRecord, null);
-    assert.equal(state.session.isEventFresh, false);
+    assert.equal(required(state.session).eventRecord, null);
+    assert.equal(required(state.session).isEventFresh, false);
     await call(page, "open", "event-c");
     await call(page, "unmount");
     state = await snapshot(page);
@@ -1006,7 +1062,7 @@ mounted(
     assert.deepEqual(await calls(page, "join"), []);
     await call(page, "setNow", 1_070_000);
     await call(page, "focus");
-    assert.equal((await snapshot(page)).session.nowMs, 1_070_000);
+    assert.equal(required((await snapshot(page)).session).nowMs, 1_070_000);
   },
 );
 
@@ -1049,7 +1105,10 @@ mounted(
     await call(page, "stash", "p3-login", { id: "p3", username: "cached" });
     await call(page, "invoke", "participant", participant);
     assert.deepEqual(await calls(page, "profile"), []);
-    assert.equal((await snapshot(page)).cards[0].profile.id, "p3");
+    assert.equal(
+      profileId(required((await snapshot(page)).cards[0]).profile),
+      "p3",
+    );
     await call(page, "stash", "p3-login", null);
     await call(page, "invoke", "participant", participant);
     assert.deepEqual(await calls(page, "profile"), []);
@@ -1088,8 +1147,11 @@ mounted(
     await call(page, "complete", "profile", 0, "resolve", { id: "p3" });
     assert.deepEqual((await snapshot(page)).cards, []);
     await call(page, "complete", "profile", 1, "resolve", { id: "p4" });
-    assert.equal((await snapshot(page)).cards[0].profile.id, "p4");
-    for (const close of ["close", "unmount"]) {
+    assert.equal(
+      profileId(required((await snapshot(page)).cards[0]).profile),
+      "p4",
+    );
+    for (const close of /** @type {const} */ (["close", "unmount"])) {
       await call(page, "mount");
       await call(page, "invoke", "participant", p3);
       await call(page, close);

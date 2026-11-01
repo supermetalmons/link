@@ -6,15 +6,15 @@ declare const normalizeString: (value: unknown) => string | null;
 declare const normalizeFiniteNumberOrNull: (value: unknown) => number | null;
 declare const mapEventStatusToNavigationStatus: (
   status: unknown,
-) => "waiting" | "active" | "ended" | "dismissed";
+) => "ended" | "active" | "waiting" | "dismissed";
 declare const getListSortAtMs: (eventData: EventData, status: string) => number;
 declare const buildPreviewParticipants: (
   participants: EventParticipants | null | undefined,
 ) => {
-  profileId: string | null;
-  displayName: string | null;
-  emojiId: number | null;
-  aura: string | null;
+  profileId: string;
+  displayName: string;
+  emojiId: number;
+  aura: import("../shared/appearance.js").Aura;
 }[];
 declare const getOwnerProfileIds: (
   participants: EventParticipants | null | undefined,

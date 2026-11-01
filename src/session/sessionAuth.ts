@@ -197,7 +197,7 @@ export class SessionAuth {
     next: (user: SessionUser | null) => void,
     error?: (error: unknown) => void,
   ): () => void {
-    const listener = { next, error };
+    const listener = { next, ...(error ? { error } : {}) };
     this.listeners.add(listener);
     if (this.ready)
       queueMicrotask(() => {
@@ -285,7 +285,7 @@ export class SessionAuth {
     options: {
       selectionForUid: InitialGameIntent["selectionForUid"];
       signal: AbortSignal;
-      onSessionBound?: InitialGameIntent["onSessionBound"];
+      onSessionBound?: NonNullable<InitialGameIntent["onSessionBound"]>;
     },
   ): Promise<InitialGameSession> {
     const intent: InitialGameIntent = {
@@ -507,7 +507,7 @@ export class SessionAuth {
     eventId: string,
     options: {
       signal: AbortSignal;
-      onSessionBound?: InitialEventIntent["onSessionBound"];
+      onSessionBound?: NonNullable<InitialEventIntent["onSessionBound"]>;
     },
   ): Promise<InitialEventSession> {
     const intent: InitialEventIntent = {

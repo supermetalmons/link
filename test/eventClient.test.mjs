@@ -1,3 +1,9 @@
+import { createTimerHandle } from "./fixtures/timerHandle.mjs";
+import {
+  required,
+  canonicalEvent,
+  canonicalParticipant,
+} from "./fixtures/canonicalData.mjs";
 import assert from "node:assert/strict";
 import { registerHooks } from "node:module";
 import test from "node:test";
@@ -23,44 +29,57 @@ const { createEventPrizeSelectionCoordinator } =
 
 const eventId = "NN3eRzoZo80";
 const settle = () => new Promise((resolve) => setImmediate(resolve));
+/** @template [T=void] @returns {PromiseWithResolvers<T>} */
 const deferred = () => {
-  let resolve, reject;
-  const promise = new Promise((yes, no) => {
-    resolve = yes;
-    reject = no;
-  });
-  return { promise, resolve, reject };
+  /** @type {PromiseWithResolvers<T>} */
+  const pending = Promise.withResolvers();
+  return {
+    promise: pending.promise,
+    resolve: pending.resolve,
+    reject: pending.reject,
+  };
 };
+/** @param {number} [revision] @param {Parameters<typeof canonicalEvent>[0]} [event] @returns {import("@mons/shared/events").EventSnapshotSeed & {snapshot: {event: import("@mons/shared/events").EventRecord}}} */
 const seed = (revision = 1, event = {}) => ({
   snapshot: {
     ok: true,
     eventId,
     revision,
-    event: {
-      eventId,
-      status: "scheduled",
-      startAtMs: revision * 1000,
-      ...event,
-    },
+    event: canonicalEvent({ eventId, startAtMs: revision * 1000, ...event }),
     prizeSelections: {},
   },
   etag: eventSnapshotEtag(eventId, revision),
   bookmark: `mons-d1-v1:11111111-1111-4111-8111-111111111111:bookmark-${revision}`,
 });
 
+/**
+ * @typedef {import("../src/connection/eventClient.ts").EventClientApi} ClientApi
+ * @typedef {{[K in keyof ClientApi]?: (...args: Parameters<ClientApi[K]>) => ReturnType<ClientApi[K]> | Awaited<ReturnType<ClientApi[K]>>}} Handlers
+ * @typedef {{ok: true, eventId: string, didChange?: boolean, event?: null, skipped?: true, reason?: string}} RawSyncResponse
+ * @param {{api?: Handlers, rawSync?: () => RawSyncResponse | Promise<RawSyncResponse>, profileId?: string | null, fallbackLoginUid?: string | null}} [options]
+ */
 function harness({
   api: handlers = {},
+  rawSync,
   profileId = "profile-2",
   fallbackLoginUid = null,
 } = {}) {
   let now = 1000;
-  let user = { uid: "login-2", getIdToken: async () => "token" };
+  let user = {
+    sessionId: "session-2",
+    generation: "generation-2",
+    uid: "login-2",
+    getIdToken: async () => "token",
+  };
   let published = seed();
-  let timerId = 0;
   let navigationRefreshes = 0;
+  /** @type {Set<() => void>} */
   const listeners = new Set();
+  /** @type {Map<ReturnType<typeof createTimerHandle>, {callback: () => void, delayMs: number}>} */
   const timers = new Map();
+  /** @type {{name: keyof ClientApi, args: unknown[]}[]} */
   const calls = [];
+  /** @type {Handlers} */
   const defaults = {
     createEventViaApi: async () => ({
       ok: true,
@@ -82,33 +101,44 @@ function harness({
       eventSnapshot: published,
     }),
   };
-  const api = Object.fromEntries(
-    [
-      "createEventViaApi",
-      "joinEventViaApi",
-      "leaveEventViaApi",
-      "postponeEventStartViaApi",
-      "removeEventParticipantViaApi",
+  /** @template {keyof ClientApi} K @param {K} name */
+  const wrap =
+    (name) =>
+    /** @param {Parameters<ClientApi[K]>} args @returns {Promise<Awaited<ReturnType<ClientApi[K]>>>} */
+    async (...args) => {
+      calls.push({ name, args });
+      const provider = args[name === "withdrawEventPrizeViaApi" ? 3 : 1];
+      assert.ok(
+        typeof provider === "function" &&
+          "assertCurrentUser" in provider &&
+          typeof provider.assertCurrentUser === "function",
+      );
+      provider.assertCurrentUser();
+      const handler =
+        (name === "syncEventStateViaApi" ? rawSync : undefined) ??
+        handlers[name] ??
+        defaults[name];
+      assert.ok(handler, `unexpected ${name}`);
+      /** @type {Awaited<ReturnType<ClientApi[K]>>} */
+      const result = await Reflect.apply(handler, undefined, args);
+      provider.assertCurrentUser();
+      return result;
+    };
+  const api = {
+    createEventViaApi: wrap("createEventViaApi"),
+    joinEventViaApi: wrap("joinEventViaApi"),
+    leaveEventViaApi: wrap("leaveEventViaApi"),
+    postponeEventStartViaApi: wrap("postponeEventStartViaApi"),
+    removeEventParticipantViaApi: wrap("removeEventParticipantViaApi"),
+    disqualifyEventMatchWinnersViaApi: wrap(
       "disqualifyEventMatchWinnersViaApi",
-      "syncEventStateViaApi",
-      "toggleEventPrizeSelectionViaApi",
-      "readEventSnapshotViaApi",
-      "readProfileEventPrizesViaApi",
-      "withdrawEventPrizeViaApi",
-    ].map((name) => [
-      name,
-      async (...args) => {
-        calls.push({ name, args });
-        const provider = args[name === "withdrawEventPrizeViaApi" ? 3 : 1];
-        provider.assertCurrentUser();
-        const handler = handlers[name] ?? defaults[name];
-        assert.ok(handler, `unexpected ${name}`);
-        const result = await handler(...args);
-        provider.assertCurrentUser();
-        return result;
-      },
-    ]),
-  );
+    ),
+    syncEventStateViaApi: wrap("syncEventStateViaApi"),
+    toggleEventPrizeSelectionViaApi: wrap("toggleEventPrizeSelectionViaApi"),
+    readEventSnapshotViaApi: wrap("readEventSnapshotViaApi"),
+    readProfileEventPrizesViaApi: wrap("readProfileEventPrizesViaApi"),
+    withdrawEventPrizeViaApi: wrap("withdrawEventPrizeViaApi"),
+  };
   const provider = () => createUserBoundAuthTokenProvider(user, () => user);
   const client = new EventClient({
     getCurrentUser: () => user,
@@ -125,7 +155,7 @@ function harness({
     api,
     now: () => now,
     setTimer(callback, delayMs) {
-      const id = ++timerId;
+      const id = createTimerHandle();
       timers.set(id, { callback, delayMs });
       return id;
     },
@@ -138,8 +168,9 @@ function harness({
     client,
     calls,
     timers,
-    callsTo: (name) => calls.filter((call) => call.name === name),
-    advance: (ms) => (now += ms),
+    callsTo: (/** @type {keyof ClientApi} */ name) =>
+      calls.filter((call) => call.name === name),
+    advance: (/** @type {number} */ ms) => (now += ms),
     navigationRefreshes: () => navigationRefreshes,
     changeAuth() {
       user = { ...user };
@@ -163,13 +194,15 @@ function harness({
   };
 }
 
-test.beforeEach((t) => t.mock.method(console, "error", () => {}));
+test.beforeEach(() => test.mock.method(console, "error", () => {}));
 
 test("leave success and failure refresh the event and navigation", async () => {
   for (const succeeds of [true, false]) {
+    /** @type {PromiseWithResolvers<import("@mons/shared/events").LeaveEventResponse>} */
     const request = deferred();
     const h = harness({ api: { leaveEventViaApi: () => request.promise } });
     await h.publish();
+    /** @type {(boolean)[]} */
     const freshness = [];
     const closeFreshness = h.client.subscribeToEventFreshness(
       eventId,
@@ -179,12 +212,13 @@ test("leave success and failure refresh the event and navigation", async () => {
     const pending = h.client.leaveEvent(eventId);
     await settle();
     if (succeeds) {
+      /** @type {import("@mons/shared/events").LeaveEventResponse} */
       const response = { ok: true, eventId, removedProfileId: "profile-2" };
-      request.resolve(response);
+      required(request.resolve)(response);
       assert.deepEqual(await pending, response);
     } else {
       const rejected = assert.rejects(pending, /event-started/);
-      request.reject(new Error("event-started"));
+      required(request.reject)(new Error("event-started"));
       await rejected;
     }
     assert.deepEqual(freshness, [false, true, false]);
@@ -198,6 +232,7 @@ test("leave success and failure refresh the event and navigation", async () => {
 
 test("old leave completions cannot refresh the next authentication generation", async () => {
   for (const change of ["auth", "reset"]) {
+    /** @type {PromiseWithResolvers<import("@mons/shared/events").LeaveEventResponse>} */
     const request = deferred();
     const h = harness({ api: { leaveEventViaApi: () => request.promise } });
     await h.publish();
@@ -211,7 +246,11 @@ test("old leave completions cannot refresh the next authentication generation", 
     if (change === "auth") h.changeAuth();
     else h.client.reset();
     const timers = [...h.timers.entries()];
-    request.resolve({ ok: true, eventId, removedProfileId: "profile-2" });
+    required(request.resolve)({
+      ok: true,
+      eventId,
+      removedProfileId: "profile-2",
+    });
     await completed;
     assert.equal(h.navigationRefreshes(), 1);
     assert.deepEqual([...h.timers.entries()], timers);
@@ -220,44 +259,71 @@ test("old leave completions cannot refresh the next authentication generation", 
 });
 
 function mutationHarness() {
+  /** @typedef {{member: boolean, selectedPrizeId: import("@mons/shared/event-prizes").EventPrizeId | null}} MutationState */
+  /** @type {{operation: string, eventId: string, prizeId?: string, reject: (reason: unknown) => void, resolve: () => void}[]} */
   const requests = [];
+  /** @type {Map<string, MutationState>} */
   const events = new Map();
+  /** @param {string} id */
   const event = (id) => {
     if (!events.has(id))
       events.set(id, { member: true, selectedPrizeId: null });
-    return events.get(id);
+    return required(events.get(id));
   };
-  const transport = (operation, request) =>
+  /** @template T @param {string} operation @param {{eventId: string, prizeId?: string}} request @param {(state: MutationState) => T} complete @returns {Promise<T>} */
+  const transport = (operation, request, complete) =>
     new Promise((resolve, reject) => {
       requests.push({
         operation,
         ...request,
         reject,
         resolve() {
-          const state = event(request.eventId);
-          const response = { ok: true, eventId: request.eventId };
-          if (operation === "prize") {
-            if (!state.member)
-              return reject(new Error("participant-not-found"));
-            state.selectedPrizeId =
-              state.selectedPrizeId === request.prizeId
-                ? null
-                : request.prizeId;
-            response.selectedPrizeId = state.selectedPrizeId;
-          } else if (operation === "leave") {
-            state.member = false;
-            state.selectedPrizeId = null;
-            response.removedProfileId = "profile-2";
-          } else state.member = true;
-          resolve(response);
+          try {
+            resolve(complete(event(request.eventId)));
+          } catch (error) {
+            reject(error);
+          }
         },
       });
     });
   const h = harness({
     api: {
-      joinEventViaApi: (request) => transport("join", request),
-      leaveEventViaApi: (request) => transport("leave", request),
-      toggleEventPrizeSelectionViaApi: (request) => transport("prize", request),
+      joinEventViaApi: (request) =>
+        transport("join", request, (state) => {
+          state.member = true;
+          return {
+            ok: true,
+            eventId: request.eventId,
+            participant: {
+              ...canonicalParticipant({ profileId: "profile-2" }),
+              loginUid: "login-2",
+              state: "active",
+              eliminatedRoundIndex: null,
+              eliminatedByProfileId: null,
+            },
+          };
+        }),
+      leaveEventViaApi: (request) =>
+        transport("leave", request, (state) => {
+          state.member = false;
+          state.selectedPrizeId = null;
+          return {
+            ok: true,
+            eventId: request.eventId,
+            removedProfileId: "profile-2",
+          };
+        }),
+      toggleEventPrizeSelectionViaApi: (request) =>
+        transport("prize", request, (state) => {
+          if (!state.member) throw new Error("participant-not-found");
+          state.selectedPrizeId =
+            state.selectedPrizeId === request.prizeId ? null : request.prizeId;
+          return {
+            ok: true,
+            eventId: request.eventId,
+            selectedPrizeId: state.selectedPrizeId,
+          };
+        }),
     },
   });
   return { ...h, requests, event };
@@ -283,18 +349,18 @@ test("closing and reopening an event cannot let an old prize write overtake leav
   const leaving = h.client.leaveEvent(eventId);
   await settle();
   assert.equal(h.requests.length, 1);
-  h.requests[0].resolve();
+  required(h.requests[0]).resolve();
   await settle();
   assert.deepEqual(
     h.requests.map(({ operation }) => operation),
     ["prize", "leave"],
   );
-  h.requests[1].resolve();
+  required(h.requests[1]).resolve();
   await leaving;
   assert.deepEqual(h.event(eventId), { member: false, selectedPrizeId: null });
   const joining = h.client.joinEvent(eventId);
   await settle();
-  h.requests[2].resolve();
+  required(h.requests[2]).resolve();
   await joining;
   assert.deepEqual(
     h.requests.map(({ operation }) => operation),
@@ -321,13 +387,13 @@ test("failed event mutations release their queue without blocking other events",
       ["join", "event-2"],
     ],
   );
-  h.requests[0].reject(new Error("transport-failed"));
+  required(h.requests[0]).reject(new Error("transport-failed"));
   await failed;
   await settle();
-  assert.equal(h.requests[2].operation, "leave");
-  h.requests[2].resolve();
+  assert.equal(required(h.requests[2]).operation, "leave");
+  required(h.requests[2]).resolve();
   await leaving;
-  h.requests[1].resolve();
+  required(h.requests[1]).resolve();
   await joining;
 });
 
@@ -345,13 +411,13 @@ test("queued event mutations reject stale authentication before dispatch", async
   ].map((pending) => assert.rejects(pending, /authentication-changed/));
   await settle();
   h.changeAuth();
-  h.requests[0].resolve();
+  required(h.requests[0]).resolve();
   await first;
   await Promise.all(queued);
   assert.equal(h.requests.length, 1);
   const next = h.client.joinEvent(eventId);
   await settle();
-  h.requests[1].resolve();
+  required(h.requests[1]).resolve();
   await next;
 });
 
@@ -365,17 +431,18 @@ for (const preserveSnapshots of [false, true]) {
     const leaving = h.client.leaveEvent(eventId);
     await settle();
     assert.equal(h.requests.length, 1);
-    h.requests[0].resolve();
+    required(h.requests[0]).resolve();
     await first;
     await settle();
-    assert.equal(h.requests[1].operation, "leave");
-    h.requests[1].resolve();
+    assert.equal(required(h.requests[1]).operation, "leave");
+    required(h.requests[1]).resolve();
     await leaving;
     assert.equal(h.event(eventId).member, false);
   });
 }
 
 test("sync skips empty IDs, deduplicates concurrent calls, and does not refresh navigation", async () => {
+  /** @type {PromiseWithResolvers<Awaited<ReturnType<ClientApi["syncEventStateViaApi"]>>>} */
   const request = deferred();
   const h = harness({ api: { syncEventStateViaApi: () => request.promise } });
   assert.deepEqual(await h.client.syncEventState("  "), {
@@ -387,8 +454,10 @@ test("sync skips empty IDs, deduplicates concurrent calls, and does not refresh 
   const second = h.client.syncEventState(eventId);
   await settle();
   assert.equal(h.callsTo("syncEventStateViaApi").length, 1);
-  assert.deepEqual(h.callsTo("syncEventStateViaApi")[0].args[0], { eventId });
-  request.resolve({
+  assert.deepEqual(required(h.callsTo("syncEventStateViaApi")[0]).args[0], {
+    eventId,
+  });
+  required(request.resolve)({
     ok: true,
     eventId,
     didChange: false,
@@ -413,7 +482,10 @@ test("sync cooldown follows the latest observed event status and clears when sub
     seed(2, { status: "active", createdByProfileId: "profile-2" }),
   );
   h.advance(699);
-  assert.equal((await h.client.syncEventState(eventId)).event.status, "active");
+  assert.equal(
+    required((await h.client.syncEventState(eventId)).event).status,
+    "active",
+  );
   assert.equal(h.callsTo("syncEventStateViaApi").length, 2);
   h.advance(1);
   await h.client.syncEventState(eventId);
@@ -426,7 +498,11 @@ test("sync cooldown follows the latest observed event status and clears when sub
 });
 
 test("sync retries lock and rate limits twice with bounded delays", async () => {
-  for (const reason of ["locked", "lock-lost", "rate-limited"]) {
+  for (const reason of /** @type {const} */ ([
+    "locked",
+    "locked",
+    "rate-limited",
+  ])) {
     const h = harness({
       api: {
         syncEventStateViaApi: async () => ({
@@ -445,7 +521,7 @@ test("sync retries lock and rate limits twice with bounded delays", async () => 
     await h.runNext(300);
     const result = await pending;
     assert.equal(h.callsTo("syncEventStateViaApi").length, 3);
-    assert.equal(result.reason, reason === "lock-lost" ? "locked" : reason);
+    assert.equal(result.reason, reason === "locked" ? "locked" : reason);
     assert.equal(h.timers.size, 0);
   }
 });
@@ -473,14 +549,7 @@ test("sync stops retrying on success and does not retry unrelated skips or failu
   assert.equal(h.timers.size, 0);
   for (const reason of ["not-participant", "other"]) {
     const skipped = harness({
-      api: {
-        syncEventStateViaApi: async () => ({
-          ok: true,
-          eventId,
-          skipped: true,
-          reason,
-        }),
-      },
+      rawSync: async () => ({ ok: true, eventId, skipped: true, reason }),
     });
     assert.equal((await skipped.client.syncEventState(eventId)).skipped, true);
     assert.equal(skipped.callsTo("syncEventStateViaApi").length, 1);
@@ -499,12 +568,15 @@ test("sync stops retrying on success and does not retry unrelated skips or failu
 });
 
 test("sync allows creators and participants while skipping observed nonmembers", async () => {
-  for (const [event, allowed] of [
+  for (const [
+    event,
+    allowed,
+  ] of /** @type {[Parameters<typeof canonicalEvent>[0], boolean][]} */ ([
     [{ createdByProfileId: "profile-2" }, true],
     [{ createdByLoginUid: "login-2" }, true],
     [{ participants: { "profile-2": {} } }, true],
     [{ createdByProfileId: "other", participants: {} }, false],
-  ]) {
+  ])) {
     const h = harness();
     await h.publish(seed(1, event));
     const close = h.client.subscribeToEvent(eventId, () => {});
@@ -522,6 +594,7 @@ test("sync allows creators and participants while skipping observed nonmembers",
 });
 
 test("old sync completions cannot seed or cool down the next subscription generation", async () => {
+  /** @type {PromiseWithResolvers<Awaited<ReturnType<ClientApi["syncEventStateViaApi"]>>>} */
   const request = deferred();
   let calls = 0;
   const h = harness({
@@ -538,14 +611,16 @@ test("old sync completions cannot seed or cool down the next subscription genera
             },
     },
   });
+  /** @type {(import("@mons/shared/events").EventRecord | null)[]} */
   const observed = [];
+  const latestObserved = () => observed.at(-1);
   const close = h.client.subscribeToEvent(eventId, (value) =>
     observed.push(value),
   );
   const old = h.client.syncEventState(eventId);
   await settle();
   h.client.reset();
-  request.resolve({
+  required(request.resolve)({
     ok: true,
     eventId,
     didChange: true,
@@ -556,20 +631,19 @@ test("old sync completions cannot seed or cool down the next subscription genera
   assert.deepEqual(observed, [null]);
   await h.client.syncEventState(eventId);
   assert.equal(calls, 2);
-  assert.equal(observed.at(-1).startAtMs, 3000);
+  assert.equal(required(latestObserved()).startAtMs, 3000);
   close();
 });
 
 test("auth replacement rejects a pending sync and permits the new owner to retry", async () => {
+  /** @type {PromiseWithResolvers<RawSyncResponse>} */
   const request = deferred();
   let calls = 0;
   const h = harness({
-    api: {
-      syncEventStateViaApi: () =>
-        ++calls === 1
-          ? request.promise
-          : { ok: true, eventId, didChange: false, event: null },
-    },
+    rawSync: () =>
+      ++calls === 1
+        ? request.promise
+        : { ok: true, eventId, didChange: false, event: null },
   });
   const old = assert.rejects(
     h.client.syncEventState(eventId),
@@ -577,7 +651,12 @@ test("auth replacement rejects a pending sync and permits the new owner to retry
   );
   await settle();
   h.changeAuth();
-  request.resolve({ ok: true, eventId, didChange: false, event: null });
+  required(request.resolve)({
+    ok: true,
+    eventId,
+    didChange: false,
+    event: null,
+  });
   await old;
   await h.client.syncEventState(eventId);
   assert.equal(calls, 2);

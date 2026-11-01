@@ -6,6 +6,7 @@ const { spawnSync } = require("node:child_process");
 const test = require("node:test");
 const { getRpcUrl } = require("../runtime/eventPrizes/solana");
 
+/** @param {string} source */
 const runModuleLoadingCheck = (source) => {
   const result = spawnSync(process.execPath, ["-e", source], {
     encoding: "utf8",
@@ -20,7 +21,10 @@ test("builds the Helius RPC URL from an injected secret value", () => {
   );
   assert.throws(
     () => getRpcUrl(""),
-    (error) => error.code === "failed-precondition",
+    (error) =>
+      error instanceof Error &&
+      "code" in error &&
+      error.code === "failed-precondition",
   );
 });
 

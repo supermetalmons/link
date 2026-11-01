@@ -1,9 +1,5 @@
 import type { AutomatchRecordValue } from "./automatchD1/types.ts";
-import {
-  AutomatchD1Failure,
-  decodeSnapshot,
-  type AutomatchRuntimeControl,
-} from "./automatchD1.ts";
+import { AutomatchD1Failure, decodeSnapshot } from "./automatchD1.ts";
 
 export type AutomatchQueueHead =
   | {
@@ -12,19 +8,6 @@ export type AutomatchQueueHead =
       value: AutomatchRecordValue<"automatch">;
     }
   | { kind: "pending"; inviteId: string; transitionId: string };
-
-export function isFifoAutomatchQueue(
-  control: Pick<AutomatchRuntimeControl, "metadata">,
-): boolean {
-  const metadata = control.metadata;
-  return Boolean(
-    metadata &&
-    typeof metadata === "object" &&
-    !Array.isArray(metadata) &&
-    "queueSelection" in metadata &&
-    metadata.queueSelection === "fifo",
-  );
-}
 
 export function isAutomatchQueueSelectionConflict(error: unknown): boolean {
   const seen = new Set<unknown>();
@@ -40,20 +23,21 @@ export const AUTOMATCH_QUEUE_HEAD_SQL = `WITH ready AS (
   SELECT ticket.invite_id, source.payload_json, source.revision,
     resource.transition_id,
     (resource.resource_key IS NULL OR reservation.status = 'pending') AS recoverable
-  FROM automatch_ready_tickets AS ticket
-  CROSS JOIN automatch_entries AS source ON source.record_key = ticket.invite_id
+  FROM automatch_ready_tickets_canonical AS ticket
+  CROSS JOIN automatch_entries_canonical AS source ON source.record_key = ticket.invite_id
     AND source.revision = ticket.source_revision AND source.payload_json IS NOT NULL
-  LEFT JOIN game_session_transition_resources AS resource ON resource.resource_key = ticket.invite_id
-  LEFT JOIN game_session_transitions AS reservation ON reservation.transition_id = resource.transition_id
+  LEFT JOIN game_session_transition_resources_canonical AS resource ON resource.resource_key = ticket.invite_id
+  LEFT JOIN game_session_transitions_canonical AS reservation ON reservation.transition_id = resource.transition_id
   ORDER BY ticket.enqueued_at_ms, ticket.invite_id LIMIT 1
 ), pending AS (
   SELECT invite_id, NULL AS payload_json, 0 AS revision, transition_id,
-    EXISTS (SELECT 1 FROM game_session_transition_resources AS resource
-      JOIN game_session_transitions AS reservation ON reservation.transition_id = resource.transition_id
+    EXISTS (SELECT 1 FROM game_session_transition_resources_canonical AS resource
+      JOIN game_session_transitions_canonical AS reservation ON reservation.transition_id = resource.transition_id
       WHERE resource.resource_key = pending.invite_id
         AND resource.transition_id = pending.transition_id
         AND reservation.status = 'pending') AS recoverable
-  FROM automatch_pending_enqueues AS pending
+  FROM automatch_pending_enqueues_canonical AS pending
+  WHERE pending.status = 'pending'
   ORDER BY created_at_ms, transition_id LIMIT 1
 )
 SELECT * FROM ready UNION ALL SELECT * FROM pending

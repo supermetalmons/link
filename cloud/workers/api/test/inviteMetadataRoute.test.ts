@@ -1,3 +1,4 @@
+import { applicationRequest } from "./testEnv.ts";
 import { retainedInviteSourceFixture } from "./inviteDocumentFixture.ts";
 import { socketTestIdentity } from "./socketTestSession.ts";
 import assert from "node:assert/strict";
@@ -25,8 +26,8 @@ const initialSnapshot: InviteMetadataSnapshot = {
   hostId: "host-login",
   guestId: "guest-login",
   hostColor: "white",
-  hostRematches: "",
-  guestRematches: "",
+  hostRematches: { state: "open", indices: [] },
+  guestRematches: { state: "open", indices: [] },
   automatchStateHint: null,
   eventId: null,
   eventOwned: false,
@@ -45,7 +46,7 @@ function request({
   method?: string;
   headers?: HeadersInit;
 } = {}): Request {
-  return new Request(
+  return applicationRequest(
     `https://api.mons.link${path || `/invites/invite-one/metadata${socket ? "/socket" : ""}`}`,
     {
       method,
@@ -198,7 +199,7 @@ test("unknown invites and failed existence checks never access a Durable Object"
     for (const source of [null, undefined, new Error("source-unavailable")]) {
       const state = setup();
       let roomAccesses = 0;
-      state.dependencies.room = undefined;
+      delete state.dependencies.room;
       Object.defineProperty(state.env, "INVITE_REACTIONS", {
         value: {
           getByName: () => {
@@ -299,7 +300,7 @@ test("linked host ownership is resolved from canonical D1 for the same snapshot"
           revision: 1,
           profile: {
             profileId: "profile-one",
-            aura: "",
+            aura: "none" as const,
             emoji: 1000,
             eth: "",
             sol: "",
@@ -351,8 +352,8 @@ test("metadata upgrade strips credentials and binds admission to authorized snap
   );
   assert.equal(response.status, 200);
   const forwarded = state.calls.sockets[0];
-  assert.equal(forwarded.url, "https://reactions.internal/metadata/socket");
-  assert.deepEqual(Object.fromEntries(forwarded.headers), {
+  assert.equal(forwarded!.url, "https://reactions.internal/metadata/socket");
+  assert.deepEqual(Object.fromEntries(forwarded!.headers), {
     "sec-websocket-protocol": INVITE_METADATA_SOCKET_PROTOCOL,
     upgrade: "websocket",
     "x-mons-session-id": state.identity.sid,
@@ -537,7 +538,7 @@ test("default metadata failure logs retain causes and preserve custom callbacks"
   };
   assert.deepEqual(await response.json(), expectedBody);
   assert.equal(logged.mock.callCount(), 1);
-  assert.deepEqual(logged.mock.calls[0].arguments, [
+  assert.deepEqual(logged.mock.calls[0]!.arguments, [
     {
       event: "invite_metadata_failure",
       error: {
@@ -564,7 +565,7 @@ test("default metadata failure logs retain causes and preserve custom callbacks"
   assert.deepEqual(await customResponse.json(), expectedBody);
   assert.equal(logged.mock.callCount(), 1);
   assert.equal(logFailure.mock.callCount(), 1);
-  assert.deepEqual(logFailure.mock.calls[0].arguments, []);
+  assert.deepEqual(logFailure.mock.calls[0]!.arguments, []);
 });
 
 test("missing, malformed, forbidden and transient source failures stay distinct", async () => {

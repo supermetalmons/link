@@ -23,6 +23,16 @@ exports.THIRD_PLACE_MATCH_KEY =
   exports.decodeEventRoundView =
   exports.decodeEventMatchView =
   exports.decodeEventParticipantView =
+  exports.isEventAnnouncements =
+  exports.isEventPrizeAssignments =
+  exports.isEventRounds =
+  exports.isEventRoundRecord =
+  exports.isEventMatches =
+  exports.isEventMatchRecord =
+  exports.isEventParticipants =
+  exports.isEventParticipantRecord =
+  exports.parseEventRecord =
+  exports.isEventRecord =
     void 0;
 exports.eventSnapshotEtag = eventSnapshotEtag;
 exports.eventBookmarkEpoch = eventBookmarkEpoch;
@@ -62,47 +72,109 @@ Object.defineProperty(exports, "THIRD_PLACE_MATCH_KEY", {
     return event_types_js_1.THIRD_PLACE_MATCH_KEY;
   },
 });
-var event_views_js_1 = require("./event-views.js");
+const event_views_js_1 = require("./event-views.js");
+const appearance_js_1 = require("./appearance.js");
+var event_views_js_2 = require("./event-views.js");
+Object.defineProperty(exports, "isEventRecord", {
+  enumerable: true,
+  get: function () {
+    return event_views_js_2.isEventRecord;
+  },
+});
+Object.defineProperty(exports, "parseEventRecord", {
+  enumerable: true,
+  get: function () {
+    return event_views_js_2.parseEventRecord;
+  },
+});
+Object.defineProperty(exports, "isEventParticipantRecord", {
+  enumerable: true,
+  get: function () {
+    return event_views_js_2.isEventParticipantRecord;
+  },
+});
+Object.defineProperty(exports, "isEventParticipants", {
+  enumerable: true,
+  get: function () {
+    return event_views_js_2.isEventParticipants;
+  },
+});
+Object.defineProperty(exports, "isEventMatchRecord", {
+  enumerable: true,
+  get: function () {
+    return event_views_js_2.isEventMatchRecord;
+  },
+});
+Object.defineProperty(exports, "isEventMatches", {
+  enumerable: true,
+  get: function () {
+    return event_views_js_2.isEventMatches;
+  },
+});
+Object.defineProperty(exports, "isEventRoundRecord", {
+  enumerable: true,
+  get: function () {
+    return event_views_js_2.isEventRoundRecord;
+  },
+});
+Object.defineProperty(exports, "isEventRounds", {
+  enumerable: true,
+  get: function () {
+    return event_views_js_2.isEventRounds;
+  },
+});
+Object.defineProperty(exports, "isEventPrizeAssignments", {
+  enumerable: true,
+  get: function () {
+    return event_views_js_2.isEventPrizeAssignments;
+  },
+});
+Object.defineProperty(exports, "isEventAnnouncements", {
+  enumerable: true,
+  get: function () {
+    return event_views_js_2.isEventAnnouncements;
+  },
+});
 Object.defineProperty(exports, "decodeEventParticipantView", {
   enumerable: true,
   get: function () {
-    return event_views_js_1.decodeEventParticipantView;
+    return event_views_js_2.decodeEventParticipantView;
   },
 });
 Object.defineProperty(exports, "decodeEventMatchView", {
   enumerable: true,
   get: function () {
-    return event_views_js_1.decodeEventMatchView;
+    return event_views_js_2.decodeEventMatchView;
   },
 });
 Object.defineProperty(exports, "decodeEventRoundView", {
   enumerable: true,
   get: function () {
-    return event_views_js_1.decodeEventRoundView;
+    return event_views_js_2.decodeEventRoundView;
   },
 });
 Object.defineProperty(exports, "decodeEventPrizeAssignmentView", {
   enumerable: true,
   get: function () {
-    return event_views_js_1.decodeEventPrizeAssignmentView;
+    return event_views_js_2.decodeEventPrizeAssignmentView;
   },
 });
 Object.defineProperty(exports, "decodeEventPrizeAssignmentsView", {
   enumerable: true,
   get: function () {
-    return event_views_js_1.decodeEventPrizeAssignmentsView;
+    return event_views_js_2.decodeEventPrizeAssignmentsView;
   },
 });
 Object.defineProperty(exports, "decodeEventView", {
   enumerable: true,
   get: function () {
-    return event_views_js_1.decodeEventView;
+    return event_views_js_2.decodeEventView;
   },
 });
 Object.defineProperty(exports, "normalizeEventPrizeId", {
   enumerable: true,
   get: function () {
-    return event_views_js_1.normalizeEventPrizeId;
+    return event_views_js_2.normalizeEventPrizeId;
   },
 });
 const MONS_LINK_ADMIN_USERNAMES = Object.freeze([
@@ -126,7 +198,7 @@ function isEventOwnedInvite(value) {
       (typeof value.eventId === "string" && value.eventId.trim() !== ""))
   );
 }
-const EVENT_SCHEMA_VERSION = 2;
+const EVENT_SCHEMA_VERSION = 3;
 exports.EVENT_SCHEMA_VERSION = EVENT_SCHEMA_VERSION;
 const MIN_STARTS_IN_MINUTES = 1;
 exports.MIN_STARTS_IN_MINUTES = MIN_STARTS_IN_MINUTES;
@@ -269,13 +341,12 @@ function isEventParticipantSnapshot(value) {
       "eliminatedRoundIndex",
       "eliminatedByProfileId",
     ]) &&
-    (0, ids_js_1.isSafeRecordKey)(value.profileId) &&
-    (0, ids_js_1.isSafeRecordKey)(value.loginUid) &&
+    isExactSafeRecordKey(value.profileId) &&
+    (0, ids_js_1.isCanonicalLoginUid)(value.loginUid) &&
     isBoundedParticipantText(value.username) &&
     isBoundedParticipantText(value.displayName) &&
-    Number.isSafeInteger(value.emojiId) &&
-    value.emojiId >= 0 &&
-    isBoundedParticipantText(value.aura) &&
+    (0, appearance_js_1.isEmojiId)(value.emojiId) &&
+    (0, appearance_js_1.isAura)(value.aura) &&
     Number.isSafeInteger(value.joinedAtMs) &&
     value.joinedAtMs >= 0 &&
     value.state === "active" &&
@@ -284,7 +355,11 @@ function isEventParticipantSnapshot(value) {
   );
 }
 function buildEventParticipantSnapshot(profile, loginUid, joinedAtMs) {
-  const parsedEmojiId = Math.floor(Number(profile.emoji));
+  if (
+    !(0, appearance_js_1.isEmojiId)(profile.emoji) ||
+    !(0, appearance_js_1.isAura)(profile.aura)
+  )
+    return null;
   const participant = {
     profileId: profile.profileId,
     loginUid,
@@ -296,11 +371,8 @@ function buildEventParticipantSnapshot(profile, loginUid, joinedAtMs) {
         : profile.sol
           ? (0, profiles_js_1.cropAddress)(profile.sol)
           : "anon"),
-    emojiId:
-      Number.isSafeInteger(parsedEmojiId) && parsedEmojiId >= 0
-        ? parsedEmojiId
-        : 0,
-    aura: profile.aura.trim(),
+    emojiId: profile.emoji,
+    aura: profile.aura,
     joinedAtMs,
     state: "active",
     eliminatedRoundIndex: null,
@@ -340,20 +412,13 @@ function hasExactOptionalKeys(value, requiredKeys, optionalKeys) {
   );
 }
 function resolveEventTelegramAnnouncements(input) {
-  const preferences = input.telegramAnnouncements;
-  if (
-    preferences &&
-    typeof preferences === "object" &&
-    !Array.isArray(preferences)
-  ) {
-    return {
-      invite: preferences.invite === true,
-      matches: preferences.matches === true,
-      results: preferences.results === true,
-    };
-  }
-  const enabled = input.announceOnTelegram === true;
-  return { invite: enabled, matches: enabled, results: enabled };
+  return (
+    input.telegramAnnouncements ?? {
+      invite: false,
+      matches: false,
+      results: false,
+    }
+  );
 }
 function isEventTelegramAnnouncements(value) {
   return (
@@ -429,13 +494,7 @@ function isSyncEventStateRequest(value) {
 }
 function isEventApiRecord(value, eventId) {
   return (
-    value &&
-    typeof value === "object" &&
-    !Array.isArray(value) &&
-    value.eventId === eventId &&
-    typeof value.status === "string" &&
-    (!Object.hasOwn(value, "isSundayMons") ||
-      typeof value.isSundayMons === "boolean")
+    (0, event_views_js_1.isEventRecord)(value) && value.eventId === eventId
   );
 }
 function isCreateEventResponse(value) {

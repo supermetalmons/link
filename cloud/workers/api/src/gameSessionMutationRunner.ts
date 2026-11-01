@@ -26,7 +26,7 @@ import type {
   AutomatchProfileGameProjectionTask,
   ProfileGameProjectionTask,
 } from "./profileGameProjectionTasks.ts";
-import { STATE_SERVER_TIMESTAMP } from "./stateCompatibility.ts";
+import { SESSION_TIMESTAMP } from "./sessionValueOperations.ts";
 
 const GAME_SESSION_MUTATION_RECEIPT_ROOT = "gameplayMutationReceipts";
 const GAME_SESSION_MUTATION_RECEIPT_EXPIRATION_ROOT =
@@ -332,7 +332,10 @@ export async function runGameSessionMutation<
         }
         return {
           response: existing.response,
-          projectionRequestId: existing.projectionRequestId,
+          projectionRequestId:
+            existing.effects.state === "retired"
+              ? null
+              : existing.projectionRequestId,
         };
       }
       const outcome = await build();
@@ -345,7 +348,8 @@ export async function runGameSessionMutation<
           kind: "mutation-receipt",
           operationId: request.operationId,
           value: {
-            schemaVersion: 1,
+            schemaVersion: 2,
+            effects: { state: "enabled" },
             operationId: request.operationId,
             kind,
             inviteId: request.inviteId,
@@ -353,19 +357,24 @@ export async function runGameSessionMutation<
             projectionRequestId,
             requesterUid,
             response: outcome.response,
-            completedAtMs: STATE_SERVER_TIMESTAMP,
+            completedAtMs: SESSION_TIMESTAMP,
           } as GameSessionMutationReceiptWrite,
-          expiration: { completedAtMs: STATE_SERVER_TIMESTAMP },
+          expiration: {
+            schemaVersion: 1,
+            completedAtMs: SESSION_TIMESTAMP,
+          },
         },
       ];
       if (outcome.projectReason) {
         changes.push(
           ...requestAutomatchProfileProjection({
-            historicalMatches: outcome.historicalMatches,
+            ...(outcome.historicalMatches === undefined
+              ? {}
+              : { historicalMatches: outcome.historicalMatches }),
             inviteId: request.inviteId,
             reason: outcome.projectReason,
             requestId: request.operationId,
-            timestamp: STATE_SERVER_TIMESTAMP,
+            timestamp: SESSION_TIMESTAMP,
             merge: true,
           }),
         );
@@ -377,7 +386,7 @@ export async function runGameSessionMutation<
     },
     {
       ...dependencies,
-      acquireRetryTimeoutMs,
+      ...(acquireRetryTimeoutMs === undefined ? {} : { acquireRetryTimeoutMs }),
     },
   );
   if (outcome.projectionRequestId) {

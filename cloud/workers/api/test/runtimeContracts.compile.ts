@@ -149,6 +149,8 @@ export type IncompleteTelegramProofIsRejected = Assert<
 >;
 export type CompleteTelegramProofIsAccepted = Assert<
   {
+    schemaVersion: 1;
+    dataEpoch: 1;
     messageKey: string;
     revision: string;
     taskKind: "rate-limit-proof";

@@ -25,10 +25,17 @@ const { PrimaryActionType } =
   await import("../src/ui/controls/primaryAction.ts");
 
 const config = Object.freeze({ duration: 60, progress: 10, requestDate: 1000 });
+/** @param {...Parameters<typeof gameControlsReducer>[1]} actions */
 const gameState = (...actions) =>
   actions.reduce(gameControlsReducer, createGameControlsState(config));
+/** @param {...Parameters<typeof automatchControlsReducer>[1]} actions */
 const automatchState = (...actions) =>
   actions.reduce(automatchControlsReducer, createAutomatchControlsState());
+/**
+ * @template {object} T
+ * @param {T} value
+ * @returns {Readonly<T>}
+ */
 const freeze = (value) => {
   for (const child of Object.values(value)) {
     if (child && typeof child === "object") freeze(child);
@@ -80,7 +87,12 @@ test("button visibility and enablement remain independent", () => {
 
 test("timer transitions hide turn actions, preserve enablement and resign confirmation, and dismiss timer confirmations", () => {
   const nextConfig = { duration: 120, progress: 20, requestDate: 2000 };
-  for (const confirmation of ["none", "resign", "timer", "claim"]) {
+  for (const confirmation of /** @type {const} */ ([
+    "none",
+    "resign",
+    "timer",
+    "claim",
+  ])) {
     const initial = freeze(
       gameState(
         { type: "setUndoVisible", visible: true },
@@ -157,7 +169,7 @@ test("hiding timers leaves independent controls and resign confirmation intact",
   assert.equal(state.undo.visible, true);
   assert.equal(state.automove.visible, true);
   assert.equal(state.confirmation, "resign");
-  for (const confirmation of ["timer", "claim"]) {
+  for (const confirmation of /** @type {const} */ (["timer", "claim"])) {
     assert.equal(
       gameControlsReducer({ ...state, confirmation }, { type: "hideTimers" })
         .confirmation,
@@ -167,7 +179,11 @@ test("hiding timers leaves independent controls and resign confirmation intact",
 });
 
 test("hiding game controls clears every confirmation and undo enablement while preserving primary action and other enablement", () => {
-  for (const confirmation of ["resign", "timer", "claim"]) {
+  for (const confirmation of /** @type {const} */ ([
+    "resign",
+    "timer",
+    "claim",
+  ])) {
     const state = gameState(
       { type: "showTimerProgress", config },
       { type: "enableTimer" },
@@ -196,7 +212,13 @@ test("hiding game controls clears every confirmation and undo enablement while p
 
 test("opening and dismissing confirmations cannot retain a second game confirmation", () => {
   let state = createGameControlsState(config);
-  for (const confirmation of ["resign", "timer", "claim", "resign", "none"]) {
+  for (const confirmation of /** @type {const} */ ([
+    "resign",
+    "timer",
+    "claim",
+    "resign",
+    "none",
+  ])) {
     state = gameControlsReducer(state, {
       type: "setConfirmation",
       confirmation,
@@ -206,8 +228,17 @@ test("opening and dismissing confirmations cannot retain a second game confirmat
 });
 
 test("repeated hide and claim actions preserve state identity once their changes are applied", () => {
-  for (const type of ["hideTimers", "hideGameControls", "showVictoryClaim"]) {
-    for (const confirmation of ["none", "resign", "timer", "claim"]) {
+  for (const type of /** @type {const} */ ([
+    "hideTimers",
+    "hideGameControls",
+    "showVictoryClaim",
+  ])) {
+    for (const confirmation of /** @type {const} */ ([
+      "none",
+      "resign",
+      "timer",
+      "claim",
+    ])) {
       const action = { type };
       const state = freeze(
         gameState(
@@ -281,11 +312,11 @@ test("fresh automatch waits for an explicit reveal and repeated waiting preserve
 });
 
 test("cancel reveal requires both a visible automatch button and waiting state", () => {
-  for (const actions of [
+  for (const actions of /** @type {Parameters<typeof automatchControlsReducer>[1][][]} */ ([
     [],
     [{ type: "setVisible", visible: true }],
     [{ type: "beginRequest" }],
-  ]) {
+  ])) {
     const state = automatchState(...actions);
     assert.equal(
       automatchControlsReducer(state, { type: "revealCancel" }),

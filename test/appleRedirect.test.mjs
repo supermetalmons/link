@@ -1,3 +1,4 @@
+import { applicationStorageKey } from "../src/session/applicationDataStorage.ts";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
@@ -14,12 +15,19 @@ const { outputText } = ts.transpileModule(source, {
   },
 });
 
+/**
+ * @param {string} state
+ * @param {{ pending?: unknown[], hash?: boolean }} [options]
+ */
 function callback(state, { pending = [], hash = false } = {}) {
-  const data = new Map([["appleIntentByStateV1", JSON.stringify(pending)]]);
+  const data = new Map([
+    [applicationStorageKey("appleIntentByStateV1"), JSON.stringify(pending)],
+  ]);
   const storage = {
-    getItem: (key) => data.get(key) ?? null,
-    setItem: (key, value) => data.set(key, value),
-    removeItem: (key) => data.delete(key),
+    getItem: (/** @type {string} */ key) => data.get(key) ?? null,
+    setItem: (/** @type {string} */ key, /** @type {string} */ value) =>
+      data.set(key, value),
+    removeItem: (/** @type {string} */ key) => data.delete(key),
   };
   const params = new URLSearchParams({ state, id_token: "apple-token" });
   const window = {
@@ -29,34 +37,50 @@ function callback(state, { pending = [], hash = false } = {}) {
     sessionStorage: storage,
     localStorage: storage,
     history: {
-      replaceState: (_state, _title, url) => {
+      replaceState: (
+        /** @type {unknown} */ _state,
+        /** @type {string} */ _title,
+        /** @type {string | URL} */ url,
+      ) => {
         window.location = new URL(url, "https://mons.link");
       },
     },
   };
   const exports = {};
-  new Function("exports", "window", "document", "console", outputText)(
+  new Function(
+    "exports",
+    "require",
+    "window",
+    "document",
+    "console",
+    outputText,
+  )(
     exports,
+    (/** @type {string} */ name) => {
+      assert.equal(name, "../session/applicationDataStorage.ts");
+      return { applicationStorageKey };
+    },
     window,
     { title: "Mons" },
     { log: () => {} },
   );
-  return { api: exports, window, data };
+  return {
+    api: /** @type {typeof import("../src/connection/appleConnection.ts")} */ (
+      exports
+    ),
+    window,
+    data,
+  };
 }
 
 const compactState = (expiresAtMs = Date.now() + 60_000) =>
   `apple.v1.state-token.intent-id.${expiresAtMs.toString(36)}.settings.account`;
 
 for (const hash of [false, true]) {
-  test(`compact Apple callbacks restore without stored intent from ${hash ? "hash" : "query"}`, () => {
+  test(`old Apple envelopes cannot restore without a current intent from ${hash ? "hash" : "query"}`, () => {
     const h = callback(compactState(), { hash });
-    const result = h.api.consumeAppleRedirectResult();
-    assert.deepEqual(result, {
-      idToken: "apple-token",
-      intentId: "intent-id",
-      consentSource: "settings.account",
-    });
-    assert.equal(h.api.consumeAppleRedirectResult(), result);
+    assert.throws(() => h.api.consumeAppleRedirectResult(), /session expired/);
+    assert.equal(h.api.consumeAppleRedirectResult(), null);
     assert.equal(
       h.window.location.href,
       "https://mons.link/invite?event=summer",
@@ -81,7 +105,10 @@ test("Apple callbacks retain pending intent recovery and consume its stored reco
     intentId: "pending-intent",
     consentSource: "signin",
   });
-  assert.equal(h.data.has("appleIntentByStateV1"), false);
+  assert.equal(
+    h.data.has(applicationStorageKey("appleIntentByStateV1")),
+    false,
+  );
 });
 
 test("expired, malformed and retired JSON Apple envelopes cannot restore without a pending intent", () => {

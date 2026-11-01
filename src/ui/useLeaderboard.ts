@@ -43,9 +43,8 @@ export const useLeaderboard = ({
     const storedUsername = storage.getUsername("");
     const storedEth = storage.getEthAddress("");
     const storedSol = storage.getSolAddress("");
-    const storedEmoji =
-      parseInt(String(storage.getPlayerEmojiId("1")), 10) || 1;
-    const storedAura = storage.getPlayerEmojiAura("") || undefined;
+    const storedEmoji = storage.getPlayerEmojiId(1);
+    const storedAura = storage.getPlayerEmojiAura("none");
     const storedMaterials = storage.getMiningMaterials(
       createEmptyMaterials(),
     ) as Record<MiningMaterialName, number>;
@@ -70,17 +69,21 @@ export const useLeaderboard = ({
       totalManaPoints:
         profile?.totalManaPoints ?? storage.getPlayerTotalManaPoints(0),
       cardBackgroundId:
-        profile?.cardBackgroundId ?? storage.getCardBackgroundId(0),
+        profile?.cardBackgroundId ?? storage.getCardBackgroundId(30),
       cardSubtitleId: profile?.cardSubtitleId ?? storage.getCardSubtitleId(0),
       profileCounter:
         profile?.profileCounter ?? storage.getProfileCounter("gp"),
-      profileMons: profile?.profileMons ?? storage.getProfileMons(""),
-      cardStickers: profile?.cardStickers ?? storage.getCardStickers(""),
+      profileMons: profile ? profile.profileMons : storage.getProfileMons(null),
+      cardStickers: profile?.cardStickers ?? storage.getCardStickers({}),
       username: profile?.username ?? (storedUsername ? storedUsername : null),
       eth: profile?.eth ?? (storedEth ? storedEth : null),
       sol: profile?.sol ?? (storedSol ? storedSol : null),
-      completedProblemIds: profile?.completedProblemIds,
-      isTutorialCompleted: profile?.isTutorialCompleted,
+      ...(profile?.completedProblemIds === undefined
+        ? {}
+        : { completedProblemIds: profile.completedProblemIds }),
+      ...(profile?.isTutorialCompleted === undefined
+        ? {}
+        : { isTutorialCompleted: profile.isTutorialCompleted }),
       mining: profile?.mining ?? storedMining,
     };
     return createLeaderboardEntry(mergedProfile);
@@ -139,7 +142,7 @@ export const useLeaderboard = ({
                   return prevData;
                 }
                 const newData = [...prevData];
-                newData[index] = { ...newData[index], ensName };
+                newData[index] = { ...newData[index]!, ensName };
                 leaderboardCache.set(activeLeaderboardType, newData);
                 return newData;
               });

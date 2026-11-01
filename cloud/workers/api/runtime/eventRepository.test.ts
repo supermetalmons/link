@@ -1,8 +1,18 @@
-import { eventIntentFixture } from "../test/transitionIntentFixture.ts";
+import { timerClaimFixture } from "../test/matchClaimFixture.ts";
+import { eventStatusFixture } from "../test/eventCompatibilityFixture.ts";
+import type { EventTransitionDraftInput } from "../../../runtime/eventTransitionRecords.js";
+import {
+  eventApplicationEnvironment,
+  activateEventApplicationFixture,
+} from "./eventApplicationFixture.ts";
+import { eventDraftFixture } from "../test/transitionIntentFixture.ts";
 import { matchDocumentFixture } from "../test/matchRecordFixture.ts";
-import { commitEventCompatibilityFixture } from "../test/eventCompatibilityFixture.ts";
+import {
+  commitEventCompatibilityFixture,
+  eventDocumentFixture,
+} from "../test/eventCompatibilityFixture.ts";
 import { captureLoginMatchDiscovery } from "../src/loginMatchDiscoveryD1.ts";
-import { decodeEventUpdates } from "../src/eventCompatibilityCodec.ts";
+import { decodeEventUpdates } from "../test/eventLegacyFixtureCodec.ts";
 import {
   eventMatchTestPort,
   readEventRepositoryFixture,
@@ -36,6 +46,7 @@ import {
   recoverEventTransitionIntents,
 } from "../src/eventRepository.ts";
 import { prepareInviteEventIntent } from "../src/inviteEventEffects.ts";
+import { eventIntentPayloadDigest } from "../src/eventTransitionCodec.ts";
 import {
   ensureEventTransitionReceipt,
   readEventTransitionReceipt,
@@ -46,11 +57,8 @@ import {
 } from "./eventTransitionTestFixture.ts";
 import { processEventProfileGameProjection } from "../src/profileGameProjection.ts";
 import { buildEventProfileGameProjectionOutboxUpdates } from "../test/legacyProjectionOutboxFixture.ts";
-import { sweepEventTelegramProjections } from "../src/eventTelegramProjection.ts";
-import { createEventProjectionRecoveryStore } from "../src/eventProjectionRecoveryD1.ts";
-import type { TelegramProjectionTask } from "../src/telegramProjectionTasks.ts";
 
-const testEnv = env as Env & {
+const testEnv = eventApplicationEnvironment(env) as Env & {
   TEST_D1_MIGRATIONS: D1Migration[];
   TEST_EVENT_D1_MIGRATIONS: D1Migration[];
 };
@@ -137,8 +145,8 @@ function notificationCreationEffects() {
 }
 
 function eventRecord(status = "scheduled", recordEventId = eventId) {
-  return {
-    schemaVersion: 2,
+  return eventDocumentFixture({
+    schemaVersion: 3,
     eventId: recordEventId,
     status,
     createdAtMs: 100,
@@ -148,13 +156,12 @@ function eventRecord(status = "scheduled", recordEventId = eventId) {
     createdByLoginUid: "login-one",
     createdByUsername: "ivan",
     participants: {},
-    rounds: {},
-  };
+  });
 }
 
 async function createPendingIntent(
-  intent: Extract<EventTransitionIntent, { schemaVersion: 1 }>,
-): Promise<Extract<EventTransitionIntent, { schemaVersion: 2 }>> {
+  intent: EventTransitionDraftInput,
+): Promise<EventTransitionIntent> {
   const prepared = await prepareInviteEventIntent(
     testEnv.PROFILE_GAMES_DB,
     intent,
@@ -186,6 +193,7 @@ describe("typed event repository", () => {
       testEnv.EVENT_DB,
       testEnv.TEST_EVENT_D1_MIGRATIONS,
     );
+    await activateEventApplicationFixture(testEnv.PROFILE_GAMES_DB);
   });
 
   beforeEach(async () => {
@@ -195,11 +203,13 @@ describe("typed event repository", () => {
       "durable",
     );
     await testEnv.PROFILE_GAMES_DB.batch([
-      testEnv.PROFILE_GAMES_DB.prepare("DELETE FROM invite_sources"),
+      testEnv.PROFILE_GAMES_DB.prepare("DELETE FROM invite_sources_canonical"),
       testEnv.PROFILE_GAMES_DB.prepare(
         "DELETE FROM invite_event_effect_receipts",
       ),
-      testEnv.PROFILE_GAMES_DB.prepare("DELETE FROM login_match_discovery"),
+      testEnv.PROFILE_GAMES_DB.prepare(
+        "DELETE FROM login_match_discovery_canonical",
+      ),
       testEnv.PROFILE_GAMES_DB.prepare(
         "DELETE FROM invite_source_write_admissions",
       ),
@@ -233,61 +243,61 @@ describe("typed event repository", () => {
     );
     await testEnv.EVENT_DB.batch([
       testEnv.EVENT_DB.prepare(
-        "UPDATE event_records SET pending_transition_id = NULL",
+        "UPDATE event_records_canonical SET pending_transition_id = NULL",
       ),
-      testEnv.EVENT_DB.prepare("DELETE FROM event_transition_intents"),
+      testEnv.EVENT_DB.prepare(
+        "DELETE FROM event_transition_intents_canonical",
+      ),
       testEnv.EVENT_DB.prepare("DELETE FROM event_leases"),
       testEnv.EVENT_DB.prepare("DELETE FROM event_write_admissions"),
-      testEnv.EVENT_DB.prepare("DELETE FROM event_progress_outboxes"),
-      testEnv.EVENT_DB.prepare("DELETE FROM event_records"),
-      testEnv.EVENT_DB.prepare("DELETE FROM profile_event_prize_revisions"),
+      testEnv.EVENT_DB.prepare("DELETE FROM event_progress_outboxes_canonical"),
+      testEnv.EVENT_DB.prepare("DELETE FROM event_records_canonical"),
+      testEnv.EVENT_DB.prepare(
+        "DELETE FROM profile_event_prize_revisions_canonical",
+      ),
     ]);
   });
 
-  it("retains malformed canonical intents without applying their effect entries", async () => {
+  it("rejects effects in canonical mutation arrays without applying them", async () => {
     const fixture = eventTransitionFixture(testEnv);
     await commitEventCompatibilityFixture(fixture.client, [
       { kind: "event", eventId, value: eventRecord() },
     ]);
     const before = await readEventSnapshot(testEnv.EVENT_DB, eventId);
     const canonicalUpdates = {
-      [`events/${eventId}/status`]: "active",
-      "players/host/matches/poison/timer": "gg",
+      ...eventStatusFixture(eventId, "active"),
+      "players/host/matches/poison/timer": { state: "finished" },
     };
-    const intent = await createPendingIntent(
-      eventIntentFixture({
-        schemaVersion: 1,
+    expect(() =>
+      eventDraftFixture({
+        schemaVersion: 3,
         transitionId: "malformed-canonical-effect",
         eventId,
         expectedRevision: before.revision,
         canonicalUpdates,
-        rtdbEffects: {},
+        effects: {},
         createdAtMs: 200,
         updatedAtMs: 200,
       }),
-    );
-    await expect(fixture.recover()).rejects.toThrow(
-      "event-transition-recovery-failed",
-    );
+    ).toThrow("unexpected-test-event-effect");
+    await expect(fixture.recover()).resolves.toBe(0);
     expect(await readEventSnapshot(testEnv.EVENT_DB, eventId)).toEqual(before);
     expect(fixture.writes).toEqual([]);
     expect(
       await readEventTransitionReceipt(
         testEnv.PROFILE_GAMES_DB,
-        intent.transitionId,
+        "malformed-canonical-effect",
       ),
     ).toBeNull();
     expect(
       await testEnv.PROFILE_GAMES_DB.prepare(
         "SELECT COUNT(*) AS count FROM invite_event_effect_receipts WHERE transition_id = ?",
       )
-        .bind(intent.transitionId)
+        .bind("malformed-canonical-effect")
         .first<number>("count"),
     ).toBe(0);
     const pending = await listPendingEventTransitionIntents(testEnv.EVENT_DB);
-    expect(pending).toHaveLength(1);
-    expect(pending[0].canonicalUpdates).toEqual(canonicalUpdates);
-    expect(pending[0].transitionId).toBe(intent.transitionId);
+    expect(pending).toHaveLength(0);
   });
 
   it("does not let admission release failures override D1 write outcomes", async () => {
@@ -327,12 +337,12 @@ describe("typed event repository", () => {
         }),
       );
       await expect(
-        commitEventCompatibilityFixture(
-          failedClient,
-          decodeEventUpdates({
-            [`events/${eventId}`]: { ...eventRecord(), status: "invalid" },
-          }),
-        ),
+        commitEventCompatibilityFixture(failedClient, [
+          Object.assign(
+            { kind: "event" as const, eventId, value: eventRecord() },
+            { value: { ...eventRecord(), status: "invalid" } },
+          ),
+        ]),
       ).rejects.toThrow("invalid-event-record");
       expect(
         await testEnv.EVENT_DB.prepare(
@@ -428,23 +438,23 @@ describe("typed event repository", () => {
       kind: "progress",
       method: "listDueEventProgressOutboxes",
       path: "eventProgressOutbox",
-      table: "event_progress_outboxes",
+      table: "event_progress_outboxes_canonical",
     },
     {
       kind: "profile-game",
       method: "listDueEventProfileGameProjectionOutboxes",
       path: "profileGameProjectionOutbox/event",
-      table: "event_profile_game_projection_outboxes",
+      table: "event_profile_game_projection_outboxes_canonical",
     },
     {
       kind: "telegram",
       method: "listDueEventTelegramProjectionOutboxes",
       path: "telegramProjectionOutbox/event",
-      table: "event_telegram_projection_outboxes",
+      table: "event_telegram_projection_outboxes_canonical",
     },
   ] as const)(
-    "lists raw due $kind outboxes through both event repositories",
-    async ({ kind, method, path, table }) => {
+    "lists canonical due $kind outboxes through both event repositories",
+    async ({ kind, method, path }) => {
       const getPath = vi.fn(async () => null);
       const client = createEventStateRepository(
         testEnv,
@@ -459,13 +469,13 @@ describe("typed event repository", () => {
         { id: "VOxalSrexcA", timestamp: 100 },
         { id: "FRkdorMWaYW", timestamp: 100 },
         { id: "oXAceF6anag", timestamp: 201 },
-        { id: "RpPjMNyrJJa", timestamp: 50 },
       ].map(({ id, timestamp }) => ({
         id,
         record:
           kind === "progress"
             ? {
-                schemaVersion: 1,
+                schemaVersion: 2,
+                dataEpoch: 1,
                 eventId: id,
                 sourceKey: `start:${id}:1000`,
                 reason: "scheduled-start",
@@ -500,18 +510,9 @@ describe("typed event repository", () => {
           ),
         ),
       );
-      const malformed = { status: "pending", unrecognized: "raw-record" };
-      await testEnv.EVENT_DB.batch([
-        testEnv.EVENT_DB.prepare(
-          `UPDATE ${table} SET record_json = ? WHERE event_id = ?`,
-        ).bind(JSON.stringify(malformed), rows[2].id),
-        testEnv.EVENT_DB.prepare(
-          `UPDATE ${table} SET status = 'dead' WHERE event_id = ?`,
-        ).bind(rows[4].id),
-      ]);
       const entries = [rows[2], rows[1], rows[0], rows[3]].map((row) => ({
-        ...(kind === "progress" ? { outboxId: row.id } : { eventId: row.id }),
-        record: row.id === rows[2].id ? malformed : row.record,
+        ...(kind === "progress" ? { outboxId: row!.id } : { eventId: row!.id }),
+        record: row!.record,
       }));
 
       for (const repository of [
@@ -568,7 +569,7 @@ describe("typed event repository", () => {
     expect(getPath).not.toHaveBeenCalled();
   });
 
-  it("quarantines malformed Telegram outboxes in D1 mode", async () => {
+  it("rejects malformed Telegram outboxes before they replace canonical work", async () => {
     const client = createEventStateRepository(
       testEnv,
       eventMatchTestPort({
@@ -577,66 +578,30 @@ describe("typed event repository", () => {
         transactPath: async () => ({ committed: false, value: null }),
       }),
     );
+    const outbox = {
+      schemaVersion: 1,
+      status: "pending",
+      requestId: "request-one",
+      firstQueuedAtMs: 100,
+      updatedAtMs: 100,
+    };
     await commitEventCompatibilityFixture(
       client,
       decodeEventUpdates({
         [`events/${eventId}`]: eventRecord(),
-        [`telegramProjectionOutbox/event/${eventId}`]: {
-          schemaVersion: 1,
-          status: "pending",
-          requestId: "request-one",
-          firstQueuedAtMs: 100,
-          updatedAtMs: 100,
-        },
+        [`telegramProjectionOutbox/event/${eventId}`]: outbox,
       }),
     );
-    const malformed = { status: "pending", updatedAtMs: 100 };
-    await testEnv.EVENT_DB.prepare(
-      `UPDATE event_telegram_projection_outboxes
-       SET record_json = ? WHERE event_id = ?`,
-    )
-      .bind(JSON.stringify(malformed), eventId)
-      .run();
-    const sendBatch = vi.fn(async () => ({
-      metadata: { metrics: { backlogBytes: 0, backlogCount: 0 } },
-    }));
-
     await expect(
-      sweepEventTelegramProjections(
-        { sendBatch } as unknown as Queue<TelegramProjectionTask>,
-        createEventProjectionRecoveryStore(testEnv.EVENT_DB, "telegram"),
-        200,
-      ),
-    ).resolves.toBe(0);
-    expect(sendBatch).not.toHaveBeenCalled();
-
-    const row = await testEnv.EVENT_DB.prepare(
-      `SELECT request_id, status, first_queued_at_ms, updated_at_ms, record_json
-       FROM event_telegram_projection_outboxes WHERE event_id = ?`,
-    )
-      .bind(eventId)
-      .first<{
-        first_queued_at_ms: number;
-        record_json: string;
-        request_id: string;
-        status: string;
-        updated_at_ms: number;
-      }>();
-    expect(row).toMatchObject({
-      request_id: eventId,
-      status: "dead",
-      first_queued_at_ms: 200,
-      updated_at_ms: 200,
-    });
-    expect(JSON.parse(row!.record_json)).toEqual({
-      status: "dead",
-      reason: "invalid-record",
-      updatedAtMs: null,
-      deadAtMs: 200,
-    });
-    await expect(
-      client.listDueEventTelegramProjectionOutboxes(200, 100),
-    ).resolves.toEqual([]);
+      testEnv.EVENT_DB.prepare(
+        "UPDATE event_telegram_projection_outboxes_canonical SET record_json = '{}' WHERE event_id = ?",
+      )
+        .bind(eventId)
+        .run(),
+    ).rejects.toThrow("invalid-canonical-event-projection");
+    expect(
+      await client.listDueEventTelegramProjectionOutboxes(200, 100),
+    ).toEqual([{ eventId, record: outbox }]);
   });
 
   it("pages mixed-case profile prize IDs in binary cursor order", async () => {
@@ -778,17 +743,17 @@ describe("typed event repository", () => {
         }),
       );
       await testEnv.EVENT_DB.prepare(
-        "UPDATE event_prize_selections SET prize_id = ? WHERE event_id = ? AND profile_id = ?",
+        "UPDATE event_prize_selections_canonical SET prize_id = ? WHERE event_id = ? AND profile_id = ?",
       )
         .bind("invalid#prize", eventId, "profile-one")
         .run();
       const readStoredState = async () => {
         const results = await testEnv.EVENT_DB.batch([
           testEnv.EVENT_DB.prepare(
-            "SELECT * FROM event_records WHERE event_id = ?",
+            "SELECT * FROM event_records_canonical WHERE event_id = ?",
           ).bind(eventId),
           testEnv.EVENT_DB.prepare(
-            "SELECT * FROM event_prize_selections WHERE event_id = ? ORDER BY profile_id",
+            "SELECT * FROM event_prize_selections_canonical WHERE event_id = ? ORDER BY profile_id",
           ).bind(eventId),
         ]);
         return results.map((result) => result.results);
@@ -798,7 +763,7 @@ describe("typed event repository", () => {
         commitEventCompatibilityFixture(
           f.client,
           decodeEventUpdates({
-            [`events/${eventId}/status`]: "active",
+            ...eventStatusFixture(eventId, "active"),
             [`events/${eventId}/updatedAtMs`]: 200,
             ...notificationCreationEffects(),
             ...(selectionChanges === "with" ? { [selectionPath]: "1092" } : {}),
@@ -815,13 +780,13 @@ describe("typed event repository", () => {
       }
       expect(
         await testEnv.EVENT_DB.prepare(
-          "SELECT COUNT(*) AS count FROM event_transition_intents",
+          "SELECT COUNT(*) AS count FROM event_transition_intents_canonical",
         ).first<number>("count"),
       ).toBe(0);
       for (const table of [
         "event_transition_receipts",
         "invite_event_effect_receipts",
-        "invite_sources",
+        "invite_sources_canonical",
       ]) {
         expect(
           await testEnv.PROFILE_GAMES_DB.prepare(
@@ -840,8 +805,8 @@ describe("typed event repository", () => {
     const commit = commitEventCompatibilityFixture(
       f.client,
       decodeEventUpdates({
-        [`events/${eventId}/status`]: "active",
-        "players/login-one/matches/event-match/timer": "gg",
+        ...eventStatusFixture(eventId, "active"),
+        "players/login-one/matches/event-match/timer": { state: "finished" },
       }),
       undefined,
       { upcomingEventId: eventId },
@@ -860,7 +825,7 @@ describe("typed event repository", () => {
     });
   });
 
-  it("replays a stored v2 intent with unchanged serialized effect keys and digest", async () => {
+  it("replays a canonical intent with typed effect records and verified digest", async () => {
     const f = eventTransitionFixture(testEnv);
     const timerPath = "players/login-one/matches/event-match/timer";
     await commitEventCompatibilityFixture(
@@ -868,34 +833,39 @@ describe("typed event repository", () => {
       decodeEventUpdates({ [`events/${eventId}`]: eventRecord() }),
     );
     const pending = await createPendingIntent(
-      eventIntentFixture({
-        schemaVersion: 1,
+      eventDraftFixture({
+        schemaVersion: 3,
         transitionId: "compatibility-transition",
         eventId,
         expectedRevision: 1,
         canonicalUpdates: {
-          [`events/${eventId}/status`]: "active",
+          ...eventStatusFixture(eventId, "active"),
           [`events/${eventId}/updatedAtMs`]: 200,
         },
-        rtdbEffects: { [timerPath]: "gg" },
+        effects: { [timerPath]: { state: "finished" } },
         createdAtMs: 200,
         updatedAtMs: 200,
       }),
     );
-    expect(pending.payloadDigest).toBe(
-      "6d1ec90c315e871b8614f55297b3bfd28f27d2fd947db2e390f9e8e532f0f1ba",
-    );
+    expect(pending.payloadDigest).toBe(await eventIntentPayloadDigest(pending));
+    expect(pending.operationDigest).toBe(pending.payloadDigest);
     const stored = await testEnv.EVENT_DB.prepare(
-      "SELECT intent_json FROM event_transition_intents WHERE transition_id = ?",
+      "SELECT intent_json FROM event_transition_intents_canonical WHERE transition_id = ?",
     )
       .bind(pending.transitionId)
       .first<string>("intent_json");
-    expect(stored).toContain(
-      '"rtdbEffects":{"players/login-one/matches/event-match/timer":"gg"}',
-    );
+    expect(stored).not.toContain('"rtdbEffects"');
+    expect(JSON.parse(stored!).effects).toEqual([
+      {
+        kind: "match-terminal-timer",
+        playerId: "login-one",
+        matchId: "event-match",
+        value: { state: "finished" },
+      },
+    ]);
     expect(JSON.parse(stored!)).toEqual(pending);
     expect(await f.recover()).toBe(1);
-    expect(f.values.get(timerPath)).toBe("gg");
+    expect(f.values.get(timerPath)).toEqual({ state: "finished" });
     expect(
       await readEventTransitionReceipt(
         testEnv.PROFILE_GAMES_DB,
@@ -910,7 +880,7 @@ describe("typed event repository", () => {
       revision: 2,
     });
     expect(await f.recover()).toBe(0);
-    expect(f.patches).toEqual([{ [timerPath]: "gg" }]);
+    expect(f.patches).toEqual([{ [timerPath]: { state: "finished" } }]);
   });
 
   it.each([
@@ -918,19 +888,19 @@ describe("typed event repository", () => {
       reverse: false,
       matchId: "event-match",
       expectedId:
-        "et_f667a523a2bec7bdf8661451294d4fbb859d822f9175f4938536d5bd0e6dc29c",
+        "et_dbf93390fea6f6c0783879b2e4b54cdf010d09361986e008c6e9661a01980955",
     },
     {
       reverse: true,
       matchId: "event-match",
       expectedId:
-        "et_f667a523a2bec7bdf8661451294d4fbb859d822f9175f4938536d5bd0e6dc29c",
+        "et_dbf93390fea6f6c0783879b2e4b54cdf010d09361986e008c6e9661a01980955",
     },
     {
       reverse: false,
       matchId: "other-match",
       expectedId:
-        "et_4427c6da685f3fcdb67f0c65b5d4c979acaea856d2961841a7ffa016bb2253de",
+        "et_e6a2b6b0368ac79c41e236d0489626f12143b38b17c4593a80664542c8ac7699",
     },
   ])(
     "preserves generated transition identity for $matchId, reversed=$reverse",
@@ -949,14 +919,14 @@ describe("typed event repository", () => {
         throw new Error("state-offline");
       };
       const effects = [
-        ["players/login-one/matches/event-match/timer", "gg"],
-        [`players/login-two/matches/${matchId}/timer`, "gg"],
+        ["players/login-one/matches/event-match/timer", { state: "finished" }],
+        [`players/login-two/matches/${matchId}/timer`, { state: "finished" }],
       ];
       await expect(
         commitEventCompatibilityFixture(
           f.client,
           decodeEventUpdates({
-            [`events/${eventId}/status`]: "active",
+            ...eventStatusFixture(eventId, "active"),
             ...Object.fromEntries(reverse ? effects.reverse() : effects),
           }),
         ),
@@ -964,8 +934,8 @@ describe("typed event repository", () => {
       const [pending] = await listPendingEventTransitionIntents(
         testEnv.EVENT_DB,
       );
-      expect(pending.transitionId).toBe(expectedId);
-      expect(pending.expectedRevision).toBe(1);
+      expect(pending!.transitionId).toBe(expectedId);
+      expect(pending!.expectedRevision).toBe(1);
     },
   );
 
@@ -973,7 +943,7 @@ describe("typed event repository", () => {
     const f = eventTransitionFixture(testEnv);
     const timerPath = "players/login-one/matches/event-match/timer";
     f.hooks.beforePatch = async () => {
-      f.hooks.beforePatch = undefined;
+      delete f.hooks.beforePatch;
       throw new Error("state-offline");
     };
     await commitEventCompatibilityFixture(
@@ -981,9 +951,9 @@ describe("typed event repository", () => {
       decodeEventUpdates({ [`events/${eventId}`]: eventRecord() }),
     );
     const update = {
-      [`events/${eventId}/status`]: "active",
+      ...eventStatusFixture(eventId, "active"),
       [`events/${eventId}/updatedAtMs`]: 200,
-      [timerPath]: "gg",
+      [timerPath]: { state: "finished" },
     };
     await expect(
       commitEventCompatibilityFixture(f.client, decodeEventUpdates(update)),
@@ -998,7 +968,7 @@ describe("typed event repository", () => {
       revision: 1,
     });
     const [pending] = await listPendingEventTransitionIntents(testEnv.EVENT_DB);
-    expect(pending.schemaVersion).toBe(2);
+    expect(pending!.schemaVersion).toBe(3);
     await expect(
       commitEventCompatibilityFixture(
         f.client,
@@ -1006,11 +976,14 @@ describe("typed event repository", () => {
       ),
     ).rejects.toThrow("event-transition-pending");
     await commitEventCompatibilityFixture(f.client, decodeEventUpdates(update));
-    expect(f.patches).toEqual([{ [timerPath]: "gg" }, { [timerPath]: "gg" }]);
+    expect(f.patches).toEqual([
+      { [timerPath]: { state: "finished" } },
+      { [timerPath]: { state: "finished" } },
+    ]);
     expect(
       await readEventTransitionReceipt(
         testEnv.PROFILE_GAMES_DB,
-        pending.transitionId,
+        pending!.transitionId,
       ),
     ).toMatchObject({ schemaVersion: 2, eventId, expectedRevision: 1 });
     expect(await readEventSnapshot(testEnv.EVENT_DB, eventId)).toMatchObject({
@@ -1047,19 +1020,21 @@ describe("typed event repository", () => {
         { kind: "event", eventId, value: eventRecord() },
       ]);
       const updates = {
-        [`events/${eventId}/status`]: "active",
-        "players/login-one/matches/event-match/timer": "gg",
+        ...eventStatusFixture(eventId, "active"),
+        "players/login-one/matches/event-match/timer": { state: "finished" },
       };
       if (mode === "recovery") {
         await createPendingIntent(
-          eventIntentFixture({
-            schemaVersion: 1,
+          eventDraftFixture({
+            schemaVersion: 3,
             transitionId: "post-commit-recovery",
             eventId,
             expectedRevision: 1,
-            canonicalUpdates: { [`events/${eventId}/status`]: "active" },
-            rtdbEffects: {
-              "players/login-one/matches/event-match/timer": "gg",
+            canonicalUpdates: { ...eventStatusFixture(eventId, "active") },
+            effects: {
+              "players/login-one/matches/event-match/timer": {
+                state: "finished",
+              },
             },
             createdAtMs: 200,
             updatedAtMs: 200,
@@ -1099,7 +1074,7 @@ describe("typed event repository", () => {
         ).toBe(0);
         expect(
           f.values.get("players/login-one/matches/event-match/timer"),
-        ).toBe("gg");
+        ).toEqual({ state: "finished" });
         if (mode === "scheduled") {
           await work;
           expect(scheduled).toHaveLength(1);
@@ -1132,7 +1107,7 @@ describe("typed event repository", () => {
       } else {
         await testEnv.EVENT_DB.prepare(
           `CREATE TRIGGER event_notification_test_commit_failure
-          BEFORE UPDATE ON event_records WHEN NEW.revision > OLD.revision
+          BEFORE UPDATE ON event_records_canonical WHEN NEW.revision > OLD.revision
           BEGIN SELECT RAISE(ABORT, 'canonical-commit-failed'); END`,
         ).run();
       }
@@ -1141,8 +1116,10 @@ describe("typed event repository", () => {
           commitEventCompatibilityFixture(
             f.client,
             decodeEventUpdates({
-              [`events/${eventId}/status`]: "active",
-              "players/login-one/matches/event-match/timer": "gg",
+              ...eventStatusFixture(eventId, "active"),
+              "players/login-one/matches/event-match/timer": {
+                state: "finished",
+              },
             }),
           ),
         ).rejects.toThrow();
@@ -1157,7 +1134,7 @@ describe("typed event repository", () => {
           await listPendingEventTransitionIntents(testEnv.EVENT_DB),
         ).toHaveLength(1);
       } finally {
-        f.hooks.beforePatch = undefined;
+        delete f.hooks.beforePatch;
         if (failure === "commit")
           await testEnv.EVENT_DB.prepare(
             "DROP TRIGGER event_notification_test_commit_failure",
@@ -1209,8 +1186,10 @@ describe("typed event repository", () => {
           commitEventCompatibilityFixture(
             client,
             decodeEventUpdates({
-              [`events/${eventId}/status`]: "active",
-              "players/login-one/matches/event-match/timer": "gg",
+              ...eventStatusFixture(eventId, "active"),
+              "players/login-one/matches/event-match/timer": {
+                state: "finished",
+              },
             }),
           ),
         ).resolves.toBeUndefined();
@@ -1264,21 +1243,21 @@ describe("typed event repository", () => {
       const effects = {
         ...notificationCreationEffects(),
         "matchTimerClaims/event-match1": claim("event-match"),
-        "players/login-one/matches/event-match1/timer": "gg",
+        "players/login-one/matches/event-match1/timer": { state: "finished" },
         "matchTimerClaims/claim-match": claim("claim-invite"),
-        "players/login-one/matches/claim-match/timer": "gg",
-        "players/login-one/matches/terminal-match/timer": "gg",
+        "players/login-one/matches/claim-match/timer": { state: "finished" },
+        "players/login-one/matches/terminal-match/timer": { state: "finished" },
       };
-      const canonicalUpdates = { [`events/${eventId}/status`]: "active" };
+      const canonicalUpdates = { ...eventStatusFixture(eventId, "active") };
       if (mode === "recovery") {
         await createPendingIntent(
-          eventIntentFixture({
-            schemaVersion: 1,
+          eventDraftFixture({
+            schemaVersion: 3,
             transitionId: "deduplicated-notifications",
             eventId,
             expectedRevision: 1,
             canonicalUpdates,
-            rtdbEffects: effects,
+            effects: effects,
             createdAtMs: 200,
             updatedAtMs: 200,
           }),
@@ -1341,7 +1320,7 @@ describe("typed event repository", () => {
                     return (sql: string) => {
                       if (
                         sql ===
-                        "SELECT invite_id, resolution FROM login_match_discovery WHERE login_uid = ? AND match_id = ?"
+                        "SELECT invite_id, resolution FROM login_match_discovery_canonical WHERE login_uid = ? AND match_id = ?"
                       ) {
                         return new Proxy(reader.prepare(sql), {
                           get(statement, operation) {
@@ -1394,7 +1373,7 @@ describe("typed event repository", () => {
         await commitEventCompatibilityFixture(
           client,
           decodeEventUpdates({
-            [`events/${eventId}/status`]: "active",
+            ...eventStatusFixture(eventId, "active"),
             ...notificationCreationEffects(),
           }),
         );
@@ -1431,15 +1410,18 @@ describe("typed event repository", () => {
       opponentId: "login-two",
       status: "claimed",
       claimedAtMs: 200,
+      timer: "1;90",
+      turnNumber: 1,
+      expiresAtMs: null,
     };
     await createPendingIntent(
-      eventIntentFixture({
-        schemaVersion: 1,
+      eventDraftFixture({
+        schemaVersion: 3,
         transitionId: "claim-notification",
         eventId,
         expectedRevision: 1,
-        canonicalUpdates: { [`events/${eventId}/status`]: "active" },
-        rtdbEffects: { "matchTimerClaims/claim-match": claim },
+        canonicalUpdates: { ...eventStatusFixture(eventId, "active") },
+        effects: { "matchTimerClaims/claim-match": claim },
         createdAtMs: 200,
         updatedAtMs: 200,
       }),
@@ -1448,7 +1430,9 @@ describe("typed event repository", () => {
       recoverEventTransitionIntents(scopedEnv, 100, f.raw),
     ).resolves.toBe(1);
     expect(notify).toHaveBeenCalledWith("claim-invite");
-    expect(f.values.get("matchTimerClaims/claim-match")).toEqual(claim);
+    expect(f.values.get("matchTimerClaims/claim-match")).toEqual(
+      timerClaimFixture(claim),
+    );
   });
 
   it("preserves advanced matches after an ambiguous creation commit", async () => {
@@ -1456,7 +1440,7 @@ describe("typed event repository", () => {
     const matchPath = "players/login-one/matches/event-match";
     f.hooks.afterTransaction = async (path) => {
       if (path !== matchPath) return;
-      f.hooks.afterTransaction = undefined;
+      delete f.hooks.afterTransaction;
       throw new Error("ambiguous-state-commit");
     };
     await commitEventCompatibilityFixture(
@@ -1467,7 +1451,7 @@ describe("typed event repository", () => {
       commitEventCompatibilityFixture(
         f.client,
         decodeEventUpdates({
-          [`events/${eventId}/status`]: "active",
+          ...eventStatusFixture(eventId, "active"),
           [`events/${eventId}/updatedAtMs`]: 200,
           "invites/event-match": {
             eventId,
@@ -1519,8 +1503,10 @@ describe("typed event repository", () => {
       decodeEventUpdates({ [`events/${eventId}`]: eventRecord() }),
     );
     const update = {
-      [`events/${eventId}/status`]: "active",
-      "players/login-one/matches/serialized-transition/timer": "gg",
+      ...eventStatusFixture(eventId, "active"),
+      "players/login-one/matches/serialized-transition/timer": {
+        state: "finished",
+      },
     };
     const first = commitEventCompatibilityFixture(
       f.client,
@@ -1554,15 +1540,17 @@ describe("typed event repository", () => {
         }),
       );
       await createPendingIntent(
-        eventIntentFixture({
-          schemaVersion: 1,
+        eventDraftFixture({
+          schemaVersion: 3,
           transitionId,
           eventId: targetEventId,
           expectedRevision: 1,
-          rtdbEffects: {
-            [`players/login-one/matches/${transitionId}/timer`]: "gg",
+          effects: {
+            [`players/login-one/matches/${transitionId}/timer`]: {
+              state: "finished",
+            },
           },
-          canonicalUpdates: { [`events/${targetEventId}/status`]: "active" },
+          canonicalUpdates: { ...eventStatusFixture(targetEventId, "active") },
           createdAtMs: 200,
           updatedAtMs: 200,
         }),
@@ -1606,15 +1594,17 @@ describe("typed event repository", () => {
       decodeEventUpdates({ [`events/${eventId}`]: eventRecord() }),
     );
     const intent = await createPendingIntent(
-      eventIntentFixture({
-        schemaVersion: 1,
+      eventDraftFixture({
+        schemaVersion: 3,
         transitionId: "conflicting-receipt",
         eventId,
         expectedRevision: 1,
-        rtdbEffects: {
-          "players/login-one/matches/conflicting-receipt/timer": "gg",
+        effects: {
+          "players/login-one/matches/conflicting-receipt/timer": {
+            state: "finished",
+          },
         },
-        canonicalUpdates: { [`events/${eventId}/status`]: "active" },
+        canonicalUpdates: { ...eventStatusFixture(eventId, "active") },
         createdAtMs: 200,
         updatedAtMs: 200,
       }),
@@ -1656,15 +1646,17 @@ describe("typed event repository", () => {
         }),
       );
       await createPendingIntent(
-        eventIntentFixture({
-          schemaVersion: 1,
+        eventDraftFixture({
+          schemaVersion: 3,
           transitionId,
           eventId: targetEventId,
           expectedRevision: 1,
-          rtdbEffects: {
-            [`players/login-one/matches/${transitionId}/timer`]: "gg",
+          effects: {
+            [`players/login-one/matches/${transitionId}/timer`]: {
+              state: "finished",
+            },
           },
-          canonicalUpdates: { [`events/${targetEventId}/status`]: "active" },
+          canonicalUpdates: { ...eventStatusFixture(targetEventId, "active") },
           createdAtMs: 200,
           updatedAtMs: 200,
         }),
@@ -1723,15 +1715,17 @@ describe("typed event repository", () => {
       decodeEventUpdates({ [`events/${eventId}`]: eventRecord() }),
     );
     await createPendingIntent(
-      eventIntentFixture({
-        schemaVersion: 1,
+      eventDraftFixture({
+        schemaVersion: 3,
         transitionId: "admitted-recovery",
         eventId,
         expectedRevision: 1,
-        rtdbEffects: {
-          "players/login-one/matches/admitted-recovery/timer": "gg",
+        effects: {
+          "players/login-one/matches/admitted-recovery/timer": {
+            state: "finished",
+          },
         },
-        canonicalUpdates: { [`events/${eventId}/status`]: "active" },
+        canonicalUpdates: { ...eventStatusFixture(eventId, "active") },
         createdAtMs: 200,
         updatedAtMs: 200,
       }),
@@ -1771,17 +1765,20 @@ describe("typed event repository", () => {
     });
   });
 
-  it("publishes mixed progress outboxes and timer effects with a D1 receipt", async () => {
+  it("publishes progress and decodes historical timer cleanup with the retired D1 timer table absent", async () => {
     const f = eventTransitionFixture(testEnv);
-    await testEnv.PROFILE_GAMES_DB.prepare(
-      "INSERT INTO match_timer_starts(player_id,match_id,timer,turn_number,updated_at_ms) VALUES ('match-one','login-one','timer',0,100)",
-    ).run();
+    expect(
+      await testEnv.PROFILE_GAMES_DB.prepare(
+        "SELECT COUNT(*) AS count FROM sqlite_schema WHERE type = 'table' AND name = 'match_timer_starts_canonical'",
+      ).first<number>("count"),
+    ).toBe(0);
     await commitEventCompatibilityFixture(
       f.client,
       decodeEventUpdates({ [`events/${eventId}`]: eventRecord() }),
     );
     const outbox = {
-      schemaVersion: 1,
+      schemaVersion: 2,
+      dataEpoch: 1,
       eventId,
       sourceKey: "timer:invite-one:match-one",
       reason: "timer-claimed",
@@ -1799,7 +1796,7 @@ describe("typed event repository", () => {
     expect(f.patches).toEqual([]);
     expect(
       await testEnv.PROFILE_GAMES_DB.prepare(
-        "SELECT COUNT(*) AS count FROM match_timer_starts WHERE player_id='match-one' AND match_id='login-one'",
+        "SELECT COUNT(*) AS count FROM sqlite_schema WHERE type = 'table' AND name = 'match_timer_starts_canonical'",
       ).first<number>("count"),
     ).toBe(0);
     const row = await testEnv.PROFILE_GAMES_DB.prepare(
@@ -1837,16 +1834,14 @@ describe("typed event repository", () => {
       "/eventTransitionReceipts/receipt/expectedRevision/",
     ]) {
       expect(() => decodeEventUpdates({ [path]: null })).toThrow(
-        path.startsWith("/") ? "invalid-event-path" : "unsupported-event-path",
+        "unsupported-test-event-path",
       );
       expect(() =>
         decodeEventUpdates({
           [`events/${eventId}`]: eventRecord(),
           [path]: {},
         }),
-      ).toThrow(
-        path.startsWith("/") ? "invalid-event-path" : "unsupported-event-path",
-      );
+      ).toThrow("unsupported-test-event-path");
     }
   });
 
@@ -2014,10 +2009,9 @@ describe("typed event repository", () => {
       place: 1 as const,
       prizeId: "retired-prize",
       assignedAtMs: 2_000,
-      archivedMetadata: { edition: 1 },
     };
     await testEnv.EVENT_DB.prepare(
-      `INSERT INTO profile_event_prizes (
+      `INSERT INTO profile_event_prizes_canonical (
          profile_id, event_id, assignment_json, updated_at_ms
        ) VALUES (?, ?, ?, ?)`,
     )
@@ -2177,7 +2171,7 @@ describe("typed event repository", () => {
           playerId: "login-one",
           matchId: "match-one",
         }),
-      ).toEqual({ fen: "initial" });
+      ).toEqual(matchDocumentFixture({ fen: "initial" }));
       expect(readMatchRecord).toHaveBeenCalledExactlyOnceWith({
         playerId: "login-one",
         matchId: "match-one",

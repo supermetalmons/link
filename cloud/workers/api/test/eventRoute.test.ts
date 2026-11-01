@@ -753,7 +753,7 @@ function snapshotSeed(): EventSnapshotSeed {
       ok: true,
       eventId: "event-1",
       revision: 3,
-      event: { eventId: "event-1", status: "scheduled" },
+      event: eventDocumentFixture({ eventId: "event-1", status: "scheduled" }),
       prizeSelections: {},
     },
     etag: eventSnapshotEtag("event-1", 3),
@@ -774,10 +774,9 @@ function syncRouteFixture() {
     return {
       committed: true,
       value: decision.value,
-      decision:
-        "decision" in decision && typeof decision.decision === "string"
-          ? decision.decision
-          : undefined,
+      ...("decision" in decision && typeof decision.decision === "string"
+        ? { decision: decision.decision }
+        : {}),
     };
   };
   const request = (query = "eventSnapshot=v1") =>
@@ -827,9 +826,9 @@ test("opted-in event sync reads a full seed after operation and lock release", a
     /^event_snapshot;dur=\d+$/,
   );
   assert.equal(timingLogs.length, 1);
-  assert.equal(timingLogs[0].operation, "/events/state/sync");
-  assert.equal(timingLogs[0].status, 200);
-  assert.ok((timingLogs[0].d1 as { calls: number }).calls > 0);
+  assert.equal(timingLogs[0]!.operation, "/events/state/sync");
+  assert.equal(timingLogs[0]!.status, 200);
+  assert.ok((timingLogs[0]!.d1 as { calls: number }).calls > 0);
   assert.equal(JSON.stringify(timingLogs).includes("event-1"), false);
 });
 
@@ -880,16 +879,9 @@ test("event sync keeps exact legacy responses without opt-in or when skipped", a
   });
 });
 
-test("event sync enrichment failures and combined overflow preserve successful responses", async () => {
-  for (const overflow of [false, true]) {
+test("event sync enrichment failures and malformed snapshots preserve successful responses", async () => {
+  for (const malformed of [false, true]) {
     const h = syncRouteFixture();
-    const originalRead = h.repository.readEvent;
-    if (overflow)
-      h.repository.readEvent = async (eventId, signal) =>
-        eventDocumentFixture({
-          ...(await originalRead(eventId, signal)),
-          padding: "x".repeat(350 * 1024),
-        });
     const response = await handleEventRoute(
       h.request(),
       TELEGRAM_TEST_ENV,
@@ -897,7 +889,7 @@ test("event sync enrichment failures and combined overflow preserve successful r
       {
         ...h.dependencies,
         readEventSnapshotSeed: async () => {
-          if (!overflow) throw new Error("read-after-success-failed");
+          if (!malformed) throw new Error("read-after-success-failed");
           const seed = snapshotSeed();
           seed.snapshot.event = Object.assign({}, seed.snapshot.event!, {
             padding: "x".repeat(350 * 1024),

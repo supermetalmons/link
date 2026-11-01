@@ -46,8 +46,8 @@ function readRoute(
   let inviteId = "";
   let matchId = "";
   try {
-    inviteId = match ? decodeURIComponent(match[1]) : "";
-    matchId = match ? decodeURIComponent(match[2]) : "";
+    inviteId = match ? decodeURIComponent(match[1]!) : "";
+    matchId = match ? decodeURIComponent(match[2]!) : "";
   } catch {
     throw new AuthApiFailure(400, "invalid-argument", "invalid-match-id");
   }

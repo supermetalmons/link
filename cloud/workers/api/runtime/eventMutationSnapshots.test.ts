@@ -1,4 +1,4 @@
-import { readEventTelegramProjectionDocument } from "../../../runtime/telegram/eventProjectionRecords.js";
+import { eventProjectionStateFixture as readEventTelegramProjectionDocument } from "../test/eventProjectionFixture.ts";
 import { eventIntentFixture } from "../test/transitionIntentFixture.ts";
 import { eventDocumentFixture } from "../test/eventCompatibilityFixture.ts";
 import { env } from "cloudflare:workers";
@@ -24,7 +24,7 @@ const profileId = "profile-one";
 
 function eventRecord(id = eventId) {
   return eventDocumentFixture({
-    schemaVersion: 2,
+    schemaVersion: 3,
     eventId: id,
     status: "scheduled",
     createdAtMs: 100,
@@ -32,7 +32,6 @@ function eventRecord(id = eventId) {
     startAtMs: 1_000,
     participants: {},
     rounds: {},
-    unknownFutureField: { retained: true },
   });
 }
 
@@ -138,7 +137,7 @@ async function seed() {
     {
       kind: "telegram-state",
       eventId,
-      value: readEventTelegramProjectionDocument({ retained: true }),
+      value: readEventTelegramProjectionDocument({ upcomingText: "retained" }),
     },
     { kind: "telegram-generation", eventId, value: 1 },
   ]);
@@ -149,7 +148,7 @@ function mixedPlan(
   progress: Awaited<ReturnType<typeof seed>>,
 ): EventMutation[] {
   return [
-    { kind: "event-field", eventId, field: "status", value: "active" },
+    { kind: "event-field", eventId, field: "isSundayMons", value: true },
     { kind: "event-field", eventId, field: "updatedAtMs", value: 300 },
     { kind: "prize-selection", eventId, profileId, value: "1514" },
     {
@@ -169,8 +168,8 @@ function mixedPlan(
       kind: "telegram-state",
       eventId,
       value: readEventTelegramProjectionDocument({
-        retained: true,
-        updated: true,
+        upcomingText: "retained",
+        startedText: "updated",
       }),
     },
   ];
@@ -178,12 +177,12 @@ function mixedPlan(
 
 async function readStorage() {
   const tables = [
-    "event_records",
-    "event_prize_selections",
-    "event_progress_outboxes",
-    "event_profile_game_projection_outboxes",
-    "event_telegram_projection_state",
-    "event_transition_intents",
+    "event_records_canonical",
+    "event_prize_selections_canonical",
+    "event_progress_outboxes_canonical",
+    "event_profile_game_projection_outboxes_canonical",
+    "event_telegram_projection_state_canonical",
+    "event_transition_intents_canonical",
   ];
   return (
     await testEnv.EVENT_DB.batch(
@@ -205,11 +204,13 @@ describe("event mutation snapshot batches", () => {
   beforeEach(async () => {
     await testEnv.EVENT_DB.batch([
       testEnv.EVENT_DB.prepare(
-        "UPDATE event_records SET pending_transition_id = NULL",
+        "UPDATE event_records_canonical SET pending_transition_id = NULL",
       ),
-      testEnv.EVENT_DB.prepare("DELETE FROM event_transition_intents"),
+      testEnv.EVENT_DB.prepare(
+        "DELETE FROM event_transition_intents_canonical",
+      ),
       testEnv.EVENT_DB.prepare("DELETE FROM event_write_admissions"),
-      testEnv.EVENT_DB.prepare("DELETE FROM event_records"),
+      testEnv.EVENT_DB.prepare("DELETE FROM event_records_canonical"),
     ]);
   });
 
@@ -223,9 +224,8 @@ describe("event mutation snapshot batches", () => {
     expect(await readEventSnapshot(testEnv.EVENT_DB, eventId)).toMatchObject({
       revision: 2,
       event: {
-        status: "active",
+        isSundayMons: true,
         updatedAtMs: 300,
-        unknownFutureField: { retained: true },
       },
       prizeSelections: { [profileId]: "1514" },
     });
@@ -234,11 +234,14 @@ describe("event mutation snapshot batches", () => {
     ).toEqual({
       revision: 2,
       generation: 2,
-      state: { retained: true, updated: true },
+      state: readEventTelegramProjectionDocument({
+        upcomingText: "retained",
+        startedText: "updated",
+      }),
     });
     expect(
       await testEnv.EVENT_DB.prepare(
-        "SELECT record_json FROM event_profile_game_projection_outboxes WHERE event_id = ?",
+        "SELECT record_json FROM event_profile_game_projection_outboxes_canonical WHERE event_id = ?",
       )
         .bind(eventId)
         .first("record_json"),
@@ -289,7 +292,7 @@ describe("event mutation snapshot batches", () => {
         expect(observed.writeBatches).toHaveLength(1);
         expect(
           await testEnv.EVENT_DB.prepare(
-            "SELECT count(*) AS count FROM event_records WHERE revision = 2 AND updated_at_ms = 300",
+            "SELECT count(*) AS count FROM event_records_canonical WHERE revision = 2 AND updated_at_ms = 300",
           ).first("count"),
         ).toBe(41);
       }
@@ -315,19 +318,19 @@ describe("event mutation snapshot batches", () => {
           if (attempt !== 1) return;
           if (race === "event revision") {
             await testEnv.EVENT_DB.prepare(
-              "UPDATE event_records SET revision = revision + 1 WHERE event_id = ?",
+              "UPDATE event_records_canonical SET revision = revision + 1 WHERE event_id = ?",
             )
               .bind(eventId)
               .run();
           } else if (race === "raw progress JSON") {
             await testEnv.EVENT_DB.prepare(
-              "UPDATE event_progress_outboxes SET record_json = ? WHERE outbox_id = ? AND status = 'pending'",
+              "UPDATE event_progress_outboxes_canonical SET record_json = ? WHERE outbox_id = ? AND status = 'pending'",
             )
               .bind(JSON.stringify(progress.outbox, null, 2), progress.outboxId)
               .run();
           } else if (race === "Telegram revision") {
             await testEnv.EVENT_DB.prepare(
-              "UPDATE event_telegram_projection_state SET revision = revision + 1 WHERE event_id = ?",
+              "UPDATE event_telegram_projection_state_canonical SET revision = revision + 1 WHERE event_id = ?",
             )
               .bind(eventId)
               .run();
@@ -336,12 +339,12 @@ describe("event mutation snapshot batches", () => {
               createEventTransitionIntent(
                 testEnv.EVENT_DB,
                 eventIntentFixture({
-                  schemaVersion: 1,
+                  schemaVersion: 3,
                   transitionId: "concurrent-transition",
                   eventId,
                   expectedRevision: 1,
                   canonicalUpdates: {},
-                  rtdbEffects: {},
+                  effects: {},
                   createdAtMs: 200,
                   updatedAtMs: 200,
                 }),
@@ -362,25 +365,24 @@ describe("event mutation snapshot batches", () => {
     },
   );
 
-  it("does not load unrelated malformed records and rejects a required malformed event before writing", async () => {
+  it("rejects malformed outbox writes and loads only required event state", async () => {
     await seed();
-    await testEnv.EVENT_DB.batch([
+    await expect(
       testEnv.EVENT_DB.prepare(
-        "UPDATE event_profile_game_projection_outboxes SET record_json = '{}'",
-      ),
-      testEnv.EVENT_DB.prepare(
-        "INSERT INTO profile_event_prizes (profile_id, event_id, assignment_json, updated_at_ms) VALUES (?, ?, '{}', 100)",
-      ).bind(profileId, eventId),
-    ]);
+        "UPDATE event_profile_game_projection_outboxes_canonical SET record_json = '{}'",
+      ).run(),
+    ).rejects.toThrow("invalid-canonical-event-projection");
     const changes: EventMutation[] = [
       { kind: "event-field", eventId, field: "updatedAtMs", value: 300 },
     ];
     const observed = observeReads();
     await commit(observed.db, changes);
     expect(observed.readBatches.map((batch) => batch.length)).toEqual([1]);
-    expect(observed.readBatches[0][0]).toContain("FROM event_records");
+    expect(observed.readBatches[0]![0]!).toContain(
+      "FROM event_records_canonical",
+    );
     await testEnv.EVENT_DB.prepare(
-      "UPDATE event_records SET record_json = '{}' WHERE event_id = ?",
+      "UPDATE event_records_canonical SET record_json = json_set(record_json, '$.participants', json('{\"invalid\":null}')) WHERE event_id = ?",
     )
       .bind(eventId)
       .run();

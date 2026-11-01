@@ -1,12 +1,17 @@
+import { publicMatchFixture } from "../test/matchRecordFixture.ts";
+import { inviteDocumentFixture } from "../test/inviteDocumentFixture.ts";
+import {
+  evictCanonicalMatchRoom as evictDurableObject,
+  runCanonicalMatchAlarm as runDurableObjectAlarm,
+} from "./canonicalMatchTestFixture.ts";
+import { canonicalMatchEnvironment } from "./canonicalMatchTestFixture.ts";
+import { activateCanonicalApplicationFixture } from "./applicationRoomFixture.ts";
+import { runInCanonicalMatchRoom as runInDurableObject } from "./canonicalMatchTestFixture.ts";
 import { matchDocumentFixture } from "../test/matchRecordFixture.ts";
 import { socketTestSessionHeaders } from "../test/socketTestSession.ts";
-import { env } from "cloudflare:workers";
-import {
-  evictDurableObject,
-  runDurableObjectAlarm,
-  runInDurableObject,
-} from "cloudflare:test";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { env as nativeEnv } from "cloudflare:workers";
+
+import { beforeAll, afterEach, describe, expect, it, vi } from "vitest";
 import {
   MATCH_SYNC_REFRESH_MS,
   MATCH_SYNC_SOCKET_PROTOCOL,
@@ -29,6 +34,7 @@ import {
   MAX_CACHED_MATCH_SYNC_STATES,
 } from "../src/matchSyncRoom.ts";
 import { GameSessionTransitionFailure } from "../src/gameSessionCodec.ts";
+const env = canonicalMatchEnvironment(nativeEnv);
 
 type Room = DurableObjectStub<InviteReactions>;
 type SyncReader = (
@@ -55,7 +61,7 @@ const match = matchDocumentFixture({
   version: 2,
   color: "white",
   emojiId: 1,
-  aura: "",
+  aura: "none" as const,
   gameVariant: "standard",
   fen: "initial",
   status: "",
@@ -90,7 +96,7 @@ async function install(room: Room, source: Source) {
     };
     mutable.inviteReader = async () => {
       source.metadataReads++;
-      return structuredClone(source.invite);
+      return inviteDocumentFixture(structuredClone(source.invite));
     };
     mutable.wagerReader = async () => {
       source.wagerReads++;
@@ -137,7 +143,7 @@ async function fixture(paired = true) {
     matches: new Map([
       [
         `host-login/${inviteId}`,
-        matchDocumentFixture({ ...match, sessionCreation: { private: true } }),
+        matchDocumentFixture({ ...match, sessionCreation: "private" }),
       ],
       ...(paired
         ? [
@@ -288,7 +294,7 @@ describe("live match snapshots", () => {
           expect(
             state.storage.sql
               .exec<{ match_id: string; next_at_ms: number }>(
-                "SELECT match_id, next_at_ms FROM match_sync_snapshots ORDER BY match_id",
+                "SELECT match_id, next_at_ms FROM match_sync_snapshots_canonical ORDER BY match_id",
               )
               .toArray(),
           ).toEqual(
@@ -326,7 +332,7 @@ describe("live match snapshots", () => {
           await instance.notifyMatchesChanged(
             inviteId,
             targets === "explicit"
-              ? [...subscribedIds, subscribedIds[0], idleMatchId]
+              ? [...subscribedIds, subscribedIds[0]!, idleMatchId]
               : undefined,
           );
           expect(
@@ -334,7 +340,7 @@ describe("live match snapshots", () => {
           ).toHaveLength(1);
           const scheduled = state.storage.sql
             .exec<{ match_id: string; next_at_ms: number | null }>(
-              "SELECT match_id, next_at_ms FROM match_sync_snapshots ORDER BY match_id",
+              "SELECT match_id, next_at_ms FROM match_sync_snapshots_canonical ORDER BY match_id",
             )
             .toArray();
           expect(scheduled).toEqual([
@@ -416,8 +422,8 @@ describe("live match snapshots", () => {
           const second = instance.readMatches(inviteId, inviteId);
           release();
           const results = await Promise.all([first, second]);
-          expect(results[0]).toEqual(results[1]);
-          expect(results[0]).toMatchObject({
+          expect(results[0]!).toEqual(results[1]!);
+          expect(results[0]!).toMatchObject({
             status: "ok",
             snapshot: { revision: 1, hostMatch: { fen: "initial" } },
           });
@@ -468,7 +474,7 @@ describe("live match snapshots", () => {
       ).matchSync.states.size,
       persisted: state.storage.sql
         .exec<{ count: number }>(
-          "SELECT COUNT(*) AS count FROM match_sync_snapshots",
+          "SELECT COUNT(*) AS count FROM match_sync_snapshots_canonical",
         )
         .one().count,
     }));
@@ -518,8 +524,8 @@ describe("live match snapshots", () => {
         const second = instance.readMatches(inviteId, inviteId);
         release();
         const results = await Promise.all([first, second]);
-        expect(results[0]).toEqual(results[1]);
-        expect(results[0]).toMatchObject({
+        expect(results[0]!).toEqual(results[1]!);
+        expect(results[0]!).toMatchObject({
           status: "ok",
           snapshot: { revision: 1, hostMatch: { fen: "newest" } },
         });
@@ -598,7 +604,7 @@ describe("live match snapshots", () => {
       if (changed === "match") {
         setMatch(source, `host-login/${inviteId}`, {
           ...match,
-          sessionCreation: { private: "changed" },
+          sessionCreation: "private-changed",
         });
       } else if (changed === "metadata") {
         source.invite.hostRematches = "1";
@@ -740,9 +746,9 @@ describe("live match snapshots", () => {
           const second = instance.readMatches(inviteId, inviteId);
           release.resolve();
           const results = await Promise.all([first, second]);
-          expect(results[0]).toEqual(results[1]);
-          expect(results[0]).not.toEqual(initial);
-          expect(results[0]).toMatchObject({
+          expect(results[0]!).toEqual(results[1]!);
+          expect(results[0]!).not.toEqual(initial);
+          expect(results[0]!).toMatchObject({
             snapshot: { revision: 2, hostMatch: { fen: "newest" } },
           });
         } finally {
@@ -859,10 +865,21 @@ describe("live match snapshots", () => {
       const blocked = new Promise<void>((resolve) => (release = resolve));
       const mutable = instance as unknown as {
         inviteReader: () => Promise<unknown>;
+        inviteChannels: { invalidate(): void };
       };
+      const invalidated = Promise.withResolvers<void>();
+      const invalidate = mutable.inviteChannels.invalidate.bind(
+        mutable.inviteChannels,
+      );
+      vi.spyOn(mutable.inviteChannels, "invalidate").mockImplementationOnce(
+        () => {
+          invalidate();
+          invalidated.resolve();
+        },
+      );
       let first = true;
       mutable.inviteReader = async () => {
-        const captured = structuredClone(source.invite);
+        const captured = inviteDocumentFixture(structuredClone(source.invite));
         if (first) {
           first = false;
           began();
@@ -875,6 +892,7 @@ describe("live match snapshots", () => {
       try {
         source.invite.guestId = "guest-login";
         const notification = instance.notifySessionCommitted(inviteId);
+        await invalidated.promise;
         release();
         await notification;
       } finally {
@@ -965,7 +983,7 @@ describe("live match snapshots", () => {
     const first = await room.readMatches(inviteId, inviteId);
     expect(first).toMatchObject({
       status: "ok",
-      snapshot: { revision: 1, hostMatch: match },
+      snapshot: { revision: 1, hostMatch: publicMatchFixture(match) },
     });
     expect(
       first.status === "ok" && first.snapshot.hostMatch,
@@ -1019,7 +1037,7 @@ describe("live match snapshots", () => {
       color: "black",
       flatMovesString: "a-z-b",
       fen: "later",
-      timer: "claimed",
+      timer: { state: "finished" },
       status: "surrendered",
     });
     await room.notifyMatchesChanged(inviteId, [inviteId]);
@@ -1027,7 +1045,7 @@ describe("live match snapshots", () => {
     expect(await channel.snapshot()).toMatchObject({
       guestMatch: {
         flatMovesString: "a-z-b",
-        timer: "claimed",
+        timer: { state: "finished" },
         status: "surrendered",
       },
       revision: 3,
@@ -1097,7 +1115,7 @@ describe("live match snapshots", () => {
         });
         await channel.snapshot();
       }
-      const laterMatchId = matchIds[4];
+      const laterMatchId = matchIds[4]!;
       if (change === "closes" || change === "expires") {
         const laterChannel = await connect(room, inviteId, laterMatchId, {
           "X-Mons-Session-Expires-At": String(now + 1_000),
@@ -1109,7 +1127,7 @@ describe("live match snapshots", () => {
       await runInDurableObject(room, async (instance, state) => {
         for (const [index, matchId] of matchIds.entries()) {
           state.storage.sql.exec(
-            "UPDATE match_sync_snapshots SET next_at_ms = ? WHERE match_id = ?",
+            "UPDATE match_sync_snapshots_canonical SET next_at_ms = ? WHERE match_id = ?",
             now - matchIds.length + index,
             matchId,
           );
@@ -1155,7 +1173,7 @@ describe("live match snapshots", () => {
                 (candidate) =>
                   candidate.deserializeAttachment().matchId === laterMatchId,
               )!;
-            instance.webSocketClose(socket);
+            await instance.webSocketClose(socket);
           } else if (change === "expires") {
             clock.mockReturnValue(now + 1_000);
           } else {
@@ -1171,7 +1189,7 @@ describe("live match snapshots", () => {
           ).toHaveLength(reads + (change === "joins" ? 1 : 0));
           const due = state.storage.sql
             .exec<{ next_at_ms: number | null }>(
-              "SELECT next_at_ms FROM match_sync_snapshots WHERE match_id = ?",
+              "SELECT next_at_ms FROM match_sync_snapshots_canonical WHERE match_id = ?",
               laterMatchId,
             )
             .one().next_at_ms;
@@ -1232,7 +1250,7 @@ describe("live match snapshots", () => {
     await runNextAlarm(room);
     expect(
       JSON.parse(await metadataChannel.read()).snapshot.hostRematches,
-    ).toBe("1");
+    ).toEqual({ state: "open", indices: [1] });
     expect(source.metadataReads).toBe(reads + 1);
     expect(source.reads).toHaveLength(matchReads + 2);
     await close(channel.socket);
@@ -1287,7 +1305,7 @@ describe("live match snapshots", () => {
           return client;
         }),
       );
-      const metadataChannel = inviteChannels[0];
+      const metadataChannel = inviteChannels[0]!;
       clock.mockReturnValue(now + MATCH_SYNC_REPAIR_MS);
       expect(await room.readMetadata(inviteId)).toMatchObject({
         status: "ok",
@@ -1304,11 +1322,11 @@ describe("live match snapshots", () => {
         const entered = new Promise<void>((resolve) => (began = resolve));
         const blocked = new Promise<void>((resolve) => (release = resolve));
         const metadataSend = vi.spyOn(
-          state.getWebSockets("channel:metadata")[0],
+          state.getWebSockets("channel:metadata")[0]!,
           "send",
         );
         const matchSend = vi.spyOn(
-          state.getWebSockets("channel:matches")[0],
+          state.getWebSockets("channel:matches")[0]!,
           "send",
         );
         let restoreDigest: (() => void) | undefined;
@@ -1323,9 +1341,15 @@ describe("live match snapshots", () => {
           };
         } else {
           const digest = crypto.subtle.digest.bind(crypto.subtle);
+          const alarmWriterPayload = JSON.stringify({
+            kind: "alarm",
+            request: { objectId: state.id.toString() },
+          });
           const digestSpy = vi
             .spyOn(crypto.subtle, "digest")
             .mockImplementation(async (...args) => {
+              if (new TextDecoder().decode(args[1]) === alarmWriterPayload)
+                return digest(...args);
               began();
               await blocked;
               return digest(...args);
@@ -1358,7 +1382,7 @@ describe("live match snapshots", () => {
           restoreDigest?.();
         }
       });
-      expect(JSON.parse(await metadataChannel.read()).snapshot).toMatchObject({
+      expect(JSON.parse(await metadataChannel!.read()).snapshot).toMatchObject({
         guestId: "guest-login",
         revision: 2,
       });
@@ -1418,8 +1442,8 @@ describe("live match snapshots", () => {
       const second = instance.readMatches(inviteId, inviteId);
       release();
       const results = await Promise.all([first, second]);
-      expect(results[0]).toEqual(results[1]);
-      expect(results[0]).toMatchObject({
+      expect(results[0]!).toEqual(results[1]!);
+      expect(results[0]!).toMatchObject({
         status: "ok",
         snapshot: { revision: 1, hostMatch: { fen: "newest" } },
       });
@@ -1513,7 +1537,7 @@ describe("live match snapshots", () => {
       await runInDurableObject(room, async (instance, state) => {
         const saved = state.storage.sql
           .exec<{ snapshot_json: string; next_at_ms: number }>(
-            "SELECT snapshot_json, next_at_ms FROM match_sync_snapshots WHERE match_id = ?",
+            "SELECT snapshot_json, next_at_ms FROM match_sync_snapshots_canonical WHERE match_id = ?",
             inviteId,
           )
           .one();
@@ -1546,7 +1570,11 @@ describe("live match snapshots", () => {
     const { room, inviteId, source } = await fixture();
     const channel = await connect(room, inviteId);
     await channel.snapshot();
-    setMatch(source, `host-login/${inviteId}`, { ...match, fen: null });
+    source.matches.set(`host-login/${inviteId}`, {
+      ...match,
+      fen: null,
+    } as never);
+    source.revisions.set(inviteId, (source.revisions.get(inviteId) ?? 0) + 1);
     const before = source.reads.length;
     const closed = new Promise<CloseEvent>((resolve) =>
       channel.socket.addEventListener("close", resolve, { once: true }),
@@ -1583,7 +1611,7 @@ describe("live match snapshots", () => {
     const saved = await runInDurableObject(room, (_instance, state) =>
       state.storage.sql
         .exec<{ snapshot_json: string }>(
-          "SELECT snapshot_json FROM match_sync_snapshots WHERE match_id = ?",
+          "SELECT snapshot_json FROM match_sync_snapshots_canonical WHERE match_id = ?",
           inviteId,
         )
         .one(),
@@ -1690,7 +1718,7 @@ describe("live match snapshots", () => {
     const channel = await connect(room, inviteId, nextMatchId);
     expect(await channel.snapshot()).toMatchObject({
       matchId: nextMatchId,
-      hostMatch: match,
+      hostMatch: publicMatchFixture(match),
       guestMatch: null,
     });
     const reads = source.reads.length;
@@ -1733,3 +1761,5 @@ describe("live match snapshots", () => {
     });
   });
 });
+
+beforeAll(activateCanonicalApplicationFixture);

@@ -1,6 +1,10 @@
+import { applyCanonicalTestMigrations } from "./canonicalTestMigrations.ts";
+import { wagerRecordFixture } from "../test/wagerRecordFixture.ts";
+import { queueEnvelope, type QueueBinding } from "../src/queueEnvelope.ts";
+import { canonicalQueuePayloadFixture } from "../test/canonicalQueueFixture.ts";
 import { describe, expect, it, vi } from "vitest";
 import { env } from "cloudflare:workers";
-import { applyD1Migrations, type D1Migration } from "cloudflare:test";
+import type { D1Migration } from "cloudflare:test";
 import * as entrypoint from "../src/index.ts";
 import {
   createEventProgressWorkflowDependencies,
@@ -32,13 +36,35 @@ function queueMessage(body: unknown) {
 }
 
 function queueBatch(queue: string, messages: Message<unknown>[]) {
+  const bindings: Record<string, QueueBinding> = {
+    [AUTH_RECOVERY_QUEUE_NAME]: "AUTH_RECOVERY_QUEUE",
+    [PROFILE_GAME_PROJECTION_QUEUE_NAME]: "PROFILE_GAME_PROJECTION_QUEUE",
+    [EVENT_PROFILE_GAME_PROJECTION_QUEUE_NAME]:
+      "EVENT_PROFILE_GAME_PROJECTION_QUEUE",
+    [TELEGRAM_PROJECTION_QUEUE_NAME]: "TELEGRAM_PROJECTION_QUEUE",
+    [WAGER_SETTLEMENT_QUEUE_NAME]: "WAGER_SETTLEMENT_QUEUE",
+    "mons-link-telegram-delivery-data1": "TELEGRAM_DELIVERY_QUEUE",
+  };
+  const binding = bindings[queue];
   return {
     queue,
-    messages,
+    messages: binding
+      ? messages.map((message) => ({
+          ...message,
+          body: queueEnvelope(binding, message.body),
+        }))
+      : messages,
     metadata: { metrics: { backlogCount: 0, backlogBytes: 0 } },
     retryAll: () => undefined,
     ackAll: () => undefined,
   } satisfies MessageBatch<unknown>;
+}
+
+function dispatchQueue(
+  batch: MessageBatch<unknown>,
+  environment: Env,
+): Promise<void> {
+  return Reflect.apply(worker.queue, worker, [batch, environment]);
 }
 
 const controller = {
@@ -102,7 +128,8 @@ describe("Worker entrypoint", () => {
       dependencies.synchronize({
         instanceId: "workflow-1",
         params: {
-          schemaVersion: 1,
+          schemaVersion: 2,
+          dataEpoch: 1,
           eventId: "event-1",
           outboxId: "outbox-1",
           reason: "rating-completed",
@@ -125,7 +152,7 @@ describe("Worker entrypoint", () => {
       TELEGRAM_PROJECTION_QUEUE_NAME,
     ]) {
       const tracked = queueMessage({ kind: "task" });
-      await worker.queue(queueBatch(queue, [tracked.message]), frozen);
+      await dispatchQueue(queueBatch(queue, [tracked.message]), frozen);
       expect(tracked.acknowledgements(), queue).toBe(0);
       expect(tracked.retries, queue).toEqual([{ delaySeconds: 300 }]);
     }
@@ -150,11 +177,11 @@ describe("Worker entrypoint", () => {
           TELEGRAM_PROJECTION_QUEUE_NAME,
           "telegram_projection_queue_invalid_message",
         ],
-        ["mons-link-telegram-delivery", "telegram_queue_invalid_message"],
+        ["mons-link-telegram-delivery-data1", "telegram_queue_invalid_message"],
         [WAGER_SETTLEMENT_QUEUE_NAME, "wager_settlement_queue_invalid_message"],
-      ]) {
+      ] as const) {
         const tracked = queueMessage({ kind: "invalid-task" });
-        await worker.queue(
+        await dispatchQueue(
           queueBatch(queue, [tracked.message]),
           TELEGRAM_TEST_ENV,
         );
@@ -215,7 +242,7 @@ describe("Worker entrypoint", () => {
           },
         };
         const tracked = queueMessage({ kind: "invalid-task" });
-        const processing = worker.queue(
+        const processing = dispatchQueue(
           queueBatch(queue, [tracked.message]),
           environment,
         );
@@ -231,19 +258,20 @@ describe("Worker entrypoint", () => {
     }
   });
 
-  it("rejects unknown Queues without reading bindings or acknowledging messages", async () => {
+  it("rejects unknown Queues after admission without acknowledging messages", async () => {
     const logger = vi
       .spyOn(console, "error")
       .mockImplementation(() => undefined);
     const tracked = queueMessage({ kind: "invalid-task" });
-    const environment = new Proxy({} as Env, {
-      get(_target, property) {
+    const environment = new Proxy(TELEGRAM_TEST_ENV, {
+      get(target, property) {
+        if (property === "PROFILE_GAMES_DB") return target.PROFILE_GAMES_DB;
         throw new Error(`unexpected-binding-access:${String(property)}`);
       },
     });
     try {
       await expect(
-        worker.queue(
+        dispatchQueue(
           queueBatch("unconfigured-queue", [tracked.message]),
           environment,
         ),
@@ -272,7 +300,7 @@ describe("Worker entrypoint", () => {
         },
       } as unknown as D1Database,
     } as unknown as Env;
-    await worker.queue(
+    await dispatchQueue(
       queueBatch(AUTH_RECOVERY_QUEUE_NAME, [tracked.message]),
       unavailable,
     );
@@ -280,7 +308,7 @@ describe("Worker entrypoint", () => {
     expect(tracked.retries).toEqual([{ delaySeconds: 300 }]);
   });
 
-  it("forwards legacy wagers while frozen without blocking Telegram work", async () => {
+  it("acknowledges wrong-family wager messages without forwarding them from Telegram delivery", async () => {
     const deferred: Array<{ body: unknown; options?: QueueSendOptions }> = [];
     const settlement = queueMessage({
       kind: "wager-settlement",
@@ -289,8 +317,8 @@ describe("Worker entrypoint", () => {
       operationId: "a".repeat(64),
     });
     const unrelated = queueMessage({ kind: "invalid-telegram-task" });
-    await worker.queue(
-      queueBatch("mons-link-telegram-delivery", [
+    await dispatchQueue(
+      queueBatch("mons-link-telegram-delivery-data1", [
         settlement.message,
         unrelated.message,
       ]),
@@ -299,7 +327,10 @@ describe("Worker entrypoint", () => {
         WAGER_SETTLEMENT_QUEUE: {
           ...TELEGRAM_TEST_ENV.WAGER_SETTLEMENT_QUEUE,
           send: async (body, options) => {
-            deferred.push({ body, options });
+            deferred.push({
+              body: canonicalQueuePayloadFixture(body),
+              ...(options === undefined ? {} : { options }),
+            });
             return {
               metadata: { metrics: { backlogCount: 0, backlogBytes: 0 } },
             };
@@ -309,9 +340,7 @@ describe("Worker entrypoint", () => {
     );
     expect(settlement.acknowledgements()).toBe(1);
     expect(settlement.retries).toEqual([]);
-    expect(deferred).toEqual([
-      { body: settlement.message.body, options: undefined },
-    ]);
+    expect(deferred).toEqual([]);
     expect(unrelated.acknowledgements()).toBe(1);
     expect(unrelated.retries).toEqual([]);
   });
@@ -331,18 +360,23 @@ describe("Worker entrypoint", () => {
           activated_at_ms: 1,
           invite_id: "invite-1",
           match_id: "invite-1",
-          wager_json: JSON.stringify({
-            settlement: {
-              version: 2,
-              kind: "proposals",
-              state: "completed",
-              operationId: (status === "completed" ? "a" : "b").repeat(64),
-              fingerprint: "settlement-fingerprint",
-              claimedAtMs: 1,
-              completedAtMs: 2,
-              releases: [],
-            },
-          }),
+          wager_json: JSON.stringify(
+            wagerRecordFixture({
+              settlement: {
+                version: 2,
+                kind: "proposals",
+                state: "completed",
+                operationId: (status === "completed" ? "a" : "b").repeat(64),
+                fingerprint: "settlement-fingerprint",
+                claimedAtMs: 1,
+                completedAtMs: 2,
+                releases: [
+                  { uid: "host", reservationOperationIds: ["c".repeat(64)] },
+                  { uid: "guest", reservationOperationIds: ["d".repeat(64)] },
+                ],
+              },
+            }),
+          ),
           resolution_marker: null,
           revision: 1,
         };
@@ -385,7 +419,7 @@ describe("Worker entrypoint", () => {
           matchId: "invite-1",
           operationId: "a".repeat(64),
         });
-        await worker.queue(
+        await dispatchQueue(
           queueBatch(WAGER_SETTLEMENT_QUEUE_NAME, [tracked.message]),
           {
             ...environment,
@@ -424,7 +458,6 @@ describe("Worker entrypoint", () => {
       gameSessionLocks: async () => calls.push("gameSessionLocks"),
       gameSessionReceipts: async () => calls.push("gameSessionReceipts"),
       gameSessionTransitions: async () => calls.push("gameSessionTransitions"),
-      matchTimerStarts: async () => calls.push("matchTimerStarts"),
       profileGameProjection: async () => calls.push("profileGameProjection"),
       telegramProjection: async () => calls.push("telegramProjection"),
     };
@@ -452,7 +485,6 @@ describe("Worker entrypoint", () => {
         "gameSessionLocks",
         "gameSessionReceipts",
         "gameSessionTransitions",
-        "matchTimerStarts",
         "profileGameProjection",
         "telegramProjection",
       ]),
@@ -464,14 +496,31 @@ describe("Worker entrypoint", () => {
     const db = testEnv.PROFILE_GAMES_DB;
     const scheduledTime = 7 * 24 * 60 * 60 * 1_000 + 1_000;
     const executedAtMs = scheduledTime + 60_000;
-    const payload = JSON.stringify({ kind: "invite-create" });
+    const payload = (completedAtMs: number) =>
+      JSON.stringify({
+        schemaVersion: 2,
+        kind: "invite-create",
+        completedAtMs,
+        inviteId: "invite",
+        operationId: "operation",
+        requesterUid: "login",
+        fingerprint: "fingerprint",
+        projectionRequestId: null,
+        effects: { state: "enabled" },
+        response: {
+          ok: true,
+          inviteId: "invite",
+          hostId: "login",
+          matchId: "invite",
+        },
+      });
     const receipts = [
       { key: "due", completedAtMs: 999 },
       { key: "boundary", completedAtMs: 1_000 },
       { key: "future", completedAtMs: 1_001 },
       { key: "reserved", completedAtMs: 999 },
     ];
-    await applyD1Migrations(db, testEnv.TEST_D1_MIGRATIONS);
+    await applyCanonicalTestMigrations(db, testEnv.TEST_D1_MIGRATIONS);
     await db.batch([
       db.prepare(
         "UPDATE automatch_runtime_control SET backend = 'd1', state = 'active' WHERE singleton = 1",
@@ -482,19 +531,38 @@ describe("Worker entrypoint", () => {
       ...receipts.map(({ key, completedAtMs }) =>
         db
           .prepare(
-            `INSERT INTO game_session_mutation_receipts
+            `INSERT INTO game_session_mutation_receipts_canonical
                (record_key, payload_json, revision, expiration_json, expiration_revision, updated_at_ms)
              VALUES (?, ?, 1, ?, 1, 1)`,
           )
-          .bind(key, payload, JSON.stringify({ completedAtMs })),
+          .bind(
+            key,
+            payload(completedAtMs),
+            JSON.stringify({ schemaVersion: 1, completedAtMs }),
+          ),
       ),
-      db.prepare(
-        `INSERT INTO game_session_transitions
+      db
+        .prepare(
+          `INSERT INTO game_session_transitions_canonical
            (transition_id, invite_id, payload_json, status, created_at_ms, updated_at_ms)
-         VALUES ('pending-transition', 'invite', '{}', 'pending', 1, 1)`,
-      ),
+         VALUES ('pending-transition', 'invite', ?, 'pending', 1, 1)`,
+        )
+        .bind(
+          JSON.stringify({
+            version: 3,
+            inviteId: "invite",
+            inviteSourceEpoch: 1,
+            inviteMutations: [],
+            transitionId: "pending-transition",
+            operationDigest: "a".repeat(64),
+            resources: ["invite"],
+            mutations: [],
+            creations: [],
+            createdAtMs: 1,
+          }),
+        ),
       db.prepare(
-        `INSERT INTO game_session_transition_resources (resource_key, transition_id)
+        `INSERT INTO game_session_transition_resources_canonical (resource_key, transition_id)
          VALUES ('gameplay-operation:reserved', 'pending-transition')`,
       ),
     ]);
@@ -520,15 +588,17 @@ describe("Worker entrypoint", () => {
         await db
           .prepare(
             `SELECT payload_json, revision, expiration_json, expiration_revision, updated_at_ms
-             FROM game_session_mutation_receipts WHERE record_key = ?`,
+             FROM game_session_mutation_receipts_canonical WHERE record_key = ?`,
           )
           .bind(key)
           .first(),
         key,
       ).toEqual({
-        payload_json: expired ? null : payload,
+        payload_json: expired ? null : payload(completedAtMs),
         revision: expired ? 2 : 1,
-        expiration_json: expired ? null : JSON.stringify({ completedAtMs }),
+        expiration_json: expired
+          ? null
+          : JSON.stringify({ schemaVersion: 1, completedAtMs }),
         expiration_revision: expired ? 2 : 1,
         updated_at_ms: expired ? executedAtMs : 1,
       });
@@ -571,7 +641,6 @@ describe("Worker entrypoint", () => {
           gameSessionLocks: async () => undefined,
           gameSessionReceipts: async () => undefined,
           gameSessionTransitions: async () => undefined,
-          matchTimerStarts: async () => undefined,
           profileGameProjection: async () => undefined,
           telegramProjection: async () => undefined,
         },
@@ -611,11 +680,11 @@ describe("Worker entrypoint", () => {
       TEST_D1_MIGRATIONS: D1Migration[];
       TEST_AUTH_STATE_D1_MIGRATIONS: D1Migration[];
     };
-    await applyD1Migrations(
+    await applyCanonicalTestMigrations(
       env.PROFILE_GAMES_DB,
       migrations.TEST_D1_MIGRATIONS,
     );
-    await applyD1Migrations(
+    await applyCanonicalTestMigrations(
       env.AUTH_STATE_DB,
       migrations.TEST_AUTH_STATE_D1_MIGRATIONS,
     );
@@ -643,7 +712,6 @@ describe("Worker entrypoint", () => {
           eventTransitions: async () => undefined,
           gameSessionReceipts: async () => undefined,
           gameSessionTransitions: async () => undefined,
-          matchTimerStarts: async () => undefined,
           profileGameProjection: async () => undefined,
           telegramProjection: async () => undefined,
         },

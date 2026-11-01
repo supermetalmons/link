@@ -1,3 +1,5 @@
+import { canonicalAppearance, required } from "./fixtures/canonicalData.mjs";
+import { createTimerHandle } from "./fixtures/timerHandle.mjs";
 import assert from "node:assert/strict";
 import { registerHooks } from "node:module";
 import test from "node:test";
@@ -24,17 +26,16 @@ const {
   subscribeSettingsAppleFlowProgress,
 } = await import("../src/ui/identity/authFlowState.ts");
 
+/**
+ * @template [T=import("@mons/shared/auth").AuthIntentResponse]
+ * @returns {PromiseWithResolvers<T>}
+ */
 const deferred = () => {
-  let resolve;
-  let reject;
-  const promise = new Promise((resolvePromise, rejectPromise) => {
-    resolve = resolvePromise;
-    reject = rejectPromise;
-  });
-  return { promise, resolve, reject };
+  return Promise.withResolvers();
 };
 
 const flush = () => new Promise((resolve) => setImmediate(resolve));
+/** @param {number} expiresAtMs @returns {import("@mons/shared/auth").AuthIntentResponse} */
 const intent = (expiresAtMs, intentId = "intent") => ({
   ok: true,
   intentId,
@@ -43,12 +44,26 @@ const intent = (expiresAtMs, intentId = "intent") => ({
   expiresAtMs,
 });
 
+/** @param {Partial<Parameters<typeof createAppleAuthFlowController>[0]["dependencies"]>} [overrides]
+ * @param {Partial<import("../src/ui/identity/appleAuthFlowController.ts").AppleAuthFlowOptions>} [optionOverrides]
+ * @param {import("../src/ui/identity/appleAuthFlowController.ts").AppleConsentSource} [source] */
 const harness = (overrides = {}, optionOverrides = {}, source = "signin") => {
   let time = 100_000;
-  let nextTimer = 0;
+  /** @type {Map<ReturnType<typeof createTimerHandle>, {callback: () => void; at: number}>} */
   const timers = new Map();
+  /** @type {Array<[string, ...unknown[]]>} */
   const calls = [];
-  const result = { ok: true, uid: "user" };
+  /** @type {import("@mons/shared/auth").AuthProfileResponse} */
+  const result = {
+    ok: true,
+    uid: "user",
+    profileId: "profile",
+    username: null,
+    linkedMethods: { apple: true, eth: false, sol: false, x: false },
+    appleLinked: true,
+    opId: "operation",
+    ...canonicalAppearance(),
+  };
   const controller = createAppleAuthFlowController({
     consentSource: source,
     dependencies: {
@@ -73,15 +88,29 @@ const harness = (overrides = {}, optionOverrides = {}, source = "signin") => {
         calls.push(["flush-end"]);
       },
       now: () => time,
-      setTimeout: (callback, delay) => {
-        const id = ++nextTimer;
-        timers.set(id, { callback, at: time + delay });
-        return id;
+      setTimeout: new Proxy(setTimeout, {
+        apply(_target, _receiver, /** @type {unknown[]} */ args) {
+          const [callback, delay = 0, ...values] = args;
+          assert.ok(
+            typeof callback === "function" && typeof delay === "number",
+          );
+          const id = createTimerHandle();
+          timers.set(id, {
+            callback: () => {
+              Reflect.apply(callback, undefined, values);
+            },
+            at: time + delay,
+          });
+          return id;
+        },
+      }),
+      clearTimeout: (id) => {
+        if (typeof id === "object" && id !== null) timers.delete(id);
       },
-      clearTimeout: (id) => timers.delete(id),
       ...overrides,
     },
   });
+  /** @type {import("../src/ui/identity/appleAuthFlowController.ts").AppleAuthFlowOptions} */
   const options = {
     canStart: () => true,
     canConfirm: () => true,
@@ -98,9 +127,10 @@ const harness = (overrides = {}, optionOverrides = {}, source = "signin") => {
     calls,
     timers,
     result,
-    setOptions: (nextOptions) =>
-      controller.setOptions({ ...options, ...nextOptions }),
-    advance: (duration) => {
+    setOptions: (
+      /** @type {Partial<import("../src/ui/identity/appleAuthFlowController.ts").AppleAuthFlowOptions>} */ nextOptions,
+    ) => controller.setOptions({ ...options, ...nextOptions }),
+    advance: (/** @type {number} */ duration) => {
       time += duration;
       for (const [id, timer] of timers) {
         if (timer.at <= time) {
@@ -203,7 +233,13 @@ test("clearing an intent prevents an older preload overwriting the replacement",
   oldIntent.resolve(intent(220_000, "old"));
   await oldPreparation;
   await controller.start();
-  assert.equal(calls.find(([name]) => name === "popup")[1].intentId, "new");
+  assert.equal(
+    fixtureField(
+      required(calls.find(([name]) => name === "popup"))[1],
+      "intentId",
+    ),
+    "new",
+  );
 });
 
 test("invalidated preparation cannot restore confirmation after an unlink reset", async () => {
@@ -225,6 +261,7 @@ test("invalidated preparation cannot restore confirmation after an unlink reset"
 });
 
 test("resetting UI does not cancel verification, and duplicate clicks remain blocked", async () => {
+  /** @type {PromiseWithResolvers<import("@mons/shared/auth").AuthVerificationResponse>} */
   const verification = deferred();
   const { controller, calls, result } = harness({
     verify: () => verification.promise,
@@ -245,6 +282,7 @@ test("resetting UI does not cancel verification, and duplicate clicks remain blo
 });
 
 test("invalidating linked Apple action suppresses stale success and still settles", async () => {
+  /** @type {PromiseWithResolvers<import("@mons/shared/auth").AuthVerificationResponse>} */
   const verification = deferred();
   const { controller, calls, result } = harness({
     verify: () => verification.promise,
@@ -267,6 +305,7 @@ test("invalidating linked Apple action suppresses stale success and still settle
 });
 
 test("invalidating a pending popup prevents stale verification", async () => {
+  /** @type {PromiseWithResolvers<{idToken: string} | null>} */
   const popup = deferred();
   const { controller, calls } = harness({ openPopup: () => popup.promise });
   await controller.prepare();
@@ -294,6 +333,7 @@ test("unmount clears expiry timers and reattach restores confirmation lifecycle"
 
 test("settings lock survives unmount until verification finishes and releases for a remount", async () => {
   setSettingsAppleFlowInProgress(false);
+  /** @type {PromiseWithResolvers<import("@mons/shared/auth").AuthVerificationResponse>} */
   const verification = deferred();
   const settingsOptions = {
     canStart: () => !getSettingsAppleFlowInProgress(),
@@ -305,6 +345,7 @@ test("settings lock survives unmount until verification finishes and releases fo
     settingsOptions,
     "settings",
   );
+  /** @type {Array<boolean>} */
   const states = [];
   const unsubscribe = subscribeSettingsAppleFlowProgress((state) =>
     states.push(state),
@@ -314,7 +355,10 @@ test("settings lock survives unmount until verification finishes and releases fo
     const connect = original.controller.start();
     assert.equal(getSettingsAppleFlowInProgress(), true);
     assert.equal(
-      original.calls.find(([name]) => name === "popup")[1].consentSource,
+      fixtureField(
+        required(original.calls.find(([name]) => name === "popup"))[1],
+        "consentSource",
+      ),
       "settings",
     );
     let notificationsAfterDetach = 0;
@@ -382,3 +426,9 @@ test("redirect null, preparation failure, popup failure, and verify failure reco
     );
   }
 });
+
+/** @param {unknown} value @param {string} key @returns {unknown} */
+function fixtureField(value, key) {
+  assert.ok(value !== null && typeof value === "object" && key in value);
+  return Reflect.get(value, key);
+}

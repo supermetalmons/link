@@ -1,4 +1,9 @@
 import {
+  parseApiErrorDetails,
+  type ApiErrorDetails,
+} from "@mons/shared/api-errors";
+import { fetchApplicationData } from "./applicationTransport.ts";
+import {
   EVENT_BOOKMARK_HEADER,
   EVENT_ETAG_HEADER,
   MAX_EVENT_READ_RESPONSE_BYTES,
@@ -29,13 +34,13 @@ export type ConditionalReadOptions = {
 
 export class GameplayApiError extends Error {
   readonly code: string;
-  readonly details?: unknown;
+  readonly details: ApiErrorDetails | undefined;
 
-  constructor(code: string, message: string, details?: unknown) {
+  constructor(code: string, message: string, details?: ApiErrorDetails) {
     super(message);
     this.name = "GameplayApiError";
     this.code = code;
-    this.details = details;
+    this.details = parseApiErrorDetails(code, details);
   }
 }
 
@@ -170,7 +175,7 @@ export async function withConditionalGameplayReads<T>(
       const bookmark = readOptions.bookmark?.trim();
       if (etag) headers.set("If-None-Match", etag);
       if (bookmark) headers.set(EVENT_BOOKMARK_HEADER, bookmark);
-      const response = await fetch(url, {
+      const response = await fetchApplicationData(url, {
         method: "GET",
         headers,
         cache: "no-store",
@@ -282,5 +287,16 @@ export function responseError(
     typeof body.message === "string" && body.message.trim()
       ? body.message.trim()
       : "Gameplay service is unavailable.";
-  return new GameplayApiError(code, message, body.details);
+  try {
+    return new GameplayApiError(
+      code,
+      message,
+      parseApiErrorDetails(code, body.details),
+    );
+  } catch {
+    return new GameplayApiError(
+      "unavailable",
+      "Gameplay service is unavailable.",
+    );
+  }
 }

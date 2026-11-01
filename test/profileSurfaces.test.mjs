@@ -1,3 +1,4 @@
+import { required } from "./fixtures/canonicalData.mjs";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { registerHooks } from "node:module";
@@ -22,7 +23,6 @@ const {
   getShinyCardUndoEntry,
   getShinyCardUndoUpdateSource,
   isInventoryEmojiId,
-  parseStickerMap,
 } = await import("../src/ui/shinyCardModels.ts");
 const {
   bindShinyCardUi,
@@ -40,14 +40,17 @@ const {
   populateMaterialLeaderboardCaches,
 } = await import("../src/ui/leaderboardModels.ts");
 
-const readSource = (relativePath) =>
+const readSource = (/** @type {string | URL} */ relativePath) =>
   readFileSync(new URL(relativePath, import.meta.url), "utf8");
 
 test("shiny card UI port exposes state and forwards every public command", async () => {
+  /** @type {((string | boolean | import("@mons/shared/profiles").PlayerProfile | null)[] | string[] | (string | number)[])[]} */
   const calls = [];
   const selection = { avatarId: 9, specialIds: new Set([1, 2]) };
   const dispose = bindShinyCardUi({
-    show: async (...args) => calls.push(["show", ...args]),
+    show: async (...args) => {
+      calls.push(["show", ...args]);
+    },
     hide: () => calls.push(["hide"]),
     updateDisplayName: (name) => calls.push(["name", name]),
     getActiveInventoryItemSelection: () => selection,
@@ -98,10 +101,14 @@ test("card history retains absent sticker values and rejects anonymous or stale 
   assert.equal(history.size, 0);
 
   history.enqueue("one", "one", { contentType: "mana", value: undefined });
-  history.enqueue("one", "one", {
-    contentType: "profileCounter",
-    value: "legacy-counter",
-  });
+  Reflect.apply(history.enqueue, history, [
+    "one",
+    "one",
+    {
+      contentType: "profileCounter",
+      value: "legacy-counter",
+    },
+  ]);
   assert.deepEqual(history.pop("one"), {
     contentType: "profileCounter",
     value: "legacy-counter",
@@ -122,10 +129,11 @@ test("card history retains absent sticker values and rejects anonymous or stale 
 });
 
 test("explicit undo intent distinguishes recorded absence from skipped history", () => {
+  /** @type {import("@mons/shared/game-sessions").GameSessionPresentation} */
   const oldEmoji = { emojiId: 1009, aura: "rainbow" };
   const restoredEmoji = getShinyCardUndoEntry({
     contentType: "emojiAndAura",
-    value: { emojiId: "1", aura: "" },
+    value: { emojiId: 1, aura: "none" },
     undo: { kind: "record", value: oldEmoji },
   });
   assert.deepEqual(restoredEmoji, {
@@ -152,13 +160,12 @@ test("explicit undo intent distinguishes recorded absence from skipped history",
 });
 
 test("shiny card selectors preserve inventory and cyclic rules", () => {
-  assert.deepEqual(parseStickerMap('{"left":"mon","count":2}'), {
-    left: "mon",
-  });
-  assert.deepEqual(parseStickerMap("[]"), {});
-  assert.deepEqual(parseStickerMap("{"), {});
-  assert.equal(isInventoryEmojiId("1000", 1000), true);
-  assert.equal(isInventoryEmojiId("999", 1000), false);
+  assert.equal(isInventoryEmojiId(1000, 1000), true);
+  assert.equal(isInventoryEmojiId(999, 1000), false);
+  assert.equal(
+    Reflect.apply(isInventoryEmojiId, undefined, ["1000", 1000]),
+    false,
+  );
   assert.equal(getNextRegularId(36, 37), 0);
   assert.equal(getNextRegularId(Number.NaN, 37), 0);
   assert.equal(getNextRegularId(1, 0), 0);
@@ -172,7 +179,7 @@ test("shiny card selectors preserve inventory and cyclic rules", () => {
   };
   assert.equal(
     getShinyCardUndoUpdateSource(
-      { contentType: "emojiAndAura", value: { emojiId: 1001, aura: "" } },
+      { contentType: "emojiAndAura", value: { emojiId: 1001, aura: "none" } },
       options,
     ),
     "inventory",
@@ -187,7 +194,7 @@ test("shiny card selectors preserve inventory and cyclic rules", () => {
   );
 });
 
-test("card undo permission preserves inventory coercions and restoration values", () => {
+test("card undo permission preserves canonical inventory and restoration values", () => {
   const options = {
     inventoryEmojiStartId: 1000,
     inventoryBackgroundId: 100,
@@ -195,23 +202,31 @@ test("card undo permission preserves inventory coercions and restoration values"
     inventoryStickerType: "big-mon-top-right",
     inventoryStickerName: "gate",
   };
-  for (const [contentType, value, expected] of [
-    ["emojiAndAura", { emojiId: "1009", aura: "" }, "inventory"],
-    ["emojiAndAura", { emojiId: 1009, aura: "" }, "inventory"],
-    ["emojiAndAura", { emojiId: "1", aura: "rainbow" }, "inventory"],
-    ["emojiAndAura", { emojiId: "1", aura: "legacy-aura" }, "default"],
-    ["bg", "100", "inventory"],
-    ["drainer", "5", "inventory"],
-    ["drainer", 0, "default"],
-    ["big-mon-top-right", "gate", "inventory"],
-    ["big-mon-top-right", undefined, "default"],
-    ["mana", "gate", "default"],
-    ["profileCounter", "legacy-counter", "default"],
-  ]) {
-    assert.equal(
-      getShinyCardUndoUpdateSource({ contentType, value }, options),
-      expected,
-    );
+  for (const [
+    change,
+    expected,
+  ] of /** @type {[Parameters<typeof getShinyCardUndoUpdateSource>[0], string][]} */ ([
+    [
+      { contentType: "emojiAndAura", value: { emojiId: 1009, aura: "none" } },
+      "inventory",
+    ],
+    [
+      { contentType: "emojiAndAura", value: { emojiId: 1, aura: "rainbow" } },
+      "inventory",
+    ],
+    [
+      { contentType: "emojiAndAura", value: { emojiId: 1, aura: "none" } },
+      "default",
+    ],
+    [{ contentType: "bg", value: 100 }, "inventory"],
+    [{ contentType: "drainer", value: 5 }, "inventory"],
+    [{ contentType: "drainer", value: 0 }, "default"],
+    [{ contentType: "big-mon-top-right", value: "gate" }, "inventory"],
+    [{ contentType: "big-mon-top-right", value: undefined }, "default"],
+    [{ contentType: "mana", value: "blue-mana" }, "default"],
+    [{ contentType: "profileCounter", value: "gp" }, "default"],
+  ])) {
+    assert.equal(getShinyCardUndoUpdateSource(change, options), expected);
   }
 });
 
@@ -226,7 +241,8 @@ test("leaderboard models preserve defaults and display-name priority", () => {
     totalManaPoints: 12,
     mining: { materials: { dust: 3 } },
   };
-  const entry = createLeaderboardEntry(profile);
+  /** @type {ReturnType<typeof createLeaderboardEntry>} */
+  const entry = Reflect.apply(createLeaderboardEntry, undefined, [profile]);
   assert.equal(entry.rating, 1500);
   assert.equal(entry.mp, 12);
   assert.equal(entry.materials.dust, 3);
@@ -243,21 +259,32 @@ test("leaderboard models preserve defaults and display-name priority", () => {
 });
 
 test("material leaderboard warming deduplicates and caps missing rankings while preserving existing caches", () => {
+  /** @type {ReturnType<typeof createLeaderboardEntry>[]} */
   const entries = Array.from({ length: 105 }, (_, index) =>
-    createLeaderboardEntry({
-      id: `profile-${index}`,
-      emoji: 7,
-      mining: { materials: { slime: index } },
-    }),
+    Reflect.apply(createLeaderboardEntry, undefined, [
+      {
+        id: `profile-${index}`,
+        emoji: 7,
+        mining: { materials: { slime: index } },
+      },
+    ]),
   );
   entries.push(
-    createLeaderboardEntry({
-      id: "profile-0",
-      emoji: 7,
-      mining: { materials: { slime: 200 } },
-    }),
+    Reflect.apply(createLeaderboardEntry, undefined, [
+      {
+        id: "profile-0",
+        emoji: 7,
+        mining: { materials: { slime: 200 } },
+      },
+    ]),
   );
-  const existing = [createLeaderboardEntry({ id: "existing", emoji: 7 })];
+  /** @type {ReturnType<typeof createLeaderboardEntry>[]} */
+  const existing = [
+    Reflect.apply(createLeaderboardEntry, undefined, [
+      { id: "existing", emoji: 7 },
+    ]),
+  ];
+  /** @type {Parameters<typeof populateMaterialLeaderboardCaches>[0]} */
   const cache = new Map([
     ["dust", existing],
     ["rating", existing],
@@ -271,14 +298,14 @@ test("material leaderboard warming deduplicates and caps missing rankings while 
     ...Array.from({ length: 98 }, (_, index) => `profile-${104 - index}`),
   ];
   assert.deepEqual(
-    cache.get("slime").map((entry) => entry.id),
+    required(cache.get("slime")).map((entry) => entry.id),
     expected,
   );
   assert.deepEqual(
-    cache.get("total").map((entry) => entry.id),
+    required(cache.get("total")).map((entry) => entry.id),
     expected,
   );
-  assert.equal(cache.get("slime")[0].materials.slime, 200);
+  assert.equal(required(required(cache.get("slime"))[0]).materials.slime, 200);
   assert.strictEqual(cache.get("dust"), existing);
   assert.strictEqual(cache.get("rating"), existing);
   assert.deepEqual(

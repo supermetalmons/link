@@ -1,3 +1,5 @@
+import { createDefaultProfileAppearance } from "@mons/shared/appearance";
+import { applicationRequest } from "./testEnv.ts";
 import assert from "node:assert/strict";
 import test from "node:test";
 import type {
@@ -29,6 +31,7 @@ const input = {
   revokeSecret: `${"B".repeat(42)}A`,
 };
 const profile: CompletePlayerProfile = {
+  ...createDefaultProfileAppearance(1),
   id: "identity-profile",
   username: "Alice",
   eth: null,
@@ -50,11 +53,11 @@ function request(
   query = "bootstrapIdentity=1",
   signal?: AbortSignal,
 ): Request {
-  return new Request(
+  return applicationRequest(
     `https://api.mons.link/auth/session/${endpoint}${query ? `?${query}` : ""}`,
     {
       method: "POST",
-      signal,
+      ...(signal === undefined ? {} : { signal }),
       headers: {
         Origin: "https://mons.link",
         ...(endpoint === "anonymous"
@@ -173,7 +176,7 @@ test("missing ownership, repair, read failure and oversized profiles preserve va
     [
       async () => ({
         ok: true as const,
-        profile: { ...profile, cardStickers: "x".repeat(65_536) },
+        profile: { ...profile, username: "x".repeat(65_536) },
       }),
       { ok: false, status: 503 },
     ],
@@ -254,7 +257,7 @@ test("failed session authentication never reads identity", async () => {
 test("authenticated identity route derives the login from the token and keeps failures distinct", async () => {
   for (const result of [profile, null]) {
     const response = await handleRequest(
-      new Request("https://api.mons.link/auth/identity", {
+      applicationRequest("https://api.mons.link/auth/identity", {
         headers: { Origin: "https://mons.link" },
       }),
       env,
@@ -275,7 +278,7 @@ test("authenticated identity route derives the login from the token and keeps fa
   }
   for (const status of [409, 503]) {
     const response = await handleAuthRoute(
-      new Request("https://api.mons.link/auth/identity"),
+      applicationRequest("https://api.mons.link/auth/identity"),
       env,
       { waitUntil() {} },
       {
@@ -304,16 +307,23 @@ test("authenticated identity route derives the login from the token and keeps fa
 test("identity route rejects foreign origins, wrong methods, identity parameters and unauthenticated callers before profile reads", async () => {
   for (const [request, expected] of [
     [
-      new Request("https://api.mons.link/auth/identity", {
+      applicationRequest("https://api.mons.link/auth/identity", {
         headers: { Origin: "https://foreign.invalid" },
       }),
       403,
     ],
     [
-      new Request("https://api.mons.link/auth/identity", { method: "POST" }),
+      applicationRequest("https://api.mons.link/auth/identity", {
+        method: "POST",
+      }),
       405,
     ],
-    [new Request("https://api.mons.link/auth/identity?uid=another-user"), 400],
+    [
+      applicationRequest(
+        "https://api.mons.link/auth/identity?uid=another-user",
+      ),
+      400,
+    ],
   ] as const) {
     const response = await handleAuthRoute(
       request,
@@ -329,7 +339,7 @@ test("identity route rejects foreign origins, wrong methods, identity parameters
     assert.equal(response.status, expected);
   }
   const response = await handleAuthRoute(
-    new Request("https://api.mons.link/auth/identity"),
+    applicationRequest("https://api.mons.link/auth/identity"),
     env,
     { waitUntil() {} },
     {

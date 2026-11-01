@@ -7,7 +7,7 @@ import type {
   ModernProposalLineage,
 } from "./wagerStateRepository.ts";
 import type { WagerFrozenReadRepository } from "./wagerFrozenStore.ts";
-import { isMaterialName, normalizeCount } from "@mons/shared/mining";
+import { isMaterialName } from "@mons/shared/mining";
 import {
   type WagerProposalAcceptRequest,
   type WagerProposalAcceptResponse,
@@ -114,8 +114,7 @@ async function readModernProposalLineage(
     input.matchId,
     input.uid,
   );
-  if (proposal.raw.reservationOperationId !== reservationOperationId)
-    return null;
+  if (proposal.reservationOperationId !== reservationOperationId) return null;
   const reservation = await readFrozenOperationForUid(
     repository,
     input.uid,
@@ -136,7 +135,7 @@ async function readModernProposalLineage(
     material,
     String(reservation.requestedCount),
   );
-  return proposal.raw.operationId === operationId
+  return proposal.operationId === operationId
     ? { material, count, operationId, reservationOperationId }
     : null;
 }
@@ -273,7 +272,7 @@ async function runWagerMutationWithLease<T>(
             refreshLease: guardedRefreshLease,
           });
         },
-        { now: dependencies.now },
+        dependencies.now === undefined ? {} : { now: dependencies.now },
       );
     } catch (error) {
       if (
@@ -333,7 +332,7 @@ async function sendWagerProposalUnlocked(
     return participants;
   }
   const now = dependencies.now || Date.now;
-  const requestedCount = normalizeCount(request.count);
+  const requestedCount = request.count;
   const operationId = await createOperationId(
     "send",
     request.inviteId,
@@ -360,6 +359,10 @@ async function sendWagerProposalUnlocked(
     inviteId: request.inviteId,
     matchId: request.matchId,
   };
+  const wagerBefore = await repository.wagers.readWager(wagerKey);
+  if (wagerBefore?.state === "blocked") {
+    return { ok: false, reason: "manual-review-required" };
+  }
   if (participants.playerProfileId === participants.opponentProfileId) {
     await recoverUnreferencedWagerReservation(
       repository,
@@ -390,23 +393,22 @@ async function sendWagerProposalUnlocked(
     throw new Error("wager-operation-unavailable");
   }
   if (existingReservationState.status === "consumed") {
-    const wager = await repository.wagers.readWager(wagerKey);
-    const agreementOperation = wager?.agreementOperation.value;
-    const agreement = wager?.agreed.value?.agreement;
+    const wager = wagerBefore;
+    const agreementOperation = wager?.agreementOperation;
+    const agreement = wager?.agreed;
     if (
       agreement &&
-      (agreementOperation?.raw.id === operationId ||
-        agreementOperation?.raw.proposerOperationId === operationId)
+      (agreementOperation?.id === operationId ||
+        agreementOperation?.proposerOperationId === operationId)
     ) {
       return { ok: true, count: agreement.count, agreed: agreement };
     }
     const proposal = readWagerProposal(wager, participants.playerUid);
-    if (proposal?.raw.operationId === operationId) {
+    if (proposal?.operationId === operationId) {
       return { ok: true, count: readWagerCount(proposal) };
     }
     return { ok: false, reason: "proposal-unavailable" };
   }
-  const wagerBefore = await repository.wagers.readWager(wagerKey);
   const opponentProposalBefore = readWagerProposal(
     wagerBefore,
     participants.opponentUid,
@@ -414,7 +416,7 @@ async function sendWagerProposalUnlocked(
   const opponentProposalCount = readWagerCount(opponentProposalBefore);
   let opponentProposal: ModernProposalLineage | null = null;
   if (
-    opponentProposalBefore?.raw.material === request.material &&
+    opponentProposalBefore?.material === request.material &&
     opponentProposalCount > 0
   ) {
     opponentProposal = await readModernProposalLineage(repository, {
@@ -487,16 +489,15 @@ async function sendWagerProposalUnlocked(
     },
     readback: () => repository.wagers.readWager(wagerKey),
   });
-  const agreementOperation = wagerAfter?.agreementOperation.value;
-  const removalOperations =
-    wagerAfter?.proposalRemovalOperations.value?.entries;
+  const agreementOperation = wagerAfter?.agreementOperation;
+  const removalOperations = wagerAfter?.proposalRemovalOperations;
   const ownProposal = readWagerProposal(wagerAfter, participants.playerUid);
-  const agreementMatchesAsAccepter = agreementOperation?.raw.id === operationId;
+  const agreementMatchesAsAccepter = agreementOperation?.id === operationId;
   const agreementMatchesAsProposer =
-    agreementOperation?.raw.proposerOperationId === operationId;
-  const proposalMatches = ownProposal?.raw.operationId === operationId;
+    agreementOperation?.proposerOperationId === operationId;
+  const proposalMatches = ownProposal?.operationId === operationId;
   const removalMatches = Object.values(removalOperations || {}).some(
-    (field) => field.value?.raw.proposalOperationId === operationId,
+    (receipt) => receipt.proposalOperationId === operationId,
   );
   if (
     !agreementMatchesAsAccepter &&
@@ -524,7 +525,7 @@ async function sendWagerProposalUnlocked(
     });
     return { ok: false, reason: "proposal-unavailable" };
   }
-  const agreement = wagerAfter?.agreed.value?.agreement;
+  const agreement = wagerAfter?.agreed;
   if (!agreement) {
     throw new Error("wager-agreement-unavailable");
   }
@@ -603,9 +604,11 @@ async function acceptWagerProposalUnlocked(
     matchId: request.matchId,
   };
   const wager = await repository.wagers.readWager(wagerKey);
-  const replayOperation = wager?.agreementOperation.value;
-  const replayAgreement = wager?.agreed.value?.agreement;
-  if (replayOperation?.raw.id === operationId && replayAgreement) {
+  if (wager?.state === "blocked")
+    return { ok: false, reason: "manual-review-required" };
+  const replayOperation = wager?.agreementOperation;
+  const replayAgreement = wager?.agreed;
+  if (replayOperation?.id === operationId && replayAgreement) {
     await dependencies.assertMutationAllowed?.();
     await ensureWagerAgreementLineageReady(
       repository,
@@ -628,12 +631,7 @@ async function acceptWagerProposalUnlocked(
   if (participants.playerProfileId === participants.opponentProfileId) {
     return { ok: false, reason: "proposal-unavailable" };
   }
-  if (
-    !wager?.record ||
-    wager.resolved.raw ||
-    wager.agreed.raw ||
-    wager.settlement.raw
-  ) {
+  if (!wager || wager.resolved || wager.agreed || wager.settlement) {
     return { ok: false, reason: "proposal-missing" };
   }
   const opponentProposal = readWagerProposal(wager, participants.opponentUid);
@@ -677,7 +675,7 @@ async function acceptWagerProposalUnlocked(
     reservationOperationId,
     material,
     proposedCount,
-    ownProposal?.raw ?? null,
+    ownProposal ?? null,
     totalMaterials,
     now,
     mutation.createCriticalPhaseSignal(),
@@ -717,9 +715,9 @@ async function acceptWagerProposalUnlocked(
     },
     readback: () => repository.wagers.readWager(wagerKey),
   });
-  const agreementOperation = wagerAfter?.agreementOperation.value;
-  const agreement = wagerAfter?.agreed.value?.agreement;
-  if (agreementOperation?.raw.id !== operationId || !agreement) {
+  const agreementOperation = wagerAfter?.agreementOperation;
+  const agreement = wagerAfter?.agreed;
+  if (agreementOperation?.id !== operationId || !agreement) {
     await releaseUnreferencedWagerReservation(repository, {
       playerUid: participants.playerUid,
       mutation,
@@ -752,9 +750,9 @@ async function removeProposal(
   const wagerBefore = await repository.wagers.readWager(wagerKey);
   const proposalBefore = readWagerProposal(wagerBefore, proposalUid);
   if (
-    !wagerBefore?.agreed.raw &&
-    !wagerBefore?.resolved.raw &&
-    !wagerBefore?.settlement.raw &&
+    !wagerBefore?.agreed &&
+    !wagerBefore?.resolved &&
+    !wagerBefore?.settlement &&
     proposalBefore &&
     !(await readModernProposalLineage(repository, {
       inviteId,
@@ -854,6 +852,16 @@ async function removeWagerProposalUnlocked(
       request.matchId,
       proposalUid,
     );
+  if (
+    (
+      await repository.wagers.readWager({
+        inviteId: request.inviteId,
+        matchId: request.matchId,
+      })
+    )?.state === "blocked"
+  ) {
+    return { ok: false, reason: "manual-review-required" };
+  }
   const proposal = await removeProposal(
     repository,
     request.inviteId,
@@ -867,8 +875,8 @@ async function removeWagerProposalUnlocked(
     return { ok: false, reason: "proposal-missing" };
   }
   if (
-    proposal.raw.reservationOperationId !== proposalReservationOperationId ||
-    !validOperationId(proposal.raw.proposalOperationId)
+    proposal.reservationOperationId !== proposalReservationOperationId ||
+    !validOperationId(proposal.proposalOperationId)
   ) {
     throw new Error("wager-removal-operation-invalid");
   }

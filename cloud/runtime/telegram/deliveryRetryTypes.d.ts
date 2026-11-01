@@ -34,7 +34,7 @@ export type TelegramBarrierProof = {
 export type TelegramBarrierProofResult = {
   applied: boolean;
   retryNotBeforeMs: number;
-  gate: TelegramApiGateDocument;
+  gate: TelegramApiGateDocument | null;
 };
 export type TelegramExactRetryInput = {
   messageKey: string;

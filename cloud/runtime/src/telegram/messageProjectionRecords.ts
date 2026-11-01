@@ -12,27 +12,14 @@ import {
 import type { EventTelegramDesiredChange } from "./eventProjectionCore.js";
 import { writeDelivery } from "./deliveryState.js";
 import {
-  desiredDocument,
   messageDocument,
   updateTelegramMessage,
   type TelegramAppliedDocument,
   type TelegramMessageDocument,
 } from "./records.js";
 
-type SourceRecord = Record<string, unknown>;
-const asObject = (value: unknown): SourceRecord =>
-  value && typeof value === "object" && !Array.isArray(value)
-    ? (value as SourceRecord)
-    : {};
-const guardField = "eventTelegramProjectionGuard";
-const generation = (value: unknown): number => {
-  const stored = asObject(asObject(value)[guardField]).generation;
-  return typeof stored === "number" &&
-    Number.isSafeInteger(stored) &&
-    stored >= 0
-    ? stored
-    : 0;
-};
+const generation = (value: TelegramDesired | undefined): number =>
+  value?.eventTelegramProjectionGuard?.generation ?? 0;
 
 export function replaceTelegramDesired(
   current: TelegramMessageDocument | null,
@@ -92,56 +79,60 @@ export function projectEventMessage(
   current: TelegramMessageDocument | null,
   value: EventTelegramDesiredChange["value"],
   expectedGeneration: number,
-  expectedApplied?: TelegramAppliedDocument,
+  expectedApplied?: TelegramAppliedDocument | null,
 ): TransactionDecision<TelegramMessageDocument> {
-  const record = asObject(current);
-  if (generation(record.desired) > expectedGeneration) {
+  const record = messageDocument(current);
+  if (generation(record.desired) > expectedGeneration)
     return { commit: false, decision: "newer-projection" };
-  }
-  if (expectedApplied) {
-    const desired = asObject(value);
-    const delivery = asObject(record.delivery);
-    const abandoned = asObject(delivery.abandonedSend);
+  if (expectedApplied !== undefined) {
+    const desired = value;
+    const delivery = record.delivery;
+    const abandoned = delivery?.abandonedSend;
     if (
-      delivery.status === "terminal" &&
-      asObject(delivery.lastError).code === "manually-abandoned" &&
-      abandoned.destination === desired.destination &&
+      delivery?.status === "terminal" &&
+      delivery.lastError?.code === "manually-abandoned" &&
+      abandoned?.destination === desired.destination &&
+      desired.operation !== "delete" &&
       abandoned.instanceKey === desired.instanceKey
     )
       return { commit: false, decision: "abandoned" };
-    const applied = asObject(record.applied);
-    const expected = asObject(expectedApplied);
+    const applied = record.applied;
     if (
-      delivery.sendInFlight ||
-      [
-        "destination",
-        "instanceKey",
-        "messageId",
-        "contentHash",
-        "revision",
-      ].some((key) => applied[key] !== expected[key])
+      delivery?.sendInFlight ||
+      (
+        [
+          "destination",
+          "instanceKey",
+          "messageId",
+          "contentHash",
+          "revision",
+        ] as const
+      ).some((key) => applied?.[key] !== expectedApplied?.[key])
     ) {
-      const previousDesired = asObject(record.desired);
+      const previousDesired = record.desired;
       if (
         desired.operation === "edit" &&
         desired.ifMissing === "skip" &&
+        previousDesired &&
+        previousDesired.operation !== "delete" &&
         previousDesired.destination === desired.destination &&
         previousDesired.instanceKey === desired.instanceKey
       ) {
-        const next: unknown = {
-          ...Reflect.apply(buildTelegramEditDesired, undefined, [
-            {
-              ...previousDesired,
-              ifMissing: "skip",
-              sourceRevision: desired.sourceRevision,
-            },
-          ]),
-          [guardField]: desired[guardField],
+        const next: TelegramEditDesired = {
+          ...buildTelegramEditDesired({
+            ...previousDesired,
+            ifMissing: "skip",
+            sourceRevision: desired.sourceRevision,
+          }),
+          ...(desired.eventTelegramProjectionGuard
+            ? {
+                eventTelegramProjectionGuard:
+                  desired.eventTelegramProjectionGuard,
+              }
+            : {}),
         };
         return {
-          value: updateTelegramMessage(messageDocument(record), {
-            desired: desiredDocument(next),
-          }),
+          value: updateTelegramMessage(record, { desired: next }),
           decision: "delivery-changed",
         };
       }
@@ -149,7 +140,7 @@ export function projectEventMessage(
     }
   }
   return {
-    value: updateTelegramMessage(messageDocument(record), { desired: value }),
+    value: updateTelegramMessage(record, { desired: value }),
     decision: "projection-committed",
   };
 }

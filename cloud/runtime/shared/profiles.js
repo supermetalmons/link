@@ -12,12 +12,30 @@ exports.cropAddress =
   exports.isLeaderboardReadType =
   exports.isLeaderboardReadResponse =
   exports.isLeaderboardReadRequest =
-  exports.normalizeProfileEmojiId =
   exports.getProfileFallbackEmojiId =
   exports.PROFILE_FALLBACK_EMOJI_COUNT =
   exports.PROFILE_STICKER_CATALOG =
   exports.LEADERBOARD_READ_TYPES =
     void 0;
+const appearance_js_1 = require("./appearance.js");
+Object.defineProperty(exports, "PROFILE_FALLBACK_EMOJI_COUNT", {
+  enumerable: true,
+  get: function () {
+    return appearance_js_1.PROFILE_FALLBACK_EMOJI_COUNT;
+  },
+});
+Object.defineProperty(exports, "PROFILE_STICKER_CATALOG", {
+  enumerable: true,
+  get: function () {
+    return appearance_js_1.PROFILE_STICKER_CATALOG;
+  },
+});
+Object.defineProperty(exports, "getProfileFallbackEmojiId", {
+  enumerable: true,
+  get: function () {
+    return appearance_js_1.getProfileFallbackEmojiId;
+  },
+});
 const mining_js_1 = require("./mining.js");
 const PROFILE_KEYS = Object.freeze([
   "id",
@@ -47,56 +65,23 @@ const REQUIRED_PROFILE_KEYS = Object.freeze([
   "totalManaPoints",
   "win",
   "emoji",
+  "aura",
+  "cardBackgroundId",
+  "cardSubtitleId",
+  "profileCounter",
+  "profileMons",
+  "cardStickers",
   "username",
   "eth",
   "sol",
   "mining",
 ]);
-const PROFILE_FALLBACK_EMOJI_COUNT = 155;
-exports.PROFILE_FALLBACK_EMOJI_COUNT = PROFILE_FALLBACK_EMOJI_COUNT;
 const LEADERBOARD_READ_TYPES = Object.freeze([
   "rating",
   "mp",
   ...mining_js_1.MATERIAL_KEYS,
 ]);
 exports.LEADERBOARD_READ_TYPES = LEADERBOARD_READ_TYPES;
-const PROFILE_STICKER_CATALOG = Object.freeze({
-  "big-mon-top-right": Object.freeze([
-    "applecreme",
-    "armored-gummoskullj",
-    "crystal-cloud-gabber",
-    "crystal-gummy-deino",
-    "gate",
-    "crystal-owg",
-    "estalibur",
-    "gerp",
-    "gummy-deino",
-    "hatchat",
-    "king-snowbie",
-    "lord-idgecreist",
-    "melmut",
-    "omen-statue",
-    "omom-2",
-    "omom-3",
-    "omom-4",
-    "omom",
-    "speklmic",
-    "super-mana-piece-3",
-    "zemred",
-  ]),
-  "bottom-left": Object.freeze(["heart", "rock"]),
-  "bottom-right": Object.freeze(["cursor", "star"]),
-  mana: Object.freeze(["blue-mana", "metal-mana"]),
-  "middle-left": Object.freeze(["super-mana-piece-2", "super-mana-piece"]),
-  "middle-right": Object.freeze([
-    "glitter-rock",
-    "metal-mana-pog",
-    "swag-coin",
-  ]),
-  "mini-logo": Object.freeze(["bomb", "mana", "potion", "super-mana"]),
-  "type-logo": Object.freeze(["angel", "demon", "drainer", "mystic", "spirit"]),
-});
-exports.PROFILE_STICKER_CATALOG = PROFILE_STICKER_CATALOG;
 const isRecord = (value) =>
   typeof value === "object" && value !== null && !Array.isArray(value);
 const hasExactKeys = (value, expectedKeys) => {
@@ -110,10 +95,7 @@ const hasOnlyKeys = (value, allowedKeys) =>
   Object.keys(value).every((key) => allowedKeys.includes(key));
 const isOptionalFiniteNumber = (value) =>
   value === undefined || (typeof value === "number" && Number.isFinite(value));
-const isOptionalString = (value) =>
-  value === undefined || typeof value === "string";
-const isOptionalNullableString = (value) =>
-  value === undefined || value === null || typeof value === "string";
+const isNullableString = (value) => value === null || typeof value === "string";
 const isPlayerProfile = (value) =>
   isRecord(value) &&
   hasOnlyKeys(value, PROFILE_KEYS) &&
@@ -127,17 +109,17 @@ const isPlayerProfile = (value) =>
   typeof value.totalManaPoints === "number" &&
   Number.isFinite(value.totalManaPoints) &&
   typeof value.win === "boolean" &&
-  ((typeof value.emoji === "number" && Number.isFinite(value.emoji)) ||
-    (typeof value.emoji === "string" && value.emoji !== "")) &&
-  isOptionalString(value.aura) &&
-  isOptionalFiniteNumber(value.cardBackgroundId) &&
-  isOptionalFiniteNumber(value.cardSubtitleId) &&
-  isOptionalString(value.profileCounter) &&
-  isOptionalString(value.profileMons) &&
-  isOptionalString(value.cardStickers) &&
-  isOptionalNullableString(value.username) &&
-  isOptionalNullableString(value.eth) &&
-  isOptionalNullableString(value.sol) &&
+  (0, appearance_js_1.isEmojiId)(value.emoji) &&
+  (0, appearance_js_1.isAura)(value.aura) &&
+  (0, appearance_js_1.isCardBackgroundId)(value.cardBackgroundId) &&
+  (0, appearance_js_1.isCardSubtitleId)(value.cardSubtitleId) &&
+  (0, appearance_js_1.isProfileCounter)(value.profileCounter) &&
+  (value.profileMons === null ||
+    (0, appearance_js_1.isSelectedMons)(value.profileMons)) &&
+  (0, appearance_js_1.isStickerMap)(value.cardStickers) &&
+  isNullableString(value.username) &&
+  isNullableString(value.eth) &&
+  isNullableString(value.sol) &&
   isOptionalFiniteNumber(value.feb2026UniqueOpponentsCount) &&
   (value.completedProblemIds === undefined ||
     (Array.isArray(value.completedProblemIds) &&
@@ -194,62 +176,22 @@ const isProfileCustomizationUpdateRequest = (value) => {
   switch (value.field) {
     case "emojiAndAura":
       return (
-        isRecord(value.value) &&
-        hasExactKeys(value.value, ["emoji", "aura"]) &&
-        Number.isSafeInteger(value.value.emoji) &&
-        ((value.value.emoji >= 0 &&
-          value.value.emoji <= 155 &&
-          value.value.aura === "") ||
-          (value.value.emoji >= 1000 &&
-            value.value.emoji <= 1466 &&
-            (value.value.aura === "" || value.value.aura === "rainbow")))
+        (0, appearance_js_1.isEmojiAppearance)(value.value) &&
+        (value.value.aura === "none" ||
+          value.value.emoji >= appearance_js_1.INVENTORY_EMOJI_START)
       );
     case "cardBackgroundId":
-      return (
-        Number.isSafeInteger(value.value) &&
-        ((value.value >= 0 && value.value < 37) || value.value === 100)
-      );
+      return (0, appearance_js_1.isCardBackgroundId)(value.value);
     case "cardSubtitleId":
-      return (
-        Number.isSafeInteger(value.value) &&
-        value.value >= 0 &&
-        value.value < 30
-      );
+      return (0, appearance_js_1.isCardSubtitleId)(value.value);
     case "profileCounter":
-      return value.value === "gp" || value.value === "mp";
+      return (0, appearance_js_1.isProfileCounter)(value.value);
     case "profileMons":
       return (
-        value.value === "" ||
-        (typeof value.value === "string" &&
-          /^(?:0|1),(?:0|1|2|3|4),(?:0|1|2|3|4|5),(?:0|1|2),(?:0|1|2)$/.test(
-            value.value,
-          ))
+        value.value === null || (0, appearance_js_1.isSelectedMons)(value.value)
       );
-    case "cardStickers": {
-      if (value.value === "") {
-        return true;
-      }
-      if (typeof value.value !== "string") {
-        return false;
-      }
-      let stickers;
-      try {
-        stickers = JSON.parse(value.value);
-      } catch {
-        return false;
-      }
-      return (
-        isRecord(stickers) &&
-        Object.keys(stickers).length <=
-          Object.keys(PROFILE_STICKER_CATALOG).length &&
-        Object.entries(stickers).every(
-          ([field, name]) =>
-            Object.hasOwn(PROFILE_STICKER_CATALOG, field) &&
-            typeof name === "string" &&
-            PROFILE_STICKER_CATALOG[field].includes(name),
-        )
-      );
-    }
+    case "cardStickers":
+      return (0, appearance_js_1.isStickerMap)(value.value);
     case "completedProblems":
       return (
         Array.isArray(value.value) &&
@@ -270,23 +212,6 @@ const isProfileCustomizationUpdateResponse = (value) =>
   isRecord(value) && hasExactKeys(value, ["ok"]) && value.ok === true;
 exports.isProfileCustomizationUpdateResponse =
   isProfileCustomizationUpdateResponse;
-const getProfileFallbackEmojiId = (profileId) => {
-  let hash = 0;
-  for (let index = 0; index < profileId.length; index += 1) {
-    hash += profileId.charCodeAt(index);
-  }
-  return `${(hash % PROFILE_FALLBACK_EMOJI_COUNT) + 1}`;
-};
-exports.getProfileFallbackEmojiId = getProfileFallbackEmojiId;
-const normalizeProfileEmojiId = (value, fallback = 1) => {
-  const parsed =
-    typeof value === "number" ||
-    (typeof value === "string" && value.trim() !== "")
-      ? Number(value)
-      : NaN;
-  return Number.isFinite(parsed) ? Math.floor(parsed) : fallback;
-};
-exports.normalizeProfileEmojiId = normalizeProfileEmojiId;
 const cropAddress = (address) =>
   `${address.slice(0, 4)}...${address.slice(-4)}`;
 exports.cropAddress = cropAddress;

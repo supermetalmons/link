@@ -1,9 +1,20 @@
+import { runInCanonicalMatchRoom as runInDurableObject } from "./canonicalMatchTestFixture.ts";
 import { env } from "cloudflare:workers";
-import { runInDurableObject } from "cloudflare:test";
+
 import { describe, expect, it } from "vitest";
 import { createMatchSyncSnapshotStore } from "../src/matchSyncSnapshotStore.ts";
 
 type MatchSyncSnapshotStore = ReturnType<typeof createMatchSyncSnapshotStore>;
+const snapshot = (matchId: string, revision: number) =>
+  JSON.stringify({
+    inviteId: matchId,
+    matchId,
+    revision,
+    hostPlayerId: "host",
+    guestPlayerId: null,
+    hostMatch: null,
+    guestMatch: null,
+  });
 
 function fixture(work: (store: MatchSyncSnapshotStore) => void) {
   const room = env.INVITE_REACTIONS.getByName(
@@ -18,8 +29,8 @@ describe("match sync snapshot storage", () => {
   it("preserves snapshot bytes and existing deadlines when replacing revisions", async () => {
     await fixture((store) => {
       const matchId = "match-'😀";
-      const first = '{ "unknown": null, "revision": 0 }';
-      const next = '{ "revision": 7, "unknown": { "retained": true } }';
+      const first = " " + snapshot(matchId, 0) + " ";
+      const next = snapshot(matchId, 7);
       expect(store.read(matchId)).toBeUndefined();
       store.write(matchId, first, 0);
       expect(store.read(matchId)).toEqual({
@@ -48,7 +59,7 @@ describe("match sync snapshot storage", () => {
 
   it("preserves earlier deadlines only when requested, including null schedules", async () => {
     await fixture((store) => {
-      store.write("match", "{}", 1);
+      store.write("match", snapshot("match", 1), 1);
       store.setDeadline("match", 200, true);
       expect(store.nextDeadline()).toBe(200);
       store.setDeadline("match", 300, true);
@@ -73,14 +84,14 @@ describe("match sync snapshot storage", () => {
       expect(store.read("absent")).toBeUndefined();
       expect(store.listDue(100)).toEqual([]);
       expect(store.nextDeadline()).toBeNull();
-      store.write("first", '{"first":true}', 2);
-      store.write("second", '{"second":true}', 3);
+      store.write("first", snapshot("first", 2), 2);
+      store.write("second", snapshot("second", 3), 3);
       store.setDeadline("first", 100);
       store.setDeadline("second", 200);
       store.clearDeadline("first");
       expect(store.read("second")).toEqual({
         match_id: "second",
-        snapshot_json: '{"second":true}',
+        snapshot_json: snapshot("second", 3),
         revision: 3,
         next_at_ms: 200,
       });
@@ -93,7 +104,7 @@ describe("match sync snapshot storage", () => {
       expect(store.nextDeadline()).toBeNull();
       expect(store.listDue(100)).toEqual([]);
       for (const matchId of ["future", "tie-b", "early", "tie-a", "idle"])
-        store.write(matchId, "{}", 1);
+        store.write(matchId, snapshot(matchId, 1), 1);
       store.setDeadline("future", 30);
       store.setDeadline("tie-b", 20);
       store.setDeadline("early", 10);

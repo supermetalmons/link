@@ -1,29 +1,34 @@
+import { canonicalMatch, required } from "./fixtures/canonicalData.mjs";
 import assert from "node:assert/strict";
 import test from "node:test";
 import { createRematchHistory } from "../src/game/rematchHistory.ts";
 
+/** @typedef {import("@mons/shared/game-sessions").HistoricalMatchPair} MatchPair */
+/** @returns {MatchPair} */
 const pair = (matchId = "match", emojiId = 1) => ({
   matchId,
   hostPlayerId: "host",
   guestPlayerId: "guest",
-  hostMatch: { emojiId, aura: "", fen: "host-fen" },
-  guestMatch: { emojiId: 2, aura: "", fen: "guest-fen" },
+  hostMatch: canonicalMatch({ emojiId, fen: "host-fen" }),
+  guestMatch: canonicalMatch({ color: "black", emojiId: 2, fen: "guest-fen" }),
 });
 
-const deferred = () => {
-  let resolve;
-  const promise = new Promise((done) => {
-    resolve = done;
-  });
-  return { promise, resolve };
-};
+/** @returns {PromiseWithResolvers<MatchPair | null>} */
+const deferred = () => Promise.withResolvers();
 const flush = () => new Promise((resolve) => setImmediate(resolve));
 
-function harness(load = async (matchId) => pair(matchId)) {
+/** @param {Parameters<typeof createRematchHistory>[0]["loadMatchPair"]} [load] */
+function harness(
+  load = async (/** @type {string | undefined} */ matchId) => pair(matchId),
+) {
   let now = 1000;
   let session = 0;
   let nextTimerId = 0;
+  /**
+   * @type {string[]}
+   */
   const reads = [];
+  /** @type {Map<number, { callback: () => void, delay: number }>} */
   const timers = new Map();
   const history = createRematchHistory({
     loadMatchPair: (matchId) => {
@@ -31,7 +36,7 @@ function harness(load = async (matchId) => pair(matchId)) {
       return load(matchId);
     },
     scoreFromPair: (_matchId, value) => ({
-      white: value.hostMatch.emojiId,
+      white: required(value.hostMatch).emojiId,
       black: 2,
     }),
     createSessionGuard: () => {
@@ -50,14 +55,14 @@ function harness(load = async (matchId) => pair(matchId)) {
     history,
     reads,
     timers,
-    advance: (ms) => {
+    advance: (/** @type {number} */ ms) => {
       now += ms;
     },
     invalidateSession: () => {
       session++;
     },
     runTimer: async () => {
-      const [id, timer] = timers.entries().next().value;
+      const [id, timer] = required(timers.entries().next().value);
       timers.delete(id);
       timer.callback();
       await flush();
@@ -105,19 +110,22 @@ test("archive misses retain provisional history, expire after 3 seconds, and all
 });
 
 test("archive refresh uses existing delays and stops after authoritative data arrives", async () => {
+  /** @type {MatchPair | null} */
   let archived = null;
   const h = harness(async () => archived);
+  /** @type {MatchPair[]} */
   const refreshed = [];
+  /** @type {unknown[]} */
   const errors = [];
   h.history.seedProvisional(pair());
   h.history.refreshArchive("match", {
     isCurrent: () => true,
-    onRefresh: (value) => refreshed.push(value),
+    onRefresh: (/** @type {MatchPair} */ value) => refreshed.push(value),
     onError: (error) => errors.push(error),
   });
-  assert.equal([...h.timers.values()][0].delay, 250);
+  assert.equal(required([...h.timers.values()][0]).delay, 250);
   await h.runTimer();
-  assert.equal([...h.timers.values()][0].delay, 3000);
+  assert.equal(required([...h.timers.values()][0]).delay, 3000);
   archived = pair("match", 7);
   await h.runTimer();
   assert.deepEqual(refreshed, [archived]);
@@ -128,18 +136,20 @@ test("archive refresh uses existing delays and stops after authoritative data ar
 test("reset alone cancels queued refreshes and rejects in-flight archive results", async () => {
   const pending = deferred();
   const h = harness(() => pending.promise);
+  /** @type {MatchPair[]} */
   const refreshed = [];
   h.history.seedProvisional(pair());
   h.history.setScore("match", { white: 3, black: 4 });
   const options = {
     isCurrent: () => true,
-    onRefresh: (value) => refreshed.push(value),
-    onError: assert.fail,
+    onRefresh: (/** @type {MatchPair} */ value) => refreshed.push(value),
+    onError: (/** @type {unknown} */ error) =>
+      assert.fail(error instanceof Error ? error : String(error)),
   };
   h.history.refreshArchive("match", options);
   await h.runTimer();
   h.history.refreshArchive("match", options);
-  const queued = [...h.timers.values()][0];
+  const queued = required([...h.timers.values()][0]);
   h.history.reset();
   assert.equal(h.timers.size, 0);
   queued.callback();
@@ -155,6 +165,7 @@ test("reset alone cancels queued refreshes and rejects in-flight archive results
 });
 
 test("score prefetch shares identical requests and limits work to two concurrent loads", async () => {
+  /** @type {Map<string, ReturnType<typeof deferred>>} */
   const pending = new Map();
   const h = harness((matchId) => {
     const request = deferred();
@@ -168,12 +179,12 @@ test("score prefetch shares identical requests and limits work to two concurrent
   const prefetch = h.history.prefetchScores("live", ids, onChange);
   assert.equal(h.history.prefetchScores("live", ids, onChange), prefetch);
   assert.deepEqual(h.reads, ["a", "b"]);
-  pending.get("a").resolve(pair("a", 3));
+  required(pending.get("a")).resolve(pair("a", 3));
   await flush();
   assert.deepEqual(h.reads, ["a", "b", "c"]);
   assert.equal(changed, 1);
-  pending.get("b").resolve(pair("b", 4));
-  pending.get("c").resolve(pair("c", 5));
+  required(pending.get("b")).resolve(pair("b", 4));
+  required(pending.get("c")).resolve(pair("c", 5));
   assert.equal(await prefetch, true);
   assert.equal(changed, 3);
   assert.deepEqual(h.history.getScore("c"), { white: 5, black: 2 });
@@ -199,6 +210,7 @@ test("a previous prefetch finishing cannot release a newer request's deduplicati
 });
 
 test("reset stops old prefetch workers and preserves a new request with the same signature", async () => {
+  /** @type {ReturnType<typeof deferred>[]} */
   const requests = [];
   const h = harness(() => {
     const request = deferred();
@@ -211,18 +223,18 @@ test("reset stops old prefetch workers and preserves a new request with the same
   const old = h.history.prefetchScores("live", ids, onChange);
   h.history.reset();
   const current = h.history.prefetchScores("live", ids, onChange);
-  requests[0].resolve(pair("a", 10));
-  requests[1].resolve(pair("b", 10));
+  required(requests[0]).resolve(pair("a", 10));
+  required(requests[1]).resolve(pair("b", 10));
   assert.equal(await old, false);
   assert.equal(changed, 0);
   assert.equal(h.history.getScore("a"), undefined);
   assert.equal(h.history.prefetchScores("live", ids, onChange), current);
   assert.deepEqual(h.reads, ["a", "b", "a", "b"]);
-  requests[2].resolve(pair("a", 3));
-  requests[3].resolve(pair("b", 4));
+  required(requests[2]).resolve(pair("a", 3));
+  required(requests[3]).resolve(pair("b", 4));
   await flush();
   assert.deepEqual(h.reads, ["a", "b", "a", "b", "c"]);
-  requests[4].resolve(pair("c", 5));
+  required(requests[4]).resolve(pair("c", 5));
   assert.equal(await current, true);
   assert.equal(changed, 3);
 });

@@ -881,22 +881,6 @@ const isExactRecord = (value, keys) => {
     actualKeys.every((key) => keys.includes(key))
   );
 };
-const isJsonValue = (value, depth = 0) => {
-  if (depth > 64) return false;
-  if (
-    value === null ||
-    typeof value === "string" ||
-    typeof value === "boolean"
-  ) {
-    return true;
-  }
-  if (typeof value === "number") return Number.isFinite(value);
-  if (Array.isArray(value)) {
-    return value.every((entry) => isJsonValue(entry, depth + 1));
-  }
-  if (!value || typeof value !== "object") return false;
-  return Object.values(value).every((entry) => isJsonValue(entry, depth + 1));
-};
 const isExactSafeRecordKey = (value) =>
   typeof value === "string" &&
   value.trim() === value &&
@@ -914,17 +898,18 @@ const isToggleEventPrizeSelectionResponse = (value) =>
 exports.isToggleEventPrizeSelectionResponse =
   isToggleEventPrizeSelectionResponse;
 const isEventPrizeAssignmentWireRecord = (value) =>
-  !!value &&
-  typeof value === "object" &&
-  !Array.isArray(value) &&
-  isJsonValue(value) &&
-  ["eventId", "profileId", "place", "prizeId", "assignedAtMs"].every((key) =>
-    Object.hasOwn(value, key),
-  ) &&
+  isExactRecord(value, [
+    "eventId",
+    "profileId",
+    "place",
+    "prizeId",
+    "assignedAtMs",
+  ]) &&
   isExactSafeRecordKey(value.eventId) &&
   isExactSafeRecordKey(value.profileId) &&
   (value.place === 1 || value.place === 2 || value.place === 3) &&
   isExactSafeRecordKey(value.prizeId) &&
+  typeof value.assignedAtMs === "number" &&
   Number.isSafeInteger(value.assignedAtMs) &&
   value.assignedAtMs >= 0;
 exports.isEventPrizeAssignmentWireRecord = isEventPrizeAssignmentWireRecord;

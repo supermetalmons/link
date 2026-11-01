@@ -3,19 +3,11 @@ import {
   type RetainedEventProgressPlan,
 } from "./eventProgressCodec.ts";
 import type { MatchStateClaimTimerRequest } from "./matchStateTypes.ts";
-import type { RetainedTimerCleanupInput } from "./gameplayCoordinationD1.ts";
-
-declare const dueMatchEffect: unique symbol;
-declare const matchEffectTarget: unique symbol;
-
-export type DueMatchEffect = {
-  readonly [dueMatchEffect]: true;
-  readonly nextAtMs: number;
-  readonly attempts: number;
-};
-export type MatchEffectTarget = { readonly [matchEffectTarget]: true };
+import { isSafeRecordKey } from "./recordKeys.ts";
 
 export type TimerClaimEffectPayload = {
+  schemaVersion: 1;
+  kind: "timer-claimed";
   effectId: string;
   inviteId: string;
   matchId: string;
@@ -25,30 +17,92 @@ export type TimerClaimEffectPayload = {
   claimedAtMs: number;
   eventId: string | null;
   sourceKey: string;
-  reason: "timer-claimed";
 };
-
-type EffectFields = {
-  effectId?: unknown;
-  inviteId?: unknown;
-  matchId?: unknown;
-  playerId?: unknown;
-  opponentId?: unknown;
-  epoch?: unknown;
-  claimedAtMs?: unknown;
-  eventId?: unknown;
-  sourceKey?: unknown;
-  reason?: unknown;
+export type DueMatchEffect = TimerClaimEffectPayload & {
+  state: "pending";
+  nextAtMs: number;
+  attempts: number;
 };
+export type MatchEffectTarget = { effectId: string };
 
-const fields = (effect: DueMatchEffect): EffectFields => effect as EffectFields;
+function invalid(): never {
+  throw new TypeError("match-state-invalid-effect");
+}
+function key(value: unknown): value is string {
+  return (
+    typeof value === "string" &&
+    value.trim() === value &&
+    isSafeRecordKey(value)
+  );
+}
+function integer(value: unknown, minimum = 0): value is number {
+  return (
+    typeof value === "number" && Number.isSafeInteger(value) && value >= minimum
+  );
+}
+
+export function parseTimerClaimEffectPayload(
+  value: unknown,
+): TimerClaimEffectPayload {
+  if (value === null || typeof value !== "object" || Array.isArray(value))
+    invalid();
+  const row: Record<string, unknown> = Object.fromEntries(
+    Object.entries(value),
+  );
+  const fields = [
+    "schemaVersion",
+    "kind",
+    "effectId",
+    "inviteId",
+    "matchId",
+    "playerId",
+    "opponentId",
+    "epoch",
+    "claimedAtMs",
+    "eventId",
+    "sourceKey",
+  ];
+  if (
+    Object.keys(row).length !== fields.length ||
+    fields.some((field) => !Object.hasOwn(row, field)) ||
+    row.schemaVersion !== 1 ||
+    row.kind !== "timer-claimed" ||
+    !key(row.effectId) ||
+    !key(row.inviteId) ||
+    !key(row.matchId) ||
+    !key(row.playerId) ||
+    !key(row.opponentId) ||
+    row.playerId === row.opponentId ||
+    !integer(row.epoch, 1) ||
+    !integer(row.claimedAtMs) ||
+    !(row.eventId === null || key(row.eventId)) ||
+    row.effectId !== `timer:${row.inviteId}:${row.matchId}` ||
+    row.sourceKey !== row.effectId
+  )
+    invalid();
+  return {
+    schemaVersion: 1,
+    kind: "timer-claimed",
+    effectId: row.effectId,
+    inviteId: row.inviteId,
+    matchId: row.matchId,
+    playerId: row.playerId,
+    opponentId: row.opponentId,
+    epoch: row.epoch,
+    claimedAtMs: row.claimedAtMs,
+    eventId: row.eventId,
+    sourceKey: row.sourceKey,
+  };
+}
 
 export function createTimerClaimEffectPayload(
   input: MatchStateClaimTimerRequest,
   claimedAtMs: number,
 ): TimerClaimEffectPayload {
   const effectId = `timer:${input.inviteId}:${input.matchId}`;
-  return {
+  return parseTimerClaimEffectPayload({
+    schemaVersion: 1,
+    kind: "timer-claimed",
     effectId,
     inviteId: input.inviteId,
     matchId: input.matchId,
@@ -58,8 +112,7 @@ export function createTimerClaimEffectPayload(
     claimedAtMs,
     eventId: input.eventId ?? null,
     sourceKey: effectId,
-    reason: "timer-claimed",
-  };
+  });
 }
 
 export function matchesStoredTimerEffect(
@@ -67,8 +120,10 @@ export function matchesStoredTimerEffect(
   input: MatchStateClaimTimerRequest,
 ): boolean {
   const value: unknown = JSON.parse(json);
-  const previous = value as EffectFields;
+  const previous = parseTimerClaimEffectPayload(value);
   return (
+    previous.inviteId === input.inviteId &&
+    previous.matchId === input.matchId &&
     previous.playerId === input.playerId &&
     previous.opponentId === input.opponentId &&
     previous.epoch === input.epoch &&
@@ -82,54 +137,47 @@ export function readDueMatchEffect(row: {
   attempts: number;
 }): DueMatchEffect {
   const value: unknown = JSON.parse(row.payload_json);
-  const payload: object = Object(value);
-  return {
-    ...payload,
+  return createDueMatchEffect(parseTimerClaimEffectPayload(value), {
     nextAtMs: row.next_at_ms,
     attempts: row.attempts,
-  } as DueMatchEffect;
+  });
 }
 
 export function createDueMatchEffect(
   payload: TimerClaimEffectPayload,
   schedule: { nextAtMs: number; attempts: number },
 ): DueMatchEffect {
-  return { ...payload, ...schedule } as object as DueMatchEffect;
+  const effect = parseTimerClaimEffectPayload(payload);
+  if (!integer(schedule.nextAtMs) || !integer(schedule.attempts)) invalid();
+  return { ...effect, state: "pending", ...schedule };
 }
 
 export function captureMatchEffectTarget(
   effect: DueMatchEffect,
 ): MatchEffectTarget {
-  return { effectId: fields(effect).effectId } as object as MatchEffectTarget;
+  return { effectId: effect.effectId };
 }
 
-export function matchEffectStorageKey(target: MatchEffectTarget): unknown {
-  return (target as { effectId?: unknown }).effectId;
+export function matchEffectStorageKey(target: MatchEffectTarget): string {
+  if (!key(target.effectId)) invalid();
+  return target.effectId;
 }
 
 export function matchEffectLogIdentity(effect: DueMatchEffect) {
-  const value = fields(effect);
-  return { inviteId: value.inviteId, matchId: value.matchId };
-}
-
-export function cleanupRetainedMatchEffect(
-  effect: DueMatchEffect,
-  cleanup: (input: RetainedTimerCleanupInput) => Promise<void>,
-): Promise<void> {
-  return cleanup(fields(effect));
+  return { inviteId: effect.inviteId, matchId: effect.matchId };
 }
 
 export function prepareMatchEffectProgress(
   effect: DueMatchEffect,
 ): Promise<RetainedEventProgressPlan> | null {
-  const value = fields(effect);
-  if (!value.eventId) return null;
-  return buildRetainedEventProgressPlan(
-    {
-      eventId: value.eventId,
-      sourceKey: value.sourceKey,
-      reason: value.reason,
-    },
-    value.claimedAtMs,
-  );
+  return effect.eventId === null
+    ? null
+    : buildRetainedEventProgressPlan(
+        {
+          eventId: effect.eventId,
+          sourceKey: effect.sourceKey,
+          reason: "timer-claimed",
+        },
+        effect.claimedAtMs,
+      );
 }

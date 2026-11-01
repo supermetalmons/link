@@ -1,3 +1,4 @@
+import { required } from "./fixtures/canonicalData.mjs";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
@@ -17,9 +18,17 @@ const { outputText } = ts.transpileModule(
   },
 );
 
+/**
+ * @typedef {{ kind: string, uuid: number, variation?: number }} TraceReaction
+ * @typedef {["guard" | "random" | "dismiss"] | ["send" | "createVoice" | "createSticker" | "voice", TraceReaction] | ["sounds", string[]] | ["sticker", boolean, number] | ["text", string, boolean] | ["entitlement" | "schedule", number] | ["disabled", boolean]} TraceEvent
+ */
+
 function fixture({ isVisible = true, allowed = true } = {}) {
+  /** @type {TraceEvent[]} */
   const events = [];
+  /** @type {{ callback: () => void, at: number, fired?: boolean }[]} */
   const timers = [];
+  /** @type {{ context: { isGameWithBot: boolean, puzzleMode: boolean }, epoch: number, flipped: boolean, sendError: Error | null, entitlementError: Error | null }} */
   const state = {
     context: { isGameWithBot: false, puzzleMode: false },
     epoch: 0,
@@ -30,7 +39,10 @@ function fixture({ isVisible = true, allowed = true } = {}) {
   let now = 0;
   let nextReaction = 0;
   const modules = {
-    react: { useCallback: (callback) => callback },
+    react: {
+      /** @template Callback @param {Callback} callback @returns {Callback} */
+      useCallback: (callback) => callback,
+    },
     "@mons/shared/reactions": { STICKER_ID_WHITELIST },
     "../../connection/connection": {
       connection: {
@@ -39,6 +51,7 @@ function fixture({ isVisible = true, allowed = true } = {}) {
           const epoch = state.epoch;
           return () => epoch === state.epoch;
         },
+        /** @param {TraceReaction} reaction */
         sendVoiceReaction(reaction) {
           events.push(["send", reaction]);
           if (state.sendError) throw state.sendError;
@@ -46,11 +59,13 @@ function fixture({ isVisible = true, allowed = true } = {}) {
       },
     },
     "../../content/sounds": {
+      /** @param {string} kind @returns {TraceReaction} */
       newReactionOfKind(kind) {
         const reaction = { kind, uuid: ++nextReaction };
         events.push(["createVoice", reaction]);
         return reaction;
       },
+      /** @param {number} id @returns {TraceReaction} */
       newStickerReaction(id) {
         const reaction = {
           kind: "sticker",
@@ -60,8 +75,10 @@ function fixture({ isVisible = true, allowed = true } = {}) {
         events.push(["createSticker", reaction]);
         return reaction;
       },
-      playReaction: (reaction) => events.push(["voice", reaction]),
-      playSounds: (sounds) => events.push(["sounds", sounds]),
+      playReaction: (/** @type {TraceReaction} */ reaction) =>
+        events.push(["voice", reaction]),
+      playSounds: (/** @type {string[]} */ sounds) =>
+        events.push(["sounds", sounds]),
     },
     "../../game/gameControlsStore": {
       getGameControlsSnapshot: () => ({ context: state.context }),
@@ -70,15 +87,21 @@ function fixture({ isVisible = true, allowed = true } = {}) {
       Sound: { EmoteSent: "sent", EmoteReceived: "received" },
     },
     "./boardReactionPort": {
-      isMetadataSideDisplayedAtOpponentSlot: (opponent) =>
-        state.flipped ? !opponent : opponent,
-      showVideoReaction: (opponent, id) =>
-        events.push(["sticker", opponent, id]),
-      showVoiceReactionText: (reaction, opponent) =>
-        events.push(["text", reaction, opponent]),
+      isMetadataSideDisplayedAtOpponentSlot: (
+        /** @type {boolean} */ opponent,
+      ) => (state.flipped ? !opponent : opponent),
+      showVideoReaction: (
+        /** @type {boolean} */ opponent,
+        /** @type {number} */ id,
+      ) => events.push(["sticker", opponent, id]),
+      showVoiceReactionText: (
+        /** @type {string} */ reaction,
+        /** @type {boolean} */ opponent,
+      ) => events.push(["text", reaction, opponent]),
     },
   };
   const exports = {};
+  /** @type {Math} */
   const math = Object.create(Math);
   math.random = () => {
     events.push(["random"]);
@@ -86,13 +109,19 @@ function fixture({ isVisible = true, allowed = true } = {}) {
   };
   new Function("exports", "require", "Math", outputText)(
     exports,
-    (specifier) => {
-      assert.ok(Object.hasOwn(modules, specifier), specifier);
+    (/** @type {string} */ specifier) => {
+      /** @param {string} name @returns {name is keyof typeof modules} */
+      const knownModule = (name) => Object.hasOwn(modules, name);
+      assert.ok(knownModule(specifier), specifier);
       return modules[specifier];
     },
     math,
   );
-  const actions = exports.useReactionActions({
+  const module =
+    /** @type {typeof import("../src/ui/controls/useReactionActions.ts")} */ (
+      exports
+    );
+  const actions = module.useReactionActions({
     isVisible,
     canSendSticker(id) {
       events.push(["entitlement", id]);
@@ -111,6 +140,9 @@ function fixture({ isVisible = true, allowed = true } = {}) {
     ...actions,
     state,
     events,
+    /**
+     * @param {number} ms
+     */
     advance(ms) {
       now += ms;
       for (const timer of timers) {
@@ -174,7 +206,7 @@ test("network voice reactions send the same object that was played locally", () 
     ["disabled", true],
     ["schedule", 9999],
   ]);
-  assert.equal(h.events[2][1], h.events[4][1]);
+  assert.equal(required(h.events[2])[1], required(h.events[4])[1]);
 });
 
 test("current puzzle mode keeps both reaction kinds local without generating a sticker payload", () => {
@@ -235,7 +267,7 @@ test("bot voice replies create their own variation before scheduling and play af
     ["createVoice", { kind: "yo", uuid: 2 }],
     ["schedule", 2000],
   ]);
-  const reply = h.events[5][1];
+  const reply = required(h.events[5])[1];
   h.events.length = 0;
   h.advance(1999);
   assert.deepEqual(h.events, []);
@@ -244,7 +276,7 @@ test("bot voice replies create their own variation before scheduling and play af
     ["voice", reply],
     ["text", "yo", true],
   ]);
-  assert.equal(h.events[0][1], reply);
+  assert.equal(required(h.events[0])[1], reply);
 });
 
 for (const kind of ["sticker", "voice"]) {
@@ -269,7 +301,7 @@ for (const kind of ["sticker", "voice"]) {
           : h.handleReactionSelect("yo"),
       h.state.sendError,
     );
-    assert.equal(h.events.at(-1)[0], "send");
+    assert.equal(required(h.events.at(-1))[0], "send");
     h.events.length = 0;
     h.advance(9999);
     assert.deepEqual(h.events, []);

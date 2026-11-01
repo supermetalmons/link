@@ -1,6 +1,8 @@
-import { timerStartStoreFixture } from "../test/matchClaimFixture.ts";
+import { timerClaimFixture } from "../test/matchClaimFixture.ts";
+import { matchDocumentFixture } from "../test/matchRecordFixture.ts";
+import { runInCanonicalMatchWriterFixture as runInDurableObject } from "./canonicalMatchTestFixture.ts";
 import { env } from "cloudflare:workers";
-import { runInDurableObject } from "cloudflare:test";
+
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { MatchStateStore } from "../src/matchStateStore.ts";
 import type { MatchStateSyncReadRequest } from "../src/matchStateTypes.ts";
@@ -30,16 +32,7 @@ function observedStore(storage: DurableObjectStorage) {
       return typeof value === "function" ? value.bind(target) : value;
     },
   });
-  const store = new MatchStateStore(measured, {
-    timerStarts: timerStartStoreFixture({
-      getOrAdvance: () => {
-        throw new Error("unexpected-timer-write");
-      },
-      deletePair: () => {
-        throw new Error("unexpected-timer-write");
-      },
-    }),
-  });
+  const store = new MatchStateStore(measured, {});
   calls.length = 0;
   return { store, calls };
 }
@@ -74,13 +67,21 @@ function createPair(store: MatchStateStore, input: MatchStateSyncReadRequest) {
         matchId: input.matchId,
         playerId: input.playerId,
         marker: "host-created",
-        value: { color: "white", fen: "initial", flatMovesString: "" },
+        value: matchDocumentFixture({
+          color: "white",
+          fen: "initial",
+          flatMovesString: "",
+        }),
       },
       {
         matchId: input.matchId,
         playerId: input.opponentId!,
         marker: "guest-created",
-        value: { color: "black", fen: "initial", flatMovesString: "" },
+        value: matchDocumentFixture({
+          color: "black",
+          fen: "initial",
+          flatMovesString: "",
+        }),
       },
     ],
   });
@@ -94,9 +95,9 @@ describe("conditional canonical sync reads", () => {
       const { store, calls } = observedStore(storage);
       createPair(store, input);
       storage.sql.exec(
-        "INSERT INTO match_state_claims(match_id, value_json) VALUES (?, ?)",
+        "INSERT INTO match_state_claims_canonical(match_id, value_json) VALUES (?, ?)",
         input.matchId,
-        '{"status":"claimed"}',
+        JSON.stringify(timerClaimFixture({ inviteId: input.inviteId })),
       );
       calls.length = 0;
       const pair = store.readPair(input);
@@ -104,7 +105,7 @@ describe("conditional canonical sync reads", () => {
       const payloads = new Set(
         storage.sql
           .exec<{ value_json: string }>(
-            "SELECT value_json FROM match_state_records WHERE match_id = ?",
+            "SELECT value_json FROM match_state_records_canonical WHERE match_id = ?",
             input.matchId,
           )
           .toArray()
@@ -120,8 +121,8 @@ describe("conditional canonical sync reads", () => {
         revision: pair.revision,
       });
       expect(calls).toHaveLength(2);
-      expect(calls[0].query).toContain("FROM match_state_source");
-      expect(calls[1].query).toContain("FROM match_state_revisions");
+      expect(calls[0]!.query).toContain("FROM match_state_source_canonical");
+      expect(calls[1]!.query).toContain("FROM match_state_revisions_canonical");
       expect(
         calls.reduce((total, call) => total + call.cursor.rowsRead, 0),
       ).toBe(2);
@@ -139,9 +140,9 @@ describe("conditional canonical sync reads", () => {
       const { store, calls } = observedStore(storage);
       const created = createPair(store, input);
       storage.sql.exec(
-        "INSERT INTO match_state_claims(match_id, value_json) VALUES (?, ?)",
+        "INSERT INTO match_state_claims_canonical(match_id, value_json) VALUES (?, ?)",
         input.matchId,
-        "invalid-json",
+        JSON.stringify(timerClaimFixture({ inviteId: input.inviteId })),
       );
       calls.length = 0;
       const cold = store.readSyncState(input);
@@ -149,18 +150,22 @@ describe("conditional canonical sync reads", () => {
         status: "changed",
         epoch: input.epoch,
         revision: 1,
-        playerMatch: created.records[0].value,
-        opponentMatch: created.records[1].value,
+        playerMatch: created.records[0]!.value,
+        opponentMatch: created.records[1]!.value,
       });
       expect(calls).toHaveLength(4);
       expect(
-        calls.filter(({ query }) => query.includes("FROM match_state_records")),
+        calls.filter(({ query }) =>
+          query.includes("FROM match_state_records_canonical"),
+        ),
       ).toHaveLength(2);
       expect(
-        calls.some(({ query }) => query.includes("match_state_claims")),
+        calls.some(({ query }) =>
+          query.includes("match_state_claims_canonical"),
+        ),
       ).toBe(false);
       storage.sql.exec(
-        "DELETE FROM match_state_claims WHERE match_id = ?",
+        "DELETE FROM match_state_claims_canonical WHERE match_id = ?",
         input.matchId,
       );
       store.move({
@@ -182,7 +187,9 @@ describe("conditional canonical sync reads", () => {
       });
       expect(calls).toHaveLength(4);
       expect(
-        calls.some(({ query }) => query.includes("match_state_claims")),
+        calls.some(({ query }) =>
+          query.includes("match_state_claims_canonical"),
+        ),
       ).toBe(false);
       calls.length = 0;
       expect(store.readSyncState({ ...input, opponentId: null })).toMatchObject(
@@ -200,7 +207,7 @@ describe("conditional canonical sync reads", () => {
       const { store } = observedStore(storage);
       createPair(store, input);
       storage.sql.exec(
-        "DELETE FROM match_state_revisions WHERE match_id = ?",
+        "DELETE FROM match_state_revisions_canonical WHERE match_id = ?",
         input.matchId,
       );
       expect(store.readSyncState(input)).toMatchObject({
@@ -248,7 +255,7 @@ describe("conditional canonical sync reads", () => {
         ).toBe(false);
       }
       storage.sql.exec(
-        "UPDATE match_state_source SET active_epoch = NULL WHERE singleton = 1",
+        "UPDATE match_state_source_canonical SET active_epoch = NULL, staged_epoch = 2, import_id = 'staged', digest = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' WHERE singleton = 1",
       );
       calls.length = 0;
       expect(() => store.readSyncState(known)).toThrow(

@@ -32,7 +32,9 @@ const createEventRuntime = (dependencies) => {
   const { acquireEventLockWithRetry, isEventLockStillOwned } = lockManager;
   const bracket = (0, bracket_js_1.createEventBracketRuntime)({
     state,
-    readEventPrizeWithdrawals,
+    ...(readEventPrizeWithdrawals === undefined
+      ? {}
+      : { readEventPrizeWithdrawals }),
     readMatchPair: dependencies.readMatchPair,
     readMatchPairs: dependencies.readMatchPairs,
   });
@@ -153,10 +155,14 @@ const createEventRuntime = (dependencies) => {
       winnerProfileId: null,
       winnerDisplayName: null,
       currentRoundIndex: null,
+      bracketFormat: "fixed",
       bracketSize: 0,
       roundCount: 0,
+      roundByes: {},
       supportsThirdPlaceMatch: true,
       thirdPlaceMatch: null,
+      prizeSelectionsLockedAtMs: null,
+      prizeAssignments: {},
       participants: (0, documents_js_1.createEventParticipantsDocument)({
         [creatorParticipant.profileId]: (0,
         documents_js_1.createEventParticipantDocument)(creatorParticipant),
@@ -218,10 +224,9 @@ const createEventRuntime = (dependencies) => {
         "The function must be called while authenticated.",
       );
     }
-    const ownershipSnapshot = await loadOwnershipSnapshot(
-      (0, documents_js_1.readEventDocument)({}),
-      { loginUids: [request.auth.uid] },
-    );
+    const ownershipSnapshot = await loadOwnershipSnapshot(null, {
+      loginUids: [request.auth.uid],
+    });
     const creatorProfile = ensurePilotEventCreator(
       request.auth.uid,
       ownershipSnapshot,
@@ -415,7 +420,7 @@ const createEventRuntime = (dependencies) => {
             event,
             nowMs,
             ownershipSnapshot,
-            prizeSelections,
+            ...(prizeSelections === undefined ? {} : { prizeSelections }),
           });
           if (dueTransition.didChange) {
             const lockOwned = await isEventLockStillOwned(lockHandle);
@@ -832,7 +837,7 @@ const createEventRuntime = (dependencies) => {
               event,
               nowMs,
               ownershipSnapshot,
-              prizeSelections,
+              ...(prizeSelections === undefined ? {} : { prizeSelections }),
             });
             updates.push(...dueTransition.updates);
             didChange = dueTransition.didChange;
@@ -845,7 +850,13 @@ const createEventRuntime = (dependencies) => {
                 ? syncTransitions_js_1.buildActiveEventSyncPlan
                 : syncTransitions_js_1.buildEndedEventSyncPlan
             )(
-              { eventId, event, nowMs, ownershipSnapshot, prizeSelections },
+              {
+                eventId,
+                event,
+                nowMs,
+                ownershipSnapshot,
+                ...(prizeSelections === undefined ? {} : { prizeSelections }),
+              },
               syncPlanningDependencies,
             );
             updates.push(...transition.updates);

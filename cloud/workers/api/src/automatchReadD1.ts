@@ -94,15 +94,15 @@ export async function readAutomatchResourceSnapshot(
     ...(root === "invite" ? [prepareInviteSourceControlRead(session)] : []),
   ]);
   signal?.throwIfAborted();
-  const mode = parseAutomatchRuntimeControlRow(modeRows.results[0]);
+  const mode = parseAutomatchRuntimeControlRow(modeRows!.results[0]);
   assertAutomatchBackend(mode);
   if (
     inviteRows &&
     parseInviteSourceControlRow(inviteRows.results[0]).backend !== "d1"
   )
     throw new InviteSourceFailure("invite-source-backend-retired");
-  const pending = pendingRows.results[0];
-  const row = sourceRows.results[0];
+  const pending = pendingRows!.results[0];
+  const row = sourceRows!.results[0];
   const value = pending
     ? null
     : root === "invite"
@@ -159,21 +159,21 @@ export async function readInviteMetadataMany(
          SELECT requested.invite_id, source.invite_id AS source_invite_id,
                 source.source_json, source.revision, transition.transition_id
          FROM requested
-         LEFT JOIN invite_sources AS source
+         LEFT JOIN invite_sources_canonical AS source
            ON source.invite_id = requested.invite_id
-         LEFT JOIN game_session_transition_resources AS resource
+         LEFT JOIN game_session_transition_resources_canonical AS resource
            ON resource.resource_key = requested.invite_id
-         LEFT JOIN game_session_transitions AS transition
+         LEFT JOIN game_session_transitions_canonical AS transition
            ON transition.transition_id = resource.transition_id`,
       )
       .bind(JSON.stringify([...requested])),
   ]);
   signal?.throwIfAborted();
-  assertAutomatchBackend(parseAutomatchRuntimeControlRow(modeRows.results[0]));
-  if (parseInviteSourceControlRow(controlRows.results[0]).backend !== "d1") {
+  assertAutomatchBackend(parseAutomatchRuntimeControlRow(modeRows!.results[0]));
+  if (parseInviteSourceControlRow(controlRows!.results[0]).backend !== "d1") {
     throw new InviteSourceFailure("invite-source-backend-retired");
   }
-  const rows = sourceRows.results as InviteMetadataRow[];
+  const rows = sourceRows!.results as InviteMetadataRow[];
   const rowsById = new Map(rows.map((row) => [row.invite_id, row]));
   if (
     rows.length !== requested.size ||

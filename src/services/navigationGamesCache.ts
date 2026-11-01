@@ -1,9 +1,6 @@
-import type {
-  NavigationItem,
-  NavigationEventItem,
-  NavigationItemStatus,
-} from "../connection/connectionModels";
-import { normalizeStrictAutomatchStateHint } from "@mons/shared/navigation";
+import { applicationStorageKey } from "../session/applicationDataStorage.ts";
+import type { NavigationItem } from "../connection/connectionModels";
+import { isNavigationItem } from "@mons/shared/navigation";
 
 export interface NavigationGamesCacheScope {
   kind: "profile";
@@ -29,181 +26,34 @@ interface NavigationGamesCacheSnapshot {
 
 const NAVIGATION_GAMES_PERSISTED_TOP_CACHE_TTL_MS = 365 * 24 * 60 * 60 * 1000;
 const NAVIGATION_GAMES_PERSISTED_TOP_CACHE_VERSION = 3;
-const NAVIGATION_GAMES_PERSISTED_TOP_CACHE_KEY_PREFIX =
-  "navigationGamesTopCache:v3:";
+const NAVIGATION_GAMES_PERSISTED_TOP_CACHE_KEY_PREFIX = applicationStorageKey(
+  "navigationGamesTopCache:",
+);
 const NAVIGATION_GAMES_MAX_RUNTIME_ITEMS_PER_SECTION = 500;
 
 const runtimeCacheByScope = new Map<string, NavigationGamesRuntimeEntry>();
 
-const NAVIGATION_ITEM_STATUS_VALUES: NavigationItemStatus[] = [
-  "pending",
-  "waiting",
-  "active",
-  "ended",
-  "dismissed",
-];
-
-const isNavigationItemStatus = (
-  value: unknown,
-): value is NavigationItemStatus => {
-  return (
-    typeof value === "string" &&
-    NAVIGATION_ITEM_STATUS_VALUES.includes(value as NavigationItemStatus)
-  );
-};
-
-const getNormalizedStringOrNull = (value: unknown): string | null => {
-  return typeof value === "string" ? value : null;
-};
-
-const getNormalizedNumberOrNull = (value: unknown): number | null => {
-  if (typeof value === "number") {
-    return Number.isFinite(value) ? Math.floor(value) : null;
-  }
-  if (typeof value === "string" && value.trim() !== "") {
-    const parsed = Number(value);
-    return Number.isFinite(parsed) ? Math.floor(parsed) : null;
-  }
-  return null;
-};
-
-const getNormalizedBooleanOrUndefined = (
-  value: unknown,
-): boolean | undefined => {
-  if (typeof value === "boolean") {
-    return value;
-  }
-  return undefined;
-};
-
-const sanitizeNavigationGameItem = (value: unknown): NavigationItem | null => {
-  if (!value || typeof value !== "object") {
+const readCanonicalNavigationItem = (value: unknown): NavigationItem | null => {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const fields = value as Record<string, unknown>;
+  const { isOptimistic, ...item } = fields;
+  if (isOptimistic !== undefined && typeof isOptimistic !== "boolean")
     return null;
-  }
-
-  const raw = value as Record<string, unknown>;
-  if (raw.isFallback === true) {
-    return null;
-  }
-  const entityType = raw.entityType === "event" ? "event" : "game";
-  const id = typeof raw.id === "string" && raw.id !== "" ? raw.id : null;
-
-  if (entityType === "event") {
-    const eventId = typeof raw.eventId === "string" ? raw.eventId : "";
-    if (eventId === "") {
-      return null;
-    }
-    const status =
-      isNavigationItemStatus(raw.status) && raw.status !== "pending"
-        ? raw.status
-        : null;
-    if (!status) {
-      return null;
-    }
-    const sortBucket =
-      typeof raw.sortBucket === "number" && Number.isFinite(raw.sortBucket)
-        ? Math.floor(raw.sortBucket)
-        : 0;
-    const listSortAtMs =
-      typeof raw.listSortAtMs === "number" && Number.isFinite(raw.listSortAtMs)
-        ? Math.floor(raw.listSortAtMs)
-        : 0;
-    const participantPreview = Array.isArray(raw.participantPreview)
-      ? raw.participantPreview
-          .map((participant: unknown) => {
-            if (!participant || typeof participant !== "object") {
-              return null;
-            }
-            const preview = participant as Record<string, unknown>;
-            return {
-              profileId: getNormalizedStringOrNull(preview.profileId),
-              displayName: getNormalizedStringOrNull(preview.displayName),
-              emojiId: getNormalizedNumberOrNull(preview.emojiId),
-              aura: getNormalizedStringOrNull(preview.aura),
-            };
-          })
-          .filter(
-            (
-              participant,
-            ): participant is NonNullable<
-              NavigationEventItem["participantPreview"][number]
-            > => !!participant,
-          )
-      : [];
-
-    return {
-      id: id ?? `event_${eventId}`,
-      entityType: "event",
-      eventId,
-      status,
-      sortBucket,
-      listSortAtMs,
-      startAtMs: getNormalizedNumberOrNull(raw.startAtMs),
-      updatedAtMs: getNormalizedNumberOrNull(raw.updatedAtMs),
-      endedAtMs: getNormalizedNumberOrNull(raw.endedAtMs),
-      participantCount:
-        getNormalizedNumberOrNull(raw.participantCount) ??
-        participantPreview.length,
-      participantPreview,
-      winnerDisplayName: getNormalizedStringOrNull(raw.winnerDisplayName),
-      isOptimistic: getNormalizedBooleanOrUndefined(raw.isOptimistic),
-    };
-  }
-
-  const inviteId = typeof raw.inviteId === "string" ? raw.inviteId : "";
-  if (inviteId === "") {
-    return null;
-  }
-
-  const kind = raw.kind === "auto" || raw.kind === "direct" ? raw.kind : null;
-  if (!kind) {
-    return null;
-  }
-
-  const status =
-    isNavigationItemStatus(raw.status) && raw.status !== "dismissed"
-      ? raw.status
-      : null;
-  if (!status) {
-    return null;
-  }
-
-  const sortBucket =
-    typeof raw.sortBucket === "number" && Number.isFinite(raw.sortBucket)
-      ? Math.floor(raw.sortBucket)
-      : 0;
-  const listSortAtMs =
-    typeof raw.listSortAtMs === "number" && Number.isFinite(raw.listSortAtMs)
-      ? Math.floor(raw.listSortAtMs)
-      : 0;
-  const opponentEmoji = getNormalizedNumberOrNull(raw.opponentEmoji);
-  const automatchStateHint = normalizeStrictAutomatchStateHint(
-    raw.automatchStateHint,
-  );
-
+  if (!isNavigationItem(item)) return null;
   return {
-    id: id ?? inviteId,
-    entityType: "game",
-    inviteId,
-    kind,
-    status,
-    sortBucket,
-    listSortAtMs,
-    hostLoginId: getNormalizedStringOrNull(raw.hostLoginId),
-    guestLoginId: getNormalizedStringOrNull(raw.guestLoginId),
-    opponentProfileId: getNormalizedStringOrNull(raw.opponentProfileId),
-    opponentName: getNormalizedStringOrNull(raw.opponentName),
-    opponentEmoji,
-    automatchStateHint,
-    isPendingAutomatch:
-      typeof raw.isPendingAutomatch === "boolean"
-        ? raw.isPendingAutomatch
-        : status === "pending",
-    isOptimistic: getNormalizedBooleanOrUndefined(raw.isOptimistic),
+    ...item,
+    ...(item.entityType === "event"
+      ? {
+          participantPreview: item.participantPreview.map((participant) => ({
+            ...participant,
+          })),
+        }
+      : {}),
+    ...(isOptimistic !== undefined ? { isOptimistic } : {}),
   };
 };
 
-const sanitizeNavigationGames = (
+const selectCanonicalNavigationGames = (
   games: unknown,
   options?: { maxItems?: number; excludeOptimistic?: boolean },
 ): NavigationItem[] => {
@@ -215,7 +65,7 @@ const sanitizeNavigationGames = (
   const uniqueById = new Map<string, NavigationItem>();
 
   for (const item of games) {
-    const normalizedItem = sanitizeNavigationGameItem(item);
+    const normalizedItem = readCanonicalNavigationItem(item);
     if (!normalizedItem) {
       continue;
     }
@@ -264,7 +114,12 @@ const readPersistedTopCache = (
     }
 
     const parsed: unknown = JSON.parse(raw);
-    if (!parsed || typeof parsed !== "object") {
+    if (
+      !parsed ||
+      typeof parsed !== "object" ||
+      Array.isArray(parsed) ||
+      Object.keys(parsed).length !== 3
+    ) {
       localStorage.removeItem(storageKey);
       return [];
     }
@@ -281,8 +136,8 @@ const readPersistedTopCache = (
 
     const updatedAtMs =
       typeof fields.updatedAtMs === "number" &&
-      Number.isFinite(fields.updatedAtMs)
-        ? Math.floor(fields.updatedAtMs)
+      Number.isSafeInteger(fields.updatedAtMs)
+        ? fields.updatedAtMs
         : 0;
     if (
       updatedAtMs <= 0 ||
@@ -292,7 +147,7 @@ const readPersistedTopCache = (
       return [];
     }
 
-    return sanitizeNavigationGames(fields.topGames, {
+    return selectCanonicalNavigationGames(fields.topGames, {
       maxItems: Number.MAX_SAFE_INTEGER,
       excludeOptimistic: true,
     });
@@ -337,10 +192,10 @@ export const writeNavigationGamesRuntimeCache = (
     return;
   }
   runtimeCacheByScope.set(scope.scopeKey, {
-    topGames: sanitizeNavigationGames(topGames, {
+    topGames: selectCanonicalNavigationGames(topGames, {
       maxItems: NAVIGATION_GAMES_MAX_RUNTIME_ITEMS_PER_SECTION,
     }),
-    pagedGames: sanitizeNavigationGames(pagedGames, {
+    pagedGames: selectCanonicalNavigationGames(pagedGames, {
       maxItems: NAVIGATION_GAMES_MAX_RUNTIME_ITEMS_PER_SECTION,
     }),
   });
@@ -360,7 +215,7 @@ export const writeNavigationGamesPersistedTopCache = (
   const payload: PersistedTopGamesPayload = {
     version: NAVIGATION_GAMES_PERSISTED_TOP_CACHE_VERSION,
     updatedAtMs: Date.now(),
-    topGames: sanitizeNavigationGames(topGames, {
+    topGames: selectCanonicalNavigationGames(topGames, {
       maxItems: boundedMaxItems,
       excludeOptimistic: true,
     }),

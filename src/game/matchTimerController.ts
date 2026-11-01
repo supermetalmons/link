@@ -1,6 +1,6 @@
 import {
   MATCH_TIMER_DURATION_SECONDS,
-  MATCH_TIMER_TERMINAL,
+  type MatchTimer,
   parseMatchTimer,
 } from "@mons/shared/timers";
 import type { BoardViewMode } from "./boardViewPolicy";
@@ -24,8 +24,8 @@ export interface MatchTimerContext {
 }
 
 interface MatchTimerRecord {
-  color: string;
-  timer: string | null;
+  color: TimerColor;
+  timer: MatchTimer;
 }
 
 interface MatchTimerDependencies {
@@ -53,8 +53,8 @@ interface MatchTimerDependencies {
 
 export const createMatchTimerController = (deps: MatchTimerDependencies) => {
   let matchId: string | null = null;
-  let whiteStash: string | null = null;
-  let blackStash: string | null = null;
+  let whiteStash: MatchTimer | null = null;
+  let blackStash: MatchTimer | null = null;
   let pendingResolutionOnRestore: boolean | null = null;
   let cooldown: {
     matchId: string;
@@ -105,7 +105,7 @@ export const createMatchTimerController = (deps: MatchTimerDependencies) => {
   const setStash = (
     nextMatchId: string | null,
     color: TimerColor,
-    timer: string | null,
+    timer: MatchTimer,
   ) => {
     if (matchId !== nextMatchId) {
       reset(nextMatchId);
@@ -189,17 +189,17 @@ export const createMatchTimerController = (deps: MatchTimerDependencies) => {
 
   const showCountdown = (
     onConnect: boolean,
-    timer: unknown,
+    timer: MatchTimer | null,
     color: TimerColor,
     duration?: number,
   ): boolean => {
-    if (timer === MATCH_TIMER_TERMINAL) {
+    if (timer?.state === "finished") {
       clearCooldown();
       deps.onTerminal(onConnect, color);
       return true;
     }
     const context = deps.getContext();
-    if (!timer || typeof timer !== "string" || context.isGameOver) {
+    if (timer?.state !== "running" || context.isGameOver) {
       return false;
     }
     const parsedTimer = parseMatchTimer(timer);
@@ -207,8 +207,8 @@ export const createMatchTimerController = (deps: MatchTimerDependencies) => {
       return false;
     }
     clearCooldown();
-    const { turnNumber, targetTimestamp } = parsedTimer;
-    let delta = Math.max(0, Math.floor((targetTimestamp - deps.now()) / 1000));
+    const { turnNumber, deadlineAtMs } = parsedTimer;
+    let delta = Math.max(0, Math.floor((deadlineAtMs - deps.now()) / 1000));
     if (duration !== undefined && duration !== null) {
       delta = Math.min(Math.floor(duration / 1000), delta);
     }
@@ -304,18 +304,14 @@ export const createMatchTimerController = (deps: MatchTimerDependencies) => {
       return;
     }
     if (context.boardViewMode !== "activeLive") {
-      if (state.timer === MATCH_TIMER_TERMINAL) {
+      if (state.timer?.state === "finished") {
         pendingResolutionOnRestore = onConnect;
       }
       return;
     }
     pendingResolutionOnRestore = null;
     if (!showCountdown(onConnect, state.timer, state.color)) {
-      if (
-        typeof state.timer === "string" &&
-        state.timer !== "" &&
-        state.timer !== MATCH_TIMER_TERMINAL
-      ) {
+      if (state.timer !== null && state.timer.state !== "idle") {
         hide();
       } else {
         fallback(nextMatchId);

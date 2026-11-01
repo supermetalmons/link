@@ -307,6 +307,8 @@ async function handleRecoveryRequest(
     });
   }
   await enqueueTelegramDeliveryTask(env, {
+    schemaVersion: 1,
+    dataEpoch: 1,
     messageKey: command.messageKey,
     revision: "manual-recovery",
     taskKind: "manual-recovery",
@@ -411,8 +413,12 @@ export async function handleTelegramCommand(
         ok: true,
         eventId: command.eventId,
         status: result.status,
-        messageKey: result.messageKey,
-        requestId: result.requestId,
+        ...(result.messageKey === undefined
+          ? {}
+          : { messageKey: result.messageKey }),
+        ...(result.requestId === undefined
+          ? {}
+          : { requestId: result.requestId }),
         ...(result.reason ? { reason: result.reason } : {}),
       });
     }

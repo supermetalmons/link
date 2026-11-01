@@ -94,7 +94,7 @@ export function launchConfetti(
       x: Math.random() * canvas.width,
       y: Math.random() * canvas.height - canvas.height,
       radius: Math.random() * 6 + 4,
-      color: colors[Math.floor(Math.random() * colors.length)],
+      color: colors[Math.floor(Math.random() * colors.length)]!,
       rotation: Math.random() * 360,
       speed: Math.random() * 6 + 4,
       angle: Math.random() * Math.PI * 2,
@@ -116,7 +116,7 @@ export function launchConfetti(
     elapsedTime += dt;
     ctx.clearRect(0, 0, canvas.width, canvas.height);
     for (let i = particles.length - 1; i >= 0; i--) {
-      const p = particles[i];
+      const p = particles[i]!;
       p.x += Math.cos(p.angle) * p.speed * (dt / 16) + p.drift * (dt / 16);
       p.y += Math.sin(p.angle) * p.speed * (dt / 16) + p.gravity * (dt / 16);
       p.rotation += p.angularSpeed * (dt / 16);

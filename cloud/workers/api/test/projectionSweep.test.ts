@@ -106,9 +106,9 @@ test("scan recovery bounds work and retains completion order before dispatch", a
       const index = entries.findIndex((entry) => entry.value === value);
       active++;
       maximum = Math.max(maximum, active);
-      started[index].resolve();
+      started[index]!.resolve();
       try {
-        return await gates[index].promise;
+        return await gates[index]!.promise;
       } finally {
         active--;
       }
@@ -116,7 +116,7 @@ test("scan recovery bounds work and retains completion order before dispatch", a
     onFailure(entry, error, index, phase) {
       assert.equal(entry, entries[index]);
       reports.push([error, index, phase]);
-      reported[index].resolve();
+      reported[index]!.resolve();
     },
     queue: {
       async sendBatch(messages) {
@@ -127,18 +127,18 @@ test("scan recovery bounds work and retains completion order before dispatch", a
     },
   });
 
-  await started[1].promise;
-  gates[1].resolve({ value: "fast" });
-  await started[2].promise;
-  gates[2].reject(failure);
-  await reported[2].promise;
-  await started[3].promise;
-  gates[3].resolve(undefined);
-  await started[4].promise;
-  gates[4].reject(false);
-  await reported[4].promise;
+  await started[1]!.promise;
+  gates[1]!.resolve({ value: "fast" });
+  await started[2]!.promise;
+  gates[2]!.reject(failure);
+  await reported[2]!.promise;
+  await started[3]!.promise;
+  gates[3]!.resolve(undefined);
+  await started[4]!.promise;
+  gates[4]!.reject(false);
+  await reported[4]!.promise;
   assert.deepEqual(batches, []);
-  gates[0].resolve({ value: "slow" });
+  gates[0]!.resolve({ value: "slow" });
 
   const result = await recovery;
   assert.equal(maximum, 2);
@@ -225,7 +225,7 @@ test("paged recovery awaits dispatch before requesting the next page", async () 
     },
     queue: {
       async sendBatch(messages) {
-        const [{ body }] = Array.from(messages);
+        const { body } = Array.from(messages)[0]!;
         events.push(`send-${body.value}`);
         if (body.value === "first") {
           sending.resolve();
@@ -286,14 +286,14 @@ test("paged recovery forwards concurrency and preserves raw failures, global ind
       maximum = Math.max(maximum, active);
       try {
         const index = firstEntries.findIndex((entry) => entry.value === value);
-        if (index >= 0) started[index].resolve();
+        if (index >= 0) started[index]!.resolve();
         if (value === "slow") {
           setPhase("quarantine");
-          await gates[0].promise;
+          await gates[0]!.promise;
           throw failure;
         }
         if (value === "fast") {
-          await gates[1].promise;
+          await gates[1]!.promise;
           throw false;
         }
         return { value };
@@ -313,11 +313,11 @@ test("paged recovery forwards concurrency and preserves raw failures, global ind
       },
     },
   });
-  await started[1].promise;
-  gates[1].resolve();
-  await started[2].promise;
+  await started[1]!.promise;
+  gates[1]!.resolve();
+  await started[2]!.promise;
   assert.deepEqual(batches, []);
-  gates[0].resolve();
+  gates[0]!.resolve();
 
   assert.deepEqual(await recovery, {
     sentCount: 2,
@@ -455,7 +455,7 @@ test("projection repairs continue sequentially and retain ordered results and fa
   assert.equal(result.removedCount, 1);
   assert.equal(result.failures.length, 2);
   assert.equal(result.failures[0], failure);
-  assert.equal(result.failures[1].message, "projection-invalid-record-failed");
+  assert.equal(result.failures[1]!.message, "projection-invalid-record-failed");
 });
 
 test("projection repairs support quarantine callbacks without generated tasks", async () => {
@@ -568,7 +568,7 @@ test("projection claims continue sequentially and retain all failures with the f
   assert.equal(result.failure, failure);
   assert.equal(result.failures.length, 2);
   assert.equal(result.failures[0], failure);
-  assert.equal(result.failures[1].message, "projection-claim-failed");
+  assert.equal(result.failures[1]!.message, "projection-claim-failed");
 });
 
 test("projection claims use the caller's fallback for non-Error failures", async () => {
@@ -608,7 +608,7 @@ test("repair and claim reporters receive original failures and cannot interrupt 
   );
   assert.deepEqual(repair.repairedTasks, [3]);
   assert.equal(repair.failures[0], failure);
-  assert.equal(repair.failures[1].message, "repair-failed");
+  assert.equal(repair.failures[1]!.message, "repair-failed");
   assert.deepEqual(reports, [
     [1, failure, 0],
     [2, "private", 1],
@@ -626,7 +626,7 @@ test("repair and claim reporters receive original failures and cannot interrupt 
   );
   assert.deepEqual(claims.claimed, [3]);
   assert.equal(claims.failure, failure);
-  assert.equal(claims.failures[1].message, "claim-failed");
+  assert.equal(claims.failures[1]!.message, "claim-failed");
   assert.deepEqual(reports, [
     [1, failure, 0],
     [2, "private", 1],
@@ -653,7 +653,7 @@ test("repair and claim failures are reported before the next item begins", async
   );
   assert.deepEqual(events, ["repair-0", "report", "repair-1"]);
   assert.deepEqual(repair.repairedTasks, [1]);
-  assert.equal(repair.failures[0].message, "repair-failed");
+  assert.equal(repair.failures[0]!.message, "repair-failed");
 
   events.length = 0;
   const claims = await collectSuccessfulClaims(

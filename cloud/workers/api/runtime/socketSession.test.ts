@@ -1,3 +1,10 @@
+import {
+  canonicalMatchEnvironment,
+  runInCanonicalMatchRoom,
+  evictCanonicalMatchRoom,
+  runCanonicalMatchAlarm,
+} from "./canonicalMatchTestFixture.ts";
+import { inviteDocumentFixture } from "../test/inviteDocumentFixture.ts";
 import { matchDocumentFixture } from "../test/matchRecordFixture.ts";
 import { INVITE_METADATA_SOCKET_PROTOCOL } from "@mons/shared/invite-metadata";
 import { INVITE_WAGERS_SOCKET_PROTOCOL } from "@mons/shared/invite-wagers";
@@ -7,12 +14,7 @@ import {
   REACTION_HEARTBEAT_RESPONSE,
   REACTION_SOCKET_PROTOCOL,
 } from "@mons/shared/reactions";
-import {
-  evictDurableObject,
-  runDurableObjectAlarm,
-  runInDurableObject,
-} from "cloudflare:test";
-import { env } from "cloudflare:workers";
+import { env as rawEnv } from "cloudflare:workers";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { InviteReactions } from "../src/inviteReactions.ts";
 import type {
@@ -34,6 +36,7 @@ const channels: Channel[] = [
   "wagers",
   "matches",
 ];
+const env = canonicalMatchEnvironment(rawEnv);
 const rooms: Room[] = [];
 const sockets: WebSocket[] = [];
 
@@ -41,7 +44,7 @@ async function fixture() {
   const inviteId = `session-${crypto.randomUUID()}`;
   const room = env.INVITE_REACTIONS.getByName(inviteId);
   rooms.push(room);
-  await runInDurableObject(room, (instance) => {
+  await runInCanonicalMatchRoom(room, (instance) => {
     const mutable = instance as unknown as {
       inviteReader: () => Promise<unknown>;
       wagerReader: () => Promise<[]>;
@@ -51,18 +54,19 @@ async function fixture() {
         ) => Promise<MatchStateSyncReadResult>;
       };
     };
-    mutable.inviteReader = async () => ({
-      hostId: "host-login",
-      guestId: "guest-login",
-      hostColor: "white",
-    });
+    mutable.inviteReader = async () =>
+      inviteDocumentFixture({
+        hostId: "host-login",
+        guestId: "guest-login",
+        hostColor: "white",
+      });
     mutable.wagerReader = async () => [];
     const readMatch = (playerId: string) =>
       matchDocumentFixture({
         version: 2,
         color: playerId === "host-login" ? "white" : "black",
         emojiId: 1,
-        aura: "",
+        aura: "none",
         gameVariant: "standard",
         fen: "initial",
         status: "",
@@ -82,8 +86,8 @@ async function fixture() {
           };
   });
   await seedHistoricalPresentations(room, inviteId, {
-    "host-login": { emojiId: 1, aura: "" },
-    "guest-login": { emojiId: 2, aura: "" },
+    "host-login": { emojiId: 1, aura: "none" },
+    "guest-login": { emojiId: 2, aura: "none" },
   });
   await reactionSocketTestHeaders(room, inviteId);
   return { room, inviteId };
@@ -200,7 +204,7 @@ afterEach(async () => {
     rooms
       .splice(0)
       .map((room) =>
-        runInDurableObject(room, (_instance, state) =>
+        runInCanonicalMatchRoom(room, (_instance, state) =>
           state.storage.deleteAlarm(),
         ),
       ),
@@ -250,20 +254,21 @@ describe("socket session lifetime", () => {
       await room.publish("host-login", reaction);
       await retired.read();
       await current.read();
-      const before = await runInDurableObject(room, (_instance, state) => {
+      const before = await runInCanonicalMatchRoom(room, (_instance, state) => {
         for (const socket of state.getWebSockets()) {
           const attachment = socket.deserializeAttachment();
           if (attachment.channel !== "reaction") continue;
-          if (attachment.authenticated === authenticated)
+          if (attachment.authenticated === authenticated) {
             attachment.schemaVersion = 1;
-          delete attachment.channel;
+            delete attachment.channel;
+          }
           socket.serializeAttachment(attachment);
         }
         return state.storage.sql
-          .exec("SELECT * FROM latest_reactions ORDER BY sender_uid")
+          .exec("SELECT * FROM latest_reactions_canonical ORDER BY sender_uid")
           .toArray();
       });
-      await evictDurableObject(room);
+      await evictCanonicalMatchRoom(room);
       current.socket.send(REACTION_HEARTBEAT_REQUEST);
       expect(await current.read()).toBe(REACTION_HEARTBEAT_RESPONSE);
       expect(await retired.closed).toBe(1008);
@@ -273,9 +278,11 @@ describe("socket session lifetime", () => {
         expect(client.socket.readyState).toBe(WebSocket.OPEN);
       }
       expect(
-        await runInDurableObject(room, (_instance, state) =>
+        await runInCanonicalMatchRoom(room, (_instance, state) =>
           state.storage.sql
-            .exec("SELECT * FROM latest_reactions ORDER BY sender_uid")
+            .exec(
+              "SELECT * FROM latest_reactions_canonical ORDER BY sender_uid",
+            )
             .toArray(),
         ),
       ).toEqual(before);
@@ -321,7 +328,7 @@ describe("socket session lifetime", () => {
         const prefix = channel === "matches" ? "match" : channel;
         const roleTag = reaction ? `role:${role}` : `${prefix}-role:${role}`;
         expect(
-          await runInDurableObject(room, (_instance, state) => {
+          await runInCanonicalMatchRoom(room, (_instance, state) => {
             const socket = state
               .getWebSockets()
               .find((value) => state.getTags(value).includes(roleTag))!;
@@ -382,8 +389,8 @@ describe("socket session lifetime", () => {
       }
       const client = await connect(room, channel, inviteId, expiry);
       expect(
-        await runInDurableObject(room, (_instance, state) => {
-          const attachment = state.getWebSockets()[0].deserializeAttachment();
+        await runInCanonicalMatchRoom(room, (_instance, state) => {
+          const attachment = state.getWebSockets()[0]!.deserializeAttachment();
           return {
             sid: attachment.sid,
             authExpiresAtMs: attachment.authExpiresAtMs,
@@ -399,7 +406,7 @@ describe("socket session lifetime", () => {
       const expiry = Date.now() + 300_000;
       const participant = await connect(room, channel, inviteId, expiry);
       const spectator = await connect(room, channel, inviteId, null);
-      await evictDurableObject(room);
+      await evictCanonicalMatchRoom(room);
       vi.spyOn(Date, "now").mockReturnValue(expiry);
       participant.socket.send(REACTION_HEARTBEAT_REQUEST);
       expect(await participant.closed).toBe(4001);
@@ -417,7 +424,7 @@ describe("socket session lifetime", () => {
         Date.now() + 300_000,
       );
       const spectator = await connect(room, channel, inviteId, null);
-      await runInDurableObject(room, (_instance, state) => {
+      await runInCanonicalMatchRoom(room, (_instance, state) => {
         for (const socket of state.getWebSockets()) {
           const attachment = socket.deserializeAttachment();
           if (!attachment.authenticated) continue;
@@ -427,15 +434,15 @@ describe("socket session lifetime", () => {
           socket.serializeAttachment(attachment);
         }
       });
-      await evictDurableObject(room);
+      await evictCanonicalMatchRoom(room);
       spectator.socket.send(REACTION_HEARTBEAT_REQUEST);
       expect(await spectator.read()).toBe(REACTION_HEARTBEAT_RESPONSE);
-      expect(await participant.closed).toBe(4001);
+      expect(await participant.closed).toBe(1008);
       expect(participant.messages).toEqual([]);
     });
 
     it.each(["host", "guest"] as const)(
-      `${channel} recognizes a legacy %s by its persisted tag after hibernation`,
+      `${channel} rejects a legacy %s attachment despite its persisted tag after hibernation`,
       async (role) => {
         const { room, inviteId } = await fixture();
         const participant = await connect(
@@ -449,8 +456,8 @@ describe("socket session lifetime", () => {
         const reaction = channel === "reactions" || channel === "presentation";
         const prefix = channel === "matches" ? "match" : channel;
         const roleTag = reaction ? `role:${role}` : `${prefix}-role:${role}`;
-        await runInDurableObject(room, (_instance, state) => {
-          const socket = state.getWebSockets(roleTag)[0];
+        await runInCanonicalMatchRoom(room, (_instance, state) => {
+          const socket = state.getWebSockets(roleTag)[0]!;
           const attachment = socket.deserializeAttachment();
           delete attachment.authenticated;
           delete attachment.sid;
@@ -458,10 +465,10 @@ describe("socket session lifetime", () => {
           if (reaction) delete attachment.channel;
           socket.serializeAttachment(attachment);
         });
-        await evictDurableObject(room);
+        await evictCanonicalMatchRoom(room);
         spectator.socket.send(REACTION_HEARTBEAT_REQUEST);
         expect(await spectator.read()).toBe(REACTION_HEARTBEAT_RESPONSE);
-        expect(await participant.closed).toBe(4001);
+        expect(await participant.closed).toBe(1008);
         expect(participant.messages).toEqual([]);
       },
     );
@@ -505,39 +512,42 @@ describe("socket session lifetime", () => {
         { [`X-Mons-${name}-Protected`]: "true" },
         { [`X-Mons-${name}-Authenticated`]: "true" },
       ];
-      const result = await runInDurableObject(room, async (instance, state) => {
-        let sourceReads = 0;
-        const mutable = instance as unknown as {
-          inviteReader: () => Promise<unknown>;
-        };
-        mutable.inviteReader = async () => {
-          sourceReads++;
-          throw new Error("admission-read-source");
-        };
-        const responses: { status: number; message: string }[] = [];
-        for (const overrides of [
-          { [`X-Mons-${name}-Invite`]: "%" },
-          { [`X-Mons-${name}-Actor`]: "%" },
-          ...invalid,
-          {},
-        ]) {
-          const response = await instance.fetch(
-            request(channel, inviteId, expiry, {
-              "X-Mons-Session-Id": null,
-              ...overrides,
-            }),
-          );
-          responses.push({
-            status: response.status,
-            message: await response.text(),
-          });
-        }
-        return {
-          responses,
-          sourceReads,
-          sockets: state.getWebSockets().length,
-        };
-      });
+      const result = await runInCanonicalMatchRoom(
+        room,
+        async (instance, state) => {
+          let sourceReads = 0;
+          const mutable = instance as unknown as {
+            inviteReader: () => Promise<unknown>;
+          };
+          mutable.inviteReader = async () => {
+            sourceReads++;
+            throw new Error("admission-read-source");
+          };
+          const responses: { status: number; message: string }[] = [];
+          for (const overrides of [
+            { [`X-Mons-${name}-Invite`]: "%" },
+            { [`X-Mons-${name}-Actor`]: "%" },
+            ...invalid,
+            {},
+          ]) {
+            const response = await instance.fetch(
+              request(channel, inviteId, expiry, {
+                "X-Mons-Session-Id": null,
+                ...overrides,
+              }),
+            );
+            responses.push({
+              status: response.status,
+              message: await response.text(),
+            });
+          }
+          return {
+            responses,
+            sourceReads,
+            sockets: state.getWebSockets().length,
+          };
+        },
+      );
       const targetMessage =
         channel === "matches"
           ? "Invalid match target"
@@ -575,7 +585,7 @@ describe("socket session lifetime", () => {
             : channel === "wagers"
               ? "Wagers"
               : "Match";
-        const result = await runInDurableObject(
+        const result = await runInCanonicalMatchRoom(
           room,
           async (instance, state) => {
             const mutable = instance as unknown as {
@@ -583,14 +593,14 @@ describe("socket session lifetime", () => {
             };
             mutable.inviteReader = async () => {
               clock.mockReturnValue(expiry);
-              return {
+              return inviteDocumentFixture({
                 hostId: "host-login",
                 guestId: "guest-login",
                 hostColor: "white",
                 ...(failure === "changed-private-gate"
                   ? { password: "private" }
                   : {}),
-              };
+              });
             };
             const response = await instance.fetch(
               request(channel, inviteId, expiry, {
@@ -632,44 +642,47 @@ describe("socket session lifetime", () => {
     it(`${channel} rechecks capacity after the source read before accepting a socket`, async () => {
       const { room, inviteId } = await fixture();
       const expiry = Date.now() + 300_000;
-      const result = await runInDurableObject(room, async (instance, state) => {
-        const mutable = instance as unknown as {
-          inviteReader: () => Promise<unknown>;
-          matchSync: { dependencies: { capacityFull: () => boolean } };
-          inviteChannels: { dependencies: { capacityFull: () => boolean } };
-        };
-        let full = false;
-        const capacity = vi
-          .spyOn(
-            channel === "matches"
-              ? mutable.matchSync.dependencies
-              : mutable.inviteChannels.dependencies,
-            "capacityFull",
-          )
-          .mockImplementation(() => full);
-        mutable.inviteReader = async () => {
-          full = true;
-          return {
-            hostId: "host-login",
-            guestId: "guest-login",
-            hostColor: "white",
+      const result = await runInCanonicalMatchRoom(
+        room,
+        async (instance, state) => {
+          const mutable = instance as unknown as {
+            inviteReader: () => Promise<unknown>;
+            matchSync: { dependencies: { capacityFull: () => boolean } };
+            inviteChannels: { dependencies: { capacityFull: () => boolean } };
           };
-        };
-        try {
-          const response = await instance.fetch(
-            request(channel, inviteId, expiry),
-          );
-          return {
-            status: response.status,
-            message: await response.text(),
-            retryAfter: response.headers.get("Retry-After"),
-            capacityChecks: capacity.mock.calls.length,
-            sockets: state.getWebSockets().length,
+          let full = false;
+          const capacity = vi
+            .spyOn(
+              channel === "matches"
+                ? mutable.matchSync.dependencies
+                : mutable.inviteChannels.dependencies,
+              "capacityFull",
+            )
+            .mockImplementation(() => full);
+          mutable.inviteReader = async () => {
+            full = true;
+            return inviteDocumentFixture({
+              hostId: "host-login",
+              guestId: "guest-login",
+              hostColor: "white",
+            });
           };
-        } finally {
-          capacity.mockRestore();
-        }
-      });
+          try {
+            const response = await instance.fetch(
+              request(channel, inviteId, expiry),
+            );
+            return {
+              status: response.status,
+              message: await response.text(),
+              retryAfter: response.headers.get("Retry-After"),
+              capacityChecks: capacity.mock.calls.length,
+              sockets: state.getWebSockets().length,
+            };
+          } finally {
+            capacity.mockRestore();
+          }
+        },
+      );
       const name =
         channel === "matches"
           ? "Match"
@@ -698,21 +711,21 @@ describe("socket session lifetime", () => {
     );
     const spectator = await connect(room, "reactions", inviteId, null);
     expect(
-      await runInDurableObject(room, (_instance, state) =>
+      await runInCanonicalMatchRoom(room, (_instance, state) =>
         state.storage.getAlarm(),
       ),
     ).toBe(expiry);
     vi.spyOn(Date, "now").mockReturnValue(expiry);
-    expect(await runDurableObjectAlarm(room)).toBe(true);
+    expect(await runCanonicalMatchAlarm(room)).toBe(true);
     expect(await first.closed).toBe(4001);
     expect(second.socket.readyState).toBe(WebSocket.OPEN);
     expect(
-      await runInDurableObject(room, (_instance, state) =>
+      await runInCanonicalMatchRoom(room, (_instance, state) =>
         state.storage.getAlarm(),
       ),
     ).toBe(expiry + 1_000);
     vi.spyOn(Date, "now").mockReturnValue(expiry + 1_000);
-    expect(await runDurableObjectAlarm(room)).toBe(true);
+    expect(await runCanonicalMatchAlarm(room)).toBe(true);
     expect(await second.closed).toBe(4001);
     spectator.socket.send(REACTION_HEARTBEAT_REQUEST);
     expect(await spectator.read()).toBe(REACTION_HEARTBEAT_RESPONSE);
@@ -724,12 +737,12 @@ describe("socket session lifetime", () => {
     const { room, inviteId } = await fixture();
     const participant = await connect(room, "matches", inviteId, now + 2_000);
     expect(
-      await runInDurableObject(room, (_instance, state) =>
+      await runInCanonicalMatchRoom(room, (_instance, state) =>
         state.storage.getAlarm(),
       ),
     ).toBe(now + 2_000);
     clock.mockReturnValue(now + 2_000);
-    expect(await runDurableObjectAlarm(room)).toBe(true);
+    expect(await runCanonicalMatchAlarm(room)).toBe(true);
     expect(await participant.closed).toBe(4001);
     expect(participant.messages).toEqual([]);
   });
@@ -754,7 +767,7 @@ describe("socket session lifetime", () => {
       operationId: crypto.randomUUID(),
       expectedRevision: 0,
       emojiId: 2,
-      aura: "",
+      aura: "none",
     });
     expect(JSON.parse(await spectator.read()).type).toBe("presentation");
     expect(reaction.messages).toEqual([]);

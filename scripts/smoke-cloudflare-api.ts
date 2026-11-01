@@ -3,6 +3,9 @@ const {
   refreshToolSession,
   revokeToolSession,
 }: typeof import("./cloudflare/sessions.ts") = require("./cloudflare/sessions.ts");
+const {
+  applicationDataHeaders,
+}: typeof import("@mons/shared/data-contract") = require("@mons/shared/data-contract");
 const { randomBytes } = require("node:crypto");
 const { readFileSync, statSync } = require("node:fs");
 const {
@@ -558,7 +561,7 @@ function eventBookmarkScope(value: string | null): string | null {
   return match &&
     match[2] !== "first-primary" &&
     match[2] !== "first-unconstrained"
-    ? match[1]
+    ? match[1]!
     : null;
 }
 
@@ -605,7 +608,7 @@ async function request(
   expectedStatus: number | readonly number[],
   dependencies: Dependencies,
 ): Promise<{ response: Response; body: string }> {
-  const headers = new Headers(init.headers);
+  const headers = applicationDataHeaders(init.headers);
   const session = dependencies.session;
   if (
     session &&
@@ -900,7 +903,7 @@ async function smokeRequiredAutomatchOperationId(
       Origin: ORIGIN,
       "Content-Type": "application/json",
     },
-    body: JSON.stringify({ emojiId: 1, aura: "" }),
+    body: JSON.stringify({ emojiId: 1, aura: "none" }),
   };
   const missingIdResult = await request(
     `${baseUrl}/automatch/start`,

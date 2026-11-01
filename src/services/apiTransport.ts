@@ -1,3 +1,8 @@
+import {
+  parseApiErrorDetails,
+  type ApiErrorDetails,
+} from "@mons/shared/api-errors";
+import { fetchApplicationData } from "./applicationTransport.ts";
 import type {
   ApiEndpoint,
   ApiHttpUrl,
@@ -8,7 +13,11 @@ export type AuthTokenProvider = ((forceRefresh: boolean) => Promise<string>) & {
 };
 
 export type ApiErrorPolicy = {
-  createError: (code: string, message: string, details?: unknown) => Error;
+  createError: (
+    code: string,
+    message: string,
+    details?: ApiErrorDetails,
+  ) => Error;
   normalizeError: (error: unknown) => Error | undefined;
   normalizeResponseError?: (error: unknown) => Error | undefined;
   unavailableMessage: string;
@@ -118,7 +127,15 @@ function responseError(
     typeof body.message === "string" && body.message.trim()
       ? body.message.trim()
       : errors.unavailableMessage;
-  return errors.createError(code, message, body.details);
+  try {
+    return errors.createError(
+      code,
+      message,
+      parseApiErrorDetails(code, body.details),
+    );
+  } catch {
+    return errors.createError("unavailable", errors.unavailableMessage);
+  }
 }
 
 function retryAfterMs(response: Response): number | undefined {
@@ -167,7 +184,7 @@ export async function readSnapshotJson<T>({
       assertCurrent();
       const token = tokenProvider ? await tokenProvider(attempt === 1) : null;
       assertCurrent();
-      const response = await fetch(url, {
+      const response = await fetchApplicationData(url, {
         method: "GET",
         headers: {
           Accept: "application/json",
@@ -268,12 +285,16 @@ export async function authenticatedJsonRequest<T>({
         if (init.body !== undefined) {
           headers.set("Content-Type", "application/json");
         }
-        const response = await (fetcher ?? fetch)(url, {
-          ...init,
-          headers,
-          cache: "no-store",
-          signal: controller.signal,
-        });
+        const response = await fetchApplicationData(
+          url,
+          {
+            ...init,
+            headers,
+            cache: "no-store",
+            signal: controller.signal,
+          },
+          fetcher,
+        );
         if (response.status === 401 && attempt === 0) {
           cancelBody(response);
           continue;

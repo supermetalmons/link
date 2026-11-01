@@ -1,3 +1,4 @@
+import { publicMatchFixture } from "./matchRecordFixture.ts";
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
@@ -18,17 +19,17 @@ import { handleMatchSnapshotRoute } from "../src/matchSnapshotRoute.ts";
 import { TELEGRAM_TEST_ENV } from "./testEnv.ts";
 
 const target = { playerId: "player-1", matchId: "match-1" };
-const match = {
+const match = publicMatchFixture({
   version: 2,
   color: "white",
   emojiId: 1,
-  aura: "",
+  aura: "none" as const,
   gameVariant: "Classic",
   fen: "board-fen",
   status: "",
   flatMovesString: "move-1",
   timer: "12;1234567890",
-};
+});
 
 function request(
   query = new URLSearchParams(target).toString(),
@@ -53,9 +54,8 @@ test("serves public, uncached match snapshots with only canonical fields", async
         assert.equal(sourceRequest.headers.get("Authorization"), null);
         return {
           ...match,
-          sessionCreation: { operationId: "internal" },
-          reaction: {},
-          secret: "omitted",
+          sessionCreation: "internal",
+          reaction: null,
         };
       },
     },
@@ -80,32 +80,15 @@ test("returns null only when the exact upstream record is missing", async () => 
   assert.deepEqual(await response.json(), { ok: true, ...target, match: null });
 });
 
-test("preserves legacy match defaults and numeric emoji strings", async () => {
+test("rejects incomplete archived snapshots rather than normalizing fields", async () => {
   const legacy = { color: "black", fen: "legacy-fen", emojiId: "2" };
-  const expected = {
-    version: 2,
-    color: "black",
-    emojiId: 2,
-    aura: "",
-    gameVariant: "Classic",
-    fen: "legacy-fen",
-    status: "",
-    flatMovesString: "",
-    timer: "",
-  };
-  assert.deepEqual(normalizeMatchSnapshot(legacy), expected);
+  assert.equal(normalizeMatchSnapshot(legacy), null);
   const response = await handleMatchSnapshotRoute(
     request(),
     TELEGRAM_TEST_ENV,
-    {
-      readMatch: async () => legacy,
-    },
+    { readMatch: async () => legacy },
   );
-  assert.deepEqual(await response.json(), {
-    ok: true,
-    ...target,
-    match: expected,
-  });
+  assert.equal(response.status, 503);
 });
 
 test("rejects malformed stored snapshots without disguising them as missing", async (t) => {

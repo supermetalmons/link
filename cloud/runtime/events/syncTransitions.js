@@ -214,7 +214,7 @@ async function buildActiveEventSyncPlan(
         thirdPlaceMatch,
         assignedAtMs: endedAtMs,
         ownershipSnapshot,
-        prizeSelections,
+        ...(prizeSelections === undefined ? {} : { prizeSelections }),
       });
       if (Object.keys(prizeAssignmentResult.assignments).length > 0) {
         eventPrizeAssignmentsForProjectionCleanup =
@@ -409,7 +409,7 @@ async function buildEndedEventSyncPlan(
       assignedAtMs:
         typeof state.endedAtMs === "number" ? state.endedAtMs : nowMs,
       ownershipSnapshot,
-      prizeSelections,
+      ...(prizeSelections === undefined ? {} : { prizeSelections }),
     });
     if (Object.keys(prizeAssignmentResult.assignments).length > 0) {
       eventPrizeAssignmentsForProjectionCleanup =

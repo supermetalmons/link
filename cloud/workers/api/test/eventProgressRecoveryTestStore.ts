@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { retainEventProgressRecord } from "../../../runtime/eventProgressRecords.js";
 import type {
   EventProgressRecoverySnapshot,
@@ -92,6 +93,11 @@ export function createEventProgressRecoveryTestStore(
           kind: "progress-dead",
           outboxId: observed.outboxId,
           value: {
+            schemaVersion: 1,
+            dataEpoch: 1,
+            sourceDigest: createHash("sha256")
+              .update(observed.recordJson)
+              .digest("hex"),
             deadAtMs,
             originalRecord:
               observed.record === undefined ? null : observed.record,

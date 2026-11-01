@@ -1,3 +1,5 @@
+import { authIntentFixture } from "./authStateFixture.ts";
+import { applicationRequest } from "./testEnv.ts";
 import assert from "node:assert/strict";
 import test from "node:test";
 import { AuthApiFailure } from "../src/authErrors.ts";
@@ -38,7 +40,7 @@ function request(
   body?: unknown,
   origin = "https://mons.link",
 ) {
-  return new Request(`https://api.mons.link${path}`, {
+  return applicationRequest(`https://api.mons.link${path}`, {
     method,
     headers: {
       ...(origin ? { Origin: origin } : {}),
@@ -69,17 +71,7 @@ function stateRepository(
     consumeAuthIntent: async () => true,
     createAuthIntent: async () => "created",
     createXFlow: async () => "created",
-    getAuthIntent: async () => ({
-      consumedAtMs: 0,
-      consumedByOpId: "",
-      createdAtMs: 1_000_000,
-      expiresAtMs: 2_000_000,
-      intentId: X_INTENT_ID,
-      method: "x",
-      nonce: "nonce",
-      state: "state",
-      uid: "login-uid",
-    }),
+    getAuthIntent: async () => intent(),
     getXFlow: async () => null,
     updateXFlow: async () => 2,
     ...overrides,
@@ -87,18 +79,7 @@ function stateRepository(
 }
 
 function intent(overrides: Partial<AuthIntentRecord> = {}): AuthIntentRecord {
-  return {
-    consumedAtMs: 0,
-    consumedByOpId: "",
-    createdAtMs: 1_000_000,
-    expiresAtMs: 2_000_000,
-    intentId: X_INTENT_ID,
-    method: "x",
-    nonce: "nonce",
-    state: "state",
-    uid: "login-uid",
-    ...overrides,
-  };
+  return authIntentFixture({ intentId: X_INTENT_ID, ...overrides });
 }
 
 const verifyIdentity = async () => ({
@@ -134,7 +115,7 @@ test("auth routes apply exact origin-aware preflight policy", async () => {
   );
   assert.equal(
     preflight.headers.get("Access-Control-Allow-Headers"),
-    "Authorization, Content-Type",
+    "Authorization, Content-Type, X-Mons-Data-Epoch",
   );
   assert.equal(preflight.headers.get("Vary"), "Origin");
   assert.equal(preflight.headers.get("Cache-Control"), "no-store");
@@ -349,10 +330,10 @@ test("creates exact auth intents for every supported method", async () => {
     "auth-intent:x:login-uid",
   ]);
   assert.equal(documents.length, 4);
-  assert.match(documents[0].nonce, /^[A-Za-z0-9]{24}$/);
-  assert.match(documents[1].nonce, /^[A-Za-z0-9_-]{24}$/);
-  assert.equal(documents[0].consumedAtMs, null);
-  assert.equal(documents[0].uid, "login-uid");
+  assert.match(documents[0]!.nonce, /^[A-Za-z0-9]{24}$/);
+  assert.match(documents[1]!.nonce, /^[A-Za-z0-9_-]{24}$/);
+  assert.equal(documents[0]!.consumedAtMs, null);
+  assert.equal(documents[0]!.uid, "login-uid");
 });
 
 test("validates intent bodies, fails closed, and bounds ID collisions", async () => {
@@ -700,11 +681,17 @@ test("creates an exact X flow with bounded intent and PKCE state", async () => {
   assert.equal(authUrl.searchParams.get("state"), payload.flowId);
   assert.equal(authUrl.searchParams.get("code_challenge_method"), "S256");
   assert.equal(created.length, 1);
-  assert.equal(created[0].callbackUri, "https://api.mons.link/auth/x/callback");
-  assert.equal(created[0].consentSource, "settings");
-  assert.equal(created[0].returnUrl, "https://mons.link/settings?tab=identity");
-  assert.equal(created[0].codeVerifier.length, 64);
-  assert.equal(created[0].codeChallenge.length, 43);
+  assert.equal(
+    created[0]!.callbackUri,
+    "https://api.mons.link/auth/x/callback",
+  );
+  assert.equal(created[0]!.consentSource, "settings");
+  assert.equal(
+    created[0]!.returnUrl,
+    "https://mons.link/settings?tab=identity",
+  );
+  assert.equal(created[0]!.codeVerifier.length, 64);
+  assert.equal(created[0]!.codeChallenge.length, 43);
   assert.deepEqual(rateKeys, ["auth-x-flow:login-uid"]);
 });
 
@@ -744,7 +731,7 @@ test("keeps only exact account-owned preview X return URLs", async () => {
       },
     );
     assert.equal(response.status, 200);
-    assert.equal(created[0].returnUrl, expected);
+    assert.equal(created[0]!.returnUrl, expected);
   }
 });
 
@@ -805,11 +792,11 @@ test("rejects missing, foreign, wrong-method, and stale X intents", async () => 
       status: 409,
     },
     {
-      intent: intent({ consumedAtMs: 1 }),
+      intent: intent({ status: "consumed", consumedAtMs: 1_000_001 }),
       status: 409,
     },
     {
-      intent: intent({ expiresAtMs: 999_999 }),
+      intent: intent({ createdAtMs: 900_000, expiresAtMs: 999_999 }),
       status: 409,
     },
   ];
@@ -852,7 +839,7 @@ test("falls back unsafe X return URLs and sanitizes repository failures", async 
     },
   );
   assert.equal(response.status, 200);
-  assert.equal(created[0].returnUrl, "https://mons.link/");
+  assert.equal(created[0]!.returnUrl, "https://mons.link/");
 
   const logs: string[] = [];
   const failed = await handleAuthRoute(
@@ -974,7 +961,7 @@ test("rate limits and dispatches auth mutations after session authentication", a
 test("rejects the retired profile claim alias before authentication or mutation", async () => {
   assert.equal(AUTH_PATHS.has("/auth/profile-claim/sync"), false);
   const response = await handleRequest(
-    new Request("https://api.mons.link/auth/profile-claim/sync", {
+    applicationRequest("https://api.mons.link/auth/profile-claim/sync", {
       method: "POST",
       body: "{}",
     }),

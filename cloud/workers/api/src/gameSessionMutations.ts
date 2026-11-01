@@ -1,3 +1,4 @@
+import type { Aura } from "@mons/shared/appearance";
 import {
   readInviteDocument,
   inviteMutationParticipants,
@@ -6,10 +7,7 @@ import {
   createManualInviteDocument,
   type InviteDocument,
 } from "@mons/shared/invite-records";
-import {
-  emptyAutomatchEntryFields,
-  type AutomatchEntryFields,
-} from "../../../runtime/automatchRecords.js";
+import { type AutomatchEntryFields } from "../../../runtime/automatchRecords.js";
 import {
   isCreateInviteResponse,
   isEndRematchResponse,
@@ -49,9 +47,9 @@ import { getDisplayNameFromAddress } from "../../../runtime/telegramDisplay.js";
 import { AuthApiFailure } from "./authErrors.ts";
 import type { RequestIdentity } from "./requestIdentity.ts";
 import {
-  STATE_SERVER_TIMESTAMP,
-  stateIncrement,
-} from "./stateCompatibility.ts";
+  SESSION_TIMESTAMP,
+  sessionIncrement,
+} from "./sessionValueOperations.ts";
 import { isSafeRecordKey } from "./recordKeys.ts";
 import type { GameplayProfile } from "./gameplayRepository.ts";
 import type { GameSessionRepository } from "./gameplayContracts.ts";
@@ -93,7 +91,7 @@ function failedPrecondition(message: string): AuthApiFailure {
 function secureRandom(): number {
   const values = new Uint32Array(1);
   crypto.getRandomValues(values);
-  return values[0] / 0x1_0000_0000;
+  return values[0]! / 0x1_0000_0000;
 }
 
 function normalizeMatch(value: unknown): GameSessionMatch | null {
@@ -104,7 +102,7 @@ function normalizeMatch(value: unknown): GameSessionMatch | null {
 function buildMirroredMatch(
   source: GameSessionMatch,
   emojiId: number,
-  aura: string,
+  aura: Aura,
 ): GameSessionMatch {
   const color = source.color === "white" ? "black" : "white";
   return {
@@ -214,18 +212,21 @@ function joiningProfile(
 function automatchJoinChanges(
   inviteId: string,
   operationId: string,
-  automatch: AutomatchEntryFields,
+  automatch: AutomatchEntryFields | null,
   profile: GameplayProfile,
 ): GameSessionChange[] {
-  if (automatch.telegramDeliveryVersion !== TELEGRAM_AUTOMATCH_VERSION) {
+  if (
+    !automatch ||
+    automatch.telegramDeliveryVersion !== TELEGRAM_AUTOMATCH_VERSION
+  ) {
     return [{ kind: "automatch-entry", inviteId, value: null }];
   }
   const existingName = getDisplayNameFromAddress(
-    automatch.display.username,
-    automatch.display.ethAddress,
-    automatch.display.solAddress,
-    automatch.display.rating,
-    automatch.display.emojiId,
+    automatch.username,
+    automatch.ethAddress,
+    automatch.solAddress,
+    automatch.rating,
+    automatch.emojiId,
   );
   const joiningName = getDisplayNameFromAddress(
     profile.username,
@@ -239,13 +240,13 @@ function automatchJoinChanges(
     ...buildMatchedAutomatchTelegramChanges({
       inviteId,
       matchedText: `${existingName} vs. ${joiningName} https://mons.link/${inviteId}`,
-      timestamp: STATE_SERVER_TIMESTAMP,
-      generation: stateIncrement(1),
+      timestamp: SESSION_TIMESTAMP,
+      generation: sessionIncrement(1),
     }),
     ...buildAutomatchTelegramProjectionChanges({
       inviteId,
       requestId: operationId,
-      timestamp: STATE_SERVER_TIMESTAMP,
+      timestamp: SESSION_TIMESTAMP,
     }),
   ];
 }
@@ -328,9 +329,9 @@ export async function joinInvite(
       }
       let pendingAutomatch: AutomatchEntryFields | null = null;
       if (isAutoInviteId(request.inviteId) && !currentGuestUid) {
-        pendingAutomatch = (
-          await repository.readAutomatchEntry(request.inviteId)
-        ).record;
+        pendingAutomatch = await repository.readAutomatchEntry(
+          request.inviteId,
+        );
         if (readStoredString(pendingAutomatch?.uid) !== hostUid) {
           throw failedPrecondition("automatch-not-pending");
         }
@@ -383,8 +384,7 @@ export async function joinInvite(
       if (isAutoInviteId(request.inviteId)) {
         const automatch =
           pendingAutomatch ||
-          (await repository.readAutomatchEntry(request.inviteId)).record ||
-          emptyAutomatchEntryFields();
+          (await repository.readAutomatchEntry(request.inviteId));
         const profile = joiningProfile(
           identity,
           request,

@@ -2,12 +2,12 @@
 import { type EventParticipantDocument } from "../events/documents.js";
 declare const getParticipantRecords: (eventData: unknown) => {
   profileId: string;
-  participant: EventParticipantDocument;
+  participant: import("../shared/event-types.js").EventParticipantRecord;
 }[];
 declare const buildParticipantRenderKey: (eventData: unknown) => string;
 declare const resolveParticipantToken: (
-  participant: unknown,
-  fallbackDisplayName?: unknown,
+  participant: EventParticipantDocument | null | undefined,
+  fallbackDisplayName?: string | null,
 ) => string;
 declare const renderParticipantLine: (eventData: unknown) => string;
 export {

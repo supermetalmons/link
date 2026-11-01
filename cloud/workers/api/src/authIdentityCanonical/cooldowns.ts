@@ -50,7 +50,7 @@ export async function cooldownPlan(
   ]);
   const expectations: CanonicalExpectation[] = [];
   const mutations: CanonicalMutation[] = [];
-  const revocation = results[0].results[0] as CanonicalCooldownRow | undefined;
+  const revocation = results[0]!.results[0] as CanonicalCooldownRow | undefined;
   if (revocation) {
     if (
       !Number.isSafeInteger(revocation.revision) ||
@@ -142,7 +142,7 @@ export async function sweepExpiredCanonicalAuthCooldowns(
   ]);
   const expectations: CanonicalExpectation[] = [];
   const mutations: CanonicalMutation[] = [];
-  for (const value of revocations.results) {
+  for (const value of revocations!.results) {
     const row = record(value);
     const method = row.method;
     const normalizedValue = cleanString(row.normalized_value);
@@ -166,7 +166,7 @@ export async function sweepExpiredCanonicalAuthCooldowns(
       normalizedValue,
     });
   }
-  for (const value of cooldowns.results) {
+  for (const value of cooldowns!.results) {
     const row = record(value);
     const method = row.method;
     const profileId = cleanString(row.profile_id);
@@ -192,7 +192,7 @@ export async function sweepExpiredCanonicalAuthCooldowns(
   }
   await commitCanonicalPlan(db, { expectations, mutations });
   return {
-    revocations: revocations.results.length,
-    cooldowns: cooldowns.results.length,
+    revocations: revocations!.results.length,
+    cooldowns: cooldowns!.results.length,
   };
 }

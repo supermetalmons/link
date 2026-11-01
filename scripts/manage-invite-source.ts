@@ -1,10 +1,9 @@
+import { createGuardedOperatorRunner } from "./operator/guardedSql.ts";
 import { existsSync } from "node:fs";
-import { createRequire } from "node:module";
 import { isAbsolute, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import {
   canonicalJson,
-  createWranglerRunner,
   resolveCloudflareToken,
   digest,
   privateDirectory,
@@ -13,12 +12,14 @@ import {
   type SqlRunner,
 } from "./operator/runtime.ts";
 
-const require = createRequire(import.meta.url);
-
-const { normalizeInviteSource } =
-  require("../cloud/workers/api/src/inviteSourceD1.ts") as {
-    normalizeInviteSource(value: unknown): Record<string, unknown>;
-  };
+import {
+  readInviteDocument,
+  type InviteDocument,
+} from "../cloud/runtime/shared/invite-records.js";
+import {
+  parseApplicationDataControl,
+  type ApplicationDataControl,
+} from "../cloud/workers/api/src/applicationDataRecords.ts";
 
 const DATABASE = "mons-link-profile-games";
 
@@ -34,7 +35,10 @@ type JsonRecord = Record<string, unknown>;
 
 type Operation = "status" | "inspect-admission" | "reconcile-admission";
 
+type DataEpoch = 1;
+
 type Arguments = {
+  dataEpoch?: DataEpoch;
   operation: Operation;
   directory?: string;
   admissionId?: string;
@@ -55,6 +59,7 @@ type Control = Gate & {
 };
 
 type Status = {
+  application: ApplicationDataControl | null;
   control: Control;
   automatch: Gate & { backend: "d1"; epoch: number };
   events: Gate;
@@ -79,13 +84,21 @@ type Admission = {
   createdAtMs: number;
 };
 
-type AdmissionControls = Pick<Status, "control" | "automatch" | "events">;
+type AdmissionControls = Pick<
+  Status,
+  "control" | "automatch" | "events" | "application"
+>;
 
-type SourceRow = { inviteId: string; source: JsonRecord };
+type SourceRow = {
+  inviteId: string;
+  source: InviteDocument;
+  sourceDigest: string;
+};
 
 type StoredRow = SourceRow & { revision: number; updatedAtMs: number };
 
 type Dependencies = {
+  dataEpoch: DataEpoch;
   now(): number;
   log(value: JsonRecord): void;
   status(): Promise<Status>;
@@ -110,12 +123,12 @@ function integer(value: unknown): value is number {
   return Number.isSafeInteger(value) && Number(value) >= 0;
 }
 
-function sourceRow(value: unknown): SourceRow {
-  const row = record(value);
-  const inviteId = row.inviteId;
+function sourceInviteId(value: unknown): string {
+  const inviteId = value;
   if (
     typeof inviteId !== "string" ||
     !inviteId ||
+    inviteId.trim() !== inviteId ||
     !inviteId.isWellFormed() ||
     Buffer.byteLength(inviteId) > 768 ||
     /[.#$[\]/]/.test(inviteId) ||
@@ -125,36 +138,54 @@ function sourceRow(value: unknown): SourceRow {
     })
   )
     throw new Error("invalid invite-source key");
-  const source = normalizeInviteSource(row.source);
-  if (canonicalJson(source) !== canonicalJson(row.source))
-    throw new Error("stored metadata contains retired invite fields");
-  if (Buffer.byteLength(canonicalJson(source)) > MAX_SOURCE_BYTES)
+  return inviteId;
+}
+
+function sourceRow(value: unknown): SourceRow {
+  const row = record(value),
+    inviteId = sourceInviteId(row.inviteId);
+  const raw = record(row.source),
+    encoded = canonicalJson(raw);
+  if (Buffer.byteLength(encoded) > MAX_SOURCE_BYTES)
     throw new Error("invite metadata exceeds the bounded D1 record size");
-  return { inviteId, source };
+  const source = readInviteDocument(raw);
+  if (!source) throw new Error("invalid canonical invite metadata");
+  return { inviteId, source, sourceDigest: digest(raw) };
 }
 
 function parseArgs(argv: string[]): Arguments {
+  const index = argv.indexOf("--data-epoch");
+  if (index < 0) return parseOperationArgs(argv);
+  if (index !== argv.length - 2 || argv[index + 1] !== "1")
+    throw new Error("--data-epoch must be the final option and select 1");
+  return {
+    ...parseOperationArgs(argv.slice(0, index)),
+    dataEpoch: 1,
+  };
+}
+
+function parseOperationArgs(argv: string[]): Arguments {
   if (argv.length === 1 && argv[0] === "--status")
     return { operation: "status" };
   if (
     argv.length === 4 &&
     argv[0] === "--inspect-admission" &&
-    VERSION.test(argv[1]) &&
+    VERSION.test(argv[1]!) &&
     argv[2] === "--directory" &&
-    isAbsolute(argv[3])
+    isAbsolute(argv[3]!)
   )
     return {
       operation: "inspect-admission",
-      admissionId: argv[1],
-      directory: argv[3],
+      admissionId: argv[1]!,
+      directory: argv[3]!,
     };
   if (
     argv.length === 3 &&
     argv[0] === "--reconcile-admission" &&
     argv[1] === "--evidence" &&
-    isAbsolute(argv[2])
+    isAbsolute(argv[2]!)
   )
-    return { operation: "reconcile-admission", evidence: argv[2] };
+    return { operation: "reconcile-admission", evidence: argv[2]! };
   throw new Error(
     "choose --status, --inspect-admission <UUID> --directory <absolute-path>, or --reconcile-admission --evidence <absolute-path>; initial invite migration commands are retired",
   );
@@ -186,6 +217,7 @@ function parseAdmission(value: unknown): Admission {
 
 function admissionControls(status: Status): AdmissionControls {
   return {
+    application: status.application,
     control: status.control,
     automatch: status.automatch,
     events: status.events,
@@ -231,7 +263,8 @@ async function inspectAdmission(
       "invite-source admission changed during inspection; inspect again",
     );
   const inspection = {
-    schemaVersion: 1,
+    schemaVersion: 2,
+    dataEpoch: dependencies.dataEpoch,
     admission,
     admissionDigest: digest(admission),
     controls,
@@ -248,7 +281,8 @@ async function inspectAdmission(
   );
   if (!existsSync(evidenceFile))
     writePrivateImmutable(evidenceFile, {
-      schemaVersion: 1,
+      schemaVersion: 2,
+      dataEpoch: dependencies.dataEpoch,
       inspectionFile,
       inspectionDigest,
       requestFinishedAtMs: null,
@@ -263,6 +297,7 @@ async function inspectAdmission(
     });
   dependencies.log({
     operation: "inspect-admission",
+    dataEpoch: dependencies.dataEpoch,
     admissionId: admission.admissionId,
     inspectionDigest,
     evidenceFile,
@@ -276,7 +311,8 @@ async function reconcileAdmission(
   const directory = privateDirectory(resolve(evidenceFile, ".."));
   const evidence = record(readPrivateJson(evidenceFile));
   if (
-    evidence.schemaVersion !== 1 ||
+    evidence.schemaVersion !== 2 ||
+    evidence.dataEpoch !== dependencies.dataEpoch ||
     typeof evidence.inspectionFile !== "string" ||
     !isAbsolute(evidence.inspectionFile)
   )
@@ -285,7 +321,8 @@ async function reconcileAdmission(
   const inspection = record(readPrivateJson(evidence.inspectionFile));
   const admission = parseAdmission(inspection.admission);
   if (
-    inspection.schemaVersion !== 1 ||
+    inspection.schemaVersion !== 2 ||
+    inspection.dataEpoch !== dependencies.dataEpoch ||
     digest(inspection) !== evidence.inspectionDigest ||
     digest(admission) !== inspection.admissionDigest
   )
@@ -313,7 +350,7 @@ async function reconcileAdmission(
     );
   const sources = reconciliation.sources.map((value) => {
     const source = record(value);
-    const { inviteId } = sourceRow({ inviteId: source.inviteId, source: {} });
+    const inviteId = sourceInviteId(source.inviteId);
     if (typeof source.digest !== "string" || !HASH.test(source.digest))
       throw new Error("invalid invite-source reconciliation digest");
     return { inviteId, digest: source.digest };
@@ -329,7 +366,13 @@ async function reconcileAdmission(
     directory,
     `invite-admission-completed-${evidenceDigest}.json`,
   );
-  const audit = { schemaVersion: 1, inspection, evidence, evidenceDigest };
+  const audit = {
+    schemaVersion: 2,
+    dataEpoch: dependencies.dataEpoch,
+    inspection,
+    evidence,
+    evidenceDigest,
+  };
   const current = await dependencies.readAdmission(admission.admissionId);
   if (current && canonicalJson(current) !== canonicalJson(admission))
     throw new Error("invite-source admission tuple changed after inspection");
@@ -353,10 +396,8 @@ async function reconcileAdmission(
     assertAdmissionWorkDrained(before);
     for (const source of sources) {
       const currentSource =
-        (await dependencies.readRows([source.inviteId]))[0]?.source ?? null;
-      const normalized =
-        currentSource === null ? null : normalizeInviteSource(currentSource);
-      if (digest(normalized) !== source.digest)
+        (await dependencies.readRows([source.inviteId]))[0] ?? null;
+      if ((currentSource?.sourceDigest ?? digest(null)) !== source.digest)
         throw new Error(
           "invite source changed after investigation; refresh the source reconciliation proof",
         );
@@ -380,6 +421,7 @@ async function reconcileAdmission(
   });
   dependencies.log({
     operation: "reconcile-admission",
+    dataEpoch: dependencies.dataEpoch,
     admissionId: admission.admissionId,
     evidenceDigest,
     alreadyAbsent: current === null,
@@ -390,14 +432,22 @@ async function manageInviteSource(
   args: Arguments,
   dependencies: Dependencies,
 ): Promise<void> {
+  if ((args.dataEpoch ?? 1) !== dependencies.dataEpoch)
+    throw new Error("invite-source selected data epoch mismatch");
   if (args.operation === "inspect-admission")
     return inspectAdmission(args, dependencies);
-  if (args.operation === "reconcile-admission")
+  if (args.operation === "reconcile-admission") {
+    assertSelectedGeneration(
+      (await dependencies.status()).application,
+      dependencies.dataEpoch,
+    );
     return reconcileAdmission(args.evidence!, dependencies);
+  }
   if (args.operation !== "status")
     throw new Error("initial invite migration commands are retired");
   dependencies.log({
     operation: "status",
+    dataEpoch: dependencies.dataEpoch,
     ...(await dependencies.status()),
     admissions: await dependencies.listAdmissions(),
   });
@@ -407,6 +457,7 @@ function parseStatus(
   inviteValue: unknown,
   automatchValue: unknown,
   eventValue: unknown,
+  application: ApplicationDataControl | null = null,
 ): Status {
   const invite = record(inviteValue);
   const automatch = record(automatchValue);
@@ -449,6 +500,7 @@ function parseStatus(
     return row[field];
   };
   return {
+    application,
     control: {
       ...gate(invite, invite.state),
       backend: invite.backend as Control["backend"],
@@ -482,7 +534,20 @@ function parseStatus(
   };
 }
 
-function createSqlDependencies(run: SqlRunner, now = Date.now): Dependencies {
+function assertSelectedGeneration(
+  control: ApplicationDataControl | null,
+  epoch: DataEpoch,
+): asserts control is ApplicationDataControl {
+  if (!control || control.dataEpoch !== epoch || control.phase !== "active")
+    throw new Error("invite-source management generation mismatch");
+}
+
+function createSqlDependencies(
+  run: SqlRunner,
+  now = Date.now,
+  dataEpoch: DataEpoch = 1,
+): Dependencies {
+  if (dataEpoch !== 1) throw new Error("invalid invite-source data epoch");
   const query = (sql: string, bindings: (string | number | null)[] = []) =>
     run(sql, DATABASE, bindings);
   const requireOne = async (
@@ -496,6 +561,7 @@ function createSqlDependencies(run: SqlRunner, now = Date.now): Dependencies {
       );
   };
   return {
+    dataEpoch,
     now,
     log: (value) => console.log(JSON.stringify(value)),
     async listAdmissions() {
@@ -521,9 +587,10 @@ function createSqlDependencies(run: SqlRunner, now = Date.now): Dependencies {
           "invite-source control or writer epoch changed before admission removal",
         );
       assertAdmissionWorkDrained(current);
+      assertSelectedGeneration(current.application, dataEpoch);
       const control = controls.control;
       await requireOne(
-        `DELETE FROM invite_source_write_admissions WHERE admission_id = ? AND backend = ? AND epoch = ? AND freeze_generation = ? AND kind = ? AND created_at_ms = ? AND NOT EXISTS (SELECT 1 FROM game_session_transitions WHERE status = 'pending') AND NOT EXISTS (SELECT 1 FROM game_session_transition_resources) AND NOT EXISTS (SELECT 1 FROM game_session_mutation_locks) AND EXISTS (SELECT 1 FROM invite_source_control WHERE singleton = 1 AND backend = ? AND state = ? AND epoch = ? AND freeze_generation = ? AND candidate_version_id IS ? AND source_digest IS ? AND import_digest IS ? AND verified_at_ms IS ? AND activated_at_ms IS ?) AND EXISTS (SELECT 1 FROM automatch_runtime_control WHERE singleton = 1 AND backend = ? AND state = ? AND epoch = ? AND freeze_generation = ?) RETURNING admission_id`,
+        `DELETE FROM invite_source_write_admissions WHERE admission_id = ? AND backend = ? AND epoch = ? AND freeze_generation = ? AND kind = ? AND created_at_ms = ? AND NOT EXISTS (SELECT 1 FROM game_session_transitions_canonical WHERE status = 'pending') AND NOT EXISTS (SELECT 1 FROM game_session_transition_resources_canonical) AND NOT EXISTS (SELECT 1 FROM game_session_mutation_locks) AND EXISTS (SELECT 1 FROM invite_source_control WHERE singleton = 1 AND backend = ? AND state = ? AND epoch = ? AND freeze_generation = ? AND candidate_version_id IS ? AND source_digest IS ? AND import_digest IS ? AND verified_at_ms IS ? AND activated_at_ms IS ?) AND EXISTS (SELECT 1 FROM automatch_runtime_control WHERE singleton = 1 AND backend = ? AND state = ? AND epoch = ? AND freeze_generation = ?) AND EXISTS (SELECT 1 FROM application_data_control WHERE singleton = 1 AND generation = ? AND data_epoch = ? AND phase = 'active' AND migration_id IS ?) RETURNING admission_id`,
         [
           admission.admissionId,
           admission.backend,
@@ -544,6 +611,9 @@ function createSqlDependencies(run: SqlRunner, now = Date.now): Dependencies {
           controls.automatch.state,
           controls.automatch.epoch,
           controls.automatch.freezeGeneration,
+          current.application.generation,
+          current.application.dataEpoch,
+          current.application.migrationId,
         ],
       );
     },
@@ -555,31 +625,60 @@ function createSqlDependencies(run: SqlRunner, now = Date.now): Dependencies {
       )[0];
       const automatch = (
         await query(
-          "SELECT *, (SELECT COUNT(*) FROM automatch_write_admissions) AS session_admissions, (SELECT COUNT(*) FROM game_session_transitions WHERE status = 'pending') AS session_intents, (SELECT COUNT(*) FROM game_session_transition_resources) AS session_resources, (SELECT COUNT(*) FROM game_session_mutation_locks) AS session_locks FROM automatch_runtime_control WHERE singleton = 1",
+          `SELECT *, (SELECT COUNT(*) FROM automatch_write_admissions) AS session_admissions, (SELECT COUNT(*) FROM game_session_transitions_canonical WHERE status = 'pending') AS session_intents, (SELECT COUNT(*) FROM game_session_transition_resources_canonical) AS session_resources, (SELECT COUNT(*) FROM game_session_mutation_locks) AS session_locks FROM automatch_runtime_control WHERE singleton = 1`,
         )
       )[0];
       const events = (
         await run(
-          "SELECT *, (SELECT COUNT(*) FROM event_write_admissions) AS event_admissions, (SELECT COUNT(*) FROM event_transition_intents) AS event_intents, (SELECT COUNT(*) FROM event_leases) AS event_leases FROM event_runtime_control WHERE singleton = 1",
+          `SELECT *, (SELECT COUNT(*) FROM event_write_admissions) AS event_admissions, (SELECT COUNT(*) FROM event_transition_intents_canonical) AS event_intents, (SELECT COUNT(*) FROM event_leases) AS event_leases FROM event_runtime_control WHERE singleton = 1`,
           EVENT_DATABASE,
         )
       )[0];
-      return parseStatus(invite, automatch, events);
+      const status = parseStatus(invite, automatch, events);
+      const available = await query(
+        "SELECT name FROM sqlite_schema WHERE type = 'table' AND name = 'application_data_control'",
+      );
+      if (available.length) {
+        const rows = await query(
+          "SELECT singleton, generation, data_epoch, phase, migration_id FROM application_data_control WHERE singleton = 1",
+        );
+        if (rows.length !== 1)
+          throw new Error("invite-source management control unavailable");
+        status.application = parseApplicationDataControl(rows[0]);
+      }
+      return status;
     },
     async readRows(inviteIds) {
+      if (inviteIds.length > 100)
+        throw new Error("invite-source proof scope exceeds its bound");
+      const requested = new Set(inviteIds.map(sourceInviteId)),
+        seen = new Set<string>();
       return (
         await query(
-          "SELECT invite_id, source_json, revision, updated_at_ms FROM invite_sources WHERE invite_id IN (SELECT value FROM json_each(?))",
+          `SELECT invite_id, source_json, revision, updated_at_ms FROM invite_sources_canonical WHERE invite_id IN (SELECT value FROM json_each(?))`,
           [canonicalJson(inviteIds)],
         )
-      ).map((row) => ({
-        ...sourceRow({
+      ).map((row) => {
+        if (
+          typeof row.source_json !== "string" ||
+          !integer(row.revision) ||
+          row.revision < 1 ||
+          !integer(row.updated_at_ms)
+        )
+          throw new Error("invalid invite-source proof row");
+        const source = sourceRow({
           inviteId: row.invite_id,
-          source: JSON.parse(String(row.source_json)),
-        }),
-        revision: Number(row.revision),
-        updatedAtMs: Number(row.updated_at_ms),
-      }));
+          source: JSON.parse(row.source_json),
+        });
+        if (!requested.has(source.inviteId) || seen.has(source.inviteId))
+          throw new Error("invite-source proof identity mismatch");
+        seen.add(source.inviteId);
+        return {
+          ...source,
+          revision: row.revision,
+          updatedAtMs: row.updated_at_ms,
+        };
+      });
     },
   };
 }
@@ -587,13 +686,25 @@ function createSqlDependencies(run: SqlRunner, now = Date.now): Dependencies {
 function createProductionDependencies({
   apiToken = resolveCloudflareToken(),
   fetcher = fetch,
-}: { apiToken?: string; fetcher?: typeof fetch } = {}): Dependencies {
-  return createSqlDependencies(createWranglerRunner({ apiToken, fetcher }));
+  dataEpoch = 1,
+}: {
+  apiToken?: string;
+  fetcher?: typeof fetch;
+  dataEpoch?: DataEpoch;
+} = {}): Dependencies {
+  return createSqlDependencies(
+    createGuardedOperatorRunner({ apiToken, fetcher }),
+    Date.now,
+    dataEpoch,
+  );
 }
 
 async function execute(argv = process.argv.slice(2)): Promise<void> {
   const args = parseArgs(argv);
-  await manageInviteSource(args, createProductionDependencies());
+  await manageInviteSource(
+    args,
+    createProductionDependencies({ dataEpoch: args.dataEpoch ?? 1 }),
+  );
 }
 
 export {

@@ -1,22 +1,26 @@
 // Generated from src/shared/game-sessions.ts. Run npm run generate:runtime.
+import { type MatchTimer } from "./timers.js";
+import { type Aura, type EmojiId } from "./appearance.js";
+import { type RematchSeries } from "./rematches.js";
 export type GameSessionPresentation = {
-  emojiId: number;
-  aura: string;
+  emojiId: EmojiId;
+  aura: Aura;
 };
 export type GameSessionOperation = {
   operationId: string;
   inviteId: string;
 };
 export type GameSessionMatch = {
+  schemaVersion: 1;
   version: number;
   color: "white" | "black";
-  emojiId: number;
-  aura: string;
+  emojiId: EmojiId;
+  aura: Aura;
   gameVariant: string;
   fen: string;
-  status: string;
+  status: "active" | "surrendered";
   flatMovesString: string;
-  timer: string;
+  timer: MatchTimer;
 };
 export type HistoricalMatchRecord = GameSessionMatch;
 export type ReadMatchSnapshotRequest = {
@@ -77,7 +81,7 @@ export type ProposeRematchResponse = {
   inviteId: string;
   actorUid: string;
   matchId: string;
-  rematches: string;
+  rematches: RematchSeries;
   match: GameSessionMatch;
 };
 export type EndRematchRequest = GameSessionOperation;
@@ -85,7 +89,7 @@ export type EndRematchResponse = {
   ok: true;
   inviteId: string;
   actorUid: string;
-  rematches: string;
+  rematches: RematchSeries;
 };
 export type EnsureMatchRequest = GameSessionOperation &
   GameSessionPresentation & {

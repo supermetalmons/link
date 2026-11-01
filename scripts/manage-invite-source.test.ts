@@ -1,3 +1,7 @@
+import { activateStrictLocalSchemaFixture } from "./test-fixtures/strict-local-schema.ts";
+import { canonicalEvent as eventDocumentFixture } from "../test/fixtures/canonicalData.mjs";
+import { inviteDocumentFixture } from "../cloud/workers/api/test/inviteDocumentFixture.ts";
+import { applicationWriteFenceSql } from "../cloud/runtime/application-fence.js";
 import assert from "node:assert/strict";
 import {
   mkdtempSync,
@@ -15,6 +19,7 @@ import {
   createSqlDependencies,
   manageInviteSource,
   parseArgs,
+  sourceRow,
   execute,
   type Arguments,
 } from "./manage-invite-source.ts";
@@ -63,18 +68,24 @@ function finishAdmissionEvidence(
   return evidence;
 }
 function fixture(t: test.TestContext) {
+  const dataEpoch = 1;
   const directory = mkdtempSync(resolve(tmpdir(), "invite-operator-test-"));
   const db = new DatabaseSync(":memory:"),
     events = new DatabaseSync(":memory:");
-  for (const file of [
-    "0007_gameplay_coordination.sql",
-    "0009_automatch_state.sql",
-    "0010_game_session_transitions.sql",
-    "0018_invite_sources.sql",
-  ])
+  for (const file of readdirSync(resolve("cloud/workers/api/migrations"))
+    .filter((name) => name.endsWith(".sql"))
+    .sort()) {
+    if (file.endsWith("_retire_canonical_source_tables.sql"))
+      db.exec(
+        "UPDATE application_data_control SET generation = 3, data_epoch = 1",
+      );
+    if (file === "0039_retire_canonical_timer_starts.sql")
+      activateStrictLocalSchemaFixture(db);
     db.exec(
       readFileSync(resolve("cloud/workers/api/migrations", file), "utf8"),
     );
+  }
+  db.exec(`UPDATE application_data_control SET data_epoch = ${dataEpoch}`);
   db.exec(
     "UPDATE automatch_runtime_control SET backend='d1',epoch=2,freeze_generation=1;UPDATE invite_source_control SET backend='d1',epoch=1;",
   );
@@ -94,6 +105,21 @@ function fixture(t: test.TestContext) {
     ),
   );
   events.exec("UPDATE event_runtime_control SET storage_mode='d1'");
+  for (const file of readdirSync(resolve("cloud/workers/api/event-migrations"))
+    .filter(
+      (name) =>
+        name.endsWith(".sql") && name > "0003_finalize_event_storage.sql",
+    )
+    .sort()) {
+    if (file.endsWith("_retire_canonical_source_tables.sql"))
+      events.exec(
+        "UPDATE application_data_control SET generation = 3, data_epoch = 1",
+      );
+    events.exec(
+      readFileSync(resolve("cloud/workers/api/event-migrations", file), "utf8"),
+    );
+  }
+  events.exec(`UPDATE application_data_control SET data_epoch = ${dataEpoch}`);
   let loseAdmissionDeleteResponse = false;
   let beforeAdmissionDelete: (() => void) | undefined;
   const calls: Array<{ sql: string; database: string }> = [],
@@ -117,7 +143,7 @@ function fixture(t: test.TestContext) {
     }
     return rows;
   };
-  const dependencies = createSqlDependencies(run, () => 100000);
+  const dependencies = createSqlDependencies(run, () => 100000, dataEpoch);
   dependencies.log = (value) => logs.push(value);
   const command = (
     operation: Arguments["operation"],
@@ -126,6 +152,7 @@ function fixture(t: test.TestContext) {
     manageInviteSource(
       {
         operation,
+        dataEpoch,
         ...(operation === "inspect-admission" ? { directory } : {}),
         ...extra,
       },
@@ -213,7 +240,7 @@ test("named orphan admission recovery works with active and frozen D1 gates with
       );
     await f.command("status");
     assert.equal(
-      (f.logs.at(-1)?.admissions as Array<{ admissionId: string }>)[0]
+      (f.logs.at(-1)?.admissions as Array<{ admissionId: string }>)[0]!
         .admissionId,
       VERSION,
     );
@@ -270,11 +297,16 @@ test("admission recovery rejects incomplete request or source proof and arbitrar
 test("admission source proof verifies current canonical metadata in D1 without logging payloads", async (t) => {
   for (const backend of ["d1"]) {
     const f = fixture(t);
-    const source = { hostId: "host", password: "secret-source-payload" };
+    const source = inviteDocumentFixture({
+      hostId: "host",
+      password: "secret-source-payload",
+    });
     if (backend === "d1") {
       f.db.exec("UPDATE invite_source_control SET backend = 'd1', epoch = 2");
       f.db
-        .prepare("INSERT INTO invite_sources VALUES ('private', ?, 1, 100)")
+        .prepare(
+          "INSERT INTO invite_sources_canonical VALUES ('private', ?, 1, 100)",
+        )
         .run(canonicalJson(source));
     }
     insertInviteAdmission(f);
@@ -300,7 +332,7 @@ test("two orphan admissions can be reconciled separately without deleting or wai
   insertInviteAdmission(f);
   insertInviteAdmission(f, OTHER_VERSION);
   f.db.exec(
-    "INSERT INTO automatch_write_admissions VALUES ('session', 2, 1, 'd1', 'patch', 100)",
+    "INSERT INTO automatch_write_admissions (admission_id, epoch, freeze_generation, backend, kind, created_at_ms) VALUES ('session', 2, 1, 'd1', 'patch', 100)",
   );
   f.events.exec(
     "INSERT INTO event_write_admissions VALUES ('event',2,100,101)",
@@ -324,31 +356,90 @@ test("two orphan admissions can be reconciled separately without deleting or wai
 });
 
 test("pending transitions, resources, and leases prevent named recovery", async (t) => {
-  const blockers = [
-    {
-      sql: "INSERT INTO game_session_transitions (transition_id,invite_id,payload_json,status,created_at_ms,updated_at_ms) VALUES ('intent','private','{}','pending',100,100)",
+  const sessionIntent = {
+    version: 3,
+    inviteId: "private",
+    inviteSourceEpoch: 1,
+    inviteMutations: [
+      {
+        current: { inviteId: "private", revision: 0, value: null },
+        value: inviteDocumentFixture({ hostId: "host" }),
+      },
+    ],
+    transitionId: "intent",
+    operationDigest: "a".repeat(64),
+    resources: ["private"],
+    mutations: [],
+    creations: [],
+    createdAtMs: 100,
+  };
+  const seedSession = (
+    f: ReturnType<typeof fixture>,
+    status: "pending" | "completed",
+  ) => {
+    f.db
+      .prepare(
+        "INSERT INTO game_session_transitions_canonical (transition_id,invite_id,payload_json,status,created_at_ms,updated_at_ms) VALUES ('intent','private',?,?,100,100)",
+      )
+      .run(JSON.stringify(sessionIntent), status);
+  };
+  const blockers: Array<(f: ReturnType<typeof fixture>) => void> = [
+    (f) => seedSession(f, "pending"),
+    (f) => {
+      seedSession(f, "completed");
+      f.db.exec(
+        "INSERT INTO game_session_transition_resources_canonical VALUES ('resource','intent')",
+      );
     },
-    {
-      sql: "INSERT INTO game_session_transitions (transition_id,invite_id,payload_json,status,created_at_ms,updated_at_ms) VALUES ('intent','private','{}','completed',100,100); INSERT INTO game_session_transition_resources VALUES ('resource','intent')",
+    (f) => {
+      f.db.exec(
+        "INSERT INTO game_session_mutation_locks (lock_id, owner_id, operation_id, expires_at_ms) VALUES ('lock','owner','operation',1)",
+      );
     },
-    {
-      sql: "INSERT INTO game_session_mutation_locks VALUES ('lock','owner','operation',1)",
+    (f) => {
+      f.events.exec(
+        "INSERT INTO event_leases VALUES ('event','lease','owner',100,100,101)",
+      );
     },
-    {
-      events: true,
-      sql: "INSERT INTO event_leases VALUES ('event','lease','owner',100,100,101)",
-    },
-    {
-      events: true,
-      sql: "PRAGMA foreign_keys=OFF; INSERT INTO event_transition_intents (transition_id,event_id,expected_revision,status,intent_json,created_at_ms,updated_at_ms) VALUES ('intent','event',1,'dead','{}',100,100)",
+    (f) => {
+      const event = eventDocumentFixture({
+        eventId: "event",
+        status: "scheduled",
+        startAtMs: 100,
+        updatedAtMs: 100,
+      });
+      f.events
+        .prepare(
+          "INSERT INTO event_records_canonical (event_id,status,start_at_ms,updated_at_ms,record_json,revision) VALUES ('event','scheduled',100,100,?,1)",
+        )
+        .run(JSON.stringify(event));
+      const intent = {
+        schemaVersion: 3,
+        transitionId: "intent",
+        eventId: "event",
+        expectedRevision: 1,
+        canonicalUpdates: [],
+        effects: [],
+        inviteMutations: [],
+        sourceEpoch: 1,
+        payloadDigest: "a".repeat(64),
+        operationDigest: "b".repeat(64),
+        createdAtMs: 100,
+        updatedAtMs: 100,
+      };
+      f.events
+        .prepare(
+          "INSERT INTO event_transition_intents_canonical (transition_id,event_id,expected_revision,status,intent_json,created_at_ms,updated_at_ms) VALUES ('intent','event',1,'dead',?,100,100)",
+        )
+        .run(JSON.stringify(intent));
     },
   ];
-  for (const blocker of blockers) {
+  for (const block of blockers) {
     const f = fixture(t);
     insertInviteAdmission(f);
     const file = await admissionEvidence(f);
     finishAdmissionEvidence(file);
-    (blocker.events ? f.events : f.db).exec(blocker.sql);
+    block(f);
     await assert.rejects(
       f.command("reconcile-admission", { evidence: file }),
       /not drained/,
@@ -385,7 +476,7 @@ test("changed admission tuples, control epochs, and dispatch-time session work b
   for (const sql of [
     "UPDATE invite_source_write_admissions SET kind = 'changed'",
     "UPDATE invite_source_control SET backend = 'd1', epoch = 2",
-    "INSERT INTO game_session_mutation_locks VALUES ('lock','owner','operation',1)",
+    "INSERT INTO game_session_mutation_locks (lock_id, owner_id, operation_id, expires_at_ms) VALUES ('lock','owner','operation',1)",
   ]) {
     const f = fixture(t);
     insertInviteAdmission(f);
@@ -480,4 +571,104 @@ test("invite status refuses retired authority and admission evidence without rea
   });
   await assert.rejects(fake.status(), /invalid invite-source/);
   assert.ok(f.calls.every((call) => call.sql.startsWith("SELECT")));
+});
+
+test("operator reads only canonical metadata and rejects retired epochs", async (t) => {
+  const f = fixture(t);
+  const canonical = inviteDocumentFixture({ hostId: "canonical-host" });
+  f.db
+    .prepare(
+      "INSERT INTO invite_sources_canonical VALUES ('current', ?, 1, 100)",
+    )
+    .run(JSON.stringify(canonical));
+  const rows = await f.dependencies.readRows(["current"]);
+  assert.equal(rows[0]!.source.hostId, "canonical-host");
+  assert.equal(rows[0]!.sourceDigest, digest(canonical));
+  assert.equal(
+    f.db
+      .prepare("SELECT name FROM sqlite_schema WHERE name = 'invite_sources'")
+      .get(),
+    undefined,
+  );
+  assert.ok(
+    f.calls.some(({ sql }) =>
+      sql.includes("FROM invite_sources_canonical WHERE invite_id"),
+    ),
+  );
+  assert.deepEqual(parseArgs(["--status", "--data-epoch", "1"]), {
+    operation: "status",
+    dataEpoch: 1,
+  });
+  for (const argv of [
+    ["--status", "--data-epoch", "0"],
+    ["--status", "--data-epoch", "2"],
+    ["--data-epoch", "0", "--status"],
+    ["--status", "--data-epoch", "0", "--data-epoch", "1"],
+  ])
+    assert.throws(() => parseArgs(argv));
+});
+
+test("operator rejects retired source records instead of converting them", () => {
+  assert.throws(
+    () =>
+      sourceRow({
+        inviteId: "retired",
+        source: {
+          version: 2,
+          hostId: "host",
+          hostColor: "white",
+          unaccounted: true,
+        },
+      }),
+    /invalid canonical invite metadata/,
+  );
+});
+
+test("named admission reconciliation refuses epoch and generation changes", async (t) => {
+  for (const changed of ["epoch", "generation"] as const) {
+    const f = fixture(t);
+    insertInviteAdmission(f);
+    const evidence = await admissionEvidence(f);
+    finishAdmissionEvidence(evidence);
+    if (changed === "epoch")
+      f.db.exec("UPDATE application_data_control SET data_epoch = 0");
+    else
+      f.beforeAdmissionDelete(() =>
+        f.db.exec(
+          "UPDATE application_data_control SET generation = generation + 1",
+        ),
+      );
+    await assert.rejects(
+      f.command("reconcile-admission", { evidence }),
+      /generation mismatch|not confirmed/,
+    );
+    assert.ok(await f.dependencies.readAdmission(VERSION));
+  }
+});
+
+test("named recovery cannot bypass installed application write fences", async (t) => {
+  const f = fixture(t);
+  insertInviteAdmission(f);
+  const evidence = await admissionEvidence(f);
+  finishAdmissionEvidence(evidence);
+  f.db.exec(applicationWriteFenceSql("invite_source_write_admissions"));
+  await assert.rejects(
+    f.command("reconcile-admission", { evidence }),
+    /application-write-fenced/,
+  );
+  assert.ok(await f.dependencies.readAdmission(VERSION));
+  assert.equal(
+    f.db
+      .prepare("SELECT COUNT(*) AS count FROM application_write_context")
+      .get()?.count,
+    0,
+  );
+  assert.equal(
+    f.calls.some(({ sql }) =>
+      /INSERT INTO application_write_context|DROP TRIGGER|UPDATE application_data_control/.test(
+        sql,
+      ),
+    ),
+    false,
+  );
 });

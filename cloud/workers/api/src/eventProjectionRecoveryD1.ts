@@ -105,7 +105,7 @@ export function createEventProjectionRecoveryStore<
                 requestId,
                 expectedTimestamp,
                 nowMs,
-                { admission, signal },
+                { admission, ...(signal ? { signal } : {}) },
               );
             };
           const writers: EventProjectionRecoveryWriters = {
@@ -117,7 +117,7 @@ export function createEventProjectionRecoveryStore<
                   eventId,
                   (current) =>
                     repairEventProfileProjectionRecord(current, input),
-                  { admission, signal },
+                  { admission, ...(signal ? { signal } : {}) },
                 ),
             },
             telegram: {
@@ -132,7 +132,7 @@ export function createEventProjectionRecoveryStore<
                       eventId,
                       nowMs,
                     ),
-                  { admission, signal },
+                  { admission, ...(signal ? { signal } : {}) },
                 ),
             },
           };

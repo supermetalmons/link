@@ -184,8 +184,12 @@ export async function readProfileEventPrizesPageResponse(
           };
   } else {
     const page = await readProfileEventPrizePage(session, profileId, {
-      afterEventId: cursor?.afterEventId,
-      expectedRevision: cursor?.revision,
+      ...(cursor
+        ? {
+            afterEventId: cursor.afterEventId,
+            expectedRevision: cursor.revision,
+          }
+        : {}),
       knownRevision,
     });
     if (cursor && cursor.revision !== page.revision) snapshotChanged();

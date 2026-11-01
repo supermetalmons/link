@@ -112,7 +112,7 @@ export function parseRecoveryObservation(
   if (!revisionBytes) throw new Error("recovery-observation-invalid");
   const value = Object.fromEntries(
     fieldNames.map((name, index) => {
-      const field = fields[index];
+      const field = fields[index]!;
       const value =
         field.storageType === "null"
           ? null
@@ -153,7 +153,7 @@ export function recoveryObservationGuard(
     sql: expressions
       .map(
         (expression, index) =>
-          `typeof(${expression}) = ? AND ${observation.fields[index].storageType === "real" && observation.fields[index].realValue !== null ? expression : `CAST(${expression} AS BLOB)`} IS ?`,
+          `typeof(${expression}) = ? AND ${observation.fields[index]!.storageType === "real" && observation.fields[index]!.realValue !== null ? expression : `CAST(${expression} AS BLOB)`} IS ?`,
       )
       .join(" AND "),
     bindings: observation.fields.flatMap((field) => [

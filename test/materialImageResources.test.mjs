@@ -29,14 +29,22 @@ test("shares material requests and retains one blob URL for later consumers", as
     metal: null,
     ice: null,
   });
-  const fetchMock = t.mock.method(globalThis, "fetch", async (url) => {
-    assert.equal(url, "https://cdn.lil.org/mons/rocks/materials/dust.webp");
-    return new Response("dust-image");
-  });
-  const objectUrlMock = t.mock.method(URL, "createObjectURL", (blob) => {
-    assert.ok(blob instanceof Blob);
-    return "blob:dust";
-  });
+  const fetchMock = t.mock.method(
+    globalThis,
+    "fetch",
+    async (/** @type {Parameters<typeof fetch>[0]} */ url) => {
+      assert.equal(url, "https://cdn.lil.org/mons/rocks/materials/dust.webp");
+      return new Response("dust-image");
+    },
+  );
+  const objectUrlMock = t.mock.method(
+    URL,
+    "createObjectURL",
+    (/** @type {Blob} */ blob) => {
+      assert.ok(blob instanceof Blob);
+      return "blob:dust";
+    },
+  );
 
   const first = getMaterialImageUrl("dust");
   const second = getMaterialImageUrl("dust");
@@ -113,6 +121,7 @@ test("publishes an external retry success once to mounted consumers", async (t) 
     return new Response("metal-image");
   });
   t.mock.method(URL, "createObjectURL", () => "blob:metal");
+  /** @type {{ name: Parameters<typeof getMaterialImageUrl>[0], url: string }[]} */
   const changes = [];
   const unsubscribe = subscribeMaterialImageLoads((name, url) => {
     assert.equal(getCachedMaterialImageUrls()[name], url);
@@ -131,13 +140,11 @@ test("publishes an external retry success once to mounted consumers", async (t) 
 });
 
 test("does not notify an unmounted consumer when its pending image loads", async (t) => {
-  let resolveFetch;
-  t.mock.method(
-    globalThis,
-    "fetch",
-    () => new Promise((resolve) => (resolveFetch = resolve)),
-  );
+  /** @type {PromiseWithResolvers<Response>} */
+  const { promise: response, resolve: resolveFetch } = Promise.withResolvers();
+  t.mock.method(globalThis, "fetch", () => response);
   t.mock.method(URL, "createObjectURL", () => "blob:ice");
+  /** @type {{ name: Parameters<typeof getMaterialImageUrl>[0], url: string }[]} */
   const changes = [];
   const unsubscribe = subscribeMaterialImageLoads((name, url) => {
     changes.push({ name, url });

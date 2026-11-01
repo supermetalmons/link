@@ -1,3 +1,4 @@
+import { runGuardedOperatorSqlSync } from "./operator/guardedSql.ts";
 import {
   DEFAULT_API_CONFIG,
   resolveD1Binding,
@@ -176,8 +177,9 @@ function readRemoteControl(): Control {
 }
 
 function updateRemoteState(expected: ControlState, next: ControlState): void {
-  runWrangler(
+  runGuardedOperatorSqlSync(
     `UPDATE profile_canonical_control SET state = '${next}' WHERE singleton = 1 AND state = '${expected}'`,
+    DATABASE,
   );
 }
 

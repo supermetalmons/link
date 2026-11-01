@@ -99,19 +99,36 @@ type ProfileGameProjectionDependencies = MatchPresentationReadDependencies & {
 function toD1ProjectionWrite(
   write: ProjectionWrite | EventProjectionWrite,
 ): D1ProjectionWrite {
-  const output: unknown = {
-    type: write.type,
+  const identity = {
     profileId: write.profileId,
     projectionId:
       "inviteId" in write ? write.inviteId : `event_${write.eventId}`,
-    ...(write.data ? { data: write.data } : {}),
-    ...((write.type === "update" || write.type === "delete") &&
-    "expectedVersion" in write
-      ? { expectedVersion: write.expectedVersion }
-      : {}),
-    ...(write.type === "create" ? { requireAbsent: true } : {}),
   };
-  return output as D1ProjectionWrite;
+  if (write.type === "delete")
+    return {
+      ...identity,
+      type: "delete",
+      ...("expectedVersion" in write && write.expectedVersion !== undefined
+        ? { expectedVersion: write.expectedVersion }
+        : {}),
+    };
+  if (write.type === "create")
+    return {
+      ...identity,
+      type: "create",
+      data: write.data,
+      requireAbsent: true,
+    };
+  if (write.type === "update")
+    return {
+      ...identity,
+      type: "update",
+      data: write.data,
+      ...(write.expectedVersion === undefined
+        ? {}
+        : { expectedVersion: write.expectedVersion }),
+    };
+  return { ...identity, type: "merge", data: write.data };
 }
 
 function projectionProfileData(
@@ -122,11 +139,7 @@ function projectionProfileData(
     eth: profile.eth || "",
     sol: profile.sol || "",
     username: profile.username || "",
-    ...(snapshot.emojiPresent
-      ? { custom: { emoji: profile.emoji } }
-      : snapshot.gameplayEmoji !== ""
-        ? { emoji: snapshot.gameplayEmoji }
-        : {}),
+    emoji: snapshot.emojiPresent ? snapshot.gameplayEmoji : null,
   });
 }
 
@@ -244,7 +257,7 @@ export function createProfileGameProjectionRuntime(
   const projection = createProfileGamesProjectionCore({
     logger,
     repository,
-    wait: dependencies.wait,
+    ...(dependencies.wait === undefined ? {} : { wait: dependencies.wait }),
   });
   return {
     ...projection,
@@ -307,7 +320,7 @@ export function createEventProfileGameProjectionRuntime(
       readEventProjectionOwnershipSnapshot(profileDb, query),
   };
   const projection = createEventProfileGameProjectionCore({
-    now: dependencies.now,
+    ...(dependencies.now === undefined ? {} : { now: dependencies.now }),
     prepareEventProjection: (_eventId, event) =>
       ensureEventMatchDiscovery(
         d1,
@@ -317,7 +330,7 @@ export function createEventProfileGameProjectionRuntime(
         (dependencies.now || Date.now)(),
       ),
     repository,
-    wait: dependencies.wait,
+    ...(dependencies.wait === undefined ? {} : { wait: dependencies.wait }),
   });
   return {
     async reconcileEventProjection(eventId, cleanupOwnerProfileIds, options) {

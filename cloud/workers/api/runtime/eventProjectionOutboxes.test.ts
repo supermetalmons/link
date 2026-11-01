@@ -4,6 +4,7 @@ import {
 } from "./eventProjectionTransactionFixture.ts";
 import { projectionSnapshotRecordFixture } from "../test/eventProjectionRecoveryFixture.ts";
 import { env } from "cloudflare:workers";
+import { eventDocumentFixture } from "../test/eventCompatibilityFixture.ts";
 import type { D1Migration } from "cloudflare:test";
 import { beforeAll, beforeEach, describe, expect, it } from "vitest";
 import {
@@ -28,7 +29,7 @@ const families = [
   {
     kind: "profile",
     projectionKind: "profile-game",
-    table: "event_profile_game_projection_outboxes",
+    table: "event_profile_game_projection_outboxes_canonical",
     claim: claimEventProfileGameProjectionOutbox,
     acknowledge: acknowledgeEventProfileGameProjectionOutbox,
     transact: transactEventProfileGameProjectionOutbox,
@@ -36,7 +37,7 @@ const families = [
   {
     kind: "telegram",
     projectionKind: "telegram",
-    table: "event_telegram_projection_outboxes",
+    table: "event_telegram_projection_outboxes_canonical",
     claim: claimEventTelegramProjectionOutbox,
     acknowledge: acknowledgeEventTelegramProjectionOutbox,
     transact: transactEventTelegramProjectionOutbox,
@@ -50,8 +51,7 @@ function outbox(kind: string, extra: Record<string, unknown> = {}) {
     requestId: "request",
     ...(kind === "profile"
       ? { lastQueuedAtMs: 100, cleanupOwnerProfileIds: { owner: true } }
-      : { updatedAtMs: 100 }),
-    future: { retained: [true, "value", 1e2] },
+      : { firstQueuedAtMs: 100, updatedAtMs: 100 }),
     ...extra,
   };
 }
@@ -61,12 +61,12 @@ async function seed(kind: string, value = outbox(kind)) {
   const statement =
     kind === "profile"
       ? db.prepare(
-          `INSERT INTO event_profile_game_projection_outboxes
+          `INSERT INTO event_profile_game_projection_outboxes_canonical
            (event_id, request_id, status, last_queued_at_ms, record_json)
            VALUES ('event', 'request', 'pending', 100, ?)`,
         )
       : db.prepare(
-          `INSERT INTO event_telegram_projection_outboxes
+          `INSERT INTO event_telegram_projection_outboxes_canonical
            (event_id, request_id, status, first_queued_at_ms, updated_at_ms, record_json)
            VALUES ('event', 'request', 'pending', 100, 100, ?)`,
         );
@@ -96,21 +96,77 @@ describe("native event projection outbox mutations", () => {
     await db.batch([
       db.prepare("DELETE FROM event_write_admissions"),
       db.prepare("DELETE FROM event_leases"),
-      db.prepare("DELETE FROM event_records"),
+      db.prepare("DELETE FROM event_records_canonical"),
       db.prepare(
         "UPDATE event_runtime_control SET storage_mode = 'd1' WHERE singleton = 1",
       ),
-      db.prepare(
-        `INSERT INTO event_records
+      db
+        .prepare(
+          `INSERT INTO event_records_canonical
          (event_id, status, start_at_ms, updated_at_ms, revision, record_json)
-         VALUES ('event', 'active', 1, 1, 1, '{}')`,
-      ),
+         VALUES ('event', 'active', 1, 1, 1, ?)`,
+        )
+        .bind(
+          JSON.stringify(
+            eventDocumentFixture({ eventId: "event", status: "active" }),
+          ),
+        ),
     ]);
   });
 
   describe.each(families)(
     "$kind",
     ({ kind, projectionKind, table, claim, acknowledge, transact }) => {
+      const changedOutbox = (attempt = 1) =>
+        outbox(
+          kind,
+          kind === "profile"
+            ? {
+                cleanupOwnerProfileIds: {
+                  owner: true,
+                  [`owner-${attempt}`]: true,
+                },
+              }
+            : { firstQueuedAtMs: 100 - attempt },
+        );
+      const writeRecord = async (
+        value: Record<string, unknown>,
+        pretty = false,
+      ) => {
+        const recordJson = JSON.stringify(value, null, pretty ? 2 : undefined);
+        const timestamp =
+          value.status === "dead"
+            ? Number(value.deadAtMs)
+            : Number(
+                kind === "profile" ? value.lastQueuedAtMs : value.updatedAtMs,
+              );
+        const statement =
+          kind === "profile"
+            ? db
+                .prepare(
+                  `UPDATE ${table} SET request_id = ?, status = ?, last_queued_at_ms = ?, record_json = ?`,
+                )
+                .bind(
+                  String(value.requestId),
+                  String(value.status),
+                  timestamp,
+                  recordJson,
+                )
+            : db
+                .prepare(
+                  `UPDATE ${table} SET request_id = ?, status = ?, first_queued_at_ms = ?, updated_at_ms = ?, record_json = ?`,
+                )
+                .bind(
+                  String(value.requestId),
+                  String(value.status),
+                  value.status === "dead"
+                    ? timestamp
+                    : Number(value.firstQueuedAtMs),
+                  timestamp,
+                  recordJson,
+                );
+        await statement.run();
+      };
       const readSnapshot = async (): Promise<ProjectionOutboxSnapshot> => {
         const row = await db
           .prepare(`SELECT record_json FROM ${table} WHERE event_id = 'event'`)
@@ -174,39 +230,28 @@ describe("native event projection outbox mutations", () => {
         );
       });
 
-      it.each([undefined, null, 50])(
-        "remains compatible with legacy callbacks after a claim with firstQueuedAtMs=%s",
-        async (firstQueuedAtMs) => {
-          await seed(
-            kind,
-            outbox(
-              kind,
-              firstQueuedAtMs === undefined ? {} : { firstQueuedAtMs },
-            ),
-          );
-          const admission = await acquireEventWriteAdmission(db);
-          expect(
-            await claim(db, "event", "request", 100, 1_900_000_000_001, {
-              admission,
-            }),
-          ).toBe(true);
-          const result = await transact(
-            db,
-            "event",
-            (current) => ({ value: { ...current, roundTrip: true } }),
-            { admission },
-          );
-          expect(result.committed).toBe(true);
-          expect(result.value?.roundTrip).toBe(true);
-        },
-      );
+      it("round-trips a canonical update after claiming its existing timestamp", async () => {
+        await seed(kind);
+        const admission = await acquireEventWriteAdmission(db);
+        expect(
+          await claim(db, "event", "request", 100, 200, { admission }),
+        ).toBe(true);
+        const result = await transact(
+          db,
+          "event",
+          (current) => ({ value: { ...current, requestId: "next-request" } }),
+          { admission },
+        );
+        expect(result.committed).toBe(true);
+        expect(result.value?.requestId).toBe("next-request");
+      });
 
-      it("normalizes noncanonical JSON only when needed for legacy callback compatibility", async () => {
+      it("normalizes noncanonical JSON only when needed for canonical transaction replay", async () => {
         const original = outbox(kind);
         await seed(kind, original);
         await db
           .prepare(`UPDATE ${table} SET record_json = ?`)
-          .bind(JSON.stringify(original, null, 2).replace("100", "1e2"))
+          .bind(JSON.stringify(original, null, 2))
           .run();
         const admission = await acquireEventWriteAdmission(db);
         expect(
@@ -217,40 +262,20 @@ describe("native event projection outbox mutations", () => {
             await transact(
               db,
               "event",
-              (current) => ({ value: { ...current, roundTrip: true } }),
+              (current) => ({
+                value: { ...current, requestId: "next-request" },
+              }),
               { admission },
             )
           ).committed,
         ).toBe(true);
       });
 
-      it("does not run write guards or validate proposed times for stale and malformed rows", async () => {
-        await seed(
-          kind,
-          outbox(
-            kind,
-            kind === "profile"
-              ? { cleanupOwnerProfileIds: { owner: false } }
-              : { firstQueuedAtMs: -1 },
-          ),
-        );
+      it("does not run write guards or validate proposed times for stale rows", async () => {
+        await seed(kind);
         const admission = await acquireEventWriteAdmission(db);
         await releaseEventWriteAdmission(db, admission);
         const observed = observe();
-        expect(
-          await claim(observed.database, "event", "request", 100, NaN, {
-            admission,
-          }),
-        ).toBe(false);
-        expect(
-          await acknowledge(observed.database, "event", "request", {
-            admission,
-          }),
-        ).toBe(false);
-        await db
-          .prepare(`UPDATE ${table} SET record_json = ?`)
-          .bind(JSON.stringify(outbox(kind)))
-          .run();
         expect(
           await claim(observed.database, "event", "other", 100, NaN, {
             admission,
@@ -266,12 +291,6 @@ describe("native event projection outbox mutations", () => {
             admission,
           }),
         ).toBe(false);
-        await db.prepare(`UPDATE ${table} SET status = 'dead'`).run();
-        expect(
-          await acknowledge(observed.database, "event", "request", {
-            admission,
-          }),
-        ).toBe(false);
         expect(observed.writeBatches).toHaveLength(0);
       });
 
@@ -283,7 +302,7 @@ describe("native event projection outbox mutations", () => {
           claim(observed.database, "event", "request", 100, 200.5, {
             admission,
           }),
-        ).rejects.toThrow("invalid-event-integer");
+        ).rejects.toThrow("invalid-event-projection-outbox");
         expect(observed.writeBatches).toHaveLength(0);
       });
 
@@ -292,12 +311,7 @@ describe("native event projection outbox mutations", () => {
         const admission = await acquireEventWriteAdmission(db);
         const observed = observe({
           async beforeWriteBatch(attempt) {
-            if (attempt === 1)
-              await db
-                .prepare(
-                  `UPDATE ${table} SET record_json = json_set(record_json, '$.concurrent', 1)`,
-                )
-                .run();
+            if (attempt === 1) await writeRecord(changedOutbox());
           },
         });
         expect(
@@ -309,7 +323,11 @@ describe("native event projection outbox mutations", () => {
         const row = await db
           .prepare(`SELECT record_json FROM ${table}`)
           .first<{ record_json: string }>();
-        expect(JSON.parse(row!.record_json).concurrent).toBe(1);
+        expect(JSON.parse(row!.record_json)).toMatchObject(
+          kind === "profile"
+            ? { cleanupOwnerProfileIds: { "owner-1": true } }
+            : { firstQueuedAtMs: 99 },
+        );
       });
 
       it("does not claim a replaced request after a race", async () => {
@@ -360,12 +378,7 @@ describe("native event projection outbox mutations", () => {
         const admission = await acquireEventWriteAdmission(db);
         const observed = observe({
           async beforeWriteBatch(attempt) {
-            await db
-              .prepare(
-                `UPDATE ${table} SET record_json = json_set(record_json, '$.racing', ?)`,
-              )
-              .bind(attempt)
-              .run();
+            await writeRecord(changedOutbox(attempt));
           },
         });
         await expect(
@@ -471,7 +484,7 @@ describe("native event projection outbox mutations", () => {
           if (noncanonical) {
             await db
               .prepare(`UPDATE ${table} SET record_json = ?`)
-              .bind(JSON.stringify(outbox(kind), null, 2).replace("100", "1e2"))
+              .bind(JSON.stringify(outbox(kind), null, 2))
               .run();
           }
           const snapshot = await readSnapshot();
@@ -481,6 +494,7 @@ describe("native event projection outbox mutations", () => {
             await claimEventProjectionOutboxSnapshot(
               observed.database,
               projectionSnapshotRecordFixture(snapshot, {
+                ...snapshot.record,
                 requestId: "untrusted-copy",
               }),
               "request",
@@ -510,7 +524,9 @@ describe("native event projection outbox mutations", () => {
               await transact(
                 db,
                 "event",
-                (current) => ({ value: { ...current, roundTrip: true } }),
+                (current) => ({
+                  value: { ...current, requestId: "next-request" },
+                }),
                 { admission },
               )
             ).committed,
@@ -524,13 +540,8 @@ describe("native event projection outbox mutations", () => {
           await seed(kind);
           const snapshot = await readSnapshot();
           const replacement =
-            change === "payload"
-              ? outbox(kind, { concurrent: { retained: true } })
-              : outbox(kind);
-          await db
-            .prepare(`UPDATE ${table} SET record_json = ?`)
-            .bind(JSON.stringify(replacement, null, 2))
-            .run();
+            change === "payload" ? changedOutbox() : outbox(kind);
+          await writeRecord(replacement, true);
           const admission = await acquireEventWriteAdmission(db);
           const observed = observe();
           expect(
@@ -551,7 +562,7 @@ describe("native event projection outbox mutations", () => {
             ...replacement,
             ...(kind === "profile"
               ? { lastQueuedAtMs: 200 }
-              : { firstQueuedAtMs: 100, updatedAtMs: 200 }),
+              : { updatedAtMs: 200 }),
           });
         },
       );
@@ -564,7 +575,15 @@ describe("native event projection outbox mutations", () => {
           if (change === "deleted") {
             await db.prepare(`DELETE FROM ${table}`).run();
           } else if (change === "dead") {
-            await db.prepare(`UPDATE ${table} SET status = 'dead'`).run();
+            await writeRecord({
+              schemaVersion: 2,
+              status: "dead",
+              requestId: "request",
+              reason: "invalid-record",
+              deadAtMs: 100,
+              sourceDigest: "a".repeat(64),
+              originalRecord: null,
+            });
           } else {
             const replacement = outbox(
               kind,
@@ -574,10 +593,7 @@ describe("native event projection outbox mutations", () => {
                   ? { lastQueuedAtMs: 150 }
                   : { updatedAtMs: 150 },
             );
-            await db
-              .prepare(`UPDATE ${table} SET record_json = ?`)
-              .bind(JSON.stringify(replacement))
-              .run();
+            await writeRecord(replacement);
           }
           const admission = await acquireEventWriteAdmission(db);
           const observed = observe();
@@ -604,12 +620,7 @@ describe("native event projection outbox mutations", () => {
         const admission = await acquireEventWriteAdmission(db);
         const observed = observe({
           async beforeWriteBatch(attempt) {
-            await db
-              .prepare(
-                `UPDATE ${table} SET record_json = json_set(record_json, '$.racing', ?)`,
-              )
-              .bind(attempt)
-              .run();
+            await writeRecord(changedOutbox(attempt));
           },
         });
         await expect(
@@ -702,11 +713,7 @@ describe("native event projection outbox mutations", () => {
         const controller = new AbortController();
         const observed = observe({
           async beforeWriteBatch() {
-            await db
-              .prepare(
-                `UPDATE ${table} SET record_json = json_set(record_json, '$.concurrent', 1)`,
-              )
-              .run();
+            await writeRecord(changedOutbox());
           },
           async afterRead() {
             controller.abort(reason);

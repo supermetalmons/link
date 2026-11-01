@@ -1,3 +1,4 @@
+import { readOnlyApplicationEnv } from "./applicationReadOnly.ts";
 import {
   WorkflowEntrypoint,
   type WorkflowEvent,
@@ -5,6 +6,10 @@ import {
   type WorkflowStepConfig,
 } from "cloudflare:workers";
 import { NonRetryableError } from "cloudflare:workflows";
+import {
+  applicationWorkflowStep,
+  scopedApplicationEnv,
+} from "./applicationExecution.ts";
 import {
   parseEventPrizeWithdrawalWorkflowParams,
   type EventPrizeWithdrawalWorkflowFailure,
@@ -44,12 +49,13 @@ function workflowFailure(
 
 function isPreflightParams(
   value: unknown,
-): value is { schemaVersion: 1; kind: "preflight" } {
+): value is { schemaVersion: 2; dataEpoch: 1; kind: "preflight" } {
   const record = toRecord(value);
   return (
     !!record &&
-    Object.keys(record).length === 2 &&
-    record.schemaVersion === 1 &&
+    Object.keys(record).length === 3 &&
+    record.schemaVersion === 2 &&
+    record.dataEpoch === 1 &&
     record.kind === "preflight"
   );
 }
@@ -90,7 +96,7 @@ export async function runEventPrizeWithdrawalWorkflow(
       "validate event prize runtime",
       { timeout: "30 seconds" },
       async () => {
-        await dependencies.preflight(env);
+        await dependencies.preflight(readOnlyApplicationEnv(env));
         return { ok: true as const, status: "ready" as const };
       },
     );
@@ -138,6 +144,22 @@ export async function runEventPrizeWithdrawalWorkflow(
   });
 }
 
+export function runAdmittedEventPrizeWithdrawalWorkflow(
+  env: Env,
+  event: Readonly<WorkflowEvent<EventPrizeWithdrawalWorkflowInput>>,
+  step: WorkflowStep,
+  dependencies?: WorkflowDependencies,
+): Promise<EventPrizeWithdrawalWorkflowOutput> {
+  if (isPreflightParams(event.payload))
+    return runEventPrizeWithdrawalWorkflow(env, event, step, dependencies);
+  return runEventPrizeWithdrawalWorkflow(
+    scopedApplicationEnv(env),
+    event,
+    applicationWorkflowStep(step, env, 1),
+    dependencies,
+  );
+}
+
 export class EventPrizeWithdrawalWorkflow extends WorkflowEntrypoint<
   Env,
   EventPrizeWithdrawalWorkflowInput
@@ -146,6 +168,6 @@ export class EventPrizeWithdrawalWorkflow extends WorkflowEntrypoint<
     event: Readonly<WorkflowEvent<EventPrizeWithdrawalWorkflowInput>>,
     step: WorkflowStep,
   ): Promise<EventPrizeWithdrawalWorkflowOutput> {
-    return runEventPrizeWithdrawalWorkflow(this.env, event, step);
+    return runAdmittedEventPrizeWithdrawalWorkflow(this.env, event, step);
   }
 }

@@ -1,10 +1,13 @@
-import { MATERIAL_KEYS, normalizeMaterials } from "@mons/shared/mining";
+import {
+  MATERIAL_KEYS,
+  cloneMaterials,
+  createEmptyMaterials,
+} from "@mons/shared/mining";
 import {
   commitCanonicalPlan,
   readCanonicalWagerSettlement,
   resolveCanonicalPublicProfile,
   CanonicalProfileConflict,
-  type CanonicalProfileSnapshot,
   type CanonicalExpectation,
   type CanonicalMutation,
   type CanonicalWagerSettlement,
@@ -26,63 +29,6 @@ import {
   retryCount,
 } from "./gameplayRepositoryPolicy.ts";
 import { createD1ProfileOwnershipReader } from "./profileOwnershipD1.ts";
-
-function canonicalProfileFields(
-  snapshot: CanonicalProfileSnapshot,
-): Record<string, unknown> {
-  const profile = snapshot.profile;
-  const custom = {
-    ...(snapshot.emojiPresent ? { emoji: profile.emoji } : {}),
-    ...(profile.aura === undefined ? {} : { aura: profile.aura }),
-    ...(profile.cardBackgroundId === undefined
-      ? {}
-      : { cardBackgroundId: profile.cardBackgroundId }),
-    ...(profile.cardStickers === undefined
-      ? {}
-      : { cardStickers: profile.cardStickers }),
-    ...(profile.cardSubtitleId === undefined
-      ? {}
-      : { cardSubtitleId: profile.cardSubtitleId }),
-    ...(profile.profileCounter === undefined
-      ? {}
-      : { profileCounter: profile.profileCounter }),
-    ...(profile.profileMons === undefined
-      ? {}
-      : { profileMons: profile.profileMons }),
-    ...(profile.completedProblemIds === undefined
-      ? {}
-      : { completedProblems: profile.completedProblemIds }),
-    ...(profile.isTutorialCompleted === undefined
-      ? {}
-      : { tutorialCompleted: profile.isTutorialCompleted }),
-  };
-  return {
-    custom,
-    eth: profile.eth || "",
-    feb2026UniqueOpponentsCount: profile.feb2026UniqueOpponentsCount || 0,
-    mining: profile.mining,
-    sol: profile.sol || "",
-    username: profile.username || "",
-    ...(snapshot.sortPresence.nonce
-      ? { nonce: snapshot.sortValues.nonce }
-      : {}),
-    ...(snapshot.sortPresence.rating
-      ? { rating: snapshot.sortValues.rating }
-      : {}),
-    ...(snapshot.sortPresence.mp
-      ? { totalManaPoints: snapshot.sortValues.mp }
-      : {}),
-    ...(snapshot.winPresent ? { win: profile.win } : {}),
-    ...(!snapshot.emojiPresent && snapshot.gameplayEmoji !== ""
-      ? { emoji: snapshot.gameplayEmoji }
-      : {}),
-    ...(snapshot.mergedIntoProfileId
-      ? { mergedIntoProfileId: snapshot.mergedIntoProfileId }
-      : {}),
-  };
-}
-
-export { canonicalProfileFields };
 
 function replayWagerSettlement(
   settlement: CanonicalWagerSettlement,
@@ -152,10 +98,10 @@ export function createCanonicalGameplayRepository(
           let outcome: "applied" | "insufficient-materials" = "applied";
           if (winner.profileId !== loser.profileId) {
             const material = input.material;
-            const winnerMaterials = normalizeMaterials(
+            const winnerMaterials = cloneMaterials(
               winner.profile.mining.materials,
             );
-            const loserMaterials = normalizeMaterials(
+            const loserMaterials = cloneMaterials(
               loser.profile.mining.materials,
             );
             if (loserMaterials[material] < input.count) {
@@ -258,7 +204,9 @@ export function createCanonicalGameplayRepository(
     async getMiningMaterials(profileId) {
       try {
         const snapshot = await resolveCanonicalPublicProfile(db, profileId);
-        return normalizeMaterials(snapshot?.profile.mining.materials);
+        return snapshot
+          ? cloneMaterials(snapshot.profile.mining.materials)
+          : createEmptyMaterials();
       } catch (error) {
         throw options.createFailure("getMiningMaterials", { cause: error });
       }

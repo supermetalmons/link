@@ -1,4 +1,5 @@
 // Generated from src/telegram/desiredStateCore.ts. Run npm run generate:runtime.
+import type { EventTelegramProjectionGuard } from "./eventProjectionRecords.js";
 export type TelegramSendDesiredInput = {
   destination: string;
   instanceKey: string;
@@ -19,6 +20,9 @@ export type TelegramDesiredInput =
   | TelegramEditDesiredInput
   | TelegramDeleteDesiredInput;
 type DesiredIdentity = {
+  eventTelegramProjectionGuard?: EventTelegramProjectionGuard & {
+    messageKey: string;
+  };
   schemaVersion: 2;
   destination: "community" | "events";
   revision: string;

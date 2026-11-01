@@ -2,6 +2,7 @@
 
 const assert = require("node:assert/strict");
 const test = require("node:test");
+const { event: eventFixture } = require("./fixtures/canonicalEvents");
 const {
   eventBookmarkEpoch,
   eventSnapshotEtag,
@@ -20,7 +21,7 @@ const seed = {
     ok: true,
     eventId: "event-one",
     revision: 2,
-    event: { eventId: "event-one", status: "scheduled" },
+    event: eventFixture({ eventId: "event-one" }),
     prizeSelections: {},
   },
   etag: eventSnapshotEtag("event-one", 2),

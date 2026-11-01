@@ -1,3 +1,11 @@
+import { requireValue } from "./browserAssertions";
+import type { MaterialName } from "../../src/services/rocksMiningService";
+import type { MatchWagerState } from "../../src/connection/connectionModels";
+import type { FrozenMaterialsStatus } from "../../src/services/wagerMaterialsService";
+import type {
+  WagerRenderState,
+  WagerPileAnimation,
+} from "../../src/game/boardWagerModels";
 import React from "react";
 import { createRoot } from "react-dom/client";
 import { flushSync } from "react-dom";
@@ -25,7 +33,7 @@ import {
 import "../../src/index.css";
 let root: ReturnType<typeof createRoot>;
 let revision = 0;
-const empty = () => ({
+const empty = (): WagerRenderState => ({
   player: null,
   opponent: null,
   winner: null,
@@ -33,7 +41,7 @@ const empty = () => ({
   opponentDisappearing: null,
   winAnimationActive: false,
 });
-let renderState: any = empty();
+let renderState: WagerRenderState = empty();
 const pileKeys = [
   "player",
   "opponent",
@@ -70,14 +78,14 @@ function names(long = false, flipped = false) {
 function pile(
   side: "player" | "opponent" | "winner",
   count = 8,
-  material = "obsidian",
-  animation = "none",
+  material: MaterialName = "dust",
+  animation: WagerPileAnimation = "none",
   pending = true,
 ) {
   const model = createWagerPile();
   syncWagerPileIcons(
     model,
-    material as any,
+    material,
     count,
     undefined,
     side === "winner" ? MAX_WAGER_WIN_PILE_ITEMS : undefined,
@@ -89,8 +97,8 @@ function pile(
     side === "winner" ? layout.winner : layout.pile,
     0.777,
   );
-  model.materialUrl = materialImage(material === "gold");
-  return buildWagerRenderState(model, side, animation as any, pending);
+  model.materialUrl = materialImage(material === "metal");
+  return buildWagerRenderState(model, side, animation, pending);
 }
 e.replay = () => {
   const hasPiles = pileKeys.some((key) => renderState[key] !== null);
@@ -102,7 +110,7 @@ e.replay = () => {
       next[key] = pile(
         previous.side,
         previous.actualCount,
-        previous.materialUrl === materialImage(true) ? "gold" : "obsidian",
+        previous.materialUrl === materialImage(true) ? "metal" : "dust",
         "none",
         previous.isPending,
       );
@@ -111,7 +119,7 @@ e.replay = () => {
   if (e.render) e.renderReplays++;
   e.render?.(renderState);
 };
-const harness = {
+export const harness = {
   e,
   run,
   names,
@@ -141,7 +149,7 @@ const harness = {
     run(() => boardUi.updateWagerPlayerUids(playerUid, opponentUid));
   },
   mount({ seedNames = true } = {}) {
-    root = createRoot(document.getElementById("root")!);
+    root = createRoot(requireValue(document.getElementById("root")));
     run(() =>
       root.render(
         <React.StrictMode>
@@ -151,7 +159,7 @@ const harness = {
     );
     if (seedNames) names();
   },
-  state(state: any) {
+  state(state: MatchWagerState | null) {
     e.state = state;
     run(() => e.subscribers.forEach((callback) => callback(state)));
   },
@@ -162,22 +170,30 @@ const harness = {
   proposals(playerCount = 4, opponentCount = 8) {
     this.state({
       proposals: {
-        p: { material: "obsidian", count: playerCount },
-        o: { material: "obsidian", count: opponentCount },
+        p: { material: "dust", count: playerCount },
+        o: { material: "dust", count: opponentCount },
       },
     });
   },
-  balance(count: number, status = "ready") {
+  balance(count: number, status: FrozenMaterialsStatus = "ready") {
     e.balance = {
-      availableMaterials: { obsidian: count, gold: count },
+      availableMaterials: {
+        dust: count,
+        slime: 0,
+        gum: 0,
+        metal: count,
+        ice: 0,
+      },
       frozenMaterialsStatus: status,
+      hasConfirmedSnapshot: status === "ready",
     };
     run(() => e.materialSubscribers.forEach((callback) => callback()));
   },
-  materialBalances(obsidian: number, gold: number) {
+  materialBalances(dust: number, metal: number) {
     e.balance = {
-      availableMaterials: { obsidian, gold },
+      availableMaterials: { dust, slime: 0, gum: 0, metal, ice: 0 },
       frozenMaterialsStatus: "ready",
+      hasConfirmedSnapshot: true,
     };
     run(() => e.materialSubscribers.forEach((callback) => callback()));
   },
@@ -196,7 +212,8 @@ const harness = {
     const element = label
       ? document.createElementNS("http://www.w3.org/2000/svg", "rect")
       : null;
-    element?.setAttribute("data-fixture-overlay", label!);
+    if (element && label !== null)
+      element.setAttribute("data-fixture-overlay", label);
     run(() =>
       boardUi.setTopBoardOverlayVisible(
         false,
@@ -216,7 +233,7 @@ const harness = {
     avatar.setAttribute("y", "30");
     avatar.setAttribute("width", "40");
     avatar.setAttribute("height", "50");
-    document.getElementById("avatarLayer")!.append(avatar);
+    requireValue(document.getElementById("avatarLayer")).append(avatar);
     const { left, top, width, height } = avatar.getBoundingClientRect();
     run(() => {
       boardUi.updateAuraForAvatarElement(opponent, avatar);
@@ -225,26 +242,35 @@ const harness = {
     avatar.remove();
     return { left, top, width, height };
   },
-  emit(options: any = {}) {
+  emit(
+    options: {
+      playerCount?: number;
+      opponentCount?: number;
+      material?: MaterialName;
+      animation?: WagerPileAnimation;
+      overrides?: Partial<WagerRenderState>;
+      image?: string;
+    } = {},
+  ) {
     renderState = {
       ...empty(),
       player: pile(
         "player",
         options.playerCount ?? 4,
-        options.material ?? "obsidian",
+        options.material ?? "dust",
         options.animation ?? "none",
       ),
       opponent: pile(
         "opponent",
         options.opponentCount ?? 8,
-        options.material ?? "obsidian",
+        options.material ?? "dust",
         options.animation ?? "none",
       ),
       ...options.overrides,
     };
     if (options.image) {
-      renderState.player.materialUrl = options.image;
-      renderState.opponent.materialUrl = options.image;
+      requireValue(renderState.player).materialUrl = options.image;
+      requireValue(renderState.opponent).materialUrl = options.image;
     }
     run(() => e.render?.(renderState));
   },
@@ -259,7 +285,7 @@ const harness = {
   winner(active = false) {
     renderState = {
       ...empty(),
-      winner: pile("winner", 26, "gold", "none", false),
+      winner: pile("winner", 26, "metal", "none", false),
       winAnimationActive: active,
     };
     run(() => e.render?.(renderState));
@@ -295,5 +321,5 @@ const harness = {
     };
   },
 };
-(window as any).harness = harness;
+window.boardWagersHarness = harness;
 harness.mount();

@@ -36,22 +36,6 @@ export async function handleProfileGameProjectionMessage(
     ...("operationId" in task ? { operationId: task.operationId } : {}),
   };
   try {
-    if (
-      task.kind === "event-profile-game-projection" &&
-      dependencies.forwardEventTasks
-    ) {
-      await queueFor(env, "EVENT_PROFILE_GAME_PROJECTION_QUEUE").send(task);
-      ackQueueMessage(message, {
-        entry: {
-          event: "profile_game_projection_queue_processed",
-          ...taskContext,
-          status: "forwarded",
-        },
-        level: "info",
-        logger,
-      });
-      return;
-    }
     const status = await runProfileGameProjectionTask(
       task,
       env,
@@ -98,6 +82,17 @@ export async function handleProfileGameProjectionQueue(
 ): Promise<void> {
   const dependencies = createProfileGameProjectionBatchDependencies(env);
   for (const message of batch.messages) {
+    if (
+      parseProfileGameProjectionTask(message.body)?.kind ===
+      "event-profile-game-projection"
+    ) {
+      ackQueueMessage(message, {
+        entry: { event: "profile_game_projection_queue_misrouted_message" },
+        level: "error",
+        logger: console,
+      });
+      continue;
+    }
     await handleProfileGameProjectionMessage(message, env, dependencies);
   }
 }

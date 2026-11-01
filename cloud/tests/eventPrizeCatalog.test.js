@@ -40,13 +40,13 @@ const {
 test("reveals scheduled prizes only inside the final hour", () => {
   const nowMs = 10_000_000;
   assert.equal(EVENT_PRIZE_REVEAL_WINDOW_MS, 3_600_000);
-  for (const [remainingMs, expected] of [
+  for (const [remainingMs, expected] of /** @type {[number, boolean][]} */ ([
     [3_600_001, false],
     [3_600_000, false],
     [3_599_999, true],
     [0, true],
     [-1, true],
-  ]) {
+  ])) {
     assert.equal(
       isEventPrizeRevealOpen("scheduled", nowMs + remainingMs, nowMs),
       expected,
@@ -109,16 +109,22 @@ test("withdrawal contracts require exact Worker request and response shapes", ()
   );
 });
 
-test("profile prize responses preserve valid forward-compatible assignment fields", () => {
+test("profile prize responses retain exact historical assignment records and reject extensions", () => {
   const assignment = {
     eventId: LEGACY_CORE_PRIZES_EVENT_ID,
     profileId: "profile-1",
     place: 1,
     prizeId: "1092",
     assignedAtMs: 100,
-    futureMetadata: { edition: 2, labels: ["winner"] },
   };
   assert.equal(isEventPrizeAssignmentRecord(assignment), true);
+  assert.equal(
+    isEventPrizeAssignmentWireRecord({
+      ...assignment,
+      futureMetadata: { edition: 2 },
+    }),
+    false,
+  );
   assert.equal(
     isProfileEventPrizesResponse({
       ok: true,
@@ -162,6 +168,7 @@ test("profile prize responses preserve valid forward-compatible assignment field
 
 test("preserves the legacy Core prize catalog", () => {
   const config = getEventPrizeConfig(LEGACY_CORE_PRIZES_EVENT_ID);
+  assert.ok(config);
   assert.deepEqual(
     config.prizes.map((prize) => ({
       id: prize.id,
@@ -202,6 +209,7 @@ test("preserves the legacy Core prize catalog", () => {
 
 test("maps the compressed event to the supplied prizes in fallback order", () => {
   const config = getEventPrizeConfig(COMPRESSED_PRIZES_EVENT_ID);
+  assert.ok(config);
   assert.deepEqual(
     config.prizes.map((prize) => ({
       id: prize.id,
@@ -257,6 +265,7 @@ test("maps the compressed event to the supplied prizes in fallback order", () =>
 
 test("maps the Artifact Magazine 3 event to claimable Core prizes", () => {
   const config = getEventPrizeConfig(ARTIFACT_MAGAZINE_3_PRIZES_EVENT_ID);
+  assert.ok(config);
   assert.deepEqual(
     config.prizes.map((prize) => ({
       id: prize.id,
@@ -308,6 +317,7 @@ test("maps the Artifact Magazine 3 event to claimable Core prizes", () => {
 
 test("maps the second Artifact Magazine 3 event to claimable Core prizes", () => {
   const config = getEventPrizeConfig(ARTIFACT_MAGAZINE_3_PRIZES_EVENT_2_ID);
+  assert.ok(config);
   assert.deepEqual(
     config.prizes.map((prize) => ({
       id: prize.id,
@@ -359,6 +369,7 @@ test("maps the second Artifact Magazine 3 event to claimable Core prizes", () =>
 
 test("maps the Rare Weitsmans event to claimable Core prizes", () => {
   const config = getEventPrizeConfig(RARE_WEITSMANS_PRIZES_EVENT_ID);
+  assert.ok(config);
   assert.deepEqual(
     config.prizes.map((prize) => ({
       id: prize.id,
@@ -410,6 +421,7 @@ test("maps the Rare Weitsmans event to claimable Core prizes", () => {
 
 test("maps the Planet Peppa event to claimable Core prizes", () => {
   const config = getEventPrizeConfig(PLANET_PEPPA_PRIZES_EVENT_ID);
+  assert.ok(config);
   assert.equal(PLANET_PEPPA_PRIZES_EVENT_ID, "z3oj52Iiime");
   assert.equal(config.eventId, PLANET_PEPPA_PRIZES_EVENT_ID);
   assert.deepEqual(
@@ -755,6 +767,7 @@ for (const {
 ]) {
   test(`maps the ${collectionName} event to the supplied claimable ${standard} prizes`, () => {
     const config = getEventPrizeConfig(eventId);
+    assert.ok(config);
     assert.equal(eventId, expectedEventId);
     assert.equal(config.eventId, eventId);
     assert.equal(config.collectionName, collectionName);
@@ -797,6 +810,7 @@ for (const {
         true,
       );
     }
+    assert.ok(prizes[0]);
     for (const prizeId of [otherPrizeId, "unknown", ` ${prizes[0].id} `]) {
       assert.equal(isEventPrizeId(eventId, prizeId), false);
       assert.equal(
@@ -818,6 +832,7 @@ for (const {
 test("maps MI Note Cards to claimable Core prizes with separate Telegram images", () => {
   const eventId = MI_NOTE_CARDS_PRIZES_EVENT_ID;
   const config = getEventPrizeConfig(eventId);
+  assert.ok(config);
   assert.equal(eventId, "vMBZ6dI1dQ5");
   assert.equal(config.eventId, eventId);
   assert.equal(config.collectionName, "Mi Note Cards");

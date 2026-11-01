@@ -5,6 +5,11 @@ import { type WithdrawalDocument } from "./records.js";
 import type { WithdrawalClaimInput } from "../eventPrizeWithdrawalState.js";
 export declare function createWithdrawalRecordCommands(
   storage: WithdrawalRecordStorage,
+  {
+    now,
+  }?: {
+    now?: () => number;
+  },
 ): WithdrawalRecord;
 declare const acquireWithdrawalClaim: ({
   withdrawalRecord,

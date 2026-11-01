@@ -1,5 +1,7 @@
+import { applyCanonicalTestMigrations } from "./canonicalTestMigrations.ts";
+import { inviteDocumentFixture } from "../test/inviteDocumentFixture.ts";
 import { env } from "cloudflare:workers";
-import { applyD1Migrations, type D1Migration } from "cloudflare:test";
+import type { D1Migration } from "cloudflare:test";
 import { beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { readGameBootstrapAdmission } from "../src/gameBootstrapAdmission.ts";
 import { createGameplayRepository } from "../src/gameplayRepository.ts";
@@ -7,7 +9,11 @@ import { createGameplayRepository } from "../src/gameplayRepository.ts";
 const testEnv = env as Env & { TEST_D1_MIGRATIONS: D1Migration[] };
 const db = env.PROFILE_GAMES_DB;
 const inviteId = "batched-bootstrap";
-const source = { hostId: "host", guestId: "guest", hostColor: "white" };
+const source = inviteDocumentFixture({
+  hostId: "host",
+  guestId: "guest",
+  hostColor: "white",
+});
 const signal = () => new AbortController().signal;
 
 function observe(afterBatch?: () => void) {
@@ -47,12 +53,12 @@ function observe(afterBatch?: () => void) {
 }
 
 describe("transactional bootstrap admission", () => {
-  beforeAll(() => applyD1Migrations(db, testEnv.TEST_D1_MIGRATIONS));
+  beforeAll(() => applyCanonicalTestMigrations(db, testEnv.TEST_D1_MIGRATIONS));
   beforeEach(async () => {
     await db.batch([
-      db.prepare("DELETE FROM game_session_transition_resources"),
-      db.prepare("DELETE FROM game_session_transitions"),
-      db.prepare("DELETE FROM invite_sources"),
+      db.prepare("DELETE FROM game_session_transition_resources_canonical"),
+      db.prepare("DELETE FROM game_session_transitions_canonical"),
+      db.prepare("DELETE FROM invite_sources_canonical"),
       db.prepare("DELETE FROM automatch_runtime_control"),
       db.prepare(
         "INSERT INTO automatch_runtime_control (singleton, backend, state, epoch, freeze_generation) VALUES (1, 'd1', 'active', 1, 0)",
@@ -62,7 +68,7 @@ describe("transactional bootstrap admission", () => {
       ),
       db
         .prepare(
-          "INSERT INTO invite_sources (invite_id, source_json, revision, updated_at_ms) VALUES (?, ?, 1, 1)",
+          "INSERT INTO invite_sources_canonical (invite_id, source_json, revision, updated_at_ms) VALUES (?, ?, 1, 1)",
         )
         .bind(inviteId, JSON.stringify(source)),
     ]);
@@ -77,7 +83,7 @@ describe("transactional bootstrap admission", () => {
     expect(observed.batches).toEqual([4]);
     expect(observed.queries).toHaveLength(4);
     expect(observed.queries.join(" ")).toContain(
-      "game_session_transition_resources",
+      "game_session_transition_resources_canonical",
     );
     expect(
       await createGameplayRepository(env).readInviteMetadata(inviteId),
@@ -108,12 +114,26 @@ describe("transactional bootstrap admission", () => {
     await db.batch([
       db
         .prepare(
-          "INSERT INTO game_session_transitions (transition_id, invite_id, payload_json, status, created_at_ms, updated_at_ms) VALUES ('transition', ?, '{}', 'pending', 1, 1)",
+          "INSERT INTO game_session_transitions_canonical (transition_id, invite_id, payload_json, status, created_at_ms, updated_at_ms) VALUES ('transition', ?, ?, 'pending', 1, 1)",
         )
-        .bind(inviteId),
+        .bind(
+          inviteId,
+          JSON.stringify({
+            version: 3,
+            inviteId,
+            inviteSourceEpoch: 1,
+            inviteMutations: [],
+            transitionId: "transition",
+            operationDigest: "a".repeat(64),
+            resources: [inviteId],
+            mutations: [],
+            creations: [],
+            createdAtMs: 1,
+          }),
+        ),
       db
         .prepare(
-          "INSERT INTO game_session_transition_resources (resource_key, transition_id) VALUES (?, 'transition')",
+          "INSERT INTO game_session_transition_resources_canonical (resource_key, transition_id) VALUES (?, 'transition')",
         )
         .bind(inviteId),
     ]);
@@ -134,7 +154,7 @@ describe("transactional bootstrap admission", () => {
     ]);
     await expect(
       readGameBootstrapAdmission(db, inviteId, signal()),
-    ).rejects.toThrow("automatch-persistence-backend-retired");
+    ).rejects.toThrow("automatch-control-unavailable");
     await db
       .prepare(
         "UPDATE automatch_runtime_control SET backend = 'd1' WHERE singleton = 1",
@@ -162,7 +182,9 @@ describe("transactional bootstrap admission", () => {
       )
       .run();
     await db
-      .prepare("UPDATE invite_sources SET source_json = ? WHERE invite_id = ?")
+      .prepare(
+        "UPDATE invite_sources_canonical SET source_json = ? WHERE invite_id = ?",
+      )
       .bind(JSON.stringify({ ...source, wagers: {} }), inviteId)
       .run();
     await expect(

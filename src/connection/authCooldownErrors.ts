@@ -1,69 +1,12 @@
 import {
   AUTH_COOLDOWN_REASONS,
   AUTH_METHOD_LABELS,
-  getAuthCooldownScope,
-  normalizeAuthCooldownReason,
-  normalizeAuthMethod,
-  type AuthCooldownReason,
-  type AuthCooldownScope,
   type AuthMethodKey,
 } from "@mons/shared/auth";
-
-interface AuthCooldownErrorDetails {
-  reason: AuthCooldownReason;
-  scope: AuthCooldownScope;
-  method: AuthMethodKey | null;
-  retryAtMs: number | null;
-  cooldownMs: number | null;
-  profileId: string | null;
-}
-
-const toCleanString = (value: unknown): string => {
-  return typeof value === "string" && value.trim() !== "" ? value.trim() : "";
-};
-
-const parseFiniteNumber = (value: unknown): number | null => {
-  const numeric = typeof value === "number" ? value : Number(value);
-  return Number.isFinite(numeric) ? Math.floor(numeric) : null;
-};
-
-const isRecord = (value: unknown): value is Record<string, unknown> => {
-  return typeof value === "object" && value !== null;
-};
-
-const normalizeCooldownScope = (
-  value: unknown,
-  reason: AuthCooldownReason,
-): AuthCooldownScope => {
-  const scope = toCleanString(value);
-  if (scope === "method" || scope === "profile-method") {
-    return scope;
-  }
-  return getAuthCooldownScope(reason);
-};
-
-const parseDetailsObject = (
-  value: unknown,
-): AuthCooldownErrorDetails | null => {
-  if (!isRecord(value)) {
-    return null;
-  }
-  const reason = normalizeAuthCooldownReason(value.reason);
-  if (!reason) {
-    return null;
-  }
-  const retryAtMs = parseFiniteNumber(value.retryAtMs);
-  const cooldownMs = parseFiniteNumber(value.cooldownMs);
-  const profileId = toCleanString(value.profileId) || null;
-  return {
-    reason,
-    scope: normalizeCooldownScope(value.scope, reason),
-    method: normalizeAuthMethod(value.method),
-    retryAtMs,
-    cooldownMs,
-    profileId,
-  };
-};
+import {
+  parseApiErrorDetails,
+  type AuthCooldownDetails,
+} from "@mons/shared/api-errors";
 
 const getMethodLabel = (method: AuthMethodKey | null): string => {
   return method ? AUTH_METHOD_LABELS[method] : "this sign-in method";
@@ -83,13 +26,23 @@ const formatRetryAt = (retryAtMs: number | null): string | null => {
   });
 };
 
-const parseAuthCooldownError = (
-  error: unknown,
-): AuthCooldownErrorDetails | null => {
-  if (!isRecord(error)) {
+const parseAuthCooldownError = (error: unknown): AuthCooldownDetails | null => {
+  if (
+    !error ||
+    typeof error !== "object" ||
+    !("code" in error) ||
+    typeof error.code !== "string"
+  )
+    return null;
+  try {
+    const details = parseApiErrorDetails(
+      error.code,
+      "details" in error ? error.details : undefined,
+    );
+    return details && "reason" in details ? details : null;
+  } catch {
     return null;
   }
-  return parseDetailsObject(error.details);
 };
 
 export const formatAuthCooldownErrorMessage = (

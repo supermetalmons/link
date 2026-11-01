@@ -78,10 +78,14 @@ export async function handleEventPrizeWithdrawalRoute(
       createEventPrizeRepository(env.PROFILE_DB, env.EVENT_DB);
     const context: EventPrizeRequestDependencies =
       await createEventPrizeContext(env, {
-        now: dependencies.now,
-        profileDb: dependencies.profileDb,
+        ...(dependencies.now ? { now: dependencies.now } : {}),
+        ...(dependencies.profileDb
+          ? { profileDb: dependencies.profileDb }
+          : {}),
         repository,
-        withdrawalStore: dependencies.withdrawalStore,
+        ...(dependencies.withdrawalStore
+          ? { withdrawalStore: dependencies.withdrawalStore }
+          : {}),
       });
     const workflow =
       dependencies.workflow || env.EVENT_PRIZE_WITHDRAWAL_WORKFLOW;

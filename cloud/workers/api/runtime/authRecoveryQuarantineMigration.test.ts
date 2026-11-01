@@ -1,10 +1,16 @@
+import {
+  applyPreCleanupTestMigrations,
+  preCleanupTestMigrations,
+} from "./canonicalTestMigrations.ts";
 import { env } from "cloudflare:workers";
-import { applyD1Migrations, type D1Migration } from "cloudflare:test";
+import type { D1Migration } from "cloudflare:test";
 import { beforeAll, describe, expect, it } from "vitest";
 import { applyRetiredProfileMigrations } from "./profileTestMigrations.ts";
 
-const migrations = (env as Env & { TEST_PROFILE_D1_MIGRATIONS: D1Migration[] })
-  .TEST_PROFILE_D1_MIGRATIONS;
+const migrations = preCleanupTestMigrations(
+  (env as Env & { TEST_PROFILE_D1_MIGRATIONS: D1Migration[] })
+    .TEST_PROFILE_D1_MIGRATIONS,
+);
 const migrationIndex = migrations.findIndex(
   ({ name }) => name === "0017_auth_recovery_quarantine.sql",
 );
@@ -58,7 +64,7 @@ describe("auth recovery quarantine migration", () => {
       .all();
 
     await expect(
-      applyD1Migrations(db, [migrations[migrationIndex]]),
+      applyPreCleanupTestMigrations(db, [migrations[migrationIndex]!]),
     ).rejects.toThrow();
     expect(
       await db
@@ -70,7 +76,7 @@ describe("auth recovery quarantine migration", () => {
     expect(
       await db
         .prepare("SELECT name FROM d1_migrations WHERE name = ?")
-        .bind(migrations[migrationIndex].name)
+        .bind(migrations[migrationIndex]!.name)
         .first(),
     ).toBeNull();
 
@@ -79,7 +85,7 @@ describe("auth recovery quarantine migration", () => {
         "UPDATE profile_canonical_control SET state = 'frozen' WHERE singleton = 1",
       )
       .run();
-    await applyD1Migrations(db, [migrations[migrationIndex]]);
+    await applyPreCleanupTestMigrations(db, [migrations[migrationIndex]!]);
     expect(
       (
         await db

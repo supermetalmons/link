@@ -1,10 +1,10 @@
+import { readMatchDocument, type MatchDocument } from "./matchRecordCodec.ts";
 import {
   readInviteDocument,
   inviteMatchesParticipants,
   type InviteDocument,
 } from "@mons/shared/invite-records";
 import {
-  MATCH_TIMER_TERMINAL,
   type ClaimMatchVictoryByTimerRequest,
   type ClaimMatchVictoryByTimerResponse,
   type StartMatchTimerRequest,
@@ -15,7 +15,6 @@ import {
   MAX_MATCH_HISTORY_BYTES,
   MAX_MATCH_HISTORY_ENTRIES,
   buildOrderedMoveHistory as buildSharedOrderedMoveHistory,
-  isMatchFenWithinLimit,
   isMatchHistoryWithinLimits,
   parseGameFromMatchData,
   selectLaterGame,
@@ -32,13 +31,10 @@ import {
   type MatchAdmissionDependencies,
 } from "./matchAdmission.ts";
 
-export type MatchTimerRecord = {
-  color: "white" | "black";
-  fen: string;
-  flatMovesString: string;
-  status: string;
-  timer: string;
-};
+export type MatchTimerRecord = Pick<
+  MatchDocument,
+  "color" | "fen" | "flatMovesString" | "status" | "timer"
+>;
 
 export type MatchTimerGameState = {
   activeColor: "white" | "black";
@@ -67,40 +63,24 @@ function failedPrecondition(message: string): AuthApiFailure {
   return new AuthApiFailure(409, "failed-precondition", message);
 }
 
-function toRecord(value: unknown): Record<string, unknown> | null {
-  return value && typeof value === "object" && !Array.isArray(value)
-    ? (value as Record<string, unknown>)
-    : null;
-}
-
 export function parseMatchTimerRecord(value: unknown): MatchTimerRecord | null {
-  const record = toRecord(value);
-  const color = record?.color;
-  const fen = typeof record?.fen === "string" ? record.fen : "";
-  const flatMovesString =
-    typeof record?.flatMovesString === "string" ? record.flatMovesString : "";
-  if (
-    !record ||
-    (color !== "white" && color !== "black") ||
-    !fen.trim() ||
-    !isMatchFenWithinLimit(fen) ||
-    !isMatchHistoryWithinLimits(flatMovesString)
-  ) {
-    return null;
-  }
-  return {
-    color,
-    fen,
-    flatMovesString,
-    status: typeof record.status === "string" ? record.status : "",
-    timer: typeof record.timer === "string" ? record.timer : "",
-  };
+  const match = readMatchDocument(value);
+  return match === null
+    ? null
+    : {
+        color: match.color,
+        fen: match.fen,
+        flatMovesString: match.flatMovesString,
+        status: match.status,
+        timer: match.timer,
+      };
 }
 
 export function rawMatchTimerIsTerminal(value: unknown): boolean {
-  const record = toRecord(value);
+  const match = readMatchDocument(value);
   return (
-    record?.status === "surrendered" || record?.timer === MATCH_TIMER_TERMINAL
+    match !== null &&
+    (match.status === "surrendered" || match.timer.state === "finished")
   );
 }
 

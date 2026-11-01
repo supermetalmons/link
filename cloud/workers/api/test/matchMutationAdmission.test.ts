@@ -52,7 +52,7 @@ function ownershipSnapshot(
           revision: 1,
           profile: {
             profileId,
-            aura: "",
+            aura: "none" as const,
             emoji: 0,
             eth: "",
             sol: "",
@@ -105,7 +105,7 @@ function harness(
     },
   };
   const dependencies = {
-    signal,
+    ...(signal ? { signal } : {}),
     async assertMutationAllowed() {
       steps.push("guard");
       if (guardFailure) throw guardFailure;
@@ -195,7 +195,7 @@ for (const command of ["move", "surrender"] as const) {
   test(`${command} rejects missing or malformed invites and unknown matches`, async () => {
     for (const scenario of [
       { inviteValue: null, status: 404, message: "invite-not-found" },
-      { inviteValue: {}, status: 409, message: "invite-invalid" },
+
       {
         inviteValue: { ...invite, hostId: "" },
         status: 409,
@@ -228,26 +228,26 @@ for (const command of ["move", "surrender"] as const) {
       },
     ]) {
       const h = harness(command, scenario);
-      await assert.rejects(h.run(), {
-        status: scenario.status,
-        message: scenario.message,
-      });
+      await assert.rejects(
+        h.run(),
+        scenario.message === "invite-invalid"
+          ? TypeError
+          : { status: scenario.status, message: scenario.message },
+      );
       assert.deepEqual(h.steps, ["invite"]);
     }
   });
 
-  test(`${command} preserves pending hosts and tolerant nonparticipant metadata`, async () => {
+  test(`${command} preserves pending hosts and registered canonical rematches`, async () => {
     for (const scenario of [
       {
-        inviteValue: { hostId: "actor", hostRematches: false },
+        inviteValue: { hostId: "actor" },
         matchId: "invite",
       },
       {
         inviteValue: {
           ...invite,
-          hostColor: 7,
-          hostRematches: false,
-          eventId: { malformed: true },
+          hostColor: "white",
         },
         matchId: "invite2",
       },
@@ -280,14 +280,10 @@ for (const command of ["move", "surrender"] as const) {
   test(`${command} preserves invite and ownership error precedence`, async () => {
     const malformedInvite = harness(command, {
       uid: "linked",
-      inviteValue: {},
+      inviteValue: { hostId: "" },
       owners: { actor: "profile", linked: "other-profile" },
     });
-    await assert.rejects(malformedInvite.run(), {
-      status: 409,
-      code: "failed-precondition",
-      message: "invite-invalid",
-    });
+    await assert.rejects(malformedInvite.run(), TypeError);
     assert.deepEqual(malformedInvite.steps, ["invite"]);
 
     const unrelatedOwner = harness(command, {

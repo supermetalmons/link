@@ -13,8 +13,8 @@ const snapshot = {
   hostId: "host-login",
   guestId: "guest-login",
   hostColor: "white",
-  hostRematches: "1;2",
-  guestRematches: "1x",
+  hostRematches: { state: "open", indices: [1, 2] },
+  guestRematches: { state: "ended", indices: [1] },
   automatchStateHint: null,
   eventId: null,
   eventOwned: false,
@@ -24,7 +24,13 @@ test("metadata contract accepts pending and paired rooms with full rematch seque
   assert.equal(isInviteMetadataSnapshot(snapshot), true);
   assert.equal(isInviteMetadataSnapshot({ ...snapshot, guestId: null }), true);
   assert.equal(
-    isInviteMetadataSnapshot({ ...snapshot, hostRematches: "1;".repeat(4096) }),
+    isInviteMetadataSnapshot({
+      ...snapshot,
+      hostRematches: {
+        state: "open",
+        indices: Array.from({ length: 4096 }, (_, index) => index + 1),
+      },
+    }),
     true,
   );
   for (const update of [
@@ -36,6 +42,9 @@ test("metadata contract accepts pending and paired rooms with full rematch seque
     { guestId: "host-login" },
     { hostColor: "blue" },
     { hostRematches: null },
+    { hostRematches: "1;2" },
+    { guestRematches: "1x" },
+    { hostRematches: { state: "open", indices: [1, 1] } },
     { eventId: "" },
     { automatchStateHint: "other" },
     { eventOwned: 1 },

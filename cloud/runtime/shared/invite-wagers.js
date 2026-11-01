@@ -31,11 +31,10 @@ const isKey = (value) =>
   typeof value === "string" &&
   (0, ids_js_1.normalizeRecordKey)(value) === value;
 const isUid = (value) => isKey(value) && value.length <= 128;
-const isCount = (value) => Number.isSafeInteger(value) && value > 0;
+const isCount = (value) =>
+  Number.isSafeInteger(value) && Number.isSafeInteger(value * 2) && value > 0;
 const isTimestamp = (value) =>
-  typeof value === "number" && Number.isFinite(value) && value >= 0;
-const optional = (value, key, validate) =>
-  !Object.hasOwn(value, key) || validate(value[key]);
+  typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
 const isParticipantMap = (value, validate) =>
   isRecord(value) &&
   Object.keys(value).length <= 2 &&
@@ -43,58 +42,83 @@ const isParticipantMap = (value, validate) =>
 function isPublicWagerProposal(value) {
   return (
     isRecord(value) &&
-    hasKeys(value, ["material", "count"], ["createdAt"]) &&
+    hasKeys(value, ["material", "count", "createdAt"]) &&
     (0, mining_js_1.isMaterialName)(value.material) &&
     isCount(value.count) &&
-    optional(value, "createdAt", isTimestamp)
+    isTimestamp(value.createdAt)
   );
 }
 function isPublicWagerAgreement(value) {
   return (
     isRecord(value) &&
-    hasKeys(
-      value,
-      ["material", "count", "proposerId", "accepterId"],
-      ["total", "acceptedAt"],
-    ) &&
+    hasKeys(value, [
+      "material",
+      "count",
+      "proposerId",
+      "accepterId",
+      "total",
+      "acceptedAt",
+    ]) &&
     (0, mining_js_1.isMaterialName)(value.material) &&
     isCount(value.count) &&
     isUid(value.proposerId) &&
     isUid(value.accepterId) &&
     value.proposerId !== value.accepterId &&
-    optional(value, "total", isCount) &&
-    optional(value, "acceptedAt", isTimestamp)
+    value.total === value.count * 2 &&
+    isTimestamp(value.acceptedAt)
   );
 }
 function isPublicWagerResolution(value) {
   return (
     isRecord(value) &&
-    hasKeys(
-      value,
-      ["material", "count", "winnerId", "loserId"],
-      ["total", "resolvedAt"],
-    ) &&
+    hasKeys(value, [
+      "material",
+      "count",
+      "winnerId",
+      "loserId",
+      "total",
+      "resolvedAt",
+    ]) &&
     (0, mining_js_1.isMaterialName)(value.material) &&
     isCount(value.count) &&
     isUid(value.winnerId) &&
     isUid(value.loserId) &&
     value.winnerId !== value.loserId &&
-    optional(value, "total", isCount) &&
-    optional(value, "resolvedAt", isTimestamp)
+    value.total === value.count * 2 &&
+    isTimestamp(value.resolvedAt)
   );
 }
 function isPublicMatchWagerState(value) {
   return (
     isRecord(value) &&
-    hasKeys(value, [], ["proposals", "proposedBy", "agreed", "resolved"]) &&
-    optional(value, "proposals", (proposals) =>
-      isParticipantMap(proposals, isPublicWagerProposal),
+    hasKeys(value, [
+      "schemaVersion",
+      "state",
+      "proposals",
+      "proposedBy",
+      "agreed",
+      "resolved",
+      "blocked",
+    ]) &&
+    value.schemaVersion === 1 &&
+    ["proposed", "agreed", "settling", "settled", "blocked"].includes(
+      String(value.state),
     ) &&
-    optional(value, "proposedBy", (proposedBy) =>
-      isParticipantMap(proposedBy, (proposed) => typeof proposed === "boolean"),
-    ) &&
-    optional(value, "agreed", isPublicWagerAgreement) &&
-    optional(value, "resolved", isPublicWagerResolution)
+    isParticipantMap(value.proposals, isPublicWagerProposal) &&
+    isParticipantMap(value.proposedBy, (flag) => typeof flag === "boolean") &&
+    (value.agreed === null || isPublicWagerAgreement(value.agreed)) &&
+    (value.resolved === null || isPublicWagerResolution(value.resolved)) &&
+    (value.state === "blocked"
+      ? isRecord(value.blocked) &&
+        hasKeys(value.blocked, ["reason", "requiresManualReview"]) &&
+        value.blocked.requiresManualReview === true &&
+        [
+          "legacy-agreement-unsettled",
+          "legacy-partial",
+          "legacy-settlement-incomplete",
+          "legacy-resolution-marker",
+        ].includes(String(value.blocked.reason))
+      : value.blocked === null)
   );
 }
 function isInviteWagersSnapshot(value) {

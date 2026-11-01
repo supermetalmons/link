@@ -1,10 +1,17 @@
+import {
+  applyPreCleanupTestMigrations,
+  preCleanupTestMigrations,
+} from "./canonicalTestMigrations.ts";
+import { requiredFixture } from "../test/requiredFixture.ts";
 import { env } from "cloudflare:workers";
-import { applyD1Migrations, type D1Migration } from "cloudflare:test";
+import type { D1Migration } from "cloudflare:test";
 import { beforeAll, describe, expect, it } from "vitest";
 import { applyRetiredProfileMigrations } from "./profileTestMigrations.ts";
 
-const migrations = (env as Env & { TEST_PROFILE_D1_MIGRATIONS: D1Migration[] })
-  .TEST_PROFILE_D1_MIGRATIONS;
+const migrations = preCleanupTestMigrations(
+  (env as Env & { TEST_PROFILE_D1_MIGRATIONS: D1Migration[] })
+    .TEST_PROFILE_D1_MIGRATIONS,
+);
 const migrationIndex = migrations.findIndex(
   ({ name }) => name === "0019_projection_recovery_quarantine.sql",
 );
@@ -63,7 +70,9 @@ describe("additive projection recovery quarantine migration", () => {
         )
         .all()
     ).results;
-    await applyD1Migrations(db, [migrations[migrationIndex]]);
+    await applyPreCleanupTestMigrations(db, [
+      requiredFixture(migrations[migrationIndex]),
+    ]);
     expect(await sourceRows(db)).toEqual(before);
     expect(
       await db
@@ -137,7 +146,9 @@ describe("additive projection recovery quarantine migration", () => {
         "UPDATE profile_canonical_control SET state = 'frozen' WHERE singleton = 1",
       )
       .run();
-    await applyD1Migrations(frozenDb, [migrations[migrationIndex]]);
+    await applyPreCleanupTestMigrations(frozenDb, [
+      requiredFixture(migrations[migrationIndex]),
+    ]);
     expect(
       await frozenDb
         .prepare("SELECT state FROM profile_canonical_control")

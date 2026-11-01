@@ -1,3 +1,4 @@
+import { required } from "./fixtures/canonicalData.mjs";
 import assert from "node:assert/strict";
 import { registerHooks } from "node:module";
 import test from "node:test";
@@ -23,23 +24,30 @@ const {
 const { createGameControlsState, gameControlsReducer } =
   await import("../src/ui/controls/bottomControlsState.ts");
 
+const { PrimaryActionType } =
+  await import("../src/ui/controls/primaryAction.ts");
+
 const config = Object.freeze({ duration: 60, progress: 10, requestDate: 1000 });
 const closedReaction = { mode: "closed", selection: { name: null, count: 0 } };
+/** @type {ReturnType<typeof createBottomControlsUiState>["popups"]["reaction"]} */
 const wagerReaction = {
   mode: "wager",
   selection: { name: "dust", count: 2 },
 };
+/** @template {object} T @param {T} value @returns {Readonly<T>} */
 const freeze = (value) => {
   for (const child of Object.values(value)) {
     if (child && typeof child === "object") freeze(child);
   }
   return Object.freeze(value);
 };
+/** @param {...Parameters<typeof bottomControlsUiReducer>[1]} actions */
 const apply = (...actions) =>
   actions.reduce(
     (state, action) => bottomControlsUiReducer(freeze(state), freeze(action)),
     createBottomControlsUiState(config),
   );
+/** @returns {ReturnType<typeof createBottomControlsUiState>} */
 const allOpen = () => {
   const state = createBottomControlsUiState(config);
   return freeze({
@@ -53,6 +61,7 @@ const allOpen = () => {
     },
   });
 };
+/** @param {ReturnType<typeof createGameControlsState>["confirmation"]} confirmation @returns {Parameters<typeof bottomControlsUiReducer>[1]} */
 const confirm = (confirmation) => ({
   type: "gameControls",
   action: { type: "setConfirmation", confirmation },
@@ -91,10 +100,10 @@ test("navigation can open and close without disturbing other popups or confirmat
 });
 
 test("appearance and history coexist while opening either dismisses navigation, reactions, and confirmations", () => {
-  for (const [type, popup] of [
+  for (const [type, popup] of /** @type {const} */ ([
     ["toggleAppearance", "appearance"],
     ["toggleHistory", "history"],
-  ]) {
+  ])) {
     const initial = allOpen();
     const closed = bottomControlsUiReducer(initial, { type });
     assert.deepEqual(closed, {
@@ -116,7 +125,12 @@ test("appearance and history coexist while opening either dismisses navigation, 
 });
 
 test("reaction opening preserves appearance and navigation while dismissing history and all confirmations", () => {
-  for (const confirmation of ["none", "resign", "timer", "claim"]) {
+  for (const confirmation of /** @type {const} */ ([
+    "none",
+    "resign",
+    "timer",
+    "claim",
+  ])) {
     const state = apply(
       { type: "toggleAppearance" },
       { type: "toggleHistory" },
@@ -162,6 +176,7 @@ test("targeted dismissal changes only resolved targets and becomes a no-op when 
     const targets = Object.fromEntries(
       keys.map((key, index) => [key, Boolean(mask & (1 << index))]),
     );
+    /** @type {Parameters<typeof bottomControlsUiReducer>[1]} */
     const action = { type: "dismissPopups", ...targets };
     const initial = allOpen();
     const next = bottomControlsUiReducer(initial, action);
@@ -183,8 +198,9 @@ test("targeted dismissal changes only resolved targets and becomes a no-op when 
 });
 
 test("transient cleanup preserves navigation only when requested and resets the wager selection", () => {
-  for (const preserveNavigation of [false, true]) {
+  for (const preserveNavigation of /** @type {const} */ ([false, true])) {
     const initial = allOpen();
+    /** @type {Parameters<typeof bottomControlsUiReducer>[1]} */
     const action = { type: "closeTransient", preserveNavigation };
     const next = bottomControlsUiReducer(initial, action);
     assert.deepEqual(next, {
@@ -201,7 +217,7 @@ test("transient cleanup preserves navigation only when requested and resets the 
 });
 
 test("navigation selections preserve unrelated popups and event selections retain navigation", () => {
-  for (const kind of ["event", "game", "problem"]) {
+  for (const kind of /** @type {const} */ (["event", "game", "problem"])) {
     const initial = allOpen();
     assert.deepEqual(
       bottomControlsUiReducer(initial, { type: "selectNavigationItem", kind }),
@@ -225,12 +241,12 @@ test("wager selection increments to available balance and changing materials sta
     { type: "selectWagerMaterial", name: "dust", total: 2 },
   );
   assert.deepEqual(state.popups.reaction, wagerReaction);
-  for (const action of [
+  for (const action of /** @type {const} */ ([
     { type: "enterWager" },
     { type: "selectWagerMaterial", name: "dust", total: 2 },
     { type: "selectWagerMaterial", name: "slime", total: 0 },
     { type: "selectWagerMaterial", name: "slime", total: -1 },
-  ]) {
+  ])) {
     assert.equal(bottomControlsUiReducer(freeze(state), action), state);
   }
   state = bottomControlsUiReducer(freeze(state), {
@@ -246,19 +262,19 @@ test("wager selection increments to available balance and changing materials sta
 
 test("wager actions require an open picker and closing through each path clears selection before reopening", () => {
   const initial = freeze(createBottomControlsUiState(config));
-  for (const action of [
+  for (const action of /** @type {const} */ ([
     { type: "enterWager" },
     { type: "selectWagerMaterial", name: "dust", total: 3 },
-  ]) {
+  ])) {
     assert.equal(bottomControlsUiReducer(initial, action), initial);
   }
-  for (const close of [
+  for (const close of /** @type {const} */ ([
     { type: "toggleReaction", disabled: false },
     { type: "toggleHistory" },
     { type: "toggleAppearance" },
     { type: "dismissPopups", reaction: true },
     { type: "closeTransient", preserveNavigation: true },
-  ]) {
+  ])) {
     const state = apply(
       { type: "toggleReaction", disabled: false },
       { type: "enterWager" },
@@ -278,13 +294,14 @@ test("wager actions require an open picker and closing through each path clears 
 });
 
 test("game actions delegate timer and confirmation behavior without changing popup state", () => {
+  /** @type {Parameters<typeof gameControlsReducer>[1][]} */
   const actions = [
     { type: "setUndoVisible", visible: true },
     { type: "setUndoEnabled", enabled: true },
     { type: "setAutomoveVisible", visible: true },
     { type: "setAutomoveEnabled", enabled: false },
     { type: "showResign" },
-    { type: "setPrimaryAction", action: "rematch" },
+    { type: "setPrimaryAction", action: PrimaryActionType.Rematch },
     { type: "showTimerProgress", config },
     { type: "enableTimer" },
     { type: "disableTimer" },
@@ -294,7 +311,12 @@ test("game actions delegate timer and confirmation behavior without changing pop
     { type: "hideGameControls" },
     { type: "setConfirmation", confirmation: "timer" },
   ];
-  for (const confirmation of ["none", "resign", "timer", "claim"]) {
+  for (const confirmation of /** @type {const} */ ([
+    "none",
+    "resign",
+    "timer",
+    "claim",
+  ])) {
     let state = bottomControlsUiReducer(allOpen(), confirm(confirmation));
     for (const action of actions) {
       const expected = gameControlsReducer(freeze(state.gameControls), action);
@@ -311,7 +333,7 @@ test("game actions delegate timer and confirmation behavior without changing pop
 });
 
 test("confirmation completion retains synchronous controller callback ordering", () => {
-  for (const [actions, expectedMode, enabled] of [
+  for (const [actions, expectedMode, enabled] of /** @type {const} */ ([
     [
       [
         { type: "showTimerProgress", config },
@@ -338,9 +360,12 @@ test("confirmation completion retains synchronous controller callback ordering",
       "progressing",
       "claimEnabled",
     ],
-  ]) {
+  ])) {
     const state = apply(
-      ...actions.map((action) => ({ type: "gameControls", action })),
+      ...required(actions).map((action) => ({
+        type: /** @type {const} */ ("gameControls"),
+        action,
+      })),
     );
     assert.equal(state.gameControls.timer.mode, expectedMode);
     assert.equal(state.gameControls.timer[enabled], false);
@@ -355,14 +380,14 @@ test("bottom popup visibility includes confirmations and excludes navigation", (
     hasBottomControlsPopups(apply({ type: "toggleNavigation" })),
     false,
   );
-  for (const action of [
+  for (const action of /** @type {const} */ ([
     { type: "toggleAppearance" },
     { type: "toggleHistory" },
     { type: "toggleReaction", disabled: false },
     confirm("resign"),
     confirm("timer"),
     confirm("claim"),
-  ]) {
+  ])) {
     assert.equal(hasBottomControlsPopups(apply(action)), true);
   }
   assert.equal(

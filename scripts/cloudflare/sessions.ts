@@ -1,5 +1,9 @@
 import { randomBytes, randomUUID } from "node:crypto";
 import {
+  APPLICATION_DATA_HEADER,
+  APPLICATION_DATA_EPOCH,
+} from "@mons/shared/data-contract";
+import {
   isSessionTokenResponse,
   type SessionCreateRequest,
   type SessionTokenResponse,
@@ -40,6 +44,7 @@ async function sessionRequest(
     response = await fetcher(`${baseUrl}/auth/session/${path}`, {
       method: "POST",
       headers: {
+        [APPLICATION_DATA_HEADER]: String(APPLICATION_DATA_EPOCH),
         Origin: "https://mons.link",
         Accept: "application/json",
         ...(token ? { Authorization: `Bearer ${token}` } : {}),

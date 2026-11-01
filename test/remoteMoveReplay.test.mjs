@@ -1,3 +1,4 @@
+import { canonicalMatch, required } from "./fixtures/canonicalData.mjs";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { registerHooks } from "node:module";
@@ -81,6 +82,14 @@ const { outputText } = ts.transpileModule(
   { compilerOptions: { target: ts.ScriptTarget.ES2022 } },
 );
 
+/**
+ * @typedef {import("@mons/shared/game-sessions").GameSessionMatch} Match
+ * @typedef {Extract<import("mons-rules").InputResolution, {kind: "complete"}>} CompleteOutput
+ * @typedef {{gameModel: Game; whiteMovesCount: number; blackMovesCount: number}} TrustedGame
+ * @typedef {{receive(match: Match, id?: string): void; receiveBatch(matches: Match[], id?: string, isActive?: () => boolean): void; game(): Game; counts(): {white: number; black: number}; initialized(): boolean; install(game: Game): void}} ReplayApi
+ * @typedef {ReplayApi & {invalidate(matchId?: string): void; installFresh(): void}} ReplayControl
+ * @param {{historical?: boolean; connected?: boolean; onOutput?: (output: CompleteOutput, api: ReplayControl) => void; trustedGame?: TrustedGame}} [options]
+ */
 function harness({
   historical = false,
   connected = true,
@@ -90,14 +99,19 @@ function harness({
   let activeMatchId = "match";
   let sessionVersion = 0;
   let popupReloads = 0;
+  /** @type {Array<string>} */
   const played = [];
+  /** @type {string[]} */
   const rendered = [];
+  /** @type {Array<{color: Match["color"]; fen: string}>} */
   const surrendered = [];
+  /** @type {Array<{match: Match; id: string}>} */
   const timers = [];
+  /** @type {Array<{canPlay: boolean; fen: string}>} */
   const contentReady = [];
-  const spy = (game) => {
-    const play = game.playFen.bind(game);
-    game.playFen = (input) => {
+  const spy = (/** @type {Game} */ game) => {
+    const play = required(game).playFen.bind(game);
+    required(game).playFen = (input) => {
       played.push(input);
       return play(input);
     };
@@ -105,7 +119,8 @@ function harness({
   };
   const noop = () => {};
   const dependencies = {
-    batchGameControlsUpdates: (callback) => callback(),
+    batchGameControlsUpdates: (/** @type {() => void} */ callback) =>
+      callback(),
     initialGame: spy(new Game()),
     initiallyConnected: connected,
     createRemoteMoveSyncController,
@@ -126,10 +141,15 @@ function harness({
       updateEmojiAndAuraIfNeeded: noop,
       stopMonsBoardAsDisplayAnimations: noop,
     },
-    applyOutput: (_inputs, _fen, output, remote) => {
+    applyOutput: (
+      /** @type {readonly string[]} */ _inputs,
+      /** @type {string} */ _fen,
+      /** @type {CompleteOutput} */ output,
+      /** @type {boolean} */ remote,
+    ) => {
       assert.equal(remote, true);
       rendered.push(output.inputFen);
-      onOutput?.(output, api);
+      onOutput?.(output, control);
     },
     AssistedInputKind: { None: 0 },
     ensureBoardViewInvariants: noop,
@@ -138,11 +158,18 @@ function harness({
     syncWagerOutcome: noop,
     triggerMoveHistoryPopupReload: () => popupReloads++,
     matchTimers: {
-      update: (_onConnect, match, id) => timers.push({ match, id }),
+      update: (
+        /** @type {boolean} */ _onConnect,
+        /** @type {Match} */ match,
+        /** @type {string} */ id,
+      ) => timers.push({ match, id }),
     },
     setCurrentVariant: noop,
-    onSurrender: (color, fen) => surrendered.push({ color, fen }),
-    prepareInitialGameHydration: (match) =>
+    onSurrender: (
+      /** @type {Match["color"]} */ color,
+      /** @type {string} */ fen,
+    ) => surrendered.push({ color, fen }),
+    prepareInitialGameHydration: (/** @type {{ fen: string; }} */ match) =>
       trustedGame
         ? {
             kind: "trusted",
@@ -153,9 +180,9 @@ function harness({
           }
         : {
             kind: "provisional",
-            gameModel: spy(Game.fromFen(match.fen)),
+            gameModel: spy(required(Game.fromFen(match.fen))),
           },
-    markMainGameContentReady: (canPlay) =>
+    markMainGameContentReady: (/** @type {boolean} */ canPlay) =>
       contentReady.push({ canPlay, fen: api.game().toFen() }),
     resetOnlineReconnectRequestState: noop,
     showWaitingStateText: noop,
@@ -175,9 +202,10 @@ function harness({
     playSounds: noop,
     Sound: { DidConnect: "connected" },
   };
-  const api = new Function(
-    ...Object.keys(dependencies),
-    `${outputText}
+  const api = /** @type {ReplayApi} */ (
+    new Function(
+      ...Object.keys(dependencies),
+      `${outputText}
     return {
       receive: (match, id = "match") => didReceiveMatchUpdate(match, match.color, id),
       receiveBatch: (matches, id = "match", isActive = () => true) => didReceiveMatchUpdates(new Map(matches.map(match => [match.color, match])), id, isActive),
@@ -187,8 +215,9 @@ function harness({
       install: (nextGame) => { installCurrentGameModel(nextGame); remoteMoveSync.setProcessedCounts(0, 0); isGameOver = false; },
     };
   `,
-  )(...Object.values(dependencies));
-  return Object.assign(api, {
+    )(...Object.values(dependencies))
+  );
+  const control = Object.assign(api, {
     played,
     rendered,
     surrendered,
@@ -201,9 +230,14 @@ function harness({
     },
     installFresh: () => api.install(spy(new Game())),
   });
+  return control;
 }
 
+/**
+ * @param {Game} game
+ */
 function nextMove(game) {
+  /** @type {import("mons-rules").Input[]} */
   const inputs = [];
   for (let step = 0; step < 8; step++) {
     const preview = game.preview(inputs);
@@ -212,6 +246,7 @@ function nextMove(game) {
       assert.equal(output.kind, "complete");
       return output;
     }
+    /** @type {import("mons-rules").Input | undefined} */
     const input =
       preview.kind === "awaiting-start" && preview.positions[0]
         ? { kind: "position", position: preview.positions[0] }
@@ -224,24 +259,28 @@ function nextMove(game) {
   assert.fail("no complete legal move");
 }
 
-function record(game, color, moves, status = "") {
-  return {
+/** @param {Game} game @param {Match["color"]} color @param {string[]} moves @param {Match["status"]} [status] @returns {Match} */
+function record(game, color, moves, status = "active") {
+  return canonicalMatch({
     version: 2,
     color,
     emojiId: 1,
-    aura: "",
+    aura: "none",
     gameVariant: game.variant,
     fen: game.toFen(),
     flatMovesString: moves.join("-"),
     status,
-    timer: "",
-  };
+    timer: { state: "idle" },
+  });
 }
 
 function threeTurns() {
   const game = new Game();
+  /** @type {Record<Match["color"], string[]>} */
   const moves = { white: [], black: [] };
+  /** @type {Partial<Record<Match["color"], Match>>} */
   const snapshots = {};
+  /** @type {string[]} */
   const ordered = [];
   while (game.turnNumber < 4) {
     const color = game.activeColor;
@@ -251,13 +290,22 @@ function threeTurns() {
     snapshots[color] = record(game, color, moves[color]);
     assert.ok(ordered.length < 40);
   }
-  return { game, moves, snapshots, ordered };
+  return {
+    game,
+    moves,
+    snapshots: {
+      white: required(snapshots.white),
+      black: required(snapshots.black),
+    },
+    ordered,
+  };
 }
 
 test("combined snapshots replay the other actor's last move before surrender", () => {
-  for (const surrenderedColor of ["white", "black"]) {
+  for (const surrenderedColor of /** @type {const} */ (["white", "black"])) {
     for (const historical of [false, true]) {
       const server = new Game();
+      /** @type {Record<Match["color"], string[]>} */
       const moves = { white: [], black: [] };
       while (server.activeColor === surrenderedColor) {
         moves[surrenderedColor].push(nextMove(server).inputFen);
@@ -269,6 +317,7 @@ test("combined snapshots replay the other actor's last move before surrender", (
       const movingColor = server.activeColor;
       moves[movingColor].push(nextMove(server).inputFen);
       const moving = record(server, movingColor, moves[movingColor]);
+      /** @type {Match} */
       const surrendered = {
         ...before[surrenderedColor],
         status: "surrendered",
@@ -287,7 +336,12 @@ test("combined snapshots replay the other actor's last move before surrender", (
           black: moves.black.length,
         });
         assert.ok(h.surrendered.length > 0);
-        assert.ok(h.surrendered.every((value) => value.fen === server.toFen()));
+        assert.ok(
+          h.surrendered.every(
+            (/** @type {{ fen: string; }} */ value) =>
+              value.fen === server.toFen(),
+          ),
+        );
       }
     }
   }
@@ -316,10 +370,10 @@ test("cumulative snapshots drain both colors across three turns in either arriva
     { white: fixture.moves.white.length, black: fixture.moves.black.length },
     { white: 12, black: 6 },
   );
-  for (const colors of [
+  for (const colors of /** @type {const} */ ([
     ["white", "black"],
     ["black", "white"],
-  ]) {
+  ])) {
     const h = harness();
     h.receive(fixture.snapshots[colors[0]]);
     assert.notEqual(h.game().toFen(), fixture.game.toFen());

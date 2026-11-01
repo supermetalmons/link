@@ -4,7 +4,9 @@ import { resetEnsCache, resolveENS } from "../src/utils/ensResolver.ts";
 
 const originalFetch = globalThis.fetch;
 const address = "0x0000000000000000000000000000000000000001";
+/** @type {Parameters<typeof fetch>[0][]} */
 const requests = [];
+/** @type {() => Response | Promise<Response>} */
 let fetchResponse;
 
 test.beforeEach(() => {
@@ -63,22 +65,22 @@ test("ENS rejects malformed name values as cached misses", async () => {
 });
 
 test("ENS boundary compatibility: unsuccessful HTTP responses do not decode their body", async () => {
-  fetchResponse = () => ({
-    ok: false,
-    json() {
+  fetchResponse = () => {
+    const response = new Response(null, { status: 503 });
+    response.json = async () => {
       throw new Error("unexpected-body-read");
-    },
-  });
+    };
+    return response;
+  };
   assert.equal(await resolveENS(address), null);
   assert.equal(await resolveENS(address), null);
   assert.equal(requests.length, 1);
 });
 
 test("ENS boundary compatibility: resetting during a lookup prevents stale cache publication", async () => {
-  let finishOldResponse;
-  const oldResponse = new Promise((resolve) => {
-    finishOldResponse = resolve;
-  });
+  /** @type {PromiseWithResolvers<Response>} */
+  const { promise: oldResponse, resolve: finishOldResponse } =
+    Promise.withResolvers();
   fetchResponse = () => oldResponse;
   const oldLookup = resolveENS(address);
   resetEnsCache();

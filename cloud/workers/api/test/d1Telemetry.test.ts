@@ -122,8 +122,8 @@ test("collects D1 metadata without altering statements, sessions, or results", a
     fixture.calls.map(({ method }) => method),
     ["all", "withSession", "run", "batch"],
   );
-  assert.deepEqual(fixture.calls[1].args, ["private-bookmark"]);
-  assert.deepEqual(summaries[0].d1, {
+  assert.deepEqual(fixture.calls[1]!.args, ["private-bookmark"]);
+  assert.deepEqual(summaries[0]!.d1, {
     calls: 3,
     failedCalls: 0,
     elapsedMs: 3,
@@ -133,9 +133,9 @@ test("collects D1 metadata without altering statements, sessions, or results", a
     rowsWritten: 4,
     sqlDurationMs: 8,
   });
-  assert.deepEqual(summaries[0].databases.PROFILE_DB, summaries[0].d1);
-  assert.equal(summaries[0].phases.commit.d1.calls, 2);
-  assert.equal(summaries[0].phases.other.d1.calls, 1);
+  assert.deepEqual(summaries[0]!.databases.PROFILE_DB, summaries[0]!.d1);
+  assert.equal(summaries[0]!.phases.commit!.d1.calls, 2);
+  assert.equal(summaries[0]!.phases.other!.d1.calls, 1);
   const encoded = JSON.stringify(summaries);
   for (const secret of [
     query,
@@ -236,9 +236,9 @@ test("single-row reads retain metadata, bindings, sessions, and phase attributio
   assert.equal(summary.d1.sqlDurationMs, 4);
   assert.deepEqual(summary.databases.PROFILE_DB, summary.d1);
   for (const phase of ["other", "lookup", "profileRead"]) {
-    assert.equal(summary.phases[phase].d1.calls, 1);
-    assert.equal(summary.phases[phase].d1.metadataResults, 1);
-    assert.equal(summary.phases[phase].d1.callsWithoutMetadata, 0);
+    assert.equal(summary.phases[phase]!.d1.calls, 1);
+    assert.equal(summary.phases[phase]!.d1.metadataResults, 1);
+    assert.equal(summary.phases[phase]!.d1.callsWithoutMetadata, 0);
   }
   assert.deepEqual(fixture.calls, [
     { method: "all", args: [] },
@@ -512,13 +512,13 @@ test("nested task failures are attributed once even when task and phase names ma
   assert.ok(summary);
   assert.equal(summary.d1.calls, 2);
   assert.equal(summary.d1.failedCalls, 2);
-  assert.equal(summary.phases.gameSessionTransitions.d1.calls, 1);
-  assert.equal(summary.phases.gameSessionTransitions.d1.failedCalls, 1);
-  assert.equal(summary.phases.finalize.d1.calls, 1);
-  assert.equal(summary.phases.eventTransitions.d1.calls, 1);
-  assert.equal(summary.phases.eventTransitions.d1.failedCalls, 1);
-  assert.equal(summary.phases.eventTransitions.d1.callsWithoutMetadata, 1);
-  assert.equal(summary.phases.eventTransitions.d1.rowsRead, null);
+  assert.equal(summary.phases.gameSessionTransitions!.d1.calls, 1);
+  assert.equal(summary.phases.gameSessionTransitions!.d1.failedCalls, 1);
+  assert.equal(summary.phases.finalize!.d1.calls, 1);
+  assert.equal(summary.phases.eventTransitions!.d1.calls, 1);
+  assert.equal(summary.phases.eventTransitions!.d1.failedCalls, 1);
+  assert.equal(summary.phases.eventTransitions!.d1.callsWithoutMetadata, 1);
+  assert.equal(summary.phases.eventTransitions!.d1.rowsRead, null);
 });
 
 test("freezes clocks and summaries when the main work finishes", async () => {
@@ -592,9 +592,9 @@ test("samples once, logs only fixed labels and metrics, and leaves headers untou
   );
   assert.equal(samples, 1);
   assert.equal(logs.length, 1);
-  assert.equal(logs[0].event, "d1_timing");
-  assert.equal(logs[0].operation, "ratings.update");
-  assert.equal(logs[0].status, 200);
+  assert.equal(logs[0]!.event, "d1_timing");
+  assert.equal(logs[0]!.operation, "ratings.update");
+  assert.equal(logs[0]!.status, 200);
   assert.deepEqual([...response.headers], headers);
   const encoded = JSON.stringify(logs);
   for (const secret of [
@@ -638,7 +638,7 @@ test("unsampled work uses original bindings and logs only throws or HTTP 5xx", a
     (error) => error === failure,
   );
   assert.equal(logs.length, 2);
-  assert.equal(logs[0].status, 503);
+  assert.equal(logs[0]!.status, 503);
   assert.ok(
     logs.every((record) => record.d1 === null && record.outcome === "failed"),
   );

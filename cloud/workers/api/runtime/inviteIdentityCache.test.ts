@@ -1,14 +1,23 @@
-import { env } from "cloudflare:workers";
-import { evictDurableObject, runInDurableObject } from "cloudflare:test";
+import {
+  inviteDocumentFixture,
+  rematchSeriesFixture,
+} from "../test/inviteDocumentFixture.ts";
+import {
+  canonicalMatchEnvironment,
+  runInCanonicalMatchRoom,
+  evictCanonicalMatchRoom,
+} from "./canonicalMatchTestFixture.ts";
+import { env as rawEnv } from "cloudflare:workers";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { InviteChannelsRoom } from "../src/inviteChannelsRoom.ts";
 import { matchPresentationSeedDigest } from "../src/matchPresentationRegistry.ts";
 
-const invite = {
+const env = canonicalMatchEnvironment(rawEnv);
+const invite = inviteDocumentFixture({
   hostId: "host-login",
   hostColor: "white",
   guestId: "guest-login",
-};
+});
 
 function channels(instance: unknown): InviteChannelsRoom {
   return (instance as { inviteChannels: InviteChannelsRoom }).inviteChannels;
@@ -27,7 +36,7 @@ afterEach(() => vi.restoreAllMocks());
 describe("durable invite identity cache", () => {
   it("reuses a validated pin without SQL and still validates every target", async () => {
     const { room, inviteId } = fixture();
-    await runInDurableObject(room, (instance, state) => {
+    await runInCanonicalMatchRoom(room, (instance, state) => {
       const target = channels(instance);
       target.pinInvite(inviteId);
       const exec = vi.spyOn(state.storage.sql, "exec");
@@ -51,15 +60,15 @@ describe("durable invite identity cache", () => {
   it("rejects a different identity in unnamed objects before and after eviction", async () => {
     const { room, inviteId } = fixture(false);
     const otherId = `${inviteId}-other`;
-    await runInDurableObject(room, (instance) => {
+    await runInCanonicalMatchRoom(room, (instance) => {
       const target = channels(instance);
       target.pinInvite(inviteId);
       expect(() => target.pinInvite(otherId)).toThrow(
         "metadata-invite-conflict",
       );
     });
-    await evictDurableObject(room);
-    await runInDurableObject(room, (instance, state) => {
+    await evictCanonicalMatchRoom(room);
+    await runInCanonicalMatchRoom(room, (instance, state) => {
       const target = channels(instance);
       expect(() => target.pinInvite(otherId)).toThrow(
         "metadata-invite-conflict",
@@ -67,7 +76,9 @@ describe("durable invite identity cache", () => {
       target.pinInvite(inviteId);
       expect(
         state.storage.sql
-          .exec("SELECT invite_id FROM invite_metadata WHERE singleton = 1")
+          .exec(
+            "SELECT invite_id FROM invite_metadata_canonical WHERE singleton = 1",
+          )
           .one(),
       ).toEqual({ invite_id: inviteId });
       const exec = vi.spyOn(state.storage.sql, "exec");
@@ -82,10 +93,10 @@ describe("durable invite identity cache", () => {
 
   it("retries initialization if the wagers row could not be created", async () => {
     const { room, inviteId } = fixture();
-    await runInDurableObject(room, (instance, state) => {
+    await runInCanonicalMatchRoom(room, (instance, state) => {
       const target = channels(instance);
       state.storage.sql.exec(
-        "CREATE TRIGGER fail_invite_wagers BEFORE INSERT ON invite_wagers BEGIN SELECT RAISE(ABORT, 'test-initialization-failed'); END",
+        "CREATE TRIGGER fail_invite_wagers BEFORE INSERT ON invite_wagers_canonical BEGIN SELECT RAISE(ABORT, 'test-initialization-failed'); END",
       );
       expect(() => target.pinInvite(inviteId)).toThrow(
         "test-initialization-failed",
@@ -94,7 +105,9 @@ describe("durable invite identity cache", () => {
       target.pinInvite(inviteId);
       expect(
         state.storage.sql
-          .exec("SELECT invite_id FROM invite_wagers WHERE singleton = 1")
+          .exec(
+            "SELECT invite_id FROM invite_wagers_canonical WHERE singleton = 1",
+          )
           .one(),
       ).toEqual({ invite_id: inviteId });
     });
@@ -102,8 +115,11 @@ describe("durable invite identity cache", () => {
 
   it("keeps cached metadata reads free of initialization SQL while reading current revisions on refresh", async () => {
     const { room, inviteId } = fixture();
-    await runInDurableObject(room, async (instance, state) => {
-      let value = { ...invite, hostRematches: "" };
+    await runInCanonicalMatchRoom(room, async (instance, state) => {
+      let value = inviteDocumentFixture({
+        ...invite,
+        hostRematches: { state: "open", indices: [] },
+      });
       const mutable = instance as unknown as {
         inviteReader: () => Promise<unknown>;
       };
@@ -111,7 +127,10 @@ describe("durable invite identity cache", () => {
       const target = channels(instance);
       expect(await target.readMetadata(inviteId)).toMatchObject({
         status: "ok",
-        snapshot: { revision: 1, hostRematches: "" },
+        snapshot: {
+          revision: 1,
+          hostRematches: { state: "open", indices: [] },
+        },
       });
       const exec = vi.spyOn(state.storage.sql, "exec");
       try {
@@ -128,10 +147,16 @@ describe("durable invite identity cache", () => {
         ["1", 2],
         ["1;2", 3],
       ] as const) {
-        value = { ...invite, hostRematches };
+        value = inviteDocumentFixture({
+          ...invite,
+          hostRematches: rematchSeriesFixture(hostRematches),
+        });
         expect(await target.readMetadata(inviteId)).toMatchObject({
           status: "ok",
-          snapshot: { revision, hostRematches },
+          snapshot: {
+            revision,
+            hostRematches: rematchSeriesFixture(hostRematches),
+          },
         });
       }
     });
@@ -144,7 +169,7 @@ describe("durable invite identity cache", () => {
       matchId: inviteId,
       actorUid: "host-login",
       emojiId: 1,
-      aura: "",
+      aura: "none" as const,
       provenance: "creation" as const,
       sourceId: `creation:${inviteId}`,
     };
@@ -155,15 +180,19 @@ describe("durable invite identity cache", () => {
         seedDigest: await matchPresentationSeedDigest(seed),
       })),
     );
-    await runInDurableObject(room, async (instance, state) => {
+    await runInCanonicalMatchRoom(room, async (instance, state) => {
       await expect(
         instance.registerPresentationSeeds(inviteId, seeds),
       ).rejects.toThrow("match-presentation-seed-conflict");
       expect(
-        state.storage.sql.exec("SELECT * FROM invite_metadata").toArray(),
+        state.storage.sql
+          .exec("SELECT * FROM invite_metadata_canonical")
+          .toArray(),
       ).toEqual([]);
       expect(
-        state.storage.sql.exec("SELECT * FROM invite_wagers").toArray(),
+        state.storage.sql
+          .exec("SELECT * FROM invite_wagers_canonical")
+          .toArray(),
       ).toEqual([]);
       const mutable = instance as unknown as {
         inviteReader: () => Promise<unknown>;
@@ -174,7 +203,7 @@ describe("durable invite identity cache", () => {
         snapshot: { revision: 1 },
       });
       expect(
-        await instance.registerPresentationSeeds(inviteId, [seeds[0]]),
+        await instance.registerPresentationSeeds(inviteId, [seeds[0]!]),
       ).toHaveLength(1);
     });
   });

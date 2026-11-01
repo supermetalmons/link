@@ -33,7 +33,7 @@ export function transactProfileEventPrizeWithAdmission(
     (admission) =>
       transactProfileEventPrize(db, profileId, eventId, updater, {
         admission,
-        signal,
+        ...(signal ? { signal } : {}),
       }),
   );
 }

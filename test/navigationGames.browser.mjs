@@ -1,3 +1,4 @@
+import { browserServerOrigin } from "./browserViteServer.mjs";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { createRequire } from "node:module";
@@ -6,6 +7,7 @@ import test from "node:test";
 import { createServer } from "vite";
 
 const require = createRequire(import.meta.url);
+/** @type {typeof import("playwright")} */
 const { chromium } = require(process.env.MONS_PLAYWRIGHT_PATH || "playwright");
 const repository = fileURLToPath(new URL("../", import.meta.url));
 const sharedManifest = JSON.parse(
@@ -77,7 +79,8 @@ let pickerProps;
 function drawPicker() {
   flushSync(() => root.render(React.createElement(React.StrictMode, null, React.createElement(NavigationPicker, pickerProps))));
 }
-window.harness = {
+window.navigationHarness = {
+  required(value) { if (value === null || value === undefined) throw new Error("picker-fixture-value-missing"); return value; },
   render, game, event, cursor, commits, subscriptions, pages, interactions,
   renderPicker(props = {}) { pickerProps = {showsHomeNavigation:false, ...pickerCallbacks, ...props}; drawPicker(); },
   updatePicker(props) { pickerProps = {...pickerProps, ...props}; drawPicker(); },
@@ -95,6 +98,7 @@ window.harness = {
 };
 `;
 
+/** @param {(page: import("playwright").Page) => Promise<void>} run */
 async function fixture(run) {
   const server = await createServer({
     root: repository,
@@ -145,10 +149,11 @@ async function fixture(run) {
       },
     ],
   });
+  /** @type {import("playwright").Browser | undefined} */
   let browser;
   try {
     await server.listen();
-    const origin = `http://127.0.0.1:${server.httpServer.address().port}`;
+    const origin = browserServerOrigin(server);
     browser = await chromium.launch({
       headless: true,
       ...(process.env.MONS_BROWSER_EXECUTABLE
@@ -165,10 +170,11 @@ async function fixture(run) {
         : route.abort(),
     );
     const page = await context.newPage();
+    /** @type {string[]} */
     const errors = [];
     page.on("pageerror", (error) => errors.push(error.message));
     await page.goto(`${origin}/__navigation`);
-    await page.waitForFunction(() => !!window.harness);
+    await page.waitForFunction(() => !!window.navigationHarness);
     await run(page);
     assert.deepEqual(errors, []);
   } finally {
@@ -183,7 +189,7 @@ test(
   async () => {
     await fixture(async (page) => {
       const result = await page.evaluate(() => {
-        const h = window.harness;
+        const h = window.navigationHarness;
         h.seed("a", [h.event("a"), h.game("a-game")]);
         h.seed("b", [h.event("b"), h.game("b-game")]);
         h.render("a", true);
@@ -199,7 +205,7 @@ test(
         h.render("b", true);
         const profileB = h.snapshot();
         const guardAfterSwitch = guard();
-        h.deliverItems(oldSubscription, [h.game("stale-a")]);
+        h.deliverItems(h.required(oldSubscription), [h.game("stale-a")]);
         const afterStale = h.snapshot();
         h.render("a", true);
         const guardAfterRoundTrip = guard();
@@ -266,7 +272,7 @@ test(
   async () => {
     await fixture(async (page) => {
       await page.evaluate(() => {
-        const h = window.harness;
+        const h = window.navigationHarness;
         const top = Array.from({ length: 35 }, (_, index) =>
           h.game(`top_${index}`, index),
         );
@@ -282,10 +288,11 @@ test(
           const scrollable = Array.from(document.querySelectorAll("div")).find(
             (element) => getComputedStyle(element).overflowY === "auto",
           );
+          if (!scrollable) throw new Error("navigation-scrollable-missing");
           scrollable.scrollTop = scrollable.scrollHeight;
           scrollable.dispatchEvent(new Event("scroll", { bubbles: true }));
           return {
-            pageRequests: window.harness.pages.length,
+            pageRequests: window.navigationHarness.pages.length,
             isScrollable: scrollable.scrollHeight > scrollable.clientHeight,
           };
         });
@@ -294,7 +301,7 @@ test(
         isScrollable: true,
       });
       await page.evaluate(async () => {
-        const h = window.harness;
+        const h = window.navigationHarness;
         await h.resolvePage(0, {
           items: Array.from({ length: 10 }, (_, index) =>
             h.game(`page_${index}`, 200 + index),
@@ -304,11 +311,15 @@ test(
         });
       });
       await scrollToBottom();
-      await page.waitForFunction(() => window.harness.pages.length === 2);
+      await page.waitForFunction(
+        () => window.navigationHarness.pages.length === 2,
+      );
       const nextPage = await page.evaluate(() => ({
-        request: window.harness.pages[1].cursor,
-        expected: window.harness.cursor(2),
-        snapshot: window.harness.snapshot(),
+        request: window.navigationHarness.required(
+          window.navigationHarness.pages[1],
+        ).cursor,
+        expected: window.navigationHarness.cursor(2),
+        snapshot: window.navigationHarness.snapshot(),
       }));
       assert.deepEqual(nextPage.request, nextPage.expected);
       assert.equal(nextPage.snapshot.loadingMore, true);
@@ -316,6 +327,7 @@ test(
   },
 );
 
+/** @param {import("playwright").Page} page */
 const settleScroll = (page) =>
   page.evaluate(
     () =>
@@ -324,10 +336,11 @@ const settleScroll = (page) =>
       ),
   );
 
+/** @param {import("playwright").Page} page @param {number | "bottom"} [top] */
 const dispatchScroll = (page, top = "bottom") =>
   page.evaluate((position) => {
-    const h = window.harness;
-    const list = h.scrollable();
+    const h = window.navigationHarness;
+    const list = h.required(h.scrollable());
     list.scrollTop = position === "bottom" ? list.scrollHeight : position;
     list.dispatchEvent(new Event("scroll", { bubbles: true }));
     return h.interactions.loads;
@@ -339,7 +352,7 @@ test(
   async () => {
     await fixture(async (page) => {
       const initial = await page.evaluate(() => {
-        const h = window.harness;
+        const h = window.navigationHarness;
         h.setProblems(
           [
             { id: "learn-a", icon: "mana", label: "Learn A" },
@@ -354,7 +367,7 @@ test(
           topGames: [
             {
               ...h.game("active"),
-              status: "active",
+              status: /** @type {const} */ ("active"),
               opponentName: "Top active",
             },
             h.game("waiting-top"),
@@ -371,12 +384,16 @@ test(
             },
           ],
         });
-        const list = h.scrollable();
+        const list = h.required(h.scrollable());
         const rows = [
           ...list.querySelectorAll(
             'button:not([aria-label="Remove waiting game"])',
           ),
-        ];
+        ].map((row) => {
+          if (!(row instanceof HTMLButtonElement))
+            throw new Error("navigation-button-missing");
+          return row;
+        });
         return {
           labels: rows.map((row) => row.textContent),
           selected: rows
@@ -386,8 +403,8 @@ test(
             .filter((row) => row.dataset.navigationSelectedPrimary === "true")
             .map((row) => row.textContent),
           completionIconsDiffer:
-            rows[5].querySelector("svg").innerHTML !==
-            rows[6].querySelector("svg").innerHTML,
+            h.required(h.required(rows[5]).querySelector("svg")).innerHTML !==
+            h.required(h.required(rows[6]).querySelector("svg")).innerHTML,
         };
       });
       assert.deepEqual(initial.labels, [
@@ -419,7 +436,9 @@ test(
         .getByRole("button", { name: "Remove waiting game", exact: true })
         .first()
         .click();
-      const actions = await page.evaluate(() => window.harness.interactions);
+      const actions = await page.evaluate(
+        () => window.navigationHarness.interactions,
+      );
       assert.deepEqual(actions.selections, [
         { id: "active", options: { status: "active" } },
         { id: "pending", options: { status: "pending" } },
@@ -430,14 +449,18 @@ test(
       assert.equal(actions.home, 1);
 
       const selectedEvent = await page.evaluate(() => {
-        const h = window.harness;
+        const h = window.navigationHarness;
         h.updatePicker({
           selectedNavigationItemId: "event_e",
           removingGameInviteIds: new Set(["waiting-top"]),
         });
-        const active = h
-          .scrollable()
-          .querySelector('[data-navigation-active="true"]');
+        const active = h.required(
+          h
+            .required(h.scrollable())
+            .querySelector('[data-navigation-active="true"]'),
+        );
+        if (!(active instanceof HTMLElement))
+          throw new Error("navigation-active-missing");
         return {
           text: active.textContent,
           selected: active.dataset.navigationSelected ?? null,
@@ -466,7 +489,8 @@ test(
   async () => {
     await fixture(async (page) => {
       const previews = await page.evaluate(() => {
-        const h = window.harness;
+        const h = window.navigationHarness;
+        /** @param {string} id @param {number} count @param {unknown[]} ids @param {ReturnType<typeof h.event>["status"]} [status] @returns {ReturnType<typeof h.event>} */
         const makeEvent = (id, count, ids, status = "waiting") => ({
           ...h.event("a"),
           id,
@@ -482,11 +506,13 @@ test(
             makeEvent("invalid", 7, [null, -2, "bad", 3.9, "4", 5, 6, 7, 8]),
           ],
         });
-        return [...h.scrollable().querySelectorAll("button")].map((row) => ({
-          images: row.querySelectorAll("img").length,
-          hasWaitingSlot: !!row.querySelector('svg[stroke="currentColor"]'),
-          text: row.textContent,
-        }));
+        return [...h.required(h.scrollable()).querySelectorAll("button")].map(
+          (row) => ({
+            images: row.querySelectorAll("img").length,
+            hasWaitingSlot: !!row.querySelector('svg[stroke="currentColor"]'),
+            text: row.textContent,
+          }),
+        );
       });
       assert.deepEqual(previews, [
         { images: 1, hasWaitingSlot: true, text: "SOON" },
@@ -504,10 +530,10 @@ test(
   async () => {
     await fixture(async (page) => {
       const initial = await page.evaluate(() => {
-        const h = window.harness;
+        const h = window.navigationHarness;
         const games = Array.from({ length: 45 }, (_, index) => ({
           ...h.game(`game-${index}`),
-          status: "active",
+          status: /** @type {const} */ ("active"),
           opponentName: `Game ${index}`,
         }));
         h.setProblems([{ id: "learn", icon: "mana", label: "Learn" }]);
@@ -517,9 +543,9 @@ test(
           selectedProblemId: "learn",
           hasMoreGames: true,
         });
-        const list = h.scrollable();
-        const row = list.querySelector(
-          '[data-navigation-selected-primary="true"]',
+        const list = h.required(h.scrollable());
+        const row = h.required(
+          list.querySelector('[data-navigation-selected-primary="true"]'),
         );
         return {
           scroll: list.scrollTop,
@@ -533,27 +559,27 @@ test(
       assert.ok(initial.rowBottom <= initial.bottom - 7);
       await settleScroll(page);
       assert.equal(
-        await page.evaluate(() => window.harness.interactions.loads),
+        await page.evaluate(() => window.navigationHarness.interactions.loads),
         0,
       );
       const later = await page.evaluate(() => {
-        const h = window.harness;
-        const previous = h.scrollable().scrollTop;
+        const h = window.navigationHarness;
+        const previous = h.required(h.scrollable()).scrollTop;
         h.updatePicker({ selectedNavigationItemId: "game-0" });
-        return { previous, next: h.scrollable().scrollTop };
+        return { previous, next: h.required(h.scrollable()).scrollTop };
       });
       assert.equal(later.next, later.previous);
 
       const reopened = await page.evaluate(() => {
-        const h = window.harness;
+        const h = window.navigationHarness;
         h.closePicker();
         h.updatePicker({ selectedNavigationItemId: "game-0" });
-        return h.scrollable().scrollTop;
+        return h.required(h.scrollable()).scrollTop;
       });
       assert.equal(reopened, 0);
       await settleScroll(page);
       assert.equal(
-        await page.evaluate(() => window.harness.interactions.loads),
+        await page.evaluate(() => window.navigationHarness.interactions.loads),
         0,
       );
     });
@@ -566,10 +592,10 @@ test(
   async () => {
     await fixture(async (page) => {
       const result = await page.evaluate(() => {
-        const h = window.harness;
+        const h = window.navigationHarness;
         const games = Array.from({ length: 40 }, (_, index) => ({
           ...h.game(`game-${index}`),
-          status: "active",
+          status: /** @type {const} */ ("active"),
           opponentName: `Game ${index}`,
         }));
         const activeEvent = { ...h.event("a"), id: "selected-event" };
@@ -577,11 +603,14 @@ test(
           topGames: [...games, activeEvent],
           selectedNavigationItemId: "selected-event",
         });
-        const eventScroll = h.scrollable().scrollTop;
+        const eventScroll = h.required(h.scrollable()).scrollTop;
         h.closePicker();
         h.renderPicker({ selectedNavigationItemId: "game-39" });
         h.updatePicker({ topGames: games });
-        return { eventScroll, asyncScroll: h.scrollable().scrollTop };
+        return {
+          eventScroll,
+          asyncScroll: h.required(h.scrollable()).scrollTop,
+        };
       });
       assert.ok(result.eventScroll > 0);
       assert.equal(result.asyncScroll, 0);
@@ -595,7 +624,7 @@ test(
   async () => {
     await fixture(async (page) => {
       await page.evaluate(() => {
-        const h = window.harness;
+        const h = window.navigationHarness;
         h.renderPicker({
           topGames: Array.from({ length: 45 }, (_, index) =>
             h.game(`game-${index}`),
@@ -605,42 +634,42 @@ test(
       });
       await settleScroll(page);
       assert.equal(
-        await page.evaluate(() => window.harness.interactions.loads),
+        await page.evaluate(() => window.navigationHarness.interactions.loads),
         0,
       );
       assert.equal(await dispatchScroll(page, 1), 0);
       assert.equal(await dispatchScroll(page), 1);
       assert.equal(await dispatchScroll(page), 1);
       await page.evaluate(() =>
-        window.harness.updatePicker({ isLoadingMoreGames: true }),
+        window.navigationHarness.updatePicker({ isLoadingMoreGames: true }),
       );
       assert.equal(await dispatchScroll(page), 1);
       await page.evaluate(() =>
-        window.harness.updatePicker({ isLoadingMoreGames: false }),
+        window.navigationHarness.updatePicker({ isLoadingMoreGames: false }),
       );
       assert.equal(
-        await page.evaluate(() => window.harness.interactions.loads),
+        await page.evaluate(() => window.navigationHarness.interactions.loads),
         2,
       );
       await page.evaluate(() =>
-        window.harness.updatePicker({ isLoadingMoreGames: true }),
+        window.navigationHarness.updatePicker({ isLoadingMoreGames: true }),
       );
       await page.evaluate(() =>
-        window.harness.updatePicker({ isLoadingMoreGames: false }),
+        window.navigationHarness.updatePicker({ isLoadingMoreGames: false }),
       );
       assert.equal(
-        await page.evaluate(() => window.harness.interactions.loads),
+        await page.evaluate(() => window.navigationHarness.interactions.loads),
         2,
       );
       assert.equal(await dispatchScroll(page), 3);
       await page.evaluate(() =>
-        window.harness.updatePicker({
+        window.navigationHarness.updatePicker({
           isLoadingMoreGames: true,
           hasMoreGames: false,
         }),
       );
       await page.evaluate(() =>
-        window.harness.updatePicker({ isLoadingMoreGames: false }),
+        window.navigationHarness.updatePicker({ isLoadingMoreGames: false }),
       );
       assert.equal(await dispatchScroll(page), 3);
     });
@@ -653,34 +682,34 @@ test(
   async () => {
     await fixture(async (page) => {
       await page.evaluate(() =>
-        window.harness.renderPicker({
+        window.navigationHarness.renderPicker({
           hasMoreGames: true,
           isGamesLoading: true,
         }),
       );
       assert.equal(
-        await page.evaluate(() => window.harness.interactions.loads),
+        await page.evaluate(() => window.navigationHarness.interactions.loads),
         0,
       );
       await page.evaluate(() =>
-        window.harness.updatePicker({ isGamesLoading: false }),
+        window.navigationHarness.updatePicker({ isGamesLoading: false }),
       );
       assert.equal(
-        await page.evaluate(() => window.harness.interactions.loads),
+        await page.evaluate(() => window.navigationHarness.interactions.loads),
         1,
       );
       await page.evaluate(() =>
-        window.harness.updatePicker({ isLoadingMoreGames: true }),
+        window.navigationHarness.updatePicker({ isLoadingMoreGames: true }),
       );
       await page.evaluate(() =>
-        window.harness.updatePicker({ isLoadingMoreGames: false }),
+        window.navigationHarness.updatePicker({ isLoadingMoreGames: false }),
       );
       assert.equal(
-        await page.evaluate(() => window.harness.interactions.loads),
+        await page.evaluate(() => window.navigationHarness.interactions.loads),
         2,
       );
       await page.evaluate(() => {
-        const h = window.harness;
+        const h = window.navigationHarness;
         h.closePicker();
         h.renderPicker({
           topGames: Array.from({ length: 45 }, (_, index) =>
@@ -691,7 +720,7 @@ test(
       });
       await settleScroll(page);
       assert.equal(
-        await page.evaluate(() => window.harness.interactions.loads),
+        await page.evaluate(() => window.navigationHarness.interactions.loads),
         2,
       );
       assert.equal(await dispatchScroll(page), 3);

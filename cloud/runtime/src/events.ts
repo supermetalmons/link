@@ -99,15 +99,8 @@ export type EventRuntimeRequest = {
   } | null;
   data: unknown;
 };
-export type EventProgressOutboxRecord = {
-  schemaVersion: 1;
-  eventId: string;
-  sourceKey: string;
-  reason: string;
-  runAtMs: number | null;
-  firstQueuedAtMs: number;
-  lastQueuedAtMs: number;
-};
+export type EventProgressOutboxRecord =
+  import("./eventProgressRecords.js").EventProgressPendingRecord;
 export type EventRuntimeCreateResult = {
   ok: true;
   eventId: string;
@@ -204,7 +197,9 @@ const createEventRuntime: Signature_createEventRuntime = (dependencies) => {
   const { acquireEventLockWithRetry, isEventLockStillOwned } = lockManager;
   const bracket = createEventBracketRuntime({
     state,
-    readEventPrizeWithdrawals,
+    ...(readEventPrizeWithdrawals === undefined
+      ? {}
+      : { readEventPrizeWithdrawals }),
     readMatchPair: dependencies.readMatchPair,
     readMatchPairs: dependencies.readMatchPairs,
   });
@@ -250,7 +245,7 @@ const createEventRuntime: Signature_createEventRuntime = (dependencies) => {
     randomAlphanumeric(INVITE_ID_RANDOM_LENGTH, dependencies.random);
 
   const loadOwnershipSnapshot = async (
-    event: EventData,
+    event: EventData | null,
     extras: { loginUids?: string[]; profileIds?: string[] } = {},
   ) => {
     if (typeof readProfileOwnershipSnapshot !== "function") {
@@ -341,10 +336,14 @@ const createEventRuntime: Signature_createEventRuntime = (dependencies) => {
       winnerProfileId: null,
       winnerDisplayName: null,
       currentRoundIndex: null,
+      bracketFormat: "fixed",
       bracketSize: 0,
       roundCount: 0,
+      roundByes: {},
       supportsThirdPlaceMatch: true,
       thirdPlaceMatch: null,
+      prizeSelectionsLockedAtMs: null,
+      prizeAssignments: {},
       participants: createEventParticipantsDocument({
         [creatorParticipant.profileId]:
           createEventParticipantDocument(creatorParticipant),
@@ -422,10 +421,9 @@ const createEventRuntime: Signature_createEventRuntime = (dependencies) => {
       );
     }
 
-    const ownershipSnapshot = await loadOwnershipSnapshot(
-      readEventDocument({})!,
-      { loginUids: [request.auth.uid] },
-    );
+    const ownershipSnapshot = await loadOwnershipSnapshot(null, {
+      loginUids: [request.auth.uid],
+    });
     const creatorProfile = ensurePilotEventCreator(
       request.auth.uid,
       ownershipSnapshot,
@@ -618,7 +616,7 @@ const createEventRuntime: Signature_createEventRuntime = (dependencies) => {
           event,
           nowMs,
           ownershipSnapshot,
-          prizeSelections,
+          ...(prizeSelections === undefined ? {} : { prizeSelections }),
         });
         if (dueTransition.didChange) {
           const lockOwned = await isEventLockStillOwned(lockHandle);
@@ -1030,7 +1028,7 @@ const createEventRuntime: Signature_createEventRuntime = (dependencies) => {
             event,
             nowMs,
             ownershipSnapshot,
-            prizeSelections,
+            ...(prizeSelections === undefined ? {} : { prizeSelections }),
           });
           updates.push(...dueTransition.updates);
           didChange = dueTransition.didChange;
@@ -1043,7 +1041,13 @@ const createEventRuntime: Signature_createEventRuntime = (dependencies) => {
               ? buildActiveEventSyncPlan
               : buildEndedEventSyncPlan
           )(
-            { eventId, event, nowMs, ownershipSnapshot, prizeSelections },
+            {
+              eventId,
+              event,
+              nowMs,
+              ownershipSnapshot,
+              ...(prizeSelections === undefined ? {} : { prizeSelections }),
+            },
             syncPlanningDependencies,
           );
           updates.push(...transition.updates);

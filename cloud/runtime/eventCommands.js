@@ -25,18 +25,17 @@ const eventField = (eventId, field, value) => ({
 });
 exports.eventField = eventField;
 const eventCommandIdentity = (command) => {
-  const fields = command;
   return JSON.stringify([
-    fields.kind,
-    fields.eventId,
-    fields.profileId,
-    fields.outboxId,
-    fields.inviteId,
-    fields.playerId,
-    fields.matchId,
-    fields.field,
-    fields.roundKey,
-    fields.matchKey,
+    command.kind,
+    "eventId" in command ? command.eventId : null,
+    "profileId" in command ? command.profileId : null,
+    "outboxId" in command ? command.outboxId : null,
+    "inviteId" in command ? command.inviteId : null,
+    "playerId" in command ? command.playerId : null,
+    "matchId" in command ? command.matchId : null,
+    "field" in command ? command.field : null,
+    "roundKey" in command ? command.roundKey : null,
+    "matchKey" in command ? command.matchKey : null,
   ]);
 };
 exports.eventCommandIdentity = eventCommandIdentity;

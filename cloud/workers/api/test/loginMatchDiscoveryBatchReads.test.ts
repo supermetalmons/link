@@ -24,7 +24,7 @@ function fixture(
         prepare(sql: string) {
           assert.equal(
             sql,
-            "SELECT invite_id, resolution FROM login_match_discovery WHERE login_uid = ? AND match_id = ?",
+            "SELECT invite_id, resolution FROM login_match_discovery_canonical WHERE login_uid = ? AND match_id = ?",
           );
           return {
             bind(loginUid: string, matchId: string) {

@@ -34,7 +34,7 @@ export async function runScheduledTasks(
     logger.error(
       JSON.stringify({
         event: "scheduled_task_failed",
-        task: tasks[index].name,
+        task: tasks[index]!.name,
         durationMs: durations[index],
         scheduledTime,
         code:

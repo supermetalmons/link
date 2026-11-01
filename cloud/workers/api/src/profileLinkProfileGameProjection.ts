@@ -53,11 +53,13 @@ export function createProfileLinkProjectionRuntime(
     dependencies.projection ||
     createProfileGameProjectionRuntime(env, {
       d1,
-      logger: dependencies.logger,
-      now: dependencies.now,
+      ...(dependencies.logger === undefined
+        ? {}
+        : { logger: dependencies.logger }),
+      ...(dependencies.now === undefined ? {} : { now: dependencies.now }),
       profileDb,
       state,
-      wait: dependencies.wait,
+      ...(dependencies.wait === undefined ? {} : { wait: dependencies.wait }),
     });
   const repository: ProfileLinkProjectionRepository = {
     async listMatchesPage(loginUid, afterMatchId, limit) {
@@ -77,8 +79,10 @@ export function createProfileLinkProjectionRuntime(
         : readProjectionOwnershipSnapshot(profileDb, query),
   };
   const core = createProfileLinkProjectionCore({
-    logger: dependencies.logger,
-    now: dependencies.now,
+    ...(dependencies.logger === undefined
+      ? {}
+      : { logger: dependencies.logger }),
+    ...(dependencies.now === undefined ? {} : { now: dependencies.now }),
     recomputeInviteProjection: projection.recomputeInviteProjection,
     repository,
     withInviteProjectionLock: dependencies.withInviteProjectionLock,

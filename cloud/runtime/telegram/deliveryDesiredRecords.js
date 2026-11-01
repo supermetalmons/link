@@ -10,11 +10,13 @@ exports.clearMissingAppliedRecord = clearMissingAppliedRecord;
 const deliveryState_js_1 = require("./deliveryState.js");
 const deliveryPolicy_js_1 = require("./deliveryPolicy.js");
 const values_js_1 = require("./values.js");
+const recordCodec_js_1 = require("./recordCodec.js");
+const deliveryState_js_2 = require("./deliveryState.js");
 function acquireDesiredRecord(current, input) {
   const { leaseTtlMs, nowMs, ownerToken, observeDecision } = input;
   const apply = (record) => {
     let acquireDecision = "missing";
-    const desired = asObject(record.desired);
+    const desired = (0, deliveryState_js_2.documentFields)(record.desired);
     const delivery = (0, deliveryState_js_1.readDelivery)(record.delivery);
     const desiredRevision = (0, deliveryState_js_1.normalizeString)(
       desired.revision,
@@ -98,8 +100,8 @@ function acquireDesiredRecord(current, input) {
         decision: acquireDecision,
       };
     }
-    if (delivery.hasSendInFlight) {
-      const sendInFlight = asObject(delivery.sendInFlight);
+    if (delivery.sendInFlight) {
+      const sendInFlight = delivery.sendInFlight;
       const sendApiGateOwner = (0, deliveryState_js_1.normalizeString)(
         sendInFlight.apiGateOwner,
       );
@@ -326,8 +328,7 @@ function acquireDesiredRecord(current, input) {
       decision: acquireDecision,
     };
   };
-  const output = apply(asObject(current));
-  return output;
+  return (0, recordCodec_js_1.requireTelegramTransaction)(apply(current));
 }
 function finishDesiredRecord(current, delivery, input) {
   const {
@@ -357,7 +358,7 @@ function finishDesiredRecord(current, delivery, input) {
           : status === "delivered"
             ? { status, revision, deliveredAtMs: nowMs }
             : { status, revision };
-    const nextDelivery = asObject(
+    const nextDelivery = (0, deliveryState_js_2.documentFields)(
       (0, deliveryState_js_1.writeDelivery)({
         ...(0, deliveryPolicy_js_1.omitRetryState)(
           (0, deliveryState_js_1.omitKeys)(delivery, [
@@ -421,8 +422,7 @@ function finishDesiredRecord(current, delivery, input) {
     }
     return nextRecord;
   };
-  const output = apply(asObject(current));
-  return output;
+  return (0, recordCodec_js_1.requireTelegramMessageDocument)(apply(current));
 }
 function recordDesiredRetryProof(current, delivery, input) {
   const {
@@ -451,8 +451,7 @@ function recordDesiredRetryProof(current, delivery, input) {
       },
     },
   });
-  const output = apply(asObject(current));
-  return output;
+  return (0, recordCodec_js_1.requireTelegramMessageDocument)(apply(current));
 }
 function recordDesiredRetryState(current, delivery, input) {
   const {
@@ -515,8 +514,7 @@ function recordDesiredRetryState(current, delivery, input) {
       }),
     };
   };
-  const output = apply(asObject(current));
-  return output;
+  return (0, recordCodec_js_1.requireTelegramMessageDocument)(apply(current));
 }
 function markAppliedStateUnknownRecord(current, delivery, input) {
   const { apiGateOwner, desired, markedAtMs, operation } = input;
@@ -532,8 +530,7 @@ function markAppliedStateUnknownRecord(current, delivery, input) {
       },
     },
   });
-  const output = apply(asObject(current));
-  return output;
+  return (0, recordCodec_js_1.requireTelegramMessageDocument)(apply(current));
 }
 function clearMissingAppliedRecord(current, delivery, input) {
   const { apiGateOwner } = input;
@@ -553,17 +550,5 @@ function clearMissingAppliedRecord(current, delivery, input) {
     delete nextRecord.applied;
     return nextRecord;
   };
-  const output = apply(asObject(current));
-  return output;
+  return (0, recordCodec_js_1.requireTelegramMessageDocument)(apply(current));
 }
-const asObject = (value) => {
-  const retained =
-    value instanceof deliveryState_js_1.DeliverySnapshot
-      ? (0, deliveryState_js_1.deliveryDocument)(value)
-      : value instanceof deliveryState_js_1.PendingDeleteSnapshot
-        ? (0, deliveryState_js_1.pendingDeleteDocument)(value)
-        : value;
-  return retained && typeof retained === "object" && !Array.isArray(retained)
-    ? retained
-    : {};
-};

@@ -108,10 +108,11 @@ export type MatchStateClaimTimerRequest = ClaimMatchVictoryByTimerRequest & {
 export type MatchStateEffect = import("./matchEffectCodec.ts").DueMatchEffect;
 
 export type MatchStateEventEffectsRequest = MatchStateAuthority & {
+  schemaVersion: 1;
   operationId: string;
-  creations?: MatchStateCreation[];
-  terminalTimers?: Array<{ matchId: string; playerId: string }>;
-  claims?: Array<{
+  creations: MatchStateCreation[];
+  terminalTimers: Array<{ matchId: string; playerId: string }>;
+  claims: Array<{
     matchId: string;
     playerId: string;
     opponentId: string;

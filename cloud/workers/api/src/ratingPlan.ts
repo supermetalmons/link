@@ -1,14 +1,16 @@
+import type { WagerAgreement } from "@mons/shared/wagers";
 import {
   inviteRatingEvent,
   inviteProjectionState,
   type InviteDocument,
 } from "@mons/shared/invite-records";
 import glicko2 from "glicko2";
-import type { HistoricalMatchPair } from "@mons/shared/game-sessions";
+import type {
+  HistoricalMatchPair,
+  GameSessionMatch,
+} from "@mons/shared/game-sessions";
 import {
   buildOrderedMoveHistory,
-  isMatchFenWithinLimit,
-  isMatchHistoryWithinLimits,
   parseGameFromMatchData,
   selectLaterGame,
 } from "@mons/shared/match-protocol";
@@ -16,7 +18,7 @@ import {
   createRatingUpdater,
   type RatingUpdateRequest,
 } from "@mons/shared/ratings";
-import { MATCH_TIMER_TERMINAL } from "@mons/shared/timers";
+import { readMatchDocument } from "./matchRecordCodec.ts";
 import { Color, Game, resolveMatch } from "mons-rules";
 import { TELEGRAM_AUTOMATCH_VERSION } from "../../../runtime/telegram/automatchSource.js";
 import { AuthApiFailure } from "./authErrors.ts";
@@ -37,49 +39,29 @@ import { PROFILE_GAME_PROJECTION_SCHEMA_VERSION } from "./profileGameProjectionT
 const FEB_CHALLENGE_START_UTC = Date.UTC(2026, 1, 1);
 const FEB_CHALLENGE_END_UTC = Date.UTC(2026, 2, 1);
 
-type RatingMatchRecord = {
-  color: "white" | "black";
-  emojiId: unknown;
-  fen?: string;
-  flatMovesString: string;
-  status: string;
-  timer: string;
-};
+type RatingMatchRecord = Pick<
+  GameSessionMatch,
+  "color" | "emojiId" | "fen" | "flatMovesString" | "status" | "timer"
+>;
 
 type RatingResult = "gg" | "win";
-
-function toRecord(value: unknown): Record<string, unknown> | null {
-  return value && typeof value === "object" && !Array.isArray(value)
-    ? (value as Record<string, unknown>)
-    : null;
-}
 
 function failedPrecondition(message: string): AuthApiFailure {
   return new AuthApiFailure(409, "failed-precondition", message);
 }
 
 function readMatchRecord(value: unknown): RatingMatchRecord {
-  const record = toRecord(value);
-  const color = record?.color;
-  const fen = typeof record?.fen === "string" ? record.fen : undefined;
-  const flatMovesString =
-    typeof record?.flatMovesString === "string" ? record.flatMovesString : "";
-  if (!record || (color !== "white" && color !== "black")) {
-    throw failedPrecondition("something is wrong with the game state.");
-  }
-  if (
-    (fen !== undefined && !isMatchFenWithinLimit(fen)) ||
-    !isMatchHistoryWithinLimits(flatMovesString)
-  ) {
+  const record = readMatchDocument(value);
+  if (!record) {
     throw failedPrecondition("something is wrong with the game state.");
   }
   return {
-    color,
+    color: record.color,
     emojiId: record.emojiId,
-    fen,
-    flatMovesString,
-    status: typeof record.status === "string" ? record.status : "",
-    timer: typeof record.timer === "string" ? record.timer : "",
+    fen: record.fen,
+    flatMovesString: record.flatMovesString,
+    status: record.status,
+    timer: record.timer,
   };
 }
 
@@ -87,16 +69,10 @@ function resolveRatingResult(
   player: RatingMatchRecord,
   opponent: RatingMatchRecord,
 ): RatingResult {
-  if (
-    player.status === "surrendered" ||
-    opponent.timer === MATCH_TIMER_TERMINAL
-  ) {
+  if (player.status === "surrendered" || opponent.timer.state === "finished") {
     return "gg";
   }
-  if (
-    opponent.status === "surrendered" ||
-    player.timer === MATCH_TIMER_TERMINAL
-  ) {
+  if (opponent.status === "surrendered" || player.timer.state === "finished") {
     return "win";
   }
   if (player.color === opponent.color) {
@@ -155,8 +131,8 @@ function hasMoves(record: RatingMatchRecord): boolean {
 
 function emptyProfile(): RatingProfile {
   return {
-    aura: "",
-    emoji: "",
+    aura: "none",
+    emoji: 0,
     eth: "",
     nonce: 0,
     profileId: "",
@@ -170,7 +146,6 @@ function emptyProfile(): RatingProfile {
 function buildRatingPlan({
   historicalMatchPair,
   invite,
-  matchId,
   nowMs,
   opponent,
   opponentMatch,
@@ -178,6 +153,7 @@ function buildRatingPlan({
   playerMatch,
   request,
   result,
+  wager,
 }: {
   historicalMatchPair: HistoricalMatchPair;
   invite: InviteDocument;
@@ -189,6 +165,7 @@ function buildRatingPlan({
   playerMatch: RatingMatchRecord;
   request: RatingUpdateRequest;
   result: RatingResult;
+  wager: Pick<WagerAgreement, "material" | "count"> | null;
 }): RatingCommitPlan {
   const resolvedPlayer = player || emptyProfile();
   const resolvedOpponent = opponent || emptyProfile();
@@ -280,8 +257,7 @@ function buildRatingPlan({
     shouldApplyRatingDelta,
     playerMatch,
     opponentMatch,
-    invite,
-    matchId,
+    wager,
   });
   const shouldUpdateFebruaryChallenge =
     canUpdateRatings &&

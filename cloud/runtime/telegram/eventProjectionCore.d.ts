@@ -5,19 +5,9 @@ import type { EventDocument } from "../events/documents.js";
 import {
   type EventTelegramProjectionGuard,
   type EventTelegramProjectionStateDocument,
-  type RetainedStartedMatchLines,
 } from "./eventProjectionRecords.js";
 export type { EventTelegramProjectionGuard } from "./eventProjectionRecords.js";
-type ProjectionState = {
-  upcomingText: string;
-  reminderText: string;
-  startedText: string;
-  endedText: string;
-  endedAnnouncementArmed: boolean;
-  startedMatchKeys: string[];
-  startedMatchLinesByKey: RetainedStartedMatchLines;
-  lastProjectedSignature: string;
-};
+type ProjectionState = EventTelegramProjectionStateDocument;
 type StartedState = {
   text: string | null;
   startedMatchKeys: string[];
@@ -82,12 +72,21 @@ declare const EVENT_TELEGRAM_PROJECTION_GUARD_FIELD =
   "eventTelegramProjectionGuard";
 declare const EVENT_TELEGRAM_DELIVERY_VERSION = 2;
 declare const formatPtEtUtcLine: (startAtMs: number) => string;
+export type EventTelegramRatingResultSource = {
+  status: "processing" | "done" | "blocked";
+  inviteId: string;
+  matchId: string;
+  playerId: string;
+  opponentId: string;
+  playerManaPoints: number | null;
+  opponentManaPoints: number | null;
+};
 declare const loadEndedMatchResults: (
   eventData: unknown,
   dependencies: {
     readRatingUpdates(
       operationIds: readonly string[],
-    ): Promise<readonly unknown[]>;
+    ): Promise<readonly (EventTelegramRatingResultSource | null)[]>;
   },
 ) => Promise<EventTelegramEndedResultsDocument>;
 declare const isV2TelegramEvent: (
@@ -114,7 +113,7 @@ declare const renderEndedMessage: (
   placementLines?: string[],
   heading?: "event complete" | "good games",
 ) => string;
-declare const parseProjectionState: (value: unknown) => ProjectionState;
+declare const parseProjectionState: (raw: unknown) => ProjectionState;
 declare const buildStartedState: (
   eventId: string,
   eventData: unknown,

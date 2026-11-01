@@ -40,19 +40,13 @@ async function inspectMatchPresentations(
 ): Promise<void> {
   const control = await readControl(dependencies);
   const counts = await dependencies.run(
-    "SELECT provenance, count(*) AS count FROM match_presentation_registrations GROUP BY provenance",
+    "SELECT provenance, count(*) AS count FROM match_presentation_registrations_canonical GROUP BY provenance",
     DATABASE,
   );
-  const exceptionTable = await dependencies.run(
-    "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'match_presentation_source_exceptions'",
+  const sourceExceptions = await dependencies.run(
+    "SELECT disposition, COUNT(*) AS count FROM match_presentation_source_exceptions_canonical GROUP BY disposition",
     DATABASE,
   );
-  const sourceExceptions = exceptionTable.length
-    ? await dependencies.run(
-        "SELECT disposition, COUNT(*) AS count FROM match_presentation_source_exceptions GROUP BY disposition",
-        DATABASE,
-      )
-    : [];
   dependencies.log({
     operation: "status",
     control,

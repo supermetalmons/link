@@ -2,15 +2,12 @@ import {
   assertCanonicalProfileFields,
   CANONICAL_PUBLIC_PROFILE_COLUMNS,
   parseCanonicalProfileRow,
-  parseCanonicalPublicProfileRow,
 } from "./profiles.ts";
 import {
-  CanonicalProfileCorruption,
   type CanonicalMutableProfileSnapshot,
   type CanonicalMutableProfileValue,
   type CanonicalProfileFieldsValue,
 } from "./types.ts";
-import { nullableSafeInteger, record, safeInteger } from "./validation.ts";
 
 const MUTABLE_VALUE_FIELDS = new Set([
   "profile",
@@ -25,7 +22,6 @@ const MUTABLE_VALUE_FIELDS = new Set([
 
 export function mutableProfileColumns(alias?: "profile"): string {
   const prefix = alias ? `${alias}.` : "";
-  const legacy = `${prefix}legacy_fields_json`;
   return [
     ...CANONICAL_PUBLIC_PROFILE_COLUMNS.split(",").map(
       (column) => `${prefix}${column.trim()}`,
@@ -33,47 +29,13 @@ export function mutableProfileColumns(alias?: "profile"): string {
     ...["revision", "created_at_ms", "updated_at_ms", "merged_at_ms"].map(
       (column) => `${prefix}${column}`,
     ),
-    `CASE
-      WHEN typeof(${legacy}) != 'text' OR instr(${legacy}, char(0)) > 0 THEN 0
-      WHEN json_valid(${legacy}) = 0 THEN 2
-      WHEN json_type(${legacy}) = 'object' THEN 1
-      ELSE 0 END AS legacy_fields_validation`,
-    `CASE WHEN typeof(${legacy}) = 'text'
-       AND instr(${legacy}, char(0)) = 0 AND json_valid(${legacy}) = 0
-      THEN ${legacy} END AS legacy_fields_fallback_json`,
   ].join(", ");
 }
 
 export function parseMutableProfileRow(
   value: unknown,
 ): CanonicalMutableProfileSnapshot {
-  const row = record(value);
-  if (!row) throw new CanonicalProfileCorruption();
-  if (row.legacy_fields_validation === 2) {
-    return {
-      ...parseCanonicalProfileRow({
-        ...row,
-        legacy_fields_json: row.legacy_fields_fallback_json,
-      }),
-      storageShape: "full",
-    };
-  }
-  const profile = parseCanonicalPublicProfileRow(row);
-  const revision = safeInteger(row.revision, 1);
-  if (
-    row.legacy_fields_validation !== 1 ||
-    row.legacy_fields_fallback_json !== null
-  ) {
-    throw new CanonicalProfileCorruption();
-  }
-  return {
-    ...profile,
-    revision,
-    createdAtMs: safeInteger(row.created_at_ms),
-    updatedAtMs: safeInteger(row.updated_at_ms),
-    mergedAtMs: nullableSafeInteger(row.merged_at_ms),
-    storageShape: "mutable",
-  };
+  return parseCanonicalProfileRow(value);
 }
 
 export function mutableProfileValue(
@@ -102,9 +64,10 @@ export function assertMutableProfileValue(
 export function mutableProfileWriteRow(value: CanonicalProfileFieldsValue) {
   assertCanonicalProfileFields(value);
   return {
+    schema_version: 1,
     profile_id: value.profile.id,
     payload_json: JSON.stringify(value.profile),
-    gameplay_emoji_json: JSON.stringify(value.gameplayEmoji),
+    gameplay_emoji: value.gameplayEmoji,
     username_key: value.usernameKey,
     updated_at_ms: value.updatedAtMs,
     rating_sort: value.sortValues.rating,

@@ -4,9 +4,7 @@ import { canReceiveInvite } from "../src/inviteChannelsRoom.ts";
 import type { InviteMetadataReadResult } from "../src/inviteMetadata.ts";
 import type {
   InviteSocketAccess,
-  RetainedInviteKey,
-  RetainedMatchKey,
-  RetainedSocketAttachment,
+  SocketAttachment,
   RoomSocketAttachment,
 } from "../src/socketAttachmentRecords.ts";
 import type {
@@ -62,12 +60,6 @@ export type SocketBoundaryContracts = [
   Assert<Accepts<MatchAttachment, RoomSocketAttachment>>,
   Assert<Accepts<InviteAttachment, RoomSocketAttachment>>,
   Assert<Rejects<Record<string, unknown>, RoomSocketAttachment>>,
-  Assert<Rejects<RetainedSocketAttachment, RoomSocketAttachment>>,
-  Assert<Rejects<Record<string, unknown>, RetainedSocketAttachment>>,
-  Assert<Rejects<AuthenticatedReaction, RetainedSocketAttachment>>,
-  Assert<Rejects<RetainedMatchKey, string>>,
-  Assert<Rejects<RetainedInviteKey, RetainedMatchKey>>,
-  Assert<Rejects<RetainedMatchKey, RetainedInviteKey>>,
   Assert<Rejects<Omit<AuthenticatedReaction, "sid">, RoomSocketAttachment>>,
   Assert<
     Rejects<
@@ -134,10 +126,9 @@ export function freshAccessResult(
   return canReceiveInvite(attachment, source);
 }
 
-export function retainedAccessResult(
-  attachment: RetainedSocketAttachment,
+export function decodedAccessResult(
+  attachment: SocketAttachment,
   source: Extract<InviteMetadataReadResult, { status: "ok" }>,
 ): boolean {
-  // @ts-expect-error retained access preserves raw falsy values
   return canReceiveInvite(attachment, source);
 }

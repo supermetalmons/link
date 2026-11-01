@@ -282,8 +282,8 @@ function createTelegramDesiredDelivery({
       messageKey,
       ownerToken,
       revision: desired.revision,
-      requestedGeneration,
-      apiGateReclaimOwner,
+      ...(requestedGeneration === undefined ? {} : { requestedGeneration }),
+      ...(apiGateReclaimOwner === undefined ? {} : { apiGateReclaimOwner }),
     });
     const apiGateOwner = gateIdentity.owner;
     const gateResult = await acquireApiGate({
@@ -779,8 +779,8 @@ function createTelegramDesiredDelivery({
       messageKey: normalizedMessageKey,
       ownerToken,
       revision: desired.revision,
-      requestedGeneration,
-      apiGateReclaimOwner,
+      ...(requestedGeneration === undefined ? {} : { requestedGeneration }),
+      ...(apiGateReclaimOwner === undefined ? {} : { apiGateReclaimOwner }),
     });
     const apiGateOwner = gateIdentity.owner;
     const gateResult = await acquireApiGate({

@@ -1,4 +1,20 @@
-import { unwrapMatchStateWireFixture } from "../test/matchRecordFixture.ts";
+import { applyCanonicalTestMigrations } from "./canonicalTestMigrations.ts";
+import {
+  APPLICATION_DATA_HEADER,
+  APPLICATION_DATA_EPOCH,
+} from "@mons/shared/data-contract";
+import { eventDocumentFixture } from "../test/eventCompatibilityFixture.ts";
+import { activateCanonicalApplicationFixture } from "./applicationRoomFixture.ts";
+import {
+  canonicalMatchEnvironment,
+  runInCanonicalMatchRoom,
+} from "./canonicalMatchTestFixture.ts";
+import { inviteDocumentFixture } from "../test/inviteDocumentFixture.ts";
+import {
+  unwrapMatchStateWireFixture,
+  publicMatchFixture,
+  matchDocumentFixture,
+} from "../test/matchRecordFixture.ts";
 import {
   buildSessionRefreshToken,
   isSessionTokenResponse,
@@ -10,12 +26,8 @@ import {
   type SessionBootstrapResponse,
   type SessionEventBootstrapResponse,
 } from "@mons/shared/session-bootstrap";
-import {
-  applyD1Migrations,
-  runInDurableObject,
-  type D1Migration,
-} from "cloudflare:test";
-import { env } from "cloudflare:workers";
+import type { D1Migration } from "cloudflare:test";
+import { env as rawEnv } from "cloudflare:workers";
 import { afterEach, beforeAll, describe, expect, it } from "vitest";
 import type { InviteReactions } from "../src/inviteReactions.ts";
 import { getMatchStateRpc } from "../src/matchStateRpc.ts";
@@ -24,6 +36,7 @@ import { createSessionRepository } from "../src/sessionD1.ts";
 import { applyEventTestMigrations } from "./eventTestMigrations.ts";
 import { applyRetiredProfileMigrations } from "./profileTestMigrations.ts";
 
+const env = canonicalMatchEnvironment(rawEnv);
 const testEnv = env as Env & {
   TEST_D1_MIGRATIONS: D1Migration[];
   TEST_PROFILE_D1_MIGRATIONS: D1Migration[];
@@ -39,17 +52,17 @@ const environment: Env = {
 };
 const rooms: DurableObjectStub<InviteReactions>[] = [];
 const ctx = { waitUntil: (_promise: Promise<unknown>) => undefined };
-const match = {
+const match = publicMatchFixture({
   version: 2,
   color: "white",
   emojiId: 1,
-  aura: "",
+  aura: "none",
   gameVariant: "standard",
   fen: "initial",
-  status: "",
+  status: "active",
   flatMovesString: "",
-  timer: "",
-};
+  timer: { state: "idle" },
+});
 
 async function fixture(hostId: string) {
   const inviteId = `composed-runtime-${crypto.randomUUID()}`;
@@ -57,9 +70,14 @@ async function fixture(hostId: string) {
   rooms.push(room);
   const guestId = "g".repeat(28);
   await env.PROFILE_GAMES_DB.prepare(
-    "INSERT INTO invite_sources (invite_id, source_json, revision, updated_at_ms) VALUES (?, ?, 1, 1)",
+    "INSERT INTO invite_sources_canonical (invite_id, source_json, revision, updated_at_ms) VALUES (?, ?, 1, 1)",
   )
-    .bind(inviteId, JSON.stringify({ hostId, guestId, hostColor: "white" }))
+    .bind(
+      inviteId,
+      JSON.stringify(
+        inviteDocumentFixture({ hostId, guestId, hostColor: "white" }),
+      ),
+    )
     .run();
   unwrapMatchStateWireFixture(
     await getMatchStateRpc(env, inviteId).createCanonicalMatch({
@@ -70,13 +88,13 @@ async function fixture(hostId: string) {
           matchId: inviteId,
           playerId: hostId,
           marker: "host-created",
-          value: match,
+          value: matchDocumentFixture(match),
         },
         {
           matchId: inviteId,
           playerId: guestId,
           marker: "guest-created",
-          value: { ...match, color: "black" },
+          value: matchDocumentFixture({ ...match, color: "black" }),
         },
       ],
     }),
@@ -89,7 +107,7 @@ afterEach(async () => {
     rooms
       .splice(0)
       .map((room) =>
-        runInDurableObject(room, (_instance, state) =>
+        runInCanonicalMatchRoom(room, (_instance, state) =>
           state.storage.deleteAlarm(),
         ),
       ),
@@ -100,17 +118,24 @@ describe("composed session Worker with canonical D1 and Durable Object state", (
   beforeAll(async () => {
     await Promise.all([
       applyEventTestMigrations(env.EVENT_DB, testEnv.TEST_EVENT_D1_MIGRATIONS),
-      applyD1Migrations(env.PROFILE_GAMES_DB, testEnv.TEST_D1_MIGRATIONS),
+      applyCanonicalTestMigrations(
+        env.PROFILE_GAMES_DB,
+        testEnv.TEST_D1_MIGRATIONS,
+      ),
       applyRetiredProfileMigrations(
         env.PROFILE_DB,
         testEnv.TEST_PROFILE_D1_MIGRATIONS,
         "a".repeat(64),
       ),
-      applyD1Migrations(
+      applyCanonicalTestMigrations(
         env.AUTH_STATE_DB,
         testEnv.TEST_AUTH_STATE_D1_MIGRATIONS,
       ),
     ]);
+    await activateCanonicalApplicationFixture();
+    await env.AUTH_STATE_DB.prepare(
+      "UPDATE application_data_control SET data_epoch = 1 WHERE singleton = 1",
+    ).run();
     await env.PROFILE_GAMES_DB.batch([
       env.PROFILE_GAMES_DB.prepare(
         "UPDATE automatch_runtime_control SET backend = 'd1', state = 'active' WHERE singleton = 1",
@@ -123,16 +148,16 @@ describe("composed session Worker with canonical D1 and Durable Object state", (
 
   it("returns a primary event snapshot with the issued session and reusable conditional headers", async () => {
     const eventId = `session-event-${crypto.randomUUID()}`;
-    const event = {
+    const event = eventDocumentFixture({
       eventId,
       status: "scheduled",
       startAtMs: 1000,
       updatedAtMs: 1,
       participants: {},
       rounds: {},
-    };
+    });
     await env.EVENT_DB.prepare(
-      "INSERT INTO event_records (event_id, status, start_at_ms, updated_at_ms, revision, record_json) VALUES (?, 'scheduled', 1000, 1, 7, ?)",
+      "INSERT INTO event_records_canonical (event_id, status, start_at_ms, updated_at_ms, revision, record_json) VALUES (?, 'scheduled', 1000, 1, 7, ?)",
     )
       .bind(eventId, JSON.stringify(event))
       .run();
@@ -147,6 +172,7 @@ describe("composed session Worker with canonical D1 and Durable Object state", (
         {
           method: "POST",
           headers: {
+            [APPLICATION_DATA_HEADER]: String(APPLICATION_DATA_EPOCH),
             Origin: "https://mons.link",
             "Content-Type": "application/json",
           },
@@ -157,7 +183,7 @@ describe("composed session Worker with canonical D1 and Durable Object state", (
       {},
       ctx,
     );
-    expect(response.status).toBe(200);
+    expect(response.status, await response.clone().text()).toBe(200);
     const body = await response.json<SessionEventBootstrapResponse>();
     const { eventBootstrap, ...session } = body;
     expect(isSessionTokenResponse(session)).toBe(true);
@@ -174,6 +200,7 @@ describe("composed session Worker with canonical D1 and Durable Object state", (
     const revalidated = await handleRequest(
       new Request(`https://api.mons.link/events/snapshot?eventId=${eventId}`, {
         headers: {
+          [APPLICATION_DATA_HEADER]: String(APPLICATION_DATA_EPOCH),
           Origin: "https://mons.link",
           Authorization: `Bearer ${body.accessToken}`,
           "If-None-Match": seed.etag,
@@ -213,6 +240,7 @@ describe("composed session Worker with canonical D1 and Durable Object state", (
         {
           method: "POST",
           headers: {
+            [APPLICATION_DATA_HEADER]: String(APPLICATION_DATA_EPOCH),
             Origin: "https://mons.link",
             ...(endpoint === "anonymous"
               ? { "Content-Type": "application/json" }
@@ -224,7 +252,7 @@ describe("composed session Worker with canonical D1 and Durable Object state", (
         },
       );
       const response = await handleRequest(request, environment, {}, ctx);
-      expect(response.status).toBe(200);
+      expect(response.status, await response.clone().text()).toBe(200);
       const body = await response.json<SessionBootstrapResponse>();
       const { gameBootstrap, ...session } = body;
       expect(isSessionTokenResponse(session)).toBe(true);
@@ -268,6 +296,7 @@ describe("composed session Worker with canonical D1 and Durable Object state", (
         {
           method: "POST",
           headers: {
+            [APPLICATION_DATA_HEADER]: String(APPLICATION_DATA_EPOCH),
             Origin: "https://mons.link",
             "Content-Type": "application/json",
           },
@@ -278,7 +307,7 @@ describe("composed session Worker with canonical D1 and Durable Object state", (
       {},
       ctx,
     );
-    expect(response.status).toBe(200);
+    expect(response.status, await response.clone().text()).toBe(200);
     const body = await response.json<SessionBootstrapResponse>();
     const { gameBootstrap, ...session } = body;
     expect(isSessionTokenResponse(session)).toBe(true);

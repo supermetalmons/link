@@ -1,10 +1,8 @@
 import {
-  readTelegramAnnouncementPayloadDocument,
-  type TelegramAnnouncementPayloadDocument,
-  type TelegramAlbumPayload,
-  type TelegramReminderPayload,
+  parseTelegramAnnouncementPayload,
   type TelegramAnnouncementOutcomeStatus,
   type RetainedTelegramAnnouncementAttempt,
+  type TelegramAnnouncementAttempt,
 } from "./telegramAnnouncementRecords.ts";
 import type { TelegramRepository } from "../../../runtime/telegram/deliveryEngine.js";
 import {
@@ -17,53 +15,27 @@ import type {
 } from "./repositoryContracts.ts";
 import { validateTelegramMessageKey } from "../../../runtime/telegram/desiredStateCore.js";
 import { validateTelegramTransactionDecision } from "./telegramTransaction.ts";
-import type { EventAnnouncementKind } from "./eventAnnouncementKinds.ts";
 import { runOptimisticTransaction } from "./optimisticTransaction.ts";
 import { createVersionedJsonRowStore } from "./versionedJsonD1.ts";
 import {
   controlDocument,
+  readTelegramControlDocument,
+  readTelegramMessageDocument,
   type TelegramControlDocument,
 } from "../../../runtime/telegram/records.js";
+import {
+  decodeAnnouncement,
+  type TelegramAnnouncementRecord,
+  type AnnouncementRow,
+} from "./telegramAnnouncementRows.ts";
 
 const MAX_D1_TRANSACTION_ATTEMPTS = 25;
 
 export type TelegramStorageMode = "d1" | "frozen";
 
-export type TelegramAnnouncementRecord = {
-  kind?: EventAnnouncementKind;
-  createdAtMs: number;
-  messageIds: number[] | null;
-  payloadDigest: string;
-  status: string;
-  updatedAtMs: number;
-  eventId?: string | null;
-  startAtMs?: number | null;
-  runAtMs?: number | null;
-  firstQueuedAtMs?: number | null;
-  payload?: TelegramAnnouncementPayloadDocument | null;
-  attemptId?: string | null;
-  attemptCount?: number | null;
-  retryAtMs?: number | null;
-  errorCode?: string | null;
-};
-
-type TelegramAnnouncementAttemptFields = {
-  eventId: string;
-  startAtMs: number;
-  runAtMs: number;
-  firstQueuedAtMs: number;
-  attemptId: string;
-  expectedAttemptId: string | null;
-};
-export type TelegramAnnouncementAttempt = TelegramAnnouncementAttemptFields &
-  (
-    | { kind?: "prizes"; payload: TelegramAlbumPayload }
-    | { kind: "reminder"; payload: TelegramReminderPayload }
-  );
-type AnnouncementAttemptEvidence = TelegramAnnouncementAttemptFields & {
-  kind?: unknown;
-  payload: unknown;
-};
+export type { TelegramAnnouncementAttempt } from "./telegramAnnouncementRecords.ts";
+export { decodeAnnouncement } from "./telegramAnnouncementRows.ts";
+export type { TelegramAnnouncementRecord } from "./telegramAnnouncementRows.ts";
 
 export type TelegramAnnouncementRepository = {
   get(requestId: string): Promise<TelegramAnnouncementRecord | null>;
@@ -127,24 +99,21 @@ function encodeJsonRecord(value: unknown): string {
   }
 }
 
-function retainedRecord<Value extends object>(value: unknown): Value | null {
-  const retained: unknown = asRecord(value);
-  return retained as Value | null;
-}
-
 async function readRow<Value extends object>(
   db: D1Database,
-  table: "telegram_delivery_control" | "telegram_messages",
+  table: "telegram_delivery_control_canonical" | "telegram_messages_canonical",
   key: string | number,
+  decode: (value: unknown) => Value | null,
 ): Promise<{ record: Value; version: number } | null> {
   const row = await createVersionedJsonRowStore(db, {
     table,
     key: [key],
   }).read();
   if (!row) return null;
-  const record: unknown = parseJsonRecord(row.record_json);
+  const record = decode(parseJsonRecord(row.record_json));
+  if (!record) throw new TelegramD1Failure();
   return {
-    record: record as Value,
+    record,
     version: safeInteger(row.version),
   };
 }
@@ -154,7 +123,9 @@ async function transactRow<Value extends object>(
   input: {
     key: string | number;
     now: () => number;
-    table: "telegram_delivery_control" | "telegram_messages";
+    decode: (value: unknown) => Value | null;
+    table:
+      "telegram_delivery_control_canonical" | "telegram_messages_canonical";
     updater: (current: Value | null) => TransactionDecision<Value>;
   },
 ): Promise<TransactionResult<Value>> {
@@ -164,15 +135,17 @@ async function transactRow<Value extends object>(
   });
   return runOptimisticTransaction({
     maxAttempts: MAX_D1_TRANSACTION_ATTEMPTS,
-    read: () => readRow<Value>(db, input.table, input.key),
+    read: () => readRow<Value>(db, input.table, input.key, input.decode),
     getValue: (current) => current?.record ?? null,
     decide(current) {
       const decision = validateTelegramTransactionDecision(
         input.updater(current),
       );
+      const metadata =
+        decision.decision === undefined ? {} : { decision: decision.decision };
       return decision.commit
-        ? { value: decision.value, decision: decision.decision }
-        : { commit: false, decision: decision.decision };
+        ? { value: decision.value, ...metadata }
+        : { commit: false, ...metadata };
     },
     async write(current, next) {
       const updatedAtMs = Math.max(1, Math.floor(input.now()));
@@ -183,17 +156,19 @@ async function transactRow<Value extends object>(
         const changes = await rows.deleteIfVersion(current.version);
         return { applied: changes === 1, value: null };
       }
-      const encoded = encodeJsonRecord(next);
+      const validated = input.decode(next);
+      if (!validated) throw new TelegramD1Failure();
+      const encoded = encodeJsonRecord(validated);
       if (!current) {
         const changes = await rows.insertIfAbsent(encoded, updatedAtMs);
-        return { applied: changes === 1, value: retainedRecord<Value>(next) };
+        return { applied: changes === 1, value: validated };
       }
       const changes = await rows.updateIfVersion(
         current.version,
         encoded,
         updatedAtMs,
       );
-      return { applied: changes === 1, value: retainedRecord<Value>(next) };
+      return { applied: changes === 1, value: validated };
     },
     conflictError: () => new TelegramD1Failure(),
   });
@@ -207,13 +182,20 @@ export function createD1TelegramRepository(
     async readMessage(messageKey) {
       const key = validateTelegramMessageKey(messageKey);
       return (
-        (await readRow<TelegramStoredRecord>(db, "telegram_messages", key))
-          ?.record ?? null
+        (
+          await readRow<TelegramStoredRecord>(
+            db,
+            "telegram_messages_canonical",
+            key,
+            readTelegramMessageDocument,
+          )
+        )?.record ?? null
       );
     },
     transactMessage(messageKey, updater) {
       return transactRow(db, {
-        table: "telegram_messages",
+        table: "telegram_messages_canonical",
+        decode: readTelegramMessageDocument,
         key: validateTelegramMessageKey(messageKey),
         updater,
         now,
@@ -224,82 +206,23 @@ export function createD1TelegramRepository(
         (
           await readRow<TelegramControlDocument>(
             db,
-            "telegram_delivery_control",
+            "telegram_delivery_control_canonical",
             1,
+            readTelegramControlDocument,
           )
-        )?.record ?? controlDocument({})
+        )?.record ?? controlDocument()
       );
     },
     transactControl(updater) {
       return transactRow(db, {
-        table: "telegram_delivery_control",
+        table: "telegram_delivery_control_canonical",
+        decode: readTelegramControlDocument,
         key: 1,
         updater,
         now,
       });
     },
   });
-}
-
-type AnnouncementRow = {
-  announcement_kind: EventAnnouncementKind;
-  created_at_ms: number;
-  message_ids_json: string | null;
-  payload_digest: string;
-  status: string;
-  updated_at_ms: number;
-  event_id: string | null;
-  start_at_ms: number | null;
-  run_at_ms: number | null;
-  first_queued_at_ms: number | null;
-  payload_json: string | null;
-  attempt_id: string | null;
-  attempt_count: number | null;
-  retry_at_ms: number | null;
-  error_code: string | null;
-};
-
-function parseMessageIds(value: string | null): number[] | null {
-  if (value === null) return null;
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(value) as unknown;
-  } catch (error) {
-    throw new TelegramD1Failure({ cause: error });
-  }
-  return Array.isArray(parsed) &&
-    parsed.length > 0 &&
-    parsed.every(
-      (messageId) => Number.isSafeInteger(messageId) && messageId > 0,
-    )
-    ? parsed
-    : null;
-}
-
-function decodeAnnouncement(row: AnnouncementRow): TelegramAnnouncementRecord {
-  if (!row.payload_digest || !row.status) throw new TelegramD1Failure();
-  return {
-    kind: row.announcement_kind,
-    createdAtMs: safeInteger(row.created_at_ms),
-    messageIds: parseMessageIds(row.message_ids_json),
-    payloadDigest: row.payload_digest,
-    status: row.status,
-    updatedAtMs: safeInteger(row.updated_at_ms),
-    eventId: row.event_id,
-    startAtMs: row.start_at_ms,
-    runAtMs: row.run_at_ms,
-    firstQueuedAtMs: row.first_queued_at_ms,
-    payload:
-      row.payload_json === null
-        ? null
-        : readTelegramAnnouncementPayloadDocument(
-            parseJsonRecord(row.payload_json),
-          )!,
-    attemptId: row.attempt_id,
-    attemptCount: row.attempt_count,
-    retryAtMs: row.retry_at_ms,
-    errorCode: row.error_code,
-  };
 }
 
 export function createD1TelegramAnnouncementRepository(
@@ -309,11 +232,11 @@ export function createD1TelegramAnnouncementRepository(
     try {
       const row = await db
         .prepare(
-          `SELECT payload_digest, status, message_ids_json,
+          `SELECT schema_version, payload_digest, status, message_ids_json,
                   created_at_ms, updated_at_ms, event_id, start_at_ms,
                   run_at_ms, first_queued_at_ms, payload_json, attempt_id,
                   attempt_count, retry_at_ms, error_code, announcement_kind
-           FROM telegram_event_prize_announcements
+           FROM telegram_event_prize_announcements_canonical
            WHERE request_id = ?`,
         )
         .bind(requestId)
@@ -329,11 +252,12 @@ export function createD1TelegramAnnouncementRepository(
     async reserve(input) {
       try {
         if (input.attempt) {
-          const retained: unknown = input.attempt;
-          const attempt = retained as AnnouncementAttemptEvidence;
+          const attempt = input.attempt;
+          if (!parseTelegramAnnouncementPayload(attempt.payload, attempt.kind))
+            throw new TelegramD1Failure();
           const result = await db
             .prepare(
-              `INSERT INTO telegram_event_prize_announcements (
+              `INSERT INTO telegram_event_prize_announcements_canonical (
                  request_id, payload_digest, status, message_ids_json,
                  created_at_ms, updated_at_ms, event_id, start_at_ms,
                  run_at_ms, first_queued_at_ms, payload_json,
@@ -345,13 +269,13 @@ export function createD1TelegramAnnouncementRepository(
                  start_at_ms = excluded.start_at_ms, run_at_ms = excluded.run_at_ms,
                  first_queued_at_ms = excluded.first_queued_at_ms,
                  payload_json = excluded.payload_json, attempt_id = excluded.attempt_id,
-                 attempt_count = telegram_event_prize_announcements.attempt_count + 1,
+                 attempt_count = telegram_event_prize_announcements_canonical.attempt_count + 1,
                  retry_at_ms = NULL, error_code = NULL
-               WHERE telegram_event_prize_announcements.status = 'retryable'
-                 AND telegram_event_prize_announcements.event_id = excluded.event_id
-                 AND telegram_event_prize_announcements.announcement_kind = excluded.announcement_kind
-                 AND telegram_event_prize_announcements.attempt_id IS ?
-                 AND telegram_event_prize_announcements.retry_at_ms <= excluded.updated_at_ms`,
+               WHERE telegram_event_prize_announcements_canonical.status = 'retryable'
+                 AND telegram_event_prize_announcements_canonical.event_id = excluded.event_id
+                 AND telegram_event_prize_announcements_canonical.announcement_kind = excluded.announcement_kind
+                 AND telegram_event_prize_announcements_canonical.attempt_id IS ?
+                 AND telegram_event_prize_announcements_canonical.retry_at_ms <= excluded.updated_at_ms`,
             )
             .bind(
               input.requestId,
@@ -375,10 +299,10 @@ export function createD1TelegramAnnouncementRepository(
         }
         const result = await db
           .prepare(
-            `INSERT INTO telegram_event_prize_announcements (
+            `INSERT INTO telegram_event_prize_announcements_canonical (
                request_id, payload_digest, status, message_ids_json,
-               created_at_ms, updated_at_ms
-             ) VALUES (?, ?, 'sending', NULL, ?, ?)
+               created_at_ms, updated_at_ms, announcement_kind
+             ) VALUES (?, ?, 'sending', NULL, ?, ?, 'prizes')
              ON CONFLICT (request_id) DO NOTHING`,
           )
           .bind(
@@ -401,7 +325,7 @@ export function createD1TelegramAnnouncementRepository(
       try {
         const result = await db
           .prepare(
-            `UPDATE telegram_event_prize_announcements
+            `UPDATE telegram_event_prize_announcements_canonical
              SET status = ?, message_ids_json = ?, updated_at_ms = ?,
                  retry_at_ms = ?, error_code = ?
              WHERE request_id = ? AND payload_digest = ? AND status = 'sending'

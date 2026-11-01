@@ -1,3 +1,4 @@
+import { parseQueueEnvelope } from "../src/queueEnvelope.ts";
 import assert from "node:assert/strict";
 import test from "node:test";
 import { handleAuthRecoveryMessage } from "../src/authRecovery.ts";
@@ -90,7 +91,9 @@ test("enqueues confirmed progress before acknowledging even at the retry limit",
     AUTH_RECOVERY_QUEUE: {
       ...TELEGRAM_TEST_ENV.AUTH_RECOVERY_QUEUE,
       async send(body, options) {
-        operations.push({ send: { body, options } });
+        const envelope = parseQueueEnvelope(body, "AUTH_RECOVERY_QUEUE");
+        assert.ok(envelope);
+        operations.push({ send: { body: envelope.payload, options } });
         startedSend();
         await pendingSend;
         return TELEGRAM_TEST_ENV.AUTH_RECOVERY_QUEUE.send();
@@ -131,7 +134,9 @@ test("retries a failed continuation send without acknowledging", async () => {
     AUTH_RECOVERY_QUEUE: {
       ...TELEGRAM_TEST_ENV.AUTH_RECOVERY_QUEUE,
       async send(body, options) {
-        operations.push({ send: { body, options } });
+        const envelope = parseQueueEnvelope(body, "AUTH_RECOVERY_QUEUE");
+        assert.ok(envelope);
+        operations.push({ send: { body: envelope.payload, options } });
         throw new Error("queue-unavailable");
       },
     },

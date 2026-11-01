@@ -147,7 +147,7 @@ test("sleeps until the one-hour target, preserves discovery proof, and safely re
   assert.deepEqual(state.sleeps, [
     { name: "wait for prize announcement", timestamp: RUN_AT_MS },
   ]);
-  assert.equal(state.configs[0].retries?.limit, 0);
+  assert.equal(state.configs[0]!.retries?.limit, 0);
   assert.equal(state.sends(), 1);
   assert.equal(state.acknowledgements(), 1);
   assert.equal(state.refreshes(), 0);
@@ -270,7 +270,7 @@ test("retries only within the fixed grace and honors retryAtMs", async () => {
   );
   assert.deepEqual(await state.run(), { status: "sent" });
   assert.equal(state.sends(), 2);
-  assert.equal(state.sleeps[1].timestamp, RUN_AT_MS + 20_000);
+  assert.equal(state.sleeps[1]!.timestamp, RUN_AT_MS + 20_000);
 });
 
 for (const kind of ["prizes", "reminder"] as const) {
@@ -359,7 +359,7 @@ test("unexpected errors only retry through the guarded delivery operation", asyn
   });
   assert.deepEqual(await state.run(), { status: "uncertain" });
   assert.equal(state.sends(), 2);
-  assert.equal(state.sleeps[1].timestamp, RUN_AT_MS + 1_000);
+  assert.equal(state.sleeps[1]!.timestamp, RUN_AT_MS + 1_000);
 });
 
 test("rejects altered prize timing and reasons before any step", async () => {

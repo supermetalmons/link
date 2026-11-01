@@ -1,8 +1,11 @@
+import { canonicalAutomatchFixture } from "../test/automatchRecordFixture.ts";
 import { parseAutomatchPath } from "../test/legacyAutomatchStoreFixture.ts";
 import { createLegacyAutomatchD1Store as createAutomatchD1Store } from "../test/legacyAutomatchStoreFixture.ts";
 import { matchTestPort } from "../test/gameSessionTestPorts.ts";
 import { beforeAll, beforeEach, describe, expect, it } from "vitest";
-import { env } from "cloudflare:workers";
+import { env as baseEnv } from "cloudflare:workers";
+import { activateCanonicalApplicationFixture } from "./applicationRoomFixture.ts";
+import { eventApplicationEnvironment } from "./eventApplicationFixture.ts";
 import type { D1Migration } from "cloudflare:test";
 import { applyStrictMatchStateTestMigrations } from "./strictMatchStateTestFixture.ts";
 import { createSeededRandom } from "@mons/shared/ids";
@@ -37,6 +40,7 @@ import type {
   ProfileOwnershipSnapshot,
 } from "../src/profileOwnership.ts";
 
+const env = eventApplicationEnvironment(baseEnv);
 const testEnv = env as Env & { TEST_D1_MIGRATIONS: D1Migration[] };
 const db = env.PROFILE_GAMES_DB;
 let fixtureId = 0;
@@ -259,7 +263,7 @@ function start(
 ) {
   return startAutomatch(
     session.identity,
-    { operationId, emojiId: 1, aura: "" },
+    { operationId, emojiId: 1, aura: "none" as const },
     session.repository,
     session.dependencies,
   );
@@ -269,14 +273,14 @@ async function assertSettled() {
   expect(
     await db
       .prepare(
-        "SELECT count(*) AS count FROM game_session_transitions WHERE status = 'pending'",
+        "SELECT count(*) AS count FROM game_session_transitions_canonical WHERE status = 'pending'",
       )
       .first("count"),
   ).toBe(0);
   expect(
     await db
       .prepare(
-        "SELECT count(*) AS count FROM game_session_transition_resources",
+        "SELECT count(*) AS count FROM game_session_transition_resources_canonical",
       )
       .first("count"),
   ).toBe(0);
@@ -294,6 +298,7 @@ async function assertSettled() {
 
 describe("automatch lifecycle through D1 persistence", () => {
   beforeAll(async () => {
+    await activateCanonicalApplicationFixture();
     await applyStrictMatchStateTestMigrations(db, testEnv.TEST_D1_MIGRATIONS);
   });
 
@@ -311,18 +316,18 @@ describe("automatch lifecycle through D1 persistence", () => {
       db.prepare(
         "UPDATE invite_source_control SET backend = 'd1', state = 'active', epoch = 1, freeze_generation = 0, verified_at_ms = 1, activated_at_ms = 1 WHERE singleton = 1",
       ),
-      db.prepare("DELETE FROM invite_sources"),
+      db.prepare("DELETE FROM invite_sources_canonical"),
       db.prepare("DELETE FROM invite_source_write_admissions"),
-      db.prepare("DELETE FROM login_match_discovery"),
-      db.prepare("DELETE FROM game_session_transition_resources"),
-      db.prepare("DELETE FROM game_session_transitions"),
+      db.prepare("DELETE FROM login_match_discovery_canonical"),
+      db.prepare("DELETE FROM game_session_transition_resources_canonical"),
+      db.prepare("DELETE FROM game_session_transitions_canonical"),
       db.prepare("DELETE FROM game_session_mutation_locks"),
       db.prepare("DELETE FROM automatch_write_admissions"),
-      db.prepare("DELETE FROM automatch_entries"),
-      db.prepare("DELETE FROM automatch_telegram_sources"),
-      db.prepare("DELETE FROM automatch_telegram_projection_outbox"),
-      db.prepare("DELETE FROM game_session_projection_outbox"),
-      db.prepare("DELETE FROM game_session_mutation_receipts"),
+      db.prepare("DELETE FROM automatch_entries_canonical"),
+      db.prepare("DELETE FROM automatch_telegram_sources_canonical"),
+      db.prepare("DELETE FROM automatch_telegram_projection_outbox_canonical"),
+      db.prepare("DELETE FROM game_session_projection_outbox_canonical"),
+      db.prepare("DELETE FROM game_session_mutation_receipts_canonical"),
     ]);
   });
 
@@ -337,7 +342,7 @@ describe("automatch lifecycle through D1 persistence", () => {
           ),
         ).toMatchObject({
           ...(creation.actorUid.startsWith("auto-")
-            ? { emojiId: "", aura: null }
+            ? { emojiId: 0, aura: "none" }
             : { emojiId: creation.emojiId, aura: creation.aura }),
           sessionCreation: creation.sourceId,
         });
@@ -351,7 +356,7 @@ describe("automatch lifecycle through D1 persistence", () => {
       inviteId: "appearance-manual",
       operationId: crypto.randomUUID(),
       emojiId: 7,
-      aura: "host-aura",
+      aura: "none" as const,
     };
     const created = await createManualInvite(
       host.identity,
@@ -373,7 +378,7 @@ describe("automatch lifecycle through D1 persistence", () => {
         ...createRequest,
         operationId: crypto.randomUUID(),
         emojiId: 8,
-        aura: "guest-aura",
+        aura: "none" as const,
       },
       guest.repository,
       guest.dependencies,
@@ -391,7 +396,7 @@ describe("automatch lifecycle through D1 persistence", () => {
         operationId: crypto.randomUUID(),
         matchId: rematch.matchId,
         emojiId: 10,
-        aura: "guest-rematch",
+        aura: "none" as const,
       },
       guest.repository,
       guest.dependencies,
@@ -419,42 +424,42 @@ describe("automatch lifecycle through D1 persistence", () => {
         matchId: created.matchId,
         actorUid: "host",
         emojiId: 7,
-        aura: "host-aura",
+        aura: "none" as const,
       },
       {
         inviteId: created.inviteId,
         matchId: created.matchId,
         actorUid: "guest",
         emojiId: 8,
-        aura: "guest-aura",
+        aura: "none" as const,
       },
       {
         inviteId: created.inviteId,
         matchId: rematch.matchId,
         actorUid: "host",
         emojiId: 9,
-        aura: "host-aura",
+        aura: "none" as const,
       },
       {
         inviteId: created.inviteId,
         matchId: rematch.matchId,
         actorUid: "guest",
         emojiId: 10,
-        aura: "guest-rematch",
+        aura: "none" as const,
       },
       {
         inviteId: queued.inviteId,
         matchId: queued.inviteId,
         actorUid: "auto-host",
         emojiId: 0,
-        aura: "",
+        aura: "none" as const,
       },
       {
         inviteId: queued.inviteId,
         matchId: queued.inviteId,
         actorUid: "auto-guest",
         emojiId: 0,
-        aura: "",
+        aura: "none" as const,
       },
     ]);
     expect(new Set(prepared.map((creation) => creation.sourceId)).size).toBe(6);
@@ -520,7 +525,7 @@ describe("automatch lifecycle through D1 persistence", () => {
   it("pairs simultaneous FIFO starts instead of leaving two waiting entries", async () => {
     await db
       .prepare(
-        `UPDATE automatch_runtime_control SET metadata_json = '{"queueSelection":"fifo"}' WHERE singleton = 1`,
+        `UPDATE automatch_runtime_control SET metadata_json = NULL WHERE singleton = 1`,
       )
       .run();
     const memoryState = new MemoryMatchState();
@@ -543,7 +548,9 @@ describe("automatch lifecycle through D1 persistence", () => {
     expect(await createAutomatchD1Store(db).list("automatch")).toHaveLength(0);
     expect(
       await db
-        .prepare("SELECT count(*) AS count FROM automatch_pending_enqueues")
+        .prepare(
+          "SELECT count(*) AS count FROM automatch_pending_enqueues_canonical",
+        )
         .first("count"),
     ).toBe(0);
     expect(await start(client(memoryState, "first"), operations[0])).toEqual(
@@ -555,50 +562,29 @@ describe("automatch lifecycle through D1 persistence", () => {
     await assertSettled();
   });
 
-  it("selects the oldest ready FIFO ticket after activating over legacy queued entries", async () => {
+  it("enforces FIFO with null provenance metadata and rejects a stale empty selection", async () => {
     const memoryState = new MemoryMatchState();
-    const first = client(memoryState, "first");
-    first.repository.readFirstAutomatchEntry = async () => null;
-    const second = client(memoryState, "second");
-    second.repository.readFirstAutomatchEntry = async () => null;
-    const pendingFirst = await start(first, crypto.randomUUID());
-    const pendingSecond = await start(second, crypto.randomUUID());
-    if (!pendingFirst.ok || !pendingSecond.ok)
-      throw new Error("expected pending starts");
-    await db.batch([
-      db
-        .prepare(
-          "UPDATE automatch_entries SET payload_json = json_set(payload_json, '$.timestamp', ?), revision = revision + 1 WHERE record_key = ?",
-        )
-        .bind(20, pendingFirst.inviteId),
-      db
-        .prepare(
-          "UPDATE automatch_entries SET payload_json = json_set(payload_json, '$.timestamp', ?), revision = revision + 1 WHERE record_key = ?",
-        )
-        .bind(10, pendingSecond.inviteId),
-      db.prepare(
-        `UPDATE automatch_runtime_control SET metadata_json = '{"queueSelection":"fifo"}' WHERE singleton = 1`,
-      ),
-    ]);
+    const pending = await start(
+      client(memoryState, "first"),
+      crypto.randomUUID(),
+    );
+    if (!pending.ok) throw new Error("expected pending start");
+    const stale = client(memoryState, "second");
+    stale.repository.readFirstAutomatchEntry = async () => null;
+    await expect(start(stale, crypto.randomUUID())).rejects.toThrow(
+      "automatch-selection-stale",
+    );
+    expect(await createAutomatchD1Store(db).list("automatch")).toHaveLength(1);
     expect(
       await start(client(memoryState, "guest"), crypto.randomUUID()),
-    ).toMatchObject({
-      ok: true,
-      mode: "matched",
-      inviteId: pendingSecond.inviteId,
-    });
-    expect(
-      await createAutomatchD1Store(db).getPath(
-        `automatch/${pendingFirst.inviteId}`,
-      ),
-    ).not.toBeNull();
+    ).toMatchObject({ ok: true, mode: "matched", inviteId: pending.inviteId });
     await assertSettled();
   });
 
   it("recovers a FIFO pending enqueue after ambiguous creation before admitting another player", async () => {
     await db
       .prepare(
-        `UPDATE automatch_runtime_control SET metadata_json = '{"queueSelection":"fifo"}' WHERE singleton = 1`,
+        `UPDATE automatch_runtime_control SET metadata_json = NULL WHERE singleton = 1`,
       )
       .run();
     const memoryState = new MemoryMatchState();
@@ -608,7 +594,9 @@ describe("automatch lifecycle through D1 persistence", () => {
     ).rejects.toThrow();
     expect(
       await db
-        .prepare("SELECT count(*) AS count FROM automatch_pending_enqueues")
+        .prepare(
+          "SELECT count(*) AS count FROM automatch_pending_enqueues_canonical",
+        )
         .first("count"),
     ).toBe(1);
     memoryState.failWrites = false;
@@ -620,7 +608,9 @@ describe("automatch lifecycle through D1 persistence", () => {
     expect(await createAutomatchD1Store(db).list("automatch")).toHaveLength(0);
     expect(
       await db
-        .prepare("SELECT count(*) AS count FROM automatch_pending_enqueues")
+        .prepare(
+          "SELECT count(*) AS count FROM automatch_pending_enqueues_canonical",
+        )
         .first("count"),
     ).toBe(0);
     await assertSettled();
@@ -629,7 +619,7 @@ describe("automatch lifecycle through D1 persistence", () => {
   it("recovers an owned-ticket receipt reservation instead of enqueueing a second waiting host", async () => {
     await db
       .prepare(
-        `UPDATE automatch_runtime_control SET metadata_json = '{"queueSelection":"fifo"}' WHERE singleton = 1`,
+        `UPDATE automatch_runtime_control SET metadata_json = NULL WHERE singleton = 1`,
       )
       .run();
     const memoryState = new MemoryMatchState();
@@ -681,7 +671,7 @@ describe("automatch lifecycle through D1 persistence", () => {
       inviteId: pending.inviteId,
       operationId: crypto.randomUUID(),
       emojiId: 2,
-      aura: "",
+      aura: "none" as const,
     };
     const joined = await joinInvite(
       guest.identity,
@@ -707,7 +697,7 @@ describe("automatch lifecycle through D1 persistence", () => {
     expect(rematch).toMatchObject({
       ok: true,
       matchId: `${pending.inviteId}1`,
-      rematches: "1",
+      rematches: { state: "open", indices: [1] },
     });
     expect(
       memoryState.read(`players/guest/matches/${pending.inviteId}1`),
@@ -726,74 +716,70 @@ describe("automatch lifecycle through D1 persistence", () => {
     await assertSettled();
   });
 
-  it.each([false, true])(
-    "reuses an ensured rematch without resetting it (legacy: %s)",
-    async (legacy) => {
-      const memoryState = new MemoryMatchState();
-      const host = client(memoryState, "host");
-      const guest = client(memoryState, "guest");
-      const pending = await start(host);
-      if (!pending.ok) throw new Error("expected-pending-invite");
-      await start(guest);
-      const request = () => ({
-        inviteId: pending.inviteId,
-        operationId: crypto.randomUUID(),
-        emojiId: 1,
-        aura: "",
-      });
-      const proposed = await proposeRematch(
-        host.identity,
-        request(),
-        host.repository,
-        host.dependencies,
-      );
-      await ensureParticipantMatch(
-        guest.identity,
-        { ...request(), matchId: proposed.matchId },
-        guest.repository,
-        guest.dependencies,
-      );
-      const path = `players/guest/matches/${proposed.matchId}`;
-      const stored = memoryState.read(path);
-      if (!record(stored)) throw new Error("expected-ensured-match");
-      if (legacy) delete stored.sessionCreation;
-      stored.flatMovesString = "preserved-rematch-move";
-      stored.timer = "2;123456";
-      memoryState.put(path, stored);
-      const approvalRequest = request();
-      const approved = await proposeRematch(
+  it("reuses an ensured rematch without resetting it", async () => {
+    const memoryState = new MemoryMatchState();
+    const host = client(memoryState, "host");
+    const guest = client(memoryState, "guest");
+    const pending = await start(host);
+    if (!pending.ok) throw new Error("expected-pending-invite");
+    await start(guest);
+    const request = () => ({
+      inviteId: pending.inviteId,
+      operationId: crypto.randomUUID(),
+      emojiId: 1,
+      aura: "none" as const,
+    });
+    const proposed = await proposeRematch(
+      host.identity,
+      request(),
+      host.repository,
+      host.dependencies,
+    );
+    await ensureParticipantMatch(
+      guest.identity,
+      { ...request(), matchId: proposed.matchId },
+      guest.repository,
+      guest.dependencies,
+    );
+    const path = `players/guest/matches/${proposed.matchId}`;
+    const stored = memoryState.read(path);
+    if (!record(stored)) throw new Error("expected-ensured-match");
+    stored.flatMovesString = "preserved-rematch-move";
+    stored.timer = { state: "running", turnNumber: 2, deadlineAtMs: 123456 };
+    memoryState.put(path, stored);
+    const approvalRequest = request();
+    const approved = await proposeRematch(
+      guest.identity,
+      approvalRequest,
+      guest.repository,
+      guest.dependencies,
+    );
+    expect(approved.rematches).toEqual({ state: "open", indices: [1] });
+    expect(approved.match).toMatchObject({
+      flatMovesString: stored.flatMovesString,
+      timer: stored.timer,
+    });
+    expect(memoryState.read(path)).toEqual(stored);
+    expect(
+      await proposeRematch(
         guest.identity,
         approvalRequest,
         guest.repository,
         guest.dependencies,
-      );
-      expect(approved.rematches).toBe("1");
-      expect(approved.match).toMatchObject({
-        flatMovesString: stored.flatMovesString,
-        timer: stored.timer,
-      });
-      expect(memoryState.read(path)).toEqual(stored);
-      expect(
-        await proposeRematch(
-          guest.identity,
-          approvalRequest,
-          guest.repository,
-          guest.dependencies,
-        ),
-      ).toEqual(approved);
-      expect(await host.persistence.sweep()).toEqual({
-        recovered: 0,
-        failed: 0,
-      });
-      await endRematchSeries(
-        host.identity,
-        { inviteId: pending.inviteId, operationId: crypto.randomUUID() },
-        host.repository,
-        host.dependencies,
-      );
-      await assertSettled();
-    },
-  );
+      ),
+    ).toEqual(approved);
+    expect(await host.persistence.sweep()).toEqual({
+      recovered: 0,
+      failed: 0,
+    });
+    await endRematchSeries(
+      host.identity,
+      { inviteId: pending.inviteId, operationId: crypto.randomUUID() },
+      host.repository,
+      host.dependencies,
+    );
+    await assertSettled();
+  });
 
   it("rejects an invalid existing rematch before reserving the invite", async () => {
     const memoryState = new MemoryMatchState();
@@ -806,7 +792,7 @@ describe("automatch lifecycle through D1 persistence", () => {
       inviteId: pending.inviteId,
       operationId: crypto.randomUUID(),
       emojiId: 1,
-      aura: "",
+      aura: "none" as const,
     };
     const proposed = await proposeRematch(
       host.identity,
@@ -880,7 +866,11 @@ describe("automatch lifecycle through D1 persistence", () => {
       get(target, property) {
         if (property === "prepare") {
           return (query: string) => {
-            if (query.startsWith("INSERT INTO game_session_transitions "))
+            if (
+              query.startsWith(
+                "INSERT INTO game_session_transitions_canonical ",
+              )
+            )
               preparing = true;
             return target.prepare(query);
           };
@@ -943,7 +933,7 @@ describe("automatch lifecycle through D1 persistence", () => {
     expect(
       await db
         .prepare(
-          "SELECT count(*) AS count FROM game_session_transitions WHERE status = 'pending'",
+          "SELECT count(*) AS count FROM game_session_transitions_canonical WHERE status = 'pending'",
         )
         .first("count"),
     ).toBe(1);
@@ -987,12 +977,19 @@ describe("automatch lifecycle through D1 persistence", () => {
     ]);
     await db
       .prepare(
-        `INSERT INTO automatch_entries (record_key, payload_json, revision, updated_at_ms)
+        `INSERT INTO automatch_entries_canonical (record_key, payload_json, revision, updated_at_ms)
       SELECT json_extract(value, '$.key'),
-        json_object('uid', json_extract(value, '$.uid'), 'timestamp', json_extract(value, '$.timestamp')),
+        json_extract(value, '$.payload'),
         1, 1 FROM json_each(?)`,
       )
-      .bind(JSON.stringify(entries))
+      .bind(
+        JSON.stringify(
+          entries.map(({ key, uid, timestamp }) => ({
+            key,
+            payload: canonicalAutomatchFixture("automatch", { uid, timestamp }),
+          })),
+        ),
+      )
       .run();
     const queries: string[] = [];
     const session = client(
@@ -1001,17 +998,19 @@ describe("automatch lifecycle through D1 persistence", () => {
       countReads(db, queries),
     );
     const found = await findOwnedQueuedAutomatches(
-      [...uids, uids[0]],
+      [...uids, uids[0]!],
       session.repository,
     );
     expect(queries).toHaveLength(2);
     expect(queries[0]).toContain("automatch_runtime_control");
-    expect(queries[1]).toContain("INDEXED BY idx_automatch_entries_uid");
+    expect(queries[1]).toContain(
+      "INDEXED BY idx_automatch_entries_uid_canonical",
+    );
     expect(found).toHaveLength(1024);
     expect(found.every((entry) => entry.data.timestamp !== 10_000)).toBe(true);
     expect(
       found
-        .filter((entry) => entry.data.uid === uids[0])
+        .filter((entry) => entry.data.uid === uids[0]!)
         .map((entry) => entry.inviteId),
     ).toEqual(["10", "2"]);
     expect(
@@ -1022,7 +1021,9 @@ describe("automatch lifecycle through D1 persistence", () => {
     );
     const store = createAutomatchD1Store(db);
     expect(
-      (await store.listEntriesByLogins([uids[0]], 1)).map((entry) => entry.key),
+      (await store.listEntriesByLogins([uids[0]!], 1)).map(
+        (entry) => entry.key,
+      ),
     ).toEqual(["2"]);
     await expect(
       store.listEntriesByLogins([...uids, "too-many"]),

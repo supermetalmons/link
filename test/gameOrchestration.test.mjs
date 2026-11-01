@@ -1,3 +1,4 @@
+import { canonicalMatch, required } from "./fixtures/canonicalData.mjs";
 import assert from "node:assert/strict";
 import { registerHooks } from "node:module";
 import test from "node:test";
@@ -51,17 +52,9 @@ const {
 const { getLifecycleCounters } =
   await import("../src/lifecycle/lifecycleDiagnostics.ts");
 
-const match = (values = {}) => ({
-  version: 1,
-  color: "white",
-  emojiId: 1,
-  fen: "fen",
-  status: "",
-  flatMovesString: "",
-  timer: "",
-  ...values,
-});
+const match = canonicalMatch;
 
+/** @param {import("@mons/shared/game-sessions").GameSessionMatch} hostMatch @param {import("@mons/shared/game-sessions").GameSessionMatch} guestMatch @returns {import("@mons/shared/game-sessions").HistoricalMatchPair} */
 const pair = (hostMatch, guestMatch) => ({
   matchId: "match-1",
   hostPlayerId: "host",
@@ -77,7 +70,54 @@ test("requires explicit game connection binding and forwards with receiver conte
     /game-connection-not-bound/,
   );
 
+  /** @satisfies {import("../src/game/gameConnectionPort.ts").GameConnectionPort & {activeMatchId: string}} */
   const connection = {
+    getMatchPresentation: () => assert.fail("unexpected getMatchPresentation"),
+    matchBelongsToCurrentInvite: () =>
+      assert.fail("unexpected matchBelongsToCurrentInvite"),
+    rematchSeriesEndIsIndicated: () =>
+      assert.fail("unexpected rematchSeriesEndIsIndicated"),
+    setWagerViewMatchId: () => assert.fail("unexpected setWagerViewMatchId"),
+    getRematchSeriesDescriptor: () =>
+      assert.fail("unexpected getRematchSeriesDescriptor"),
+    signInIfNeededAndConnectToGame: () =>
+      assert.fail("unexpected signInIfNeededAndConnectToGame"),
+    getSameProfilePlayerUid: () =>
+      assert.fail("unexpected getSameProfilePlayerUid"),
+    getHostColorForMatch: () => assert.fail("unexpected getHostColorForMatch"),
+    getSameProfileColorForMatch: () =>
+      assert.fail("unexpected getSameProfileColorForMatch"),
+    loadHistoricalMatchPair: () =>
+      assert.fail("unexpected loadHistoricalMatchPair"),
+    hasPendingInviteCreationFor: () =>
+      assert.fail("unexpected hasPendingInviteCreationFor"),
+    setupConnection: () => assert.fail("unexpected setupConnection"),
+    tryNavigateWatchOnlyToLatestApprovedMatch: () =>
+      assert.fail("unexpected tryNavigateWatchOnlyToLatestApprovedMatch"),
+    sendRematchProposal: () => assert.fail("unexpected sendRematchProposal"),
+    sendEndMatchIndicator: () =>
+      assert.fail("unexpected sendEndMatchIndicator"),
+    surrender: () => assert.fail("unexpected surrender"),
+    updateEmoji: () => assert.fail("unexpected updateEmoji"),
+    sendMove: () => assert.fail("unexpected sendMove"),
+    resolveWagerOutcome: () => assert.fail("unexpected resolveWagerOutcome"),
+    isAutomatch: () => assert.fail("unexpected isAutomatch"),
+    updateRatings: () => assert.fail("unexpected updateRatings"),
+    isCurrentInviteEventOwned: () =>
+      assert.fail("unexpected isCurrentInviteEventOwned"),
+    getCurrentInviteEventId: () =>
+      assert.fail("unexpected getCurrentInviteEventId"),
+    getCachedHistoricalMatchPair: () =>
+      assert.fail("unexpected getCachedHistoricalMatchPair"),
+    getPlayerColorForMatch: () =>
+      assert.fail("unexpected getPlayerColorForMatch"),
+    seeIfFreshlySignedInProfileIsOneOfThePlayers: () =>
+      assert.fail("unexpected seeIfFreshlySignedInProfileIsOneOfThePlayers"),
+    connectToAutomatch: () => assert.fail("unexpected connectToAutomatch"),
+    automatch: () => assert.fail("unexpected automatch"),
+    claimVictoryByTimer: () => assert.fail("unexpected claimVictoryByTimer"),
+    startTimer: () => assert.fail("unexpected startTimer"),
+    getProfileByLoginId: () => assert.fail("unexpected getProfileByLoginId"),
     activeMatchId: "match-7",
     getActiveMatchId() {
       return this.activeMatchId;
@@ -108,8 +148,8 @@ test("pauses watch automove instead of falling back to the main thread", () => {
 });
 
 test("normalizes persisted histories without accepting malformed values", () => {
-  assert.equal(normalizePersistedMoveHistory(null), "");
-  assert.equal(normalizePersistedMoveHistory(undefined), "");
+  assert.equal(normalizePersistedMoveHistory(null), null);
+  assert.equal(normalizePersistedMoveHistory(undefined), null);
   assert.equal(normalizePersistedMoveHistory("a--b"), "a--b");
   assert.equal(normalizePersistedMoveHistory({}), null);
   assert.deepEqual(movesArrayForHistoryVerification("a--b"), ["a", "", "b"]);
@@ -128,39 +168,62 @@ test("maps historical moves by stored colors and series fallback", () => {
   });
   assert.equal(countRecordedMovesInHistoricalPair(storedColors, null), 3);
 
-  const seriesColors = pair(
-    match({ color: "legacy", flatMovesString: "w1-w2" }),
-    match({ color: "legacy", flatMovesString: "b1" }),
+  const seriesColors = {
+    ...pair(match(), match()),
+    hostMatch: { ...match({ flatMovesString: "w1-w2" }), color: "legacy" },
+    guestMatch: { ...match({ flatMovesString: "b1" }), color: "legacy" },
+  };
+  assert.deepEqual(
+    Reflect.apply(getMatchMovesByColor, undefined, [seriesColors, "white"]),
+    {
+      whiteMoves: "w1-w2",
+      blackMoves: "b1",
+    },
   );
-  assert.deepEqual(getMatchMovesByColor(seriesColors, "white"), {
-    whiteMoves: "w1-w2",
-    blackMoves: "b1",
-  });
-  assert.deepEqual(getMatchMovesByColor(seriesColors, "black"), {
-    whiteMoves: "b1",
-    blackMoves: "w1-w2",
-  });
+  assert.deepEqual(
+    Reflect.apply(getMatchMovesByColor, undefined, [seriesColors, "black"]),
+    {
+      whiteMoves: "b1",
+      blackMoves: "w1-w2",
+    },
+  );
 });
 
 test("trusts only verified, agreeing historical game candidates", () => {
   const historicalPair = pair(
-    match({ color: "white", fen: "host", flatMovesString: "w1-w2" }),
-    match({ color: "black", fen: "guest", flatMovesString: "b1" }),
+    match({
+      schemaVersion: 1,
+      color: "white",
+      fen: "host",
+      flatMovesString: "w1-w2",
+    }),
+    match({
+      schemaVersion: 1,
+      color: "black",
+      fen: "guest",
+      flatMovesString: "b1",
+    }),
   );
+  /** @type {Array<Parameters<import("mons-rules").Game["verifyHistory"]>[0]>} */
   const receivedHistories = [];
-  const candidateFor = (fen) => ({
-    verifyHistory(history) {
-      receivedHistories.push(history);
-      return true;
-    },
-    toFen() {
-      return "agreed";
-    },
-    source: fen,
-  });
+  const candidateFor = (/** @type {unknown} */ fen) =>
+    Object.assign(new MonsRules.Game(), {
+      verifyHistory(
+        /** @type {Parameters<import("mons-rules").Game["verifyHistory"]>[0]} */ history,
+      ) {
+        receivedHistories.push(history);
+        return true;
+      },
+      toFen() {
+        return "agreed";
+      },
+      source: fen,
+    });
 
   const trusted = getTrustedGameFromMatchPair(historicalPair, candidateFor);
-  assert.equal(trusted?.gameModel.source, "host");
+  const trustedModel = required(trusted).gameModel;
+  assert.ok("source" in trustedModel);
+  assert.equal(trustedModel.source, "host");
   assert.equal(trusted?.whiteMovesCount, 2);
   assert.equal(trusted?.blackMovesCount, 1);
   assert.deepEqual(receivedHistories, [
@@ -169,10 +232,12 @@ test("trusts only verified, agreeing historical game candidates", () => {
   ]);
 
   assert.equal(
-    getTrustedGameFromMatchPair(historicalPair, (fen) => ({
-      verifyHistory: () => true,
-      toFen: () => fen,
-    })),
+    getTrustedGameFromMatchPair(historicalPair, (fen) =>
+      Object.assign(new MonsRules.Game(), {
+        verifyHistory: () => true,
+        toFen: () => fen,
+      }),
+    ),
     null,
   );
   assert.equal(
@@ -186,13 +251,14 @@ test("trusts only verified, agreeing historical game candidates", () => {
 
 test("derives historical terminal colors from records and series fallback", () => {
   assert.equal(
-    getHistoricalResignedColor(
-      pair(
-        match({ color: "legacy", status: "surrendered" }),
-        match({ color: "legacy" }),
-      ),
+    Reflect.apply(getHistoricalResignedColor, undefined, [
+      {
+        ...pair(match(), match()),
+        hostMatch: { ...match({ status: "surrendered" }), color: "legacy" },
+        guestMatch: { ...match(), color: "legacy" },
+      },
       "black",
-    ),
+    ]),
     MonsRules.Color.Black,
   );
   assert.equal(
@@ -209,12 +275,13 @@ test("derives historical terminal colors from records and series fallback", () =
 
 test("managed game timeouts retain guard and lifecycle behavior", () => {
   const previousWindow = Object.getOwnPropertyDescriptor(globalThis, "window");
+  /** @type {Map<number, () => void>} */
   const callbacks = new Map();
   let nextId = 1;
   Object.defineProperty(globalThis, "window", {
     configurable: true,
     value: {
-      setTimeout(callback) {
+      setTimeout(/** @type {() => void} */ callback) {
         const id = nextId;
         nextId += 1;
         callbacks.set(id, callback);
@@ -239,7 +306,7 @@ test("managed game timeouts retain guard and lifecycle behavior", () => {
       10,
       () => false,
     );
-    callbacks.get(guardedId)();
+    required(callbacks.get(guardedId))();
     assert.equal(calls, 0);
     assert.equal(getLifecycleCounters().gameTimeouts, initialCount);
 
@@ -253,7 +320,7 @@ test("managed game timeouts retain guard and lifecycle behavior", () => {
     if (previousWindow) {
       Object.defineProperty(globalThis, "window", previousWindow);
     } else {
-      delete globalThis.window;
+      Reflect.deleteProperty(globalThis, "window");
     }
   }
 });

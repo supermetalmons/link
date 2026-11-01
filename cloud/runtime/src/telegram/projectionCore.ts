@@ -1,4 +1,7 @@
-import type { RetainedAutomatchValue } from "../automatchRecords.js";
+import {
+  parseAutomatchRecord,
+  type AutomatchTelegramSourceRecord,
+} from "../automatchRecords.js";
 import {
   inviteTrimmedParticipants,
   type InviteDocument,
@@ -11,29 +14,27 @@ import type {
 import { createHash } from "node:crypto";
 import { parseInviteMatchIndex } from "../shared/rematches.js";
 import { TELEGRAM_AUTOMATCH_VERSION } from "./automatchSource.js";
-export type AutomatchTelegramSourceDocument =
-  RetainedAutomatchValue<"telegramAutomatches">;
+export type AutomatchTelegramSourceDocument = AutomatchTelegramSourceRecord;
 export type TelegramRatingProjectionInput = {
-  telegramDeliveryVersion?: number | null;
-  status?: string;
-  isEventMatch?: boolean;
-  eventOwned?: boolean;
-  eventId?: string | null;
-  inviteId?: string;
-  matchId?: string;
-  updateRatingMessage?: string;
-  completedAtMs?: number;
+  telegramDeliveryVersion: 2 | null;
+  status: "processing" | "done" | "blocked";
+  isEventMatch: boolean;
+  eventOwned: boolean;
+  eventId: string | null;
+  inviteId: string;
+  matchId: string;
+  updateRatingMessage: string | null;
+  completedAtMs: number | null;
 };
 export function retainAutomatchTelegramSource(
   value: unknown,
-): AutomatchTelegramSourceDocument {
-  return value as AutomatchTelegramSourceDocument;
+): AutomatchTelegramSourceDocument | null {
+  return parseAutomatchRecord("telegramAutomatches", value);
 }
 function sourceEvidence(
   value: AutomatchTelegramSourceDocument | null,
-): Record<string, unknown> | null {
-  const retained: unknown = value;
-  return retained as Record<string, unknown> | null;
+): AutomatchTelegramSourceDocument | null {
+  return value;
 }
 export type AutomatchLifecycle = "pending" | "matched" | "canceled";
 export type AutomatchTelegramProjection = {
@@ -367,54 +368,31 @@ const mergeRatingResultFragment: (
   source: AutomatchTelegramSourceDocument | null,
   ratingUpdate: TelegramRatingProjectionInput,
 ) => RatingProjectionMerge = (source, ratingUpdate) => {
-  const record = (source || {}) as Record<string, unknown>;
   if (
     !source ||
-    record.version !== TELEGRAM_AUTOMATCH_VERSION ||
-    !shouldProjectRatingTelegramUpdate(ratingUpdate)
+    !shouldProjectRatingTelegramUpdate(ratingUpdate) ||
+    ratingUpdate.completedAtMs === null ||
+    ratingUpdate.updateRatingMessage === null
   ) {
     return { changed: false, source, reason: "skipped" };
   }
-  const matchId = normalizeString(ratingUpdate.matchId);
-  const existingResults =
-    record.results && typeof record.results === "object" ? record.results : {};
-  if (Object.hasOwn(existingResults, matchId)) {
+  const matchId = ratingUpdate.matchId;
+  if (Object.hasOwn(source.results, matchId))
     return { changed: false, source, reason: "duplicate" };
-  }
-  const completedAtMs =
-    typeof ratingUpdate.completedAtMs === "number" &&
-    Number.isFinite(ratingUpdate.completedAtMs)
-      ? Math.floor(ratingUpdate.completedAtMs)
-      : null;
-  const result = {
-    text: ratingUpdate.updateRatingMessage,
-    ...(completedAtMs === null ? {} : { completedAtMs }),
-  };
-  const currentUpdatedAtMs =
-    typeof record.updatedAtMs === "number" &&
-    Number.isFinite(record.updatedAtMs)
-      ? Math.floor(record.updatedAtMs)
-      : 0;
-  const currentGeneration =
-    typeof record.generation === "number" &&
-    Number.isInteger(record.generation) &&
-    record.generation >= 0
-      ? record.generation
-      : 0;
   return {
     changed: true,
     reason: "inserted",
     source: retainAutomatchTelegramSource({
-      ...record,
+      ...source,
       results: {
-        ...existingResults,
-        [matchId]: result,
+        ...source.results,
+        [matchId]: {
+          text: ratingUpdate.updateRatingMessage,
+          completedAtMs: ratingUpdate.completedAtMs,
+        },
       },
-      updatedAtMs:
-        completedAtMs === null
-          ? currentUpdatedAtMs
-          : Math.max(currentUpdatedAtMs, completedAtMs),
-      generation: currentGeneration + 1,
+      updatedAtMs: Math.max(source.updatedAtMs, ratingUpdate.completedAtMs),
+      generation: source.generation + 1,
     }),
   };
 };

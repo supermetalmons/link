@@ -5,7 +5,7 @@ import { colors } from "../content/boardStyles";
 export type MoveHistoryToken =
   | { type: "icon"; icon: string; alt: string }
   | { type: "text"; text: string }
-  | { type: "emoji"; emoji: string; alt: string }
+  | { type: "emoji"; emoji: "statusAction" | "statusPotion"; alt: string }
   | { type: "square"; color: string; alt: string }
   | {
       type: "composite";
@@ -166,7 +166,7 @@ function targetTokensFromActionEvents(
   let manaTokens: MoveHistoryToken[] | null = null;
 
   for (let i = startIndex + 1; i < events.length; i++) {
-    const next = events[i];
+    const next = events[i]!;
     switch (next.kind) {
       case "mon-fainted":
         if (
@@ -373,7 +373,7 @@ export function tokensForSingleMoveEvents(
     }
     segment[actionIndex] = potionToken;
     for (let i = existingPotionIndices.length - 1; i >= 0; i--) {
-      const index = existingPotionIndices[i];
+      const index = existingPotionIndices[i]!;
       if (index !== actionIndex) {
         segment.splice(index, 1);
       }
@@ -381,7 +381,7 @@ export function tokensForSingleMoveEvents(
   };
 
   for (let index = 0; index < events.length; index++) {
-    const ev = events[index];
+    const ev = events[index]!;
     const tokens: MoveHistoryToken[] = [];
     let segmentRole: "arrow" | "destination" | "normal" | "skip" = "normal";
     let arrowIsRight = true;
@@ -497,7 +497,7 @@ export function tokensForSingleMoveEvents(
         break;
       }
       case "pickup-mana": {
-        const prevKind = index > 0 ? events[index - 1].kind : undefined;
+        const prevKind = index > 0 ? events[index - 1]!.kind : undefined;
         const cameFromManaMove =
           prevKind === "mana-move" || prevKind === "spirit-target-move";
         if (cameFromManaMove) {

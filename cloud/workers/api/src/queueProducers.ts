@@ -6,6 +6,7 @@ import type {
 import type { TelegramProjectionTask } from "./telegramProjectionTasks.ts";
 import type { TelegramTaskPayload } from "../../../runtime/telegram/taskIdentity.js";
 import type { WagerSettlementRetryTask } from "./wagerOutcome.ts";
+import { queueEnvelope } from "./queueEnvelope.ts";
 
 export type QueueMessages = {
   AUTH_RECOVERY_QUEUE: AuthRecoveryTask;
@@ -33,5 +34,29 @@ export function queueFor<Key extends keyof QueueMessages>(
   env: Pick<Env, Key>,
   key: Key,
 ): QueueProducers[Key] {
-  return env[key];
+  return new Proxy(env[key], {
+    get(target, property) {
+      if (property === "send") {
+        const send = target.send;
+        return (body: QueueMessages[Key], options?: QueueSendOptions) =>
+          send.call(target, queueEnvelope(key, body), options);
+      }
+      if (property === "sendBatch") {
+        const sendBatch = target.sendBatch;
+        return (
+          messages: Iterable<MessageSendRequest<QueueMessages[Key]>>,
+          options?: QueueSendBatchOptions,
+        ) =>
+          sendBatch.call(
+            target,
+            Array.from(messages, (message) => ({
+              ...message,
+              body: queueEnvelope(key, message.body),
+            })),
+            options,
+          );
+      }
+      return Reflect.get(target, property, target);
+    },
+  });
 }

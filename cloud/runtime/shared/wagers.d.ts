@@ -91,12 +91,14 @@ declare const WAGER_STORAGE_VERSION_HEADER = "X-Mons-Wager-Storage-Version";
 declare const WAGER_STORAGE_VERSION = "1";
 declare const WAGER_FROZEN_READ_PATH = "/wagers/frozen/read";
 declare const WAGER_PROPOSAL_REMOVAL_FAILURE_REASONS: readonly [
+  "manual-review-required",
   "invite-not-found",
   "missing-opponent",
   "profile-not-found",
   "proposal-missing",
 ];
 declare const WAGER_PROPOSAL_SEND_FAILURE_REASONS: readonly [
+  "manual-review-required",
   "invite-not-found",
   "missing-opponent",
   "profile-not-found",
@@ -104,6 +106,7 @@ declare const WAGER_PROPOSAL_SEND_FAILURE_REASONS: readonly [
   "proposal-unavailable",
 ];
 declare const WAGER_PROPOSAL_ACCEPT_FAILURE_REASONS: readonly [
+  "manual-review-required",
   "invite-not-found",
   "missing-opponent",
   "profile-not-found",
@@ -112,6 +115,7 @@ declare const WAGER_PROPOSAL_ACCEPT_FAILURE_REASONS: readonly [
   "proposal-unavailable",
 ];
 declare const WAGER_OUTCOME_RESOLVE_FAILURE_REASONS: readonly [
+  "manual-review-required",
   "invite-not-found",
   "missing-opponent",
   "profile-not-found",

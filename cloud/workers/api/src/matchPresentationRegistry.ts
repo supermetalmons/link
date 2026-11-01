@@ -1,3 +1,4 @@
+import type { Aura } from "@mons/shared/appearance";
 import {
   isMatchPresentationSnapshot,
   type MatchPresentationSnapshot,
@@ -10,7 +11,7 @@ export type MatchPresentationCreation = {
   matchId: string;
   actorUid: string;
   emojiId: number;
-  aura: string;
+  aura: Aura;
   sourceId: string;
 };
 
@@ -176,15 +177,15 @@ export function buildMatchPresentationRegistrationStatements(
       db
         .prepare(
           `INSERT INTO match_presentation_registration_guards (singleton)
-        SELECT 0 WHERE EXISTS (SELECT 1 FROM match_presentation_registrations
+        SELECT 0 WHERE EXISTS (SELECT 1 FROM match_presentation_registrations_canonical
           WHERE actor_uid = ? AND match_id = ? AND (invite_id != ? OR seed_digest != ?))`,
         )
         .bind(row.actorUid, row.matchId, row.inviteId, row.seedDigest),
       db
         .prepare(
-          `INSERT OR IGNORE INTO match_presentation_registrations
+          `INSERT OR IGNORE INTO match_presentation_registrations_canonical
         (invite_id, match_id, actor_uid, seed_digest, provenance, source_id, registered_at_ms)
-        VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        VALUES (?, ?, ?, ?, ?, ?, COALESCE((SELECT registered_at_ms FROM match_presentation_registrations_canonical WHERE actor_uid = ? AND match_id = ?), ?))`,
         )
         .bind(
           row.inviteId,
@@ -193,6 +194,8 @@ export function buildMatchPresentationRegistrationStatements(
           row.seedDigest,
           row.provenance,
           row.sourceId,
+          row.actorUid,
+          row.matchId,
           nowMs,
         ),
     ];
@@ -209,7 +212,7 @@ export async function listMatchPresentationRegistrations(
   const result = await db
     .withSession("first-primary")
     .prepare(
-      "SELECT invite_id, match_id, actor_uid, seed_digest, provenance, source_id FROM match_presentation_registrations WHERE invite_id = ? AND match_id = ? ORDER BY actor_uid",
+      "SELECT invite_id, match_id, actor_uid, seed_digest, provenance, source_id FROM match_presentation_registrations_canonical WHERE invite_id = ? AND match_id = ? ORDER BY actor_uid",
     )
     .bind(inviteId, matchId)
     .all<RegistrationRow>();
@@ -294,7 +297,7 @@ export function selectRegisteredPresentations(
         snapshot.seedDigests[row.actorUid] !== row.seedDigest
       )
         throw new Error("match-presentation-unavailable");
-      return [row.actorUid, snapshot.players[row.actorUid]];
+      return [row.actorUid, snapshot.players[row.actorUid]!];
     }),
   );
   return { matchId, players };

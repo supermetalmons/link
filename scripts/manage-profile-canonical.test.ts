@@ -41,7 +41,7 @@ test("profile canonical control follows the maintenance lifecycle", () => {
   manageProfileCanonical("resume", dependencies);
   assert.equal(control.state, "active");
   assert.equal(logs.length, 4);
-  assert.deepEqual(JSON.parse(logs[0]), {
+  assert.deepEqual(JSON.parse(logs[0]!), {
     operation: "freeze",
     state: "frozen",
   });

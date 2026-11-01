@@ -74,15 +74,16 @@ export type EventCreationRejectsAnArbitraryBag = Assert<
 >;
 export type MirroredCreationRetainsStatusHistoryAndTimer = Assert<
   {
+    schemaVersion: 1;
     version: 2;
     color: "black";
     emojiId: 1;
-    aura: "";
+    aura: "none";
     gameVariant: "Classic";
     fen: "restored";
     status: "surrendered";
     flatMovesString: "a-b";
-    timer: "7;100";
+    timer: { state: "running"; turnNumber: 7; deadlineAtMs: 100 };
   } extends MatchCreationRecord
     ? true
     : false

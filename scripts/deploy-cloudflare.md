@@ -19,8 +19,8 @@ Deploy only affected Workers. Shared prize-catalog changes need both the API and
 - `wrangler.jsonc` owns the frontend Worker configuration; `cloud/workers/api/wrangler.jsonc` owns API routes, bindings, variables, Queues, Workflows, consumers, and the Cron schedule.
 - The six canonical D1 databases run in ENAM. Operators resolve stable bindings from the API configuration; direct Wrangler commands use bindings such as `PROFILE_DB` and `EVENT_DB`.
 - The six migration directories under `cloud/workers/api/` retain the applied D1 schema history. Never rename or rewrite an applied migration.
-- `PROFILE_DB.profile_login_owners` owns login-to-profile identity. Profiles, authentication state, events, wagers, reservations, projections, withdrawals, and Telegram delivery use their configured D1 databases.
-- `PROFILE_GAMES_DB.invite_sources` owns invite metadata. Active match records and timer claims live in the existing SQLite `InviteReactions` Durable Object; D1 retains routes and immutable legacy match records.
+- `PROFILE_DB.profile_login_owners_canonical` owns login-to-profile identity. Profiles, authentication state, events, wagers, reservations, projections, withdrawals, and Telegram delivery use their configured D1 databases.
+- `PROFILE_GAMES_DB.invite_sources_canonical` owns invite metadata. Active match records and timer claims live in the existing SQLite `InviteReactions` Durable Object; D1 retains routes and immutable legacy match records.
 - The same Durable Object delivers match, metadata, wager, reaction, and appearance snapshots. Preserve its namespace, canonical records, revisions, alarm behavior, socket attachments, and imported evidence.
 - Existing IDs, historical snapshots, completion records, transition receipts, and stored payload digests are application data. Compatibility codecs preserve their exact serialized forms.
 - `cloud/workers/api/release.env` stays empty. Release commands never load developer environment files. Keep required secret names in Wrangler configuration and encrypted values in Cloudflare.
@@ -29,9 +29,9 @@ Authenticate Wrangler locally or supply `CLOUDFLARE_API_TOKEN` through the proce
 
 ## Match timer storage
 
-`NEW_MATCH_TIMER_STORAGE` selects `d1` or `local` only when the Durable Object creates a wholly new match. The tracked configuration selects `local`; missing configuration means `d1`, and invalid values are rejected. Each new match persists its choice with its first records. Existing or imported matches without a saved choice continue using D1. Creation retries and partial pairs never change that choice; new rematches can use local timers within an existing invite.
+The timer runtime uses invite Durable Object SQLite exclusively. Existing rooms require verified local layout version 2 and a local cohort for every match. Missing or incompatible state remains unavailable; fresh rooms establish the local layout before business writes. There is no timer-backend setting or D1 fallback.
 
-Keep both timer implementations, D1 reconciliation, and downstream cleanup. Rollback code must understand saved modes and local timer tables; changing the setting affects only future matches. Do not bulk-copy or delete active markers, reset saved modes, or rewrite historical records. Validate mixed timer cohorts, replay, takebacks, eviction, and rollback configuration locally, then use the routine release and affected invite-lifecycle checks.
+Preserve absolute deadlines, highest-turn markers, claims, and downstream effect receipts. Validate retry, takeback, eviction, terminal-claim replay, and writer-fence behavior locally, then use the routine release and affected invite-lifecycle checks. Promote only after the required layout receipts are verified across the approved existing-room scope. A rollback version must understand the verified local layout and writer guards; never restore an older timer backend or reset a stored deadline.
 
 ## Automatch queue selection
 
@@ -54,90 +54,6 @@ Activation rechecks projection integrity in the statement that changes the flag.
 
 FIFO orders eligible tickets by `(enqueued_at_ms, invite_id)`. Prepared matches and cancellations remove tickets from consideration; receipt-only reservations and pending enqueues require targeted recovery. Preserve canonical records, journal payloads, receipts, tombstone revisions, tables, and triggers on rollback. Validate concurrency, replay, cancellation, and query plans locally; do not put smoke participants into the public matching queue.
 
-## Recovery outbox indexes
-
-`idx_automatch_telegram_projection_due` and `idx_game_session_projection_due` include the `keyOrderSql` expressions used by older recovery queries. Keep their names, expressions, and retained outbox records for compatible rollback. Verify actual query plans and stored-record compatibility locally:
-
-```sh
-npm run test:api:runtime -- automatchQueriesD1.test.ts recoveryOutboxOrderingMigration.test.ts outboxRecoverySortMigration.test.ts
-```
-
-The older Telegram plan searches its due index without a temporary ordering B-tree. The older profile plan searches its due index in all four branches without branch-level ordering B-trees; its final union sort is intentional and bounded to four times the query limit. Current recovery queries use the generated-column indexes below and require no temporary ordering B-tree. For incident diagnosis, use the exact queries captured by `observeReads()` in the runtime tests rather than a simplified `ORDER BY record_key`. Never clear outboxes to verify query plans.
-
-### Generated recovery columns
-
-`migrations/0027_outbox_recovery_sort_columns.sql` adds five VIRTUAL generated columns to `automatch_telegram_projection_outbox` and `game_session_projection_outbox`, plus `idx_automatch_telegram_projection_recovery` and `idx_game_session_projection_recovery`. The derived columns preserve the existing JSON-type and numeric-key ordering, including malformed values. `recovery_sort_value` deliberately has no declared type so SQLite retains numeric and text storage classes.
-
-The migration preserves canonical JSON bytes, revisions, tombstones, old indexes, and existing write interfaces. It requires no backfill, constraints, write freeze, Queue pause, or drain. Older Workers and version-pinned Workflows keep writing the original columns; generated values follow those writes automatically. Retaining both generations of indexes adds index storage and write work in exchange for rollback compatibility.
-
-Prepare and validate the API candidate first. Run `npm run check:api`, the migration/query tests above, projection recovery and combined scheduled-budget tests, and the affected socket suites. Upload the validated candidate before changing remote schema:
-
-```sh
-npm run upload:api
-npx wrangler d1 migrations list PROFILE_GAMES_DB --remote --config cloud/workers/api/wrangler.jsonc --env-file cloud/workers/api/release.env
-```
-
-Apply only when `0027_outbox_recovery_sort_columns.sql` is the sole reviewed pending gameplay migration:
-
-```sh
-npx wrangler d1 migrations apply PROFILE_GAMES_DB --remote --config cloud/workers/api/wrangler.jsonc --env-file cloud/workers/api/release.env
-```
-
-Before promotion, inspect both tables with `PRAGMA table_xinfo` and confirm the five generated columns, the untyped `recovery_sort_value`, and both old and new indexes. Require an empty `PRAGMA foreign_key_check` result:
-
-```sql
-PRAGMA table_xinfo(automatch_telegram_projection_outbox);
-PRAGMA table_xinfo(game_session_projection_outbox);
-SELECT name, sql FROM sqlite_schema
-WHERE type = 'index' AND name IN (
-  'idx_automatch_telegram_projection_due',
-  'idx_game_session_projection_due',
-  'idx_automatch_telegram_projection_recovery',
-  'idx_game_session_projection_recovery'
-) ORDER BY name;
-PRAGMA foreign_key_check;
-```
-
-Promote the exact uploaded Version ID using the routine API release below. Run the standard API smoke, authenticated `--require-history` check with its prepared fixture, isolated invite lifecycle smoke, and affected read-only socket checks. If Workflow dependency changes require publication, publish the owned definitions through the existing helper while preserving running instances. Do not force replay, corrupt data, or wait for a Cron interval to validate recovery; local tests cover paging and failure cases. Finish after the required checks pass.
-
-On Worker rollback, retain the new columns and both generations of indexes. If schema verification fails, keep the currently serving Worker and investigate before promotion; never remove retained outboxes or restore a coordinated database independently.
-
-## Projection recovery quarantine
-
-`profile-migrations/0019_projection_recovery_quarantine.sql` adds `profile_link_catchup_quarantine` and `rating_projection_recovery_quarantine` to `PROFILE_DB`. These empty child tables reference existing jobs and rating operations with deletion cascades. The migration does not rewrite canonical records, alter their constraints, or change admission controls. Existing Workers remain compatible, so apply it with writes and Queue delivery running; no freeze, pause, or drain is required.
-
-Prepare and validate the API candidate first, including migration, malformed-row isolation, concurrent-repair, replay, and affected event tests. Upload that candidate before changing remote schema. Inspect the remote migration list and apply only when `0019_projection_recovery_quarantine.sql` is the sole reviewed pending profile migration:
-
-```sh
-npx wrangler d1 migrations list PROFILE_DB --remote --config cloud/workers/api/wrangler.jsonc --env-file cloud/workers/api/release.env
-npx wrangler d1 migrations apply PROFILE_DB --remote --config cloud/workers/api/wrangler.jsonc --env-file cloud/workers/api/release.env
-```
-
-Before promoting the exact candidate, inspect both table definitions and foreign keys and require an empty `PRAGMA foreign_key_check` result:
-
-```sql
-SELECT name, sql FROM sqlite_schema
-WHERE type = 'table' AND name IN (
-  'profile_link_catchup_quarantine', 'rating_projection_recovery_quarantine'
-)
-ORDER BY name;
-PRAGMA foreign_key_list(profile_link_catchup_quarantine);
-PRAGMA foreign_key_list(rating_projection_recovery_quarantine);
-PRAGMA foreign_key_check;
-```
-
-The new recovery code requires both tables. If verification fails, retain the serving Worker and investigate before promotion. After promotion, publish both owned Workflow definitions when the release includes shared event-repository changes: `mons-link-event-progress` uses that repository directly, and `mons-link-event-prize-withdrawal` uses it through its runtime dependencies. Use the existing publication helper with the promoted Worker Version ID and omit `--workflow` to select both; preserve running instances and their versions.
-
-Run the standard API smoke, authenticated `--require-events` check, and affected profile/gameplay or invite snapshot checks. Use the read-only withdrawal preflight if its runtime dependencies changed. Do not corrupt production records, force projection replay, or wait for a Cron interval to demonstrate quarantine; local runtime tests cover those cases. Finish when the required checks pass. Keep both side tables and retained markers on Worker rollback; older code may reconsider malformed records but does not require removing quarantine evidence. [Cloud operations](../cloud/README.md#projection-recovery-quarantine) documents inspection and repair.
-
-## Prize-selection index removal
-
-`event-migrations/0007_drop_unused_prize_selection_profile_index.sql` removes only the unused nonunique `idx_event_prize_selections_profile` index. Supported selection queries continue using the `(event_id, profile_id)` primary key. The migration preserves records, constraints, admissions, leases, and compatibility with older Workers; it does not require a write freeze, Queue pause, or drain.
-
-Validate `eventPrizeSelectionIndexMigration.test.ts` and the affected event suites before release. Inspect the remote migration list and index definition, and apply only when this is the sole reviewed pending event migration. Prepare any accompanying Worker candidate first, apply the migration, verify index absence, primary-key presence, and `PRAGMA foreign_key_check`, then promote the candidate and run the standard smoke plus authenticated `--require-events` checks.
-
-Worker rollback can retain the index's absence. If an external query requires it, restore it with a new forward migration creating `idx_event_prize_selections_profile ON event_prize_selections(profile_id, event_id)`. Do not edit applied migrations or restore the event database independently.
-
 ## Canonical operators
 
 Status and inspection commands are read-only and use Cloudflare credentials. Completed migration executors have been removed; the inspection command accepts only one explicit domain.
@@ -152,6 +68,10 @@ Status and inspection commands are read-only and use Cloudflare credentials. Com
 Inspection preserves authority, provenance, activation, maintenance, and retained-evidence reports. Event-receipt inspection also inventories every Workflow page, the serving deployment, and any retained operator lock. It never takes a lock or changes controls.
 
 Match admission inspection reads the import identity from D1 and writes a protected report to a new directory. It requires no original migration manifest. Retained records remain immutable; unexplained admissions or locks require investigation. D1 admission recovery uses exact canonical records and never reinterprets a historical whole-record digest as proof from a public snapshot.
+
+Supported maintenance writes preserve their original SQL predicates and use a native D1 binding batch for the application guard, owned write context, business statement, and context removal. The runner registers its own central application admission and completes only that exact identity. Uncertain outcomes retain the admission for inspection; use the reported operation ID and never retry the SQL merely because a response or session cleanup failed. A reported confirmed SQL outcome remains completed even if subsequent cleanup is unconfirmed.
+
+This write transport uses a private child process and an authenticated temporary [remote-binding session](https://developers.cloudflare.com/workers/local-development/#api). It requires an existing account `workers.dev` subdomain and fails closed if none exists. It creates no permanent Worker deployment or API route, but preview-session startup is a provider resource operation. Status reads do not open that session. Credentials pass through private IPC; command arguments, generated configuration, and returned diagnostics contain no credential values. The runner disposes the session and its child process after use. Atomicity relies on the [native D1 batch contract](https://developers.cloudflare.com/d1/worker-api/d1-database/#batch), not on a REST batch assumption or a successful read-only probe.
 
 ## Validation
 
@@ -205,8 +125,8 @@ Event read bookmarks are scoped by `EVENT_DB_BOOKMARK_EPOCH`, which must equal t
 When Workflow code or its dependencies change, publish the affected owned definitions after promoting the exact Worker version and before uploading another candidate. The helper preserves current Workflow settings and schedules, checks that the selected Worker is both the latest upload and the version serving 100% of traffic, and records the resulting distinct Workflow version IDs. Cloudflare's Workflow publication API has no atomic Worker-version pin, so do not run concurrent Worker uploads or promotions during this command. The helper rechecks both conditions around publication and fails closed on a mismatch. Its dry-run makes read-only provider requests. Omit `--workflow` to select both configured definitions when their shared dependencies change:
 
 ```sh
-npm run publish:api:workflows -- --version-id <worker-version-id> --workflow mons-link-event-progress --dry-run
-npm run publish:api:workflows -- --version-id <worker-version-id> --workflow mons-link-event-progress
+npm run publish:api:workflows -- --version-id <worker-version-id> --workflow mons-link-event-progress-data1 --dry-run
+npm run publish:api:workflows -- --version-id <worker-version-id> --workflow mons-link-event-progress-data1
 ```
 
 This publication updates code for new instances and does not modify Queue delivery, Worker Cron, routes, or existing instances. Compatible releases preserve running instances on their original versions. A concrete incompatible state change requires the coordinated handoff described in its migration procedure.
@@ -221,28 +141,11 @@ npm run test:api:runtime -- projectionRecoveryScheduledBudget.test.ts scheduledR
 
 The combined fixture includes a reminder-heavy background page and bulk recreation of errored/terminated Workflows alongside busy auth, transitions, and projections. Discovery returns at most 800 urgent candidates, prioritizing imminent announcement deadlines and missing schedules before matching checkpointed outboxes. Execution reserves 10 units per start and 40 per eligible announcement from separate 4,500-unit urgent and 1,000-unit background budgets. The background cursor advances only over the attempted prefix, retaining deferred work. Use the routine candidate, promotion, and affected event verification steps; do not add a Cron observation wait.
 
-After validating and uploading the exact API candidate, inspect the `EVENT_DB` migration list and apply `event-migrations/0008_event_recovery_announcement_index.sql` only when it is the sole reviewed pending event migration:
-
-```sh
-npx wrangler d1 migrations list EVENT_DB --remote --config cloud/workers/api/wrangler.jsonc --env-file cloud/workers/api/release.env
-npx wrangler d1 migrations apply EVENT_DB --remote --config cloud/workers/api/wrangler.jsonc --env-file cloud/workers/api/release.env
-```
-
-It adds only `idx_event_records_scheduled_sunday_start`, a partial index on `(status, start_at_ms, event_id)` for scheduled Sunday records. It rewrites no records and preserves old indexes and older writers. Verify its exact SQL in `sqlite_schema`, its columns with `PRAGMA index_info(idx_event_records_scheduled_sunday_start)`, and an empty `PRAGMA foreign_key_check` before promotion. The new reminder query explicitly uses this index, so do not promote before it exists. Retain it on rollback. If the candidate also needs gameplay migration `0027`, complete its separate verification above before promoting.
-
-`EVENT_DB.event_scheduled_recovery_cursor` stores the independent checkpoint for bounded scheduled-event recovery. The sweep combines urgent discovery with paginated background recovery and advances checkpoints using revision comparisons. Preserve canonical events, outboxes, Workflow identities, and the cursor during recovery or rollback; do not reset the cursor to replay announcements.
-
-Before releasing deadline-aware Workflow recovery, apply `event-migrations/0006_event_progress_recovery_deadlines.sql` to `EVENT_DB`. This additive migration introduces `next_reconcile_at_ms`, a due index, and an invalidation trigger. Existing rows and inserts from older code default to immediately due. Changed outbox writes invalidate checkpoints, while identical writes preserve them. Validate the migration, query plan, old-writer compatibility, and concurrent checkpoint behavior locally before applying it remotely.
-
-The new Worker requires this migration. Older Workers and existing Workflow instances remain compatible with it; retain the extra column, trigger, and both due indexes on rollback. Rollback code resumes its previous frequent checks. The migration preserves outbox JSON, scheduling proofs, Workflow parameters, identities, and step history, so this compatible release does not require a write freeze or Queue pause.
-
-Recovery checks confirmed waiting Workflows hourly while execution is more than ten minutes away, capped at ten minutes before execution. Other states and failures use the next five-minute Cron boundary. Initial dispatch remains immediate. Verify the affected event behavior through the routine release checks; do not add an hour-long observation window to demonstrate the reduced cadence.
-
 Changes to shared event/profile repositories may affect both owned Workflow definitions. Use the routine API release path and publish affected definitions. Verify authenticated current/ended event reads and affected metadata, wager, or gameplay behavior without adding an observation window.
 
 ## Wager settlement delivery
 
-`WAGER_SETTLEMENT_QUEUE` sends initial and deferred retries to `mons-link-wager-settlement`, with exhausted work retained in `mons-link-wager-settlement-dlq`. Its consumer runs independently of Telegram delivery and preserves wager payloads, replay, profile admissions, and reservation checks.
+`WAGER_SETTLEMENT_QUEUE` sends initial and deferred retries to `mons-link-wager-settlement-data1`, with exhausted work retained in `mons-link-wager-settlement-data1-dlq`. Its consumer runs independently of Telegram delivery and preserves wager payloads, replay, profile admissions, and reservation checks.
 
 Legacy wager tasks in the Telegram queue forward unchanged to the settlement queue. They are acknowledged only after enqueue succeeds and retried if forwarding fails. Inspect both the settlement DLQ and legacy Telegram DLQ during recovery; reconcile canonical state before replaying a specific operation.
 
@@ -250,7 +153,7 @@ Preserve both settlement queues and their consumer configuration on rollback. A 
 
 ## Event navigation delivery
 
-`EVENT_PROFILE_GAME_PROJECTION_QUEUE` delivers event navigation work through `mons-link-event-profile-game-projection`, independently of rating, invite, automatch, and profile-link work. Preserve canonical event records, task payloads, projection generations, durable outboxes, and the dedicated consumer.
+`EVENT_PROFILE_GAME_PROJECTION_QUEUE` delivers event navigation work through `mons-link-event-profile-game-projection-data1`, independently of rating, invite, automatch, and profile-link work. Preserve canonical event records, task payloads, projection generations, durable outboxes, and the dedicated consumer.
 
 Version-pinned Workflow instances can still produce tasks on the shared profile-game queue. The shared consumer forwards event tasks unchanged and acknowledges them only after the dedicated enqueue succeeds. The event recovery sweep can re-enqueue pending outboxes; investigate the exact event and request before replaying. Rollback requires a Worker that explicitly routes the dedicated queue and supports legacy forwarding. Never redirect event work to an unknown handler, purge queues, or delete pending outboxes.
 
@@ -258,11 +161,21 @@ For affected releases, publish changed Workflow definitions and verify the event
 
 ## Coordinated maintenance release
 
+The canonical data cutover is complete at data epoch 1. Current releases preserve the active application generation and its retained admission, retirement, and migration evidence. Completed migration executors and source-export capabilities are retired.
+
 Use maintenance only for a concrete schema, state-compatibility, resource-lifecycle, or incident requirement. Specify the affected stores, writer gates, Queues, leases, and recovery condition before applying controls. Prepare and validate candidates first. Preserve any maintenance or Queue pause state that predates the operation.
 
 Freeze only the affected canonical writers and pause only the consumers that could violate the maintenance invariant. Confirm relevant admissions and leases have drained from their actual state. Apply the reviewed schema or lifecycle change, validate the schema and `PRAGMA foreign_key_check`, then promote the exact compatible candidate and verify its reads before resuming affected writers. Never reset authority, bulk-delete evidence, or restore one coordinated database independently.
 
 Keep API `workers_dev` and `preview_urls` disabled. Use the custom domain for verification. On failure, retain the required maintenance controls and repair forward. Resume only controls changed for this operation. Routine compatible releases use the API and frontend release sections without freezes, Queue pauses, fixed drain waits, or observation windows.
+
+## Canonical timer storage
+
+Current timer starts and claims use the invite Durable Object's verified local layout. The API has no D1 timer backend, timer-storage selector, global timer-start sweep, or temporary cleanup ingress. Permanent writer guards and retained outcomes remain required after the storage transition. Existing rooms with missing or inconsistent layout evidence fail closed; do not recreate empty replacement tables or reset their metadata to force startup.
+
+Keep the protected source/schema comparisons, exact scope, copy acknowledgements or verified empty decisions, and post-retirement schema checks with the release evidence. Applied migrations and immutable ownership/receipt records remain preserved. Migration `0039_retire_canonical_timer_starts.sql` retires the former D1 timer table and deletion context only after its control, drain, and exact-schema checks pass; current local timer rows are outside that migration's scope.
+
+Before a destructive schema change, qualify every version-pinned Workflow that could still execute older D1 queries. Promoting a newer API does not upgrade existing Workflow instances. Later compatible releases use the ordinary release path and preserve the retired schema state; they do not rerun a completed cleanup executor or introduce another cleanup endpoint.
 
 ## Gameplay and delivery verification
 
@@ -287,7 +200,7 @@ Reaction checks require the match ID for v2 appearance delivery and publish no r
 
 ## Canonical profile D1 maintenance
 
-The canonical profile control accepts only `active` and `frozen`. Freeze before schema maintenance that requires exclusive access and leave affected writes frozen on a failure of that maintenance. The compatible `0019_projection_recovery_quarantine.sql` addition is an explicit exception: use its [release procedure](#projection-recovery-quarantine) above without these freeze or Queue-pause commands.
+The canonical profile control accepts only `active` and `frozen`. Freeze before schema maintenance that requires exclusive access and leave affected writes frozen on a failure of that maintenance. Compatible additive changes use the routine release path after reviewing their actual schema and writer dependencies.
 
 ```sh
 npm run manage:profile-canonical -- --status
@@ -299,27 +212,27 @@ npx wrangler d1 migrations apply PROFILE_DB --remote --config cloud/workers/api/
 Pause the permanent profile-related Queues when a migration changes profile schema or invariants:
 
 ```sh
-npx wrangler queues pause-delivery mons-link-auth-recovery --config cloud/workers/api/wrangler.jsonc --env-file cloud/workers/api/release.env
-npx wrangler queues pause-delivery mons-link-profile-game-projection --config cloud/workers/api/wrangler.jsonc --env-file cloud/workers/api/release.env
-npx wrangler queues pause-delivery mons-link-event-profile-game-projection --config cloud/workers/api/wrangler.jsonc --env-file cloud/workers/api/release.env
-npx wrangler queues pause-delivery mons-link-telegram-projection --config cloud/workers/api/wrangler.jsonc --env-file cloud/workers/api/release.env
-npx wrangler queues pause-delivery mons-link-wager-settlement --config cloud/workers/api/wrangler.jsonc --env-file cloud/workers/api/release.env
+npx wrangler queues pause-delivery mons-link-auth-recovery-data1 --config cloud/workers/api/wrangler.jsonc --env-file cloud/workers/api/release.env
+npx wrangler queues pause-delivery mons-link-profile-game-projection-data1 --config cloud/workers/api/wrangler.jsonc --env-file cloud/workers/api/release.env
+npx wrangler queues pause-delivery mons-link-event-profile-game-projection-data1 --config cloud/workers/api/wrangler.jsonc --env-file cloud/workers/api/release.env
+npx wrangler queues pause-delivery mons-link-telegram-projection-data1 --config cloud/workers/api/wrangler.jsonc --env-file cloud/workers/api/release.env
+npx wrangler queues pause-delivery mons-link-wager-settlement-data1 --config cloud/workers/api/wrangler.jsonc --env-file cloud/workers/api/release.env
 ```
 
 After applying the migration, inspect the expected schema, run `PRAGMA foreign_key_check`, smoke production, then resume the control and Queues:
 
 ```sh
 npm run manage:profile-canonical -- --resume
-npx wrangler queues resume-delivery mons-link-auth-recovery --config cloud/workers/api/wrangler.jsonc --env-file cloud/workers/api/release.env
-npx wrangler queues resume-delivery mons-link-profile-game-projection --config cloud/workers/api/wrangler.jsonc --env-file cloud/workers/api/release.env
-npx wrangler queues resume-delivery mons-link-event-profile-game-projection --config cloud/workers/api/wrangler.jsonc --env-file cloud/workers/api/release.env
-npx wrangler queues resume-delivery mons-link-telegram-projection --config cloud/workers/api/wrangler.jsonc --env-file cloud/workers/api/release.env
-npx wrangler queues resume-delivery mons-link-wager-settlement --config cloud/workers/api/wrangler.jsonc --env-file cloud/workers/api/release.env
+npx wrangler queues resume-delivery mons-link-auth-recovery-data1 --config cloud/workers/api/wrangler.jsonc --env-file cloud/workers/api/release.env
+npx wrangler queues resume-delivery mons-link-profile-game-projection-data1 --config cloud/workers/api/wrangler.jsonc --env-file cloud/workers/api/release.env
+npx wrangler queues resume-delivery mons-link-event-profile-game-projection-data1 --config cloud/workers/api/wrangler.jsonc --env-file cloud/workers/api/release.env
+npx wrangler queues resume-delivery mons-link-telegram-projection-data1 --config cloud/workers/api/wrangler.jsonc --env-file cloud/workers/api/release.env
+npx wrangler queues resume-delivery mons-link-wager-settlement-data1 --config cloud/workers/api/wrangler.jsonc --env-file cloud/workers/api/release.env
 ```
 
-When running a pre-split rollback version, include `mons-link-telegram-delivery` in these pause and resume operations because that version executes settlement retries there. The current version only forwards legacy wager messages to the settlement queue.
+When running a pre-split rollback version, include `mons-link-telegram-delivery-data1` in these pause and resume operations because that version executes settlement retries there. The current version only forwards legacy wager messages to the settlement queue.
 
-Canonical profile incidents freeze D1 and fix forward. `legacy_fields_json` contains retained migrated data and must remain intact.
+Canonical profile incidents freeze affected writers and fix forward. Retained profile evidence, ownership, balances, and blocked business outcomes must remain intact.
 
 ## Historical match D1 operations
 
@@ -351,7 +264,7 @@ npm run manage:events -- --freeze
 Wait until no withdrawal is `processing` or `submitted`, and event/projection leases and write admissions have drained before changing coordinated state. Inspect all pages of version-pinned Workflow instances during schema maintenance. Freeze storage before terminating an instance, and preserve pending D1 work for recovery.
 
 ```sh
-npx wrangler d1 execute EVENT_PRIZE_WITHDRAWALS_DB --remote --config cloud/workers/api/wrangler.jsonc --env-file cloud/workers/api/release.env --command "SELECT COUNT(*) AS pending_withdrawals FROM event_prize_withdrawals WHERE json_extract(record_json, '$.status') IN ('processing', 'submitted');" --json
+npx wrangler d1 execute EVENT_PRIZE_WITHDRAWALS_DB --remote --config cloud/workers/api/wrangler.jsonc --env-file cloud/workers/api/release.env --command "SELECT COUNT(*) AS pending_withdrawals FROM event_prize_withdrawals_canonical WHERE json_extract(record_json, '$.status') IN ('processing', 'submitted');" --json
 npx wrangler d1 migrations apply EVENT_DB --remote --config cloud/workers/api/wrangler.jsonc --env-file cloud/workers/api/release.env
 npm run manage:events -- --recover-stale-admission <admission-id>
 ```
@@ -379,7 +292,7 @@ npm run manage:wager-reservations -- --resume-d1
 npm run manage:profile-canonical -- --resume
 ```
 
-Recover only an expired admission whose original request has finished and whose uncertain effects have been reconciled. Resume requires admissions and gameplay leases drained. Include `mons-link-wager-settlement` in coordinated maintenance because it executes settlement retries. A pre-split rollback version also requires `mons-link-telegram-delivery`; the current Telegram handler only forwards legacy wager messages. Validate frozen reads and stale-client rejection while canonical writes remain frozen, then verify normal wagering after resume. Keep writes frozen and repair forward on failures; canonical balances, reservations, and wager settlement records must stay consistent.
+Recover only an expired admission whose original request has finished and whose uncertain effects have been reconciled. Resume requires admissions and gameplay leases drained. Include `mons-link-wager-settlement-data1` in coordinated maintenance because it executes settlement retries. A pre-split rollback version also requires `mons-link-telegram-delivery-data1`; the current Telegram handler only forwards legacy wager messages. Validate frozen reads and stale-client rejection while canonical writes remain frozen, then verify normal wagering after resume. Keep writes frozen and repair forward on failures; canonical balances, reservations, and wager settlement records must stay consistent.
 
 ## Event-prize withdrawal D1 operations
 
@@ -397,21 +310,21 @@ After promoting a candidate, trigger a unique read-only preflight and inspect th
 
 ```sh
 event_prize_preflight_id="preflight-$(date -u +%Y%m%d%H%M%S)-$$"
-npx wrangler workflows trigger mons-link-event-prize-withdrawal '{"schemaVersion":1,"kind":"preflight"}' --id "$event_prize_preflight_id" --config cloud/workers/api/wrangler.jsonc --env-file cloud/workers/api/release.env
-npx wrangler workflows instances describe mons-link-event-prize-withdrawal "$event_prize_preflight_id" --config cloud/workers/api/wrangler.jsonc --env-file cloud/workers/api/release.env
+npx wrangler workflows trigger mons-link-event-prize-withdrawal-data1 '{"schemaVersion":1,"kind":"preflight"}' --id "$event_prize_preflight_id" --config cloud/workers/api/wrangler.jsonc --env-file cloud/workers/api/release.env
+npx wrangler workflows instances describe mons-link-event-prize-withdrawal-data1 "$event_prize_preflight_id" --config cloud/workers/api/wrangler.jsonc --env-file cloud/workers/api/release.env
 ```
 
 The preflight must complete with `{"ok":true,"status":"ready"}`. It validates the encrypted wallet identity, Metaplex runtimes, and a read-only Helius request without building or sending a transaction.
 
 ## Queue and Workflow operations
 
-`mons-link-profile-game-projection` owns rating, invite, automatch, and profile-link projections. `mons-link-event-profile-game-projection` owns event navigation previews; the shared queue forwards legacy event tasks to it. `mons-link-telegram-projection` owns automatch, rating, and event Telegram projections. Profile-link catch-up jobs are written atomically with canonical ownership changes in `PROFILE_DB`; their Queue dispatch is recovered by the scheduled D1 sweep. Automatch and manual-session outboxes live in `PROFILE_GAMES_DB`; a durable transition journal coordinates create-only Durable Object match effects with canonical invite metadata, session receipts, and outboxes. Event transitions retain their own D1 intents and use idempotent invite-effect receipts. Event and rating outboxes remain in their owning D1 databases. Do not purge Queues or delete pending jobs or outboxes during incidents.
+`mons-link-profile-game-projection-data1` owns rating, invite, automatch, and profile-link projections. `mons-link-event-profile-game-projection-data1` owns event navigation previews; the shared queue forwards legacy event tasks to it. `mons-link-telegram-projection-data1` owns automatch, rating, and event Telegram projections. Profile-link catch-up jobs are written atomically with canonical ownership changes in `PROFILE_DB`; their Queue dispatch is recovered by the scheduled D1 sweep. Automatch and manual-session outboxes live in `PROFILE_GAMES_DB`; a durable transition journal coordinates create-only Durable Object match effects with canonical invite metadata, session receipts, and outboxes. Event transitions retain their own D1 intents and use idempotent invite-effect receipts. Event and rating outboxes remain in their owning D1 databases. Do not purge Queues or delete pending jobs or outboxes during incidents.
 
-`mons-link-event-progress` owns scheduled event starts and retriable synchronization. Inspect every page of Workflow instances before schema maintenance when version-pinned work could still be active:
+`mons-link-event-progress-data1` owns scheduled event starts and retriable synchronization. Inspect every page of Workflow instances before schema maintenance when version-pinned work could still be active:
 
 ```sh
-npx wrangler workflows instances list mons-link-event-progress --per-page 100 --page 1 --config cloud/workers/api/wrangler.jsonc --env-file cloud/workers/api/release.env
-npx wrangler workflows instances list mons-link-event-prize-withdrawal --per-page 100 --page 1 --config cloud/workers/api/wrangler.jsonc --env-file cloud/workers/api/release.env
+npx wrangler workflows instances list mons-link-event-progress-data1 --per-page 100 --page 1 --config cloud/workers/api/wrangler.jsonc --env-file cloud/workers/api/release.env
+npx wrangler workflows instances list mons-link-event-prize-withdrawal-data1 --per-page 100 --page 1 --config cloud/workers/api/wrangler.jsonc --env-file cloud/workers/api/release.env
 ```
 
 ## Telegram D1 operations
@@ -428,7 +341,7 @@ npx wrangler d1 migrations apply TELEGRAM_DB --remote --config cloud/workers/api
 
 `AUTH_MUTATIONS_DISABLED` in `cloud/workers/api/wrangler.jsonc` is the tracked auth maintenance switch. Change it through candidate upload, explicit Version ID promotion, and custom-domain smoke; do not create Dashboard overrides.
 
-`mons-link-auth-recovery` is the only auth recovery Queue. Delivery is idempotent, and the scheduled sweep re-enqueues stale jobs. Investigate a stuck job without purging the Queue or deleting its job record. Auth origins are enforced in code.
+`mons-link-auth-recovery-data1` is the only auth recovery Queue. Delivery is idempotent, and the scheduled sweep re-enqueues stale jobs. Investigate a stuck job without purging the Queue or deleting its job record. Auth origins are enforced in code.
 
 ## Frontend release
 

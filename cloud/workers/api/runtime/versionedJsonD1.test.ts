@@ -1,8 +1,10 @@
+import { applyCanonicalTestMigrations } from "./canonicalTestMigrations.ts";
+import { canonicalWithdrawalFixture } from "../test/canonicalWithdrawalFixture.ts";
 import { readTelegramMessageDocument } from "../../../runtime/telegram/records.js";
 import { createWithdrawalStorageFixture as createD1EventPrizeWithdrawalStore } from "../test/withdrawalStorageFixture.ts";
 import { beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { env } from "cloudflare:workers";
-import { applyD1Migrations, type D1Migration } from "cloudflare:test";
+import type { D1Migration } from "cloudflare:test";
 import { createVersionedJsonRowStore } from "../src/versionedJsonD1.ts";
 import { createD1TelegramRepository } from "../src/telegramD1.ts";
 
@@ -44,11 +46,11 @@ function firstWriteChanges(db: D1Database, changes: number): D1Database {
 
 describe("versioned JSON row persistence", () => {
   beforeAll(async () => {
-    await applyD1Migrations(
+    await applyCanonicalTestMigrations(
       testEnv.TELEGRAM_DB,
       testEnv.TEST_TELEGRAM_D1_MIGRATIONS,
     );
-    await applyD1Migrations(
+    await applyCanonicalTestMigrations(
       testEnv.EVENT_PRIZE_WITHDRAWALS_DB,
       testEnv.TEST_EVENT_PRIZE_WITHDRAWAL_D1_MIGRATIONS,
     );
@@ -56,26 +58,28 @@ describe("versioned JSON row persistence", () => {
 
   beforeEach(async () => {
     await testEnv.TELEGRAM_DB.batch([
-      testEnv.TELEGRAM_DB.prepare("DELETE FROM telegram_messages"),
-      testEnv.TELEGRAM_DB.prepare("DELETE FROM telegram_delivery_control"),
+      testEnv.TELEGRAM_DB.prepare("DELETE FROM telegram_messages_canonical"),
+      testEnv.TELEGRAM_DB.prepare(
+        "DELETE FROM telegram_delivery_control_canonical",
+      ),
     ]);
     await testEnv.EVENT_PRIZE_WITHDRAWALS_DB.prepare(
-      "DELETE FROM event_prize_withdrawals",
+      "DELETE FROM event_prize_withdrawals_canonical",
     ).run();
   });
 
   it.each([
     {
-      identity: { table: "telegram_messages", key: ["message-1"] },
+      identity: { table: "telegram_messages_canonical", key: ["message-1"] },
       database: () => testEnv.TELEGRAM_DB,
     },
     {
-      identity: { table: "telegram_delivery_control", key: [1] },
+      identity: { table: "telegram_delivery_control_canonical", key: [1] },
       database: () => testEnv.TELEGRAM_DB,
     },
     {
       identity: {
-        table: "event_prize_withdrawals",
+        table: "event_prize_withdrawals_canonical",
         key: ["event-1", "prize-1"],
       },
       database: () => testEnv.EVENT_PRIZE_WITHDRAWALS_DB,
@@ -84,8 +88,35 @@ describe("versioned JSON row persistence", () => {
     "rejects stale writes and preserves stored JSON for $identity.table",
     async ({ identity, database }) => {
       const rows = createVersionedJsonRowStore(database(), identity);
-      const first = '{ "unknownField": null, "count": 1 }';
-      const next = '{ "unknownField": null, "count": 2 }';
+      const first = JSON.stringify(
+        identity.table === "event_prize_withdrawals_canonical"
+          ? canonicalWithdrawalFixture({
+              eventId: "event-1",
+              prizeId: "prize-1",
+              assetAddress: "11111111111111111111111111111111",
+              assetStandard: "core",
+              updatedAtMs: 100,
+            })
+          : { schemaVersion: 1 },
+        null,
+        2,
+      );
+      const next = JSON.stringify(
+        identity.table === "event_prize_withdrawals_canonical"
+          ? canonicalWithdrawalFixture({
+              eventId: "event-1",
+              prizeId: "prize-1",
+              assetAddress: "11111111111111111111111111111111",
+              assetStandard: "core",
+              updatedAtMs: 200,
+            })
+          : identity.table === "telegram_delivery_control_canonical"
+            ? { schemaVersion: 1, retryNotBeforeMs: 200 }
+            : {
+                schemaVersion: 1,
+                manualRecovery: { requestId: "request", action: "abandon" },
+              },
+      );
       expect(await rows.read()).toBeNull();
       expect(await rows.insertIfAbsent(first, 100)).toBe(1);
       expect(await rows.insertIfAbsent(next, 200)).toBe(0);
@@ -102,39 +133,56 @@ describe("versioned JSON row persistence", () => {
   );
 
   it("isolates both parts of withdrawal keys", async () => {
-    const rows = [
+    const keys = [
       ["event-1", "prize-1"],
       ["event-1", "prize-2"],
       ["event-2", "prize-1"],
-    ].map(([eventId, prizeId]) =>
+    ] as const;
+    const rows = keys.map((key) =>
       createVersionedJsonRowStore(testEnv.EVENT_PRIZE_WITHDRAWALS_DB, {
-        table: "event_prize_withdrawals",
-        key: [eventId, prizeId],
+        table: "event_prize_withdrawals_canonical",
+        key,
       }),
     );
-    for (const row of rows) await row.insertIfAbsent("{}", 100);
-    await rows[0].updateIfVersion(1, '{"changed":true}', 200);
-    await rows[0].deleteIfVersion(2);
-    expect(await rows[0].read()).toBeNull();
-    for (const row of rows.slice(1)) {
-      expect(await row.read()).toEqual({ record_json: "{}", version: 1 });
-    }
+    const values = keys.map(([eventId, prizeId]) =>
+      JSON.stringify(
+        canonicalWithdrawalFixture({
+          eventId,
+          prizeId,
+          assetAddress: "11111111111111111111111111111111",
+          assetStandard: "core",
+          updatedAtMs: 100,
+        }),
+      ),
+    );
+    for (const [index, row] of rows.entries())
+      await row.insertIfAbsent(values[index]!, 100);
+    await rows[0]!.deleteIfVersion(1);
+    expect(await rows[0]!.read()).toBeNull();
+    for (const [index, row] of rows.entries())
+      if (index > 0)
+        expect(await row.read()).toEqual({
+          record_json: values[index],
+          version: 1,
+        });
   });
 
   it.each(["insert", "update", "delete"] as const)(
     "preserves each adapter's affected-row predicate for %s",
     async (operation) => {
-      const value = {
+      const value = canonicalWithdrawalFixture({
         eventId: "event-1",
         prizeId: "prize-1",
-        status: "completed",
+        assetAddress: "11111111111111111111111111111111",
+        assetStandard: "core",
         updatedAtMs: 100,
-      };
+      });
+      const telegramValue = { schemaVersion: 1 };
       const messageKey = "message-1";
       if (operation !== "insert") {
         await createD1TelegramRepository(testEnv.TELEGRAM_DB).transactMessage(
           messageKey,
-          () => ({ value: readTelegramMessageDocument(value)! }),
+          () => ({ value: readTelegramMessageDocument(telegramValue)! }),
         );
         await createD1EventPrizeWithdrawalStore(
           testEnv.EVENT_PRIZE_WITHDRAWALS_DB,
@@ -151,7 +199,9 @@ describe("versioned JSON row persistence", () => {
         telegramDecisions++;
         return {
           value:
-            proposed === null ? null : readTelegramMessageDocument(proposed)!,
+            proposed === null
+              ? null
+              : readTelegramMessageDocument(telegramValue)!,
         };
       });
       const withdrawalResult = await createD1EventPrizeWithdrawalStore(

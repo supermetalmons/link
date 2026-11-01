@@ -3,7 +3,12 @@
 const assert = require("node:assert/strict");
 const test = require("node:test");
 const { createEventBracketRuntime } = require("../runtime/events/bracket");
+/**
+ * @typedef {ReturnType<typeof createEventBracketRuntime>} BracketRuntime
+ * @typedef {Omit<Awaited<ReturnType<BracketRuntime["resolveRoundMatchesWithConcurrency"]>>[number], "matchRecord"> & {matchRecord: unknown}} LegacyRoundResult
+ */
 
+/** @param {string} id @param {Record<string, unknown>} [overrides] */
 const match = (id, overrides = {}) => ({
   status: "active",
   inviteId: id,
@@ -15,7 +20,9 @@ const match = (id, overrides = {}) => ({
 });
 
 test("round resolution reads only valid unresolved pairs in one ordered batch", async () => {
+  /** @type {import("../runtime/events/bracket").EventMatchPairRequest[][]} */
   const reads = [];
+  /** @type {[unknown, unknown][]} */
   const winners = [];
   const runtime = createEventBracketRuntime({
     readMatchPair: () => assert.fail("unexpected single match read"),
@@ -40,7 +47,11 @@ test("round resolution reads only valid unresolved pairs in one ordered batch", 
     absent: null,
     second: match("second"),
   };
-  const results = await runtime.resolveRoundMatchesWithConcurrency(matches);
+  const results = await /** @type {Promise<LegacyRoundResult[]>} */ (
+    Reflect.apply(runtime.resolveRoundMatchesWithConcurrency, runtime, [
+      matches,
+    ])
+  );
 
   assert.deepEqual(reads, [
     [
@@ -70,6 +81,8 @@ test("round resolution reads only valid unresolved pairs in one ordered batch", 
     results.map(({ resolved }) => resolved?.status ?? null),
     ["host", "host", "bye", null, null, "guest"],
   );
+  assert.ok(results[0]);
+  assert.ok(results[5]?.resolved);
   assert.equal(results[0].matchRecord, matches.first);
   assert.equal(results[5].resolved.winnerProfileId, "second-guest");
 });
@@ -80,15 +93,24 @@ test("finalized, bye and invalid-only rounds do not read match state", async () 
     readMatchPairs: () => assert.fail("unexpected match batch read"),
     resolveMatchWinner: () => assert.fail("unexpected winner resolution"),
   });
-  assert.deepEqual(await runtime.resolveRoundMatchesWithConcurrency({}), []);
-  const results = await runtime.resolveRoundMatchesWithConcurrency({
-    host: match("host", { status: "host" }),
-    guest: match("guest", { status: "guest" }),
-    bye: match("bye", { status: "bye", winnerProfileId: "bye-host" }),
-    invalidBye: match("bye", { status: "bye" }),
-    invalid: match("invalid", { inviteId: null }),
-    absent: null,
-  });
+  assert.deepEqual(
+    await /** @type {Promise<LegacyRoundResult[]>} */ (
+      Reflect.apply(runtime.resolveRoundMatchesWithConcurrency, runtime, [{}])
+    ),
+    [],
+  );
+  const results = await /** @type {Promise<LegacyRoundResult[]>} */ (
+    Reflect.apply(runtime.resolveRoundMatchesWithConcurrency, runtime, [
+      {
+        host: match("host", { status: "host" }),
+        guest: match("guest", { status: "guest" }),
+        bye: match("bye", { status: "bye", winnerProfileId: "bye-host" }),
+        invalidBye: match("bye", { status: "bye" }),
+        invalid: match("invalid", { inviteId: null }),
+        absent: null,
+      },
+    ])
+  );
   assert.deepEqual(
     results.map(({ resolved }) => resolved?.status ?? null),
     ["host", "guest", "bye", null, null, null],
@@ -114,10 +136,12 @@ test("large rounds batch all reads while limiting winner work to four", async ()
       return { winner: null };
     },
   });
-  const results = await runtime.resolveRoundMatchesWithConcurrency(
-    Object.fromEntries(
-      Array.from({ length: 16 }, (_, index) => [index, match(String(index))]),
-    ),
+  const results = await /** @type {Promise<LegacyRoundResult[]>} */ (
+    Reflect.apply(runtime.resolveRoundMatchesWithConcurrency, runtime, [
+      Object.fromEntries(
+        Array.from({ length: 16 }, (_, index) => [index, match(String(index))]),
+      ),
+    ])
   );
   assert.equal(results.length, 16);
   assert.equal(batches, 1);
@@ -139,11 +163,18 @@ test("single third-place resolution keeps the ordinary pair read", async () => {
       return { winner: "opponent" };
     },
   });
-  assert.deepEqual(await runtime.resolveRoundMatchState(match("third-place")), {
-    status: "guest",
-    winnerProfileId: "third-place-guest",
-    loserProfileId: "third-place-host",
-  });
+  assert.deepEqual(
+    await /** @type {ReturnType<typeof runtime.resolveRoundMatchState>} */ (
+      Reflect.apply(runtime.resolveRoundMatchState, runtime, [
+        match("third-place"),
+      ])
+    ),
+    {
+      status: "guest",
+      winnerProfileId: "third-place-guest",
+      loserProfileId: "third-place-host",
+    },
+  );
   assert.equal(reads, 1);
 });
 
@@ -155,7 +186,11 @@ test("invalid batch results never fall back to singleton reads", async () => {
       resolveMatchWinner: () => assert.fail("unexpected winner resolution"),
     });
     await assert.rejects(
-      runtime.resolveRoundMatchesWithConcurrency({ first: match("first") }),
+      /** @type {Promise<LegacyRoundResult[]>} */ (
+        Reflect.apply(runtime.resolveRoundMatchesWithConcurrency, runtime, [
+          { first: match("first") },
+        ])
+      ),
       /event-match-batch-invalid/,
     );
   }

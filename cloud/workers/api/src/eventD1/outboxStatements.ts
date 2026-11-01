@@ -1,12 +1,14 @@
+import { readEventProgressDeadLetter } from "../../../../runtime/eventProgressRecords.js";
+import {
+  createEmptyEventTelegramProjectionDocument,
+  readEventTelegramProjectionDocument,
+} from "../../../../runtime/telegram/eventProjectionRecords.js";
 import {
   isRecord,
-  cloneJson,
   encodeJson,
   safeInteger,
-  exactKey,
   validateEventProgressOutbox,
   decodeJson,
-  isJsonValue,
   validateProjectionOutbox,
 } from "./validation.ts";
 import {
@@ -63,7 +65,7 @@ export async function buildOutboxStatements(
       guards.push(
         recordJsonGuard(
           db,
-          "event_progress_outboxes",
+          "event_progress_outboxes_canonical",
           outboxId,
           options.expectedRecords!.progress![outboxId],
           "pending",
@@ -77,7 +79,7 @@ export async function buildOutboxStatements(
       mutations.push(
         db
           .prepare(
-            `DELETE FROM event_progress_outboxes
+            `DELETE FROM event_progress_outboxes_canonical
              WHERE outbox_id = ? AND status = 'pending'`,
           )
           .bind(outboxId),
@@ -100,27 +102,7 @@ export async function buildOutboxStatements(
           )
         : null;
     if (stored.recordJson !== null && !previous) {
-      mutations.push(
-        db
-          .prepare(
-            `INSERT INTO event_progress_outboxes (
-               outbox_id, event_id, status, run_at_ms, last_queued_at_ms, record_json
-             )
-             SELECT outbox_id, event_id, 'dead', NULL, ?,
-               json_object(
-                 'deadAtMs', ?, 'originalRecord', json(record_json),
-                 'reason', 'invalid-event-progress-outbox'
-               )
-             FROM event_progress_outboxes
-             WHERE status = 'pending' AND outbox_id = ? AND record_json = ?
-             ON CONFLICT (status, outbox_id) DO UPDATE SET
-               event_id = excluded.event_id,
-               run_at_ms = NULL,
-               last_queued_at_ms = excluded.last_queued_at_ms,
-               record_json = excluded.record_json`,
-          )
-          .bind(nowMs, nowMs, outboxId, stored.recordJson),
-      );
+      throw new EventD1Failure("invalid-event-progress-outbox");
     }
     if (
       previous &&
@@ -139,7 +121,7 @@ export async function buildOutboxStatements(
     mutations.push(
       db
         .prepare(
-          `INSERT INTO event_progress_outboxes (
+          `INSERT INTO event_progress_outboxes_canonical (
              outbox_id, event_id, status, run_at_ms, last_queued_at_ms,
              record_json
            ) VALUES (?, ?, 'pending', ?, ?, ?)
@@ -149,10 +131,10 @@ export async function buildOutboxStatements(
              run_at_ms = excluded.run_at_ms,
              last_queued_at_ms = excluded.last_queued_at_ms,
              record_json = excluded.record_json
-           WHERE event_progress_outboxes.event_id IS NOT excluded.event_id
-             OR event_progress_outboxes.run_at_ms IS NOT excluded.run_at_ms
-             OR event_progress_outboxes.last_queued_at_ms IS NOT excluded.last_queued_at_ms
-             OR event_progress_outboxes.record_json IS NOT excluded.record_json`,
+           WHERE event_progress_outboxes_canonical.event_id IS NOT excluded.event_id
+             OR event_progress_outboxes_canonical.run_at_ms IS NOT excluded.run_at_ms
+             OR event_progress_outboxes_canonical.last_queued_at_ms IS NOT excluded.last_queued_at_ms
+             OR event_progress_outboxes_canonical.record_json IS NOT excluded.record_json`,
         )
         .bind(
           outboxId,
@@ -169,7 +151,7 @@ export async function buildOutboxStatements(
       guards.push(
         recordJsonGuard(
           db,
-          "event_progress_outboxes",
+          "event_progress_outboxes_canonical",
           outboxId,
           options.expectedRecords!.dead![outboxId],
           "dead",
@@ -180,25 +162,23 @@ export async function buildOutboxStatements(
       mutations.push(
         db
           .prepare(
-            "DELETE FROM event_progress_outboxes WHERE outbox_id = ? AND status = 'dead'",
+            "DELETE FROM event_progress_outboxes_canonical WHERE outbox_id = ? AND status = 'dead'",
           )
           .bind(outboxId),
       );
       continue;
     }
-    if (!isRecord(raw) || !isJsonValue(raw)) {
-      throw new EventD1Failure("invalid-event-progress-dead-letter");
-    }
-    const original = isRecord(raw.originalRecord) ? raw.originalRecord : null;
-    const eventId = original ? exactKey(original.eventId) : "";
+    const record = readEventProgressDeadLetter(raw);
+    if (!record) throw new EventD1Failure("invalid-event-progress-dead-letter");
+    const eventId = record.originalRecord?.eventId ?? null;
     mutations.push(
       db
         .prepare(
-          `INSERT INTO event_progress_outboxes (
+          `INSERT INTO event_progress_outboxes_canonical (
              outbox_id, event_id, status, run_at_ms, last_queued_at_ms,
              record_json
            ) VALUES (?, (
-             SELECT event_id FROM event_records WHERE event_id = ?
+             SELECT event_id FROM event_records_canonical WHERE event_id = ?
            ), 'dead', NULL, ?, ?)
            ON CONFLICT (status, outbox_id) DO UPDATE SET
              event_id = excluded.event_id,
@@ -207,12 +187,7 @@ export async function buildOutboxStatements(
              last_queued_at_ms = excluded.last_queued_at_ms,
              record_json = excluded.record_json`,
         )
-        .bind(
-          outboxId,
-          eventId || null,
-          safeInteger(raw.deadAtMs),
-          encodeJson(raw),
-        ),
+        .bind(outboxId, eventId || null, record.deadAtMs, encodeJson(record)),
     );
   }
 
@@ -221,7 +196,7 @@ export async function buildOutboxStatements(
       guards.push(
         recordJsonGuard(
           db,
-          "event_profile_game_projection_outboxes",
+          "event_profile_game_projection_outboxes_canonical",
           eventId,
           options.expectedRecords!.profileGame![eventId],
         ),
@@ -231,7 +206,7 @@ export async function buildOutboxStatements(
       mutations.push(
         db
           .prepare(
-            "DELETE FROM event_profile_game_projection_outboxes WHERE event_id = ?",
+            "DELETE FROM event_profile_game_projection_outboxes_canonical WHERE event_id = ?",
           )
           .bind(eventId),
       );
@@ -241,18 +216,19 @@ export async function buildOutboxStatements(
     mutations.push(
       db
         .prepare(
-          `INSERT INTO event_profile_game_projection_outboxes (
+          `INSERT INTO event_profile_game_projection_outboxes_canonical (
              event_id, request_id, status, last_queued_at_ms, record_json
-           ) VALUES (?, ?, 'pending', ?, ?)
+           ) VALUES (?, ?, ?, ?, ?)
            ON CONFLICT (event_id) DO UPDATE SET
              request_id = excluded.request_id,
-             status = 'pending',
+             status = excluded.status,
              last_queued_at_ms = excluded.last_queued_at_ms,
              record_json = excluded.record_json`,
         )
         .bind(
           eventId,
           record.requestId,
+          record.status,
           record.lastQueuedAtMs,
           encodeJson(record.raw),
         ),
@@ -264,7 +240,7 @@ export async function buildOutboxStatements(
       guards.push(
         recordJsonGuard(
           db,
-          "event_telegram_projection_outboxes",
+          "event_telegram_projection_outboxes_canonical",
           eventId,
           options.expectedRecords!.telegram![eventId],
         ),
@@ -274,7 +250,7 @@ export async function buildOutboxStatements(
       mutations.push(
         db
           .prepare(
-            "DELETE FROM event_telegram_projection_outboxes WHERE event_id = ?",
+            "DELETE FROM event_telegram_projection_outboxes_canonical WHERE event_id = ?",
           )
           .bind(eventId),
       );
@@ -284,7 +260,7 @@ export async function buildOutboxStatements(
     mutations.push(
       db
         .prepare(
-          `INSERT INTO event_telegram_projection_outboxes (
+          `INSERT INTO event_telegram_projection_outboxes_canonical (
              event_id, request_id, status, first_queued_at_ms, updated_at_ms,
              record_json
            ) VALUES (?, ?, ?, ?, ?, ?)
@@ -318,7 +294,7 @@ export async function buildOutboxStatements(
     if (expectedRevision !== currentRevision) throw new EventD1Conflict();
     guards.push(telegramStateRevisionGuard(db, eventId, expectedRevision));
     let generation = current?.generation || 0;
-    let state = current?.state || {};
+    let state = current?.state ?? createEmptyEventTelegramProjectionDocument();
     if (update.generation !== undefined) {
       const increment = isRecord(update.generation)
         ? update.generation.increment
@@ -333,26 +309,29 @@ export async function buildOutboxStatements(
         mutations.push(
           db
             .prepare(
-              "DELETE FROM event_telegram_projection_state WHERE event_id = ?",
+              "DELETE FROM event_telegram_projection_state_canonical WHERE event_id = ?",
             )
             .bind(eventId),
         );
         continue;
       }
-      if (!isRecord(update.state) || !isJsonValue(update.state)) {
-        throw new EventD1Failure("invalid-event-telegram-projection-state");
-      }
-      state = cloneJson(update.state);
+      state = readEventTelegramProjectionDocument(update.state);
     }
+    const stateGuard = state.eventTelegramProjectionGuard;
+    if (
+      stateGuard !== null &&
+      (stateGuard.eventId !== eventId || stateGuard.generation > generation)
+    )
+      throw new EventD1Failure("invalid-event-telegram-projection-state");
     mutations.push(
       db
         .prepare(
-          `INSERT INTO event_telegram_projection_state (
+          `INSERT INTO event_telegram_projection_state_canonical (
              event_id, generation, revision, state_json, updated_at_ms
            ) VALUES (?, ?, 1, ?, ?)
            ON CONFLICT (event_id) DO UPDATE SET
              generation = excluded.generation,
-             revision = event_telegram_projection_state.revision + 1,
+             revision = event_telegram_projection_state_canonical.revision + 1,
              state_json = excluded.state_json,
              updated_at_ms = excluded.updated_at_ms`,
         )

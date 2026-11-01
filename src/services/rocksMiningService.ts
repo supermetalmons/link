@@ -1,7 +1,9 @@
 import {
   MATERIAL_KEYS,
   createDropsForMiningEvent,
+  createEmptyMiningSnapshot,
   formatMiningDateLocal,
+  parseMiningSnapshot,
 } from "@mons/shared/mining";
 import type {
   MiningMaterialName,
@@ -16,7 +18,6 @@ import {
   getRockVariantIndex,
   isAnonymousProfile,
   loadStoredMiningState,
-  normalizeMiningState,
   shouldShowMiningRock,
 } from "../island/miningState";
 
@@ -42,9 +43,13 @@ const createEmptyMaterials = (): PlayerMiningMaterials =>
 const cloneMaterials = (source: PlayerMiningMaterials): PlayerMiningMaterials =>
   cloneMiningMaterials(source);
 
-const normalizeSnapshot = (
-  source?: PlayerMiningData | null,
-): PlayerMiningData => normalizeMiningState(source);
+const readSnapshot = (source?: PlayerMiningData | null): PlayerMiningData => {
+  if (source === null || source === undefined)
+    return createEmptyMiningSnapshot();
+  const snapshot = parseMiningSnapshot(source);
+  if (!snapshot) throw new TypeError("invalid-mining-snapshot");
+  return snapshot;
+};
 
 const formatMiningDate = formatMiningDateLocal;
 
@@ -146,10 +151,10 @@ function setFromServer(
   data?: PlayerMiningData | null,
   options?: { persist?: boolean; notify?: boolean },
 ): void {
-  const normalized = normalizeSnapshot(data);
+  const next = readSnapshot(data);
   serverSnapshotLoaded = true;
   const shouldNotify = options?.notify !== false;
-  setSnapshot(normalized, options?.persist !== false, shouldNotify);
+  setSnapshot(next, options?.persist !== false, shouldNotify);
 }
 
 function didBreakRock(): DidBreakRockResult {
@@ -186,7 +191,7 @@ function didBreakRock(): DidBreakRockResult {
           return;
         }
         if (response && response.ok && response.mining) {
-          setSnapshot(normalizeSnapshot(response.mining), true, false);
+          setSnapshot(readSnapshot(response.mining), true, false);
         }
       })
       .catch(() => {});

@@ -17,9 +17,7 @@ import {
   type AppliedReceiptAction,
   type FinishStatusInput,
   type DeliveryTransition,
-  PendingDeleteSnapshot,
   deliveryDocument,
-  pendingDeleteDocument,
 } from "./deliveryState.js";
 import {
   buildErrorState,
@@ -31,7 +29,11 @@ import {
 
 import { readProperty } from "./values.js";
 import type { TelegramMessageDocument } from "./records.js";
-type RawRecord = Record<string, unknown>;
+import {
+  requireTelegramMessageDocument,
+  requireTelegramTransaction,
+} from "./recordCodec.js";
+import { documentFields } from "./deliveryState.js";
 
 type AcquireDesiredRecordInput = {
   leaseTtlMs: number;
@@ -44,10 +46,10 @@ export function acquireDesiredRecord(
   input: AcquireDesiredRecordInput,
 ): TransactionDecision<TelegramMessageDocument> {
   const { leaseTtlMs, nowMs, ownerToken, observeDecision } = input;
-  const apply = (record: RawRecord) => {
+  const apply = (record: TelegramMessageDocument) => {
     let acquireDecision: DesiredAcquireDecision = "missing";
 
-    const desired = asObject(record.desired);
+    const desired = documentFields(record.desired);
     const delivery = readDelivery(record.delivery);
     const desiredRevision = normalizeString(desired.revision);
     const leaseExpiresAtMs = Number(delivery.leaseExpiresAtMs) || 0;
@@ -113,8 +115,8 @@ export function acquireDesiredRecord(
         decision: acquireDecision,
       };
     }
-    if (delivery.hasSendInFlight) {
-      const sendInFlight = asObject(delivery.sendInFlight);
+    if (delivery.sendInFlight) {
+      const sendInFlight = delivery.sendInFlight;
       const sendApiGateOwner = normalizeString(sendInFlight.apiGateOwner);
       const revision =
         desiredRevision || normalizeString(delivery.revision) || "invalid";
@@ -319,8 +321,7 @@ export function acquireDesiredRecord(
       decision: acquireDecision,
     };
   };
-  const output: unknown = apply(asObject(current));
-  return output as TransactionDecision<TelegramMessageDocument>;
+  return requireTelegramTransaction(apply(current));
 }
 
 type FinishDesiredRecordInput = {
@@ -346,7 +347,7 @@ export function finishDesiredRecord(
     result,
     status,
   } = input;
-  const apply = (record: RawRecord) => {
+  const apply = (record: TelegramMessageDocument) => {
     const latestRevision = normalizeString(
       readProperty(record.desired, "revision"),
     );
@@ -364,7 +365,7 @@ export function finishDesiredRecord(
           : status === "delivered"
             ? { status, revision, deliveredAtMs: nowMs }
             : { status, revision };
-    const nextDelivery = asObject(
+    const nextDelivery = documentFields(
       writeDelivery({
         ...omitRetryState(
           omitKeys(delivery, [
@@ -413,7 +414,7 @@ export function finishDesiredRecord(
     ) {
       nextDelivery.deadLetterAtMs = nowMs;
     }
-    const nextRecord: RawRecord = {
+    const nextRecord = {
       ...record,
       delivery: nextDelivery,
     };
@@ -424,8 +425,7 @@ export function finishDesiredRecord(
     }
     return nextRecord;
   };
-  const output: unknown = apply(asObject(current));
-  return output as TelegramMessageDocument;
+  return requireTelegramMessageDocument(apply(current));
 }
 
 type RecordDesiredRetryProofInput = {
@@ -453,7 +453,7 @@ export function recordDesiredRetryProof(
     retryState,
     safeRejectedAttemptId,
   } = input;
-  const apply = (record: RawRecord) => ({
+  const apply = (record: TelegramMessageDocument) => ({
     ...record,
     delivery: {
       ...deliveryDocument(delivery),
@@ -469,8 +469,7 @@ export function recordDesiredRetryProof(
       },
     },
   });
-  const output: unknown = apply(asObject(current));
-  return output as TelegramMessageDocument;
+  return requireTelegramMessageDocument(apply(current));
 }
 
 type RecordDesiredRetryStateInput = {
@@ -492,7 +491,7 @@ export function recordDesiredRetryState(
     result,
     retryState,
   } = input;
-  const apply = (record: RawRecord) => {
+  const apply = (record: TelegramMessageDocument) => {
     const latestRevision = normalizeString(
       readProperty(record.desired, "revision"),
     );
@@ -540,8 +539,7 @@ export function recordDesiredRetryState(
       }),
     };
   };
-  const output: unknown = apply(asObject(current));
-  return output as TelegramMessageDocument;
+  return requireTelegramMessageDocument(apply(current));
 }
 
 type MarkAppliedStateUnknownRecordInput = {
@@ -556,7 +554,7 @@ export function markAppliedStateUnknownRecord(
   input: MarkAppliedStateUnknownRecordInput,
 ): TelegramMessageDocument {
   const { apiGateOwner, desired, markedAtMs, operation } = input;
-  const apply = (record: RawRecord) => ({
+  const apply = (record: TelegramMessageDocument) => ({
     ...record,
     delivery: {
       ...deliveryDocument(delivery),
@@ -568,8 +566,7 @@ export function markAppliedStateUnknownRecord(
       },
     },
   });
-  const output: unknown = apply(asObject(current));
-  return output as TelegramMessageDocument;
+  return requireTelegramMessageDocument(apply(current));
 }
 
 type ClearMissingAppliedRecordInput = {
@@ -581,8 +578,8 @@ export function clearMissingAppliedRecord(
   input: ClearMissingAppliedRecordInput,
 ): TelegramMessageDocument {
   const { apiGateOwner } = input;
-  const apply = (record: RawRecord) => {
-    const nextRecord: RawRecord = {
+  const apply = (record: TelegramMessageDocument) => {
+    const nextRecord = {
       ...record,
       delivery: {
         ...omitKeys(delivery, [
@@ -597,18 +594,5 @@ export function clearMissingAppliedRecord(
     delete nextRecord.applied;
     return nextRecord;
   };
-  const output: unknown = apply(asObject(current));
-  return output as TelegramMessageDocument;
+  return requireTelegramMessageDocument(apply(current));
 }
-
-const asObject = (value: unknown): Record<string, unknown> => {
-  const retained =
-    value instanceof DeliverySnapshot
-      ? deliveryDocument(value)
-      : value instanceof PendingDeleteSnapshot
-        ? pendingDeleteDocument(value)
-        : value;
-  return retained && typeof retained === "object" && !Array.isArray(retained)
-    ? (retained as Record<string, unknown>)
-    : {};
-};

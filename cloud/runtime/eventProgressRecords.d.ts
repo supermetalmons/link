@@ -1,19 +1,41 @@
 // Generated from src/eventProgressRecords.ts. Run npm run generate:runtime.
-export type EventProgressRecordKind = "pending" | "dead";
-declare const eventProgressRecord: unique symbol;
-export type EventProgressDocument<Kind extends EventProgressRecordKind> = {
-  readonly [eventProgressRecord]: Kind;
+export type EventProgressPendingRecord = {
+  schemaVersion: 2;
+  dataEpoch: 1;
+  eventId: string;
+  sourceKey: string;
+  reason: string;
+  runAtMs: number | null;
+  firstQueuedAtMs: number;
+  lastQueuedAtMs: number;
 };
-declare const retainedEventProgressParams: unique symbol;
-export type RetainedEventProgressParams = {
-  readonly [retainedEventProgressParams]: true;
+export type EventProgressWorkflowParams = {
+  schemaVersion: 2;
+  dataEpoch: 1;
+  eventId: string;
+  outboxId: string;
+  reason: string;
+  runAtMs: number | null;
+  sourceKey: string;
 };
+export type RetainedEventProgressParams = EventProgressWorkflowParams;
 export type EventProgressDeadLetter = {
+  schemaVersion: 1;
+  dataEpoch: 1;
   deadAtMs: number;
-  originalRecord: EventProgressDocument<"pending"> | null;
-  reason: "invalid-event-progress-outbox";
+  sourceDigest: string;
+  originalRecord: EventProgressPendingRecord | null;
+  reason: "invalid-event-progress-outbox" | "canonical-data-cutover";
 };
+export type EventProgressRecordKind = "pending" | "dead";
+export type EventProgressDocument<Kind extends EventProgressRecordKind> =
+  Kind extends "pending" ? EventProgressPendingRecord : EventProgressDeadLetter;
+export declare function readEventProgressPending(
+  value: unknown,
+): EventProgressPendingRecord | null;
+export declare function readEventProgressDeadLetter(
+  value: unknown,
+): EventProgressDeadLetter | null;
 export declare function retainEventProgressRecord<
   Kind extends EventProgressRecordKind,
->(_kind: Kind, value: unknown): EventProgressDocument<Kind>;
-export {};
+>(kind: Kind, value: unknown): EventProgressDocument<Kind>;

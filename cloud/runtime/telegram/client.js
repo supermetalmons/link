@@ -342,8 +342,8 @@ const sendTelegramMessage = async ({
     method: "sendMessage",
     body,
     token,
-    fetchImpl,
-    timeoutMs,
+    ...(fetchImpl === undefined ? {} : { fetchImpl }),
+    ...(timeoutMs === undefined ? {} : { timeoutMs }),
   });
 };
 exports.sendTelegramMessage = sendTelegramMessage;
@@ -387,8 +387,8 @@ const sendTelegramMediaGroup = async ({
       disable_notification: silent,
     },
     token,
-    fetchImpl,
-    timeoutMs,
+    ...(fetchImpl === undefined ? {} : { fetchImpl }),
+    ...(timeoutMs === undefined ? {} : { timeoutMs }),
   });
 };
 exports.sendTelegramMediaGroup = sendTelegramMediaGroup;
@@ -416,8 +416,8 @@ const editTelegramMessage = async ({
     method: "editMessageText",
     body,
     token,
-    fetchImpl,
-    timeoutMs,
+    ...(fetchImpl === undefined ? {} : { fetchImpl }),
+    ...(timeoutMs === undefined ? {} : { timeoutMs }),
   });
 };
 exports.editTelegramMessage = editTelegramMessage;
@@ -436,8 +436,8 @@ const deleteTelegramMessage = async ({
       message_id: messageId,
     },
     token,
-    fetchImpl,
-    timeoutMs,
+    ...(fetchImpl === undefined ? {} : { fetchImpl }),
+    ...(timeoutMs === undefined ? {} : { timeoutMs }),
   });
 };
 exports.deleteTelegramMessage = deleteTelegramMessage;

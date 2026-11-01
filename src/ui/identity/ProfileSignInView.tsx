@@ -236,8 +236,10 @@ const ProfileSignIn: React.FC<ProfileSignInProps> = ({ authState }) => {
     id: number;
     message: string;
   } | null>(null);
-  const [NotificationComponent, setNotificationComponent] =
-    useState<React.ComponentType<any> | null>(null);
+  const [NotificationComponent, setNotificationComponent] = useState<
+    | (typeof import("../NotificationBanner"))["NotificationBannerComponent"]
+    | null
+  >(null);
   const [isNotificationVisible, setIsNotificationVisible] = useState(false);
   const [notificationState, setNotificationState] =
     useState<NotificationState | null>(null);

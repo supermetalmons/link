@@ -1,3 +1,4 @@
+import { required } from "./fixtures/canonicalData.mjs";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
@@ -16,14 +17,14 @@ const hook = source.statements.find(
   (node) =>
     ts.isFunctionDeclaration(node) && node.name?.text === "useAuthStatus",
 );
-const effects = hook.body.statements
-  .filter(
-    (node) =>
-      ts.isExpressionStatement(node) &&
-      ts.isCallExpression(node.expression) &&
-      node.expression.expression.getText(source) === "useEffect",
-  )
-  .map((node) => node.expression.arguments[0]);
+assert.ok(hook && ts.isFunctionDeclaration(hook) && hook.body);
+const effects = hook.body.statements.flatMap((node) =>
+  ts.isExpressionStatement(node) &&
+  ts.isCallExpression(node.expression) &&
+  node.expression.expression.getText(source) === "useEffect"
+    ? [required(node.expression.arguments[0])]
+    : [],
+);
 
 for (const provider of ["Apple", "X"]) {
   const effect = effects.find((node) =>
@@ -53,14 +54,16 @@ for (const provider of ["Apple", "X"]) {
       },
       console,
     };
-    const run = new Function(
-      ...Object.keys(dependencies),
-      `${outputText}\nreturn run;`,
-    )(...Object.values(dependencies));
+    const load =
+      /** @type {(...values: unknown[]) => Parameters<typeof import("react").useEffect>[0]} */ (
+        new Function(...Object.keys(dependencies), `${outputText}\nreturn run;`)
+      );
+    const run = load(...Object.values(dependencies));
     const cleanup = run();
     await new Promise((resolve) => setImmediate(resolve));
     assert.equal(cleared, 1);
     assert.equal(consumed, 0);
+    assert.ok(typeof cleanup === "function");
     cleanup();
   });
 
@@ -82,14 +85,16 @@ for (const provider of ["Apple", "X"]) {
       },
       console,
     };
-    const run = new Function(
-      ...Object.keys(dependencies),
-      `${outputText}\nreturn run;`,
-    )(...Object.values(dependencies));
+    const load =
+      /** @type {(...values: unknown[]) => Parameters<typeof import("react").useEffect>[0]} */ (
+        new Function(...Object.keys(dependencies), `${outputText}\nreturn run;`)
+      );
+    const run = load(...Object.values(dependencies));
     const cleanup = run();
     await new Promise((resolve) => setImmediate(resolve));
     assert.equal(cleared, 0);
     assert.equal(consumed, 1);
+    assert.ok(typeof cleanup === "function");
     cleanup();
   });
 }

@@ -167,7 +167,7 @@ export async function handleEventReadRoute(
     corsHeaders = {
       ...getAuthCorsHeaders(request),
       "Access-Control-Allow-Headers":
-        "Authorization, Content-Type, If-None-Match, X-D1-Bookmark",
+        "Authorization, Content-Type, If-None-Match, X-D1-Bookmark, X-Mons-Data-Epoch",
       "Access-Control-Expose-Headers": "ETag, X-D1-Bookmark",
     };
     if (request.method === "OPTIONS") {

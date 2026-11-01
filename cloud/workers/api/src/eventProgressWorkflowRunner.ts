@@ -5,6 +5,7 @@ import type {
 } from "cloudflare:workers";
 import {
   parseEventProgressParams,
+  workflowIdFromOutboxId,
   type EventProgressWorkflowParams,
 } from "./eventProgressCodec.ts";
 import { createEventGameplayRepository } from "./eventRepository.ts";
@@ -44,7 +45,7 @@ export async function runEventProgressWorkflow(
   dependencies: EventProgressWorkflowDependencies,
 ): Promise<EventProgressWorkflowResult> {
   const params = await parseEventProgressParams(event.payload);
-  if (!params) {
+  if (!params || workflowIdFromOutboxId(params.outboxId) !== event.instanceId) {
     throw new InvalidEventProgressPayloadError(
       "invalid-event-progress-payload",
     );

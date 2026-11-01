@@ -1,3 +1,4 @@
+import { canonicalEvent } from "./fixtures/canonicalData.mjs";
 import assert from "node:assert/strict";
 import { registerHooks } from "node:module";
 import test from "node:test";
@@ -16,10 +17,10 @@ registerHooks({
 });
 
 const {
-  mapDatabaseEventRecord,
-  mapEventPrizeAssignment,
+  decodeEventView,
+  decodeEventPrizeAssignmentView,
   normalizeEventPrizeId,
-} = await import("../src/connection/eventMappers.ts");
+} = await import("@mons/shared/events");
 const { mapProfileGameProjection } = await import("@mons/shared/navigation");
 const { normalizeFiniteNumber, normalizeString, normalizeStringOrNull } =
   await import("../src/connection/valueNormalizers.ts");
@@ -32,14 +33,40 @@ test("normalizes primitive stored values", () => {
   assert.equal(normalizeFiniteNumber("bad", 7), 7);
 });
 
-test("maps navigation games with legacy aliases and validation", () => {
+test("maps navigation games with canonical appearance values", () => {
   assert.deepEqual(
     mapProfileGameProjection(
       {
+        schemaVersion: 3,
+        projectorVersion: 3,
+        source: "game-projector",
+        entityType: "game",
+        inviteId: "invite-1",
+        latestMatchId: "invite-1",
+        ownerProfileId: "profile",
+        ownerRole: "host",
+        ownerLoginId: null,
+        hostLoginId: null,
+        guestLoginId: null,
+        hostProfileId: null,
+        guestProfileId: null,
+        opponentProfileId: null,
+        opponentLoginId: null,
+        sortBucket: 40,
+        isPendingAutomatch: false,
+        automatchStateHint: null,
+        automatchCanceledAt: null,
+        createdAt: 1234,
+        updatedAt: 1234,
+        endedAt: null,
+        lastEventFingerprint: "test",
+        lastEventType: null,
+        lastEventReason: null,
+        lastEventAt: 1234,
         kind: "auto",
         status: "active",
-        opponentEmojiId: "25",
-        opponentDisplayName: "guest",
+        opponentEmoji: 25,
+        opponentName: "guest",
         listSortAt: 1234,
       },
       "invite-1",
@@ -80,88 +107,81 @@ test("maps event navigation previews and rejects pending projections", () => {
   );
   const item = mapProfileGameProjection(
     {
+      schemaVersion: 2,
+      source: "event-projector",
+      id: "event_event-1",
+      ownerProfileId: "profile",
+      sortBucket: 40,
+      startAt: null,
+      updatedAt: 10,
+      endedAt: null,
+      participantCount: 1,
+      winnerDisplayName: null,
       entityType: "event",
       eventId: "event-1",
       status: "active",
       listSortAt: 10,
       participantPreview: [
-        { profileId: "p1", displayName: "One", emojiId: "5", aura: "a" },
-        null,
+        { profileId: "p1", displayName: "One", emojiId: 5, aura: "none" },
       ],
     },
-    "fallback",
+    "event_event-1",
   );
   assert.equal(item?.entityType, "event");
   assert.deepEqual(item?.participantPreview, [
-    { profileId: "p1", displayName: "One", emojiId: 5, aura: "a" },
+    { profileId: "p1", displayName: "One", emojiId: 5, aura: "none" },
   ]);
   assert.equal(item?.participantCount, 1);
 });
 
-test("maps Sunday Mons only from an explicit boolean flag", () => {
+test("canonical event views require complete records and an explicit Sunday Mons flag", () => {
   for (const eventId of ["NN3eRzoZo80", "ordinary-event"]) {
-    assert.equal(mapDatabaseEventRecord({}, eventId)?.isSundayMons, false);
-    for (const isSundayMons of [true, false, "true", 1, null]) {
-      assert.equal(
-        mapDatabaseEventRecord({ isSundayMons }, eventId)?.isSundayMons,
-        isSundayMons === true,
-      );
+    assert.equal(decodeEventView({}, eventId), null);
+    for (const isSundayMons of [true, false]) {
+      const event = canonicalEvent({ eventId, isSundayMons });
+      assert.strictEqual(decodeEventView(event, eventId), event);
+    }
+    const valid = canonicalEvent({ eventId });
+    for (const isSundayMons of [undefined, "true", 1, null]) {
+      assert.equal(decodeEventView({ ...valid, isSundayMons }, eventId), null);
     }
   }
 });
 
-test("maps nested event records and validates configured prizes", () => {
+test("canonical nested events retain catalog-independent historical prize assignments", () => {
   const eventId = "NN3eRzoZo80";
-  const event = mapDatabaseEventRecord(
-    {
-      status: "active",
-      createdAtMs: "10",
-      participants: {
-        p1: { displayName: "One", emojiId: "7", state: "winner" },
-      },
-      rounds: {
-        1: {
-          status: "completed",
-          matches: {
-            m1: { status: "host", hostProfileId: "p1" },
-          },
-        },
-      },
-      prizeAssignments: {
-        1: {
-          eventId,
-          profileId: "p1",
-          place: 1,
-          prizeId: "1092",
-          assignedAtMs: 20,
-        },
-        2: {
-          eventId,
-          profileId: "p2",
-          place: 2,
-          prizeId: "not-a-prize",
-          assignedAtMs: 20,
-        },
-      },
-    },
+  const event = canonicalEvent({
     eventId,
-  );
-
-  assert.equal(event?.eventId, eventId);
-  assert.equal(event?.participants.p1.profileId, "p1");
-  assert.equal(event?.rounds["1"].matches.m1.matchKey, "m1");
-  assert.equal(event?.prizeAssignments?.["1"]?.prizeId, "1092");
-  assert.equal(event?.prizeAssignments?.["2"], undefined);
-  assert.equal(normalizeEventPrizeId("future-prize", "future-event"), null);
-  assert.equal(
-    mapEventPrizeAssignment(
-      {
+    status: "ended",
+    participants: { p1: { displayName: "One", emojiId: 7, state: "winner" } },
+    prizeAssignments: {
+      1: {
         eventId,
         profileId: "p1",
-        place: 4,
+        place: 1,
         prizeId: "1092",
         assignedAtMs: 20,
       },
+      2: {
+        eventId,
+        profileId: "p2",
+        place: 2,
+        prizeId: "historical-prize",
+        assignedAtMs: 20,
+      },
+    },
+  });
+  assert.strictEqual(decodeEventView(event, eventId), event);
+  assert.ok(event.participants.p1);
+  assert.ok(event.rounds["0"]?.matches["0_0"]);
+  assert.ok(event.prizeAssignments["2"]);
+  assert.equal(event.participants.p1.profileId, "p1");
+  assert.equal(event.rounds["0"].matches["0_0"].matchKey, "0_0");
+  assert.equal(event.prizeAssignments["2"].prizeId, "historical-prize");
+  assert.equal(normalizeEventPrizeId("future-prize", "future-event"), null);
+  assert.equal(
+    decodeEventPrizeAssignmentView(
+      { eventId, profileId: "p1", place: 4, prizeId: "1092", assignedAtMs: 20 },
       eventId,
     ),
     null,

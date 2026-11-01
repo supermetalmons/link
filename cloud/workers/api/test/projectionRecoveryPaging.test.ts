@@ -1,5 +1,8 @@
+import { requiredFixture } from "./requiredFixture.ts";
+import { canonicalQueuePayloadFixture } from "./canonicalQueueFixture.ts";
 import { eventProjectionOutboxFixture } from "./profileDataBoundaryFixture.ts";
 import {
+  canonicalAutomatchFixture,
   retainedAutomatchPageFixture,
   retainedAutomatchPageReaderFixture,
   retainedAutomatchSnapshotFixture,
@@ -8,7 +11,6 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { createRatingRepository } from "../src/ratingRepository.ts";
 import {
-  automatchSweepEntries,
   sweepAutomatchProfileGameProjections,
   sweepEventProfileGameProjections,
   sweepProfileLinkProfileGameProjections,
@@ -52,7 +54,7 @@ function applyTransaction(
   };
   return {
     committed: result.commit !== false,
-    decision: result.decision,
+    ...(result.decision === undefined ? {} : { decision: result.decision }),
     value: result.commit === false ? current : result.value,
   };
 }
@@ -89,7 +91,9 @@ function queueFixture(onSend?: (attempt: number) => void | Promise<void>) {
   const queue = {
     ...TELEGRAM_TEST_ENV.PROFILE_GAME_PROJECTION_QUEUE,
     async sendBatch(messages) {
-      batches.push(Array.from(messages, ({ body }) => body));
+      batches.push(
+        Array.from(messages, ({ body }) => canonicalQueuePayloadFixture(body)),
+      );
       await onSend?.(batches.length);
       return { metadata: { metrics: { backlogCount: 0, backlogBytes: 0 } } };
     },
@@ -324,7 +328,7 @@ test("dispatch or scan failures stop paging and retain precedence over earlier i
     };
     rating.claimRatingProfileGameProjection = async (id) => {
       claims.push(id);
-      if (id === data[0].operationId) throw itemFailure;
+      if (id === requiredFixture(data[0]).operationId) throw itemFailure;
       return true;
     };
     await assert.rejects(
@@ -429,7 +433,15 @@ test("event pages release admissions and retain repair-before-first-claim error 
     ).map(({ inviteId }, index) => {
       const record =
         failRepair && index === 10
-          ? { status: "bad" }
+          ? {
+              schemaVersion: 2,
+              status: "dead",
+              requestId: `request-${inviteId}`,
+              reason: "invalid-record",
+              deadAtMs: 1,
+              sourceDigest: "a".repeat(64),
+              originalRecord: null,
+            }
           : {
               schemaVersion: 1,
               status: "pending",
@@ -471,8 +483,9 @@ test("event pages release admissions and retain repair-before-first-claim error 
             async claim(snapshot, _requestId, expected, timestamp) {
               assert.equal(expected, 1);
               assert.equal(timestamp, nowMs);
-              if (snapshot.eventId === data[0].eventId) throw firstClaimFailure;
-              if (snapshot.eventId === data[11].eventId)
+              if (snapshot.eventId === requiredFixture(data[0]).eventId)
+                throw firstClaimFailure;
+              if (snapshot.eventId === requiredFixture(data[11]).eventId)
                 throw secondClaimFailure;
               return true;
             },
@@ -509,41 +522,25 @@ test("event pages release admissions and retain repair-before-first-claim error 
   }
 });
 
-test("automatch due and malformed pages retain independent caps and repair-before-send behavior", async () => {
+test("canonical automatch recovery preserves bounded due pages without salvaging malformed records", async () => {
   const healthy = records(21).map(
     ({ inviteId }) =>
       [
         `due-${inviteId}`,
-        {
-          schemaVersion: 1,
-          status: "pending",
+        canonicalAutomatchFixture("profileGameProjectionOutbox/automatch", {
           requestId: `request-${inviteId}`,
           lastQueuedAtMs: 1,
           sourceUpdatedAtMs: 1,
-        },
+        }),
       ] as const,
   );
-  const malformed = records(21).map(
-    ({ inviteId }) =>
-      [
-        `bad-${inviteId}`,
-        {
-          schemaVersion: 1,
-          status: "broken",
-          requestId: `request-${inviteId}`,
-          lastQueuedAtMs: "invalid",
-          sourceUpdatedAtMs: 1,
-        },
-      ] as const,
-  );
-  const values = new Map<string, unknown>([...healthy, ...malformed]);
+  const values = new Map<string, unknown>(healthy);
   const state = gameplayTestPort({
     getPath: async () => null,
     patchRoot: async () => assert.fail("unexpected-patch"),
     transactPath: async (path, updater) => {
       const id = path.split("/").at(-1)!;
-      const current = values.get(id) ?? null;
-      const result = applyTransaction(current, updater);
+      const result = applyTransaction(values.get(id) ?? null, updater);
       if (result.committed) values.set(id, result.value);
       return result;
     },
@@ -562,41 +559,30 @@ test("automatch due and malformed pages retain independent caps and repair-befor
       recoveryRecordPageFixture(Object.fromEntries(healthy), limit, excluded),
     );
   };
-  state.projectionRecovery.listMalformedAutomatchProfileOutboxesPage = async (
-    limit,
-    excluded = [],
-  ) => {
-    malformedScans++;
-    return retainedAutomatchPageFixture(
-      "profileGameProjectionOutbox/automatch",
-      recoveryRecordPageFixture(Object.fromEntries(malformed), limit, excluded),
-    );
-  };
+  state.projectionRecovery.listMalformedAutomatchProfileOutboxesPage =
+    async () => {
+      malformedScans++;
+      return { entries: null, scannedIdentities: [] };
+    };
   const { batches, env } = queueFixture();
-  const count = await sweepAutomatchProfileGameProjections(env, {
-    createStateRepository: () => state,
-    now: () => nowMs,
-    createRequestId: () => "repaired",
-    logger,
-  });
-  assert.equal(count, 40);
+  assert.equal(
+    await sweepAutomatchProfileGameProjections(env, {
+      createStateRepository: () => state,
+      now: () => nowMs,
+      logger,
+    }),
+    20,
+  );
   assert.equal(dueScans, 2);
-  assert.equal(malformedScans, 2);
-  for (const batch of batches) {
-    const tasks = batch as Array<{ inviteId: string; requestId: string }>;
-    assert.equal(tasks.length, 20);
-    assert(
-      tasks
-        .slice(0, 10)
-        .every(
-          ({ inviteId, requestId }) =>
-            inviteId.startsWith("bad-") && requestId === "repaired",
-        ),
-    );
-    assert(
-      tasks.slice(10).every(({ inviteId }) => inviteId.startsWith("due-")),
-    );
-  }
+  assert.equal(malformedScans, 1);
+  assert.deepEqual(
+    batches.map((batch) => batch.length),
+    [10, 10],
+  );
+  assert.equal(
+    new Set(batches.flat().map((task) => JSON.stringify(task))).size,
+    20,
+  );
 });
 
 test("Telegram automatch paging never reclaims the first page at the same timestamp", async () => {
@@ -604,7 +590,7 @@ test("Telegram automatch paging never reclaims the first page at the same timest
     records(21).map(({ inviteId }) => [
       inviteId,
       {
-        schemaVersion: 1,
+        schemaVersion: 2,
         status: "pending",
         requestId: `request-${inviteId}`,
         updatedAtMs: nowMs,
@@ -650,15 +636,12 @@ for (const lane of ["profile-game", "telegram"] as const) {
     const recordsById = new Map(
       records(21).map(({ inviteId }) => [
         inviteId,
-        {
-          schemaVersion: 1,
-          status: "pending",
+        canonicalAutomatchFixture(root, {
           requestId: `request-${inviteId}`,
-          lastQueuedAtMs: 1,
-          sourceUpdatedAtMs: 1,
-          updatedAtMs: 1,
-          future: { keep: true },
-        },
+          ...(lane === "profile-game"
+            ? { lastQueuedAtMs: 1, sourceUpdatedAtMs: 1 }
+            : { updatedAtMs: 1 }),
+        }),
       ]),
     );
     const snapshots = new Map<string, AutomatchOutboxClaimSnapshot>(
@@ -754,16 +737,20 @@ for (const lane of ["profile-game", "telegram"] as const) {
   });
 }
 
-test("malformed profile outboxes never become seeded claim candidates", () => {
-  const value = { status: "broken", lastQueuedAtMs: 1 };
-  const snapshot = retainedAutomatchSnapshotFixture(
-    "profileGameProjectionOutbox/automatch",
-    "invalid",
-    value,
-    2,
-  );
-  assert.deepEqual(
-    automatchSweepEntries({ invalid: value }, new Map([["invalid", snapshot]])),
-    [{ kind: "invalid", inviteId: "invalid" }],
-  );
+test("malformed canonical profile outboxes are rejected before seeding claim candidates", () => {
+  for (const value of [
+    { status: "broken", lastQueuedAtMs: 1 },
+    { status: "pending", future: { retained: true } },
+  ]) {
+    assert.throws(
+      () =>
+        retainedAutomatchSnapshotFixture(
+          "profileGameProjectionOutbox/automatch",
+          "invalid",
+          value,
+          2,
+        ),
+      /invalid-canonical-profileGameProjectionOutbox/,
+    );
+  }
 });

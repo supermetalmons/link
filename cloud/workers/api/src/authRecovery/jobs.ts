@@ -7,7 +7,7 @@ import {
   type CanonicalAuthRecoveryValue,
 } from "../profileCanonicalD1.ts";
 
-export const AUTH_RECOVERY_QUEUE_NAME = "mons-link-auth-recovery";
+export const AUTH_RECOVERY_QUEUE_NAME = "mons-link-auth-recovery-data1";
 export const RETRY_DELAY_SECONDS = 60;
 
 export type AuthRecoveryTask = {

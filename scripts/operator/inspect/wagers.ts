@@ -37,7 +37,7 @@ type Dependencies = {
   log(value: JsonRecord): void;
   readMaintenance(): Promise<Maintenance>;
   readActivation(): Promise<Activation>;
-  countRows(): Promise<Counts & { nonInitialRevisions: number }>;
+  countRows(): Promise<Counts>;
 };
 
 const GAMEPLAY_DATABASE = "mons-link-profile-games";
@@ -59,7 +59,7 @@ async function inspectWagers(dependencies: Dependencies): Promise<void> {
     operation: "status",
     maintenance: await dependencies.readMaintenance(),
     activation: await dependencies.readActivation(),
-    destination: await dependencies.countRows(),
+    current: await dependencies.countRows(),
   });
 }
 
@@ -148,22 +148,20 @@ function createSqlDependencies(run: SqlRunner, now = Date.now): Dependencies {
     async countRows() {
       const row = (
         await run(
-          "SELECT COUNT(*) AS row_count, COUNT(wager_json) AS wager_count, COUNT(resolution_marker) AS marker_count, COALESCE(SUM(CASE WHEN revision != 1 THEN 1 ELSE 0 END), 0) AS non_initial_revisions FROM invite_wager_states",
+          "SELECT COUNT(*) AS row_count, COUNT(wager_json) AS wager_count, COUNT(resolution_marker) AS marker_count FROM invite_wager_states_canonical",
         )
       )[0];
       if (
         !row ||
         !integer(row.row_count) ||
         !integer(row.wager_count) ||
-        !integer(row.marker_count) ||
-        !integer(row.non_initial_revisions)
+        !integer(row.marker_count)
       )
         throw new Error("invalid wager destination counts");
       return {
         rowCount: row.row_count,
         wagerCount: row.wager_count,
         markerCount: row.marker_count,
-        nonInitialRevisions: row.non_initial_revisions,
       };
     },
   };

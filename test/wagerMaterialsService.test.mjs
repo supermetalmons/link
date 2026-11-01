@@ -27,6 +27,7 @@ test("distinguishes unknown balances from authoritative zero reservations", () =
 });
 
 test("publishes optimistic deltas without falsely confirming them and clears actor state", () => {
+  /** @type {Array<{ materials: ReturnType<typeof getFrozenMaterials>; status: ReturnType<typeof getFrozenMaterialsStatus>; confirmed: boolean }>} */
   const changes = [];
   const unsubscribe = subscribeToFrozenMaterials(
     (materials, status, confirmed) =>
@@ -47,4 +48,21 @@ test("publishes optimistic deltas without falsely confirming them and clears act
   assert.equal(hasConfirmedFrozenMaterials(), false);
   assert.equal(getFrozenMaterials().dust, 0);
   unsubscribe();
+});
+
+test("rejects malformed confirmed balances without changing the prior snapshot", () => {
+  setFrozenMaterials({ ...empty, dust: 4 }, "ready");
+  for (const value of [
+    { dust: 7 },
+    { ...empty, dust: "7" },
+    { ...empty, dust: -1 },
+    { ...empty, dust: 1.5 },
+  ])
+    assert.throws(
+      () => Reflect.apply(setFrozenMaterials, undefined, [value, "ready"]),
+      /invalid-mining-materials/,
+    );
+  assert.deepEqual(getFrozenMaterials(), { ...empty, dust: 4 });
+  assert.equal(getFrozenMaterialsStatus(), "ready");
+  assert.equal(hasConfirmedFrozenMaterials(), true);
 });

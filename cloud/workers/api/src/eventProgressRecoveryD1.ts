@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import {
   retainEventProgressRecord,
   type EventProgressDocument,
@@ -13,7 +14,6 @@ import {
   decodeJson,
   encodeJson,
   exactKey,
-  isRecord,
   safeInteger,
   validateEventProgressOutbox,
 } from "./eventD1/validation.ts";
@@ -100,7 +100,7 @@ export function createEventProgressRecoveryStore(
         eventWriteAdmissionGuard(db, admission),
         db
           .prepare(
-            `INSERT INTO event_progress_outboxes (
+            `INSERT INTO event_progress_outboxes_canonical (
                outbox_id, event_id, status, run_at_ms, last_queued_at_ms,
                record_json
              ) VALUES (?, ?, 'pending', ?, ?, ?)
@@ -116,20 +116,22 @@ export function createEventProgressRecoveryStore(
         db
           .prepare(
             `SELECT outbox_id, record_json, next_reconcile_at_ms
-             FROM event_progress_outboxes
+             FROM event_progress_outboxes_canonical
              WHERE status = 'pending' AND outbox_id = ?`,
           )
           .bind(parsed.outboxId),
       ]);
       const rows = results[2]?.results;
       if (rows?.length !== 1) throw new EventD1Failure();
-      return snapshot(rows[0]);
+      const row = rows[0];
+      if (!row) throw new EventD1Failure();
+      return snapshot(row);
     },
     async listDue(nowMs, limit) {
       const rows = await db
         .prepare(
           `SELECT outbox_id, record_json, next_reconcile_at_ms
-           FROM event_progress_outboxes
+           FROM event_progress_outboxes_canonical
            WHERE status = 'pending' AND next_reconcile_at_ms <= ?
            ORDER BY next_reconcile_at_ms, last_queued_at_ms, outbox_id
            LIMIT ?`,
@@ -142,7 +144,7 @@ export function createEventProgressRecoveryStore(
       const row = await db
         .prepare(
           `SELECT outbox_id, record_json, next_reconcile_at_ms
-           FROM event_progress_outboxes
+           FROM event_progress_outboxes_canonical
            WHERE status = 'pending' AND outbox_id = ?`,
         )
         .bind(exactKey(outboxId))
@@ -154,7 +156,7 @@ export function createEventProgressRecoveryStore(
       return mutate(
         db
           .prepare(
-            `UPDATE event_progress_outboxes
+            `UPDATE event_progress_outboxes_canonical
              SET next_reconcile_at_ms = ?
              WHERE status = 'pending' AND outbox_id = ? AND record_json = ?
                AND (next_reconcile_at_ms = ? OR next_reconcile_at_ms > ?)`,
@@ -172,7 +174,7 @@ export function createEventProgressRecoveryStore(
       return mutate(
         db
           .prepare(
-            `DELETE FROM event_progress_outboxes
+            `DELETE FROM event_progress_outboxes_canonical
              WHERE status = 'pending' AND outbox_id = ? AND record_json = ?`,
           )
           .bind(exactKey(current.outboxId), current.recordJson),
@@ -182,26 +184,29 @@ export function createEventProgressRecoveryStore(
       const outboxId = exactKey(current.outboxId);
       if (!outboxId) throw new EventD1Failure("invalid-event-path");
       const timestamp = safeInteger(deadAtMs);
-      const eventId = isRecord(current.record)
-        ? exactKey((current.record as { eventId?: unknown }).eventId)
-        : "";
+      const eventId = current.record.eventId;
       const deadRecord = encodeJson({
+        schemaVersion: 1,
+        dataEpoch: 1,
         deadAtMs: timestamp,
-        originalRecord: current.record === undefined ? null : current.record,
+        sourceDigest: createHash("sha256")
+          .update(current.recordJson)
+          .digest("hex"),
+        originalRecord: current.record,
         reason: "invalid-event-progress-outbox",
       } satisfies EventProgressDeadLetter);
       const results = await db.batch([
         eventWriteAdmissionGuard(db, admission),
         db
           .prepare(
-            `INSERT INTO event_progress_outboxes (
+            `INSERT INTO event_progress_outboxes_canonical (
                outbox_id, event_id, status, run_at_ms, last_queued_at_ms,
                record_json
              )
              SELECT outbox_id, (
-               SELECT event_id FROM event_records WHERE event_id = ?
+               SELECT event_id FROM event_records_canonical WHERE event_id = ?
              ), 'dead', NULL, ?, ?
-             FROM event_progress_outboxes
+             FROM event_progress_outboxes_canonical
              WHERE status = 'pending' AND outbox_id = ? AND record_json = ?
              ON CONFLICT (status, outbox_id) DO UPDATE SET
                event_id = excluded.event_id,
@@ -219,7 +224,7 @@ export function createEventProgressRecoveryStore(
           ),
         db
           .prepare(
-            `DELETE FROM event_progress_outboxes
+            `DELETE FROM event_progress_outboxes_canonical
              WHERE status = 'pending' AND outbox_id = ? AND record_json = ?
              RETURNING outbox_id`,
           )

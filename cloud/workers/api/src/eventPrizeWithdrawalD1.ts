@@ -109,13 +109,12 @@ function decodeRecord(
   return normalizeRecord(eventId, prizeId, parsed);
 }
 
-function updatedAtMs(value: WithdrawalDocument, now: () => number): number {
+function updatedAtMs(value: WithdrawalDocument): number {
   const stored = withdrawalStorageUpdatedAtMs(value);
-  const candidate = Number.isSafeInteger(stored) && stored > 0 ? stored : now();
-  if (!Number.isSafeInteger(candidate) || candidate < 1) {
+  if (!Number.isSafeInteger(stored) || stored < 1) {
     throw new EventPrizeWithdrawalD1Failure();
   }
-  return candidate;
+  return stored;
 }
 
 async function readRow(
@@ -125,7 +124,7 @@ async function readRow(
 ): Promise<{ record: WithdrawalDocument; version: number } | null> {
   try {
     const row = await createVersionedJsonRowStore(db, {
-      table: "event_prize_withdrawals",
+      table: "event_prize_withdrawals_canonical",
       key: [eventId, prizeId],
     }).read();
     return row
@@ -147,10 +146,9 @@ async function transactRow(
   updater: (
     current: WithdrawalDocument | null,
   ) => TransactionDecision<WithdrawalDocument>,
-  now: () => number,
 ): Promise<TransactionResult<WithdrawalDocument>> {
   const rows = createVersionedJsonRowStore(db, {
-    table: "event_prize_withdrawals",
+    table: "event_prize_withdrawals_canonical",
     key: [eventId, prizeId],
   });
   return runOptimisticTransaction({
@@ -166,7 +164,7 @@ async function transactRow(
       }
       const normalized = normalizeRecord(eventId, prizeId, next);
       const encoded = encodeRecord(eventId, prizeId, normalized);
-      const timestamp = updatedAtMs(normalized, now);
+      const timestamp = updatedAtMs(normalized);
       if (!current) {
         const changes = await rows.insertIfAbsent(encoded, timestamp);
         return { applied: changes > 0, value: normalized };
@@ -244,7 +242,7 @@ export function createD1EventPrizeWithdrawalReader(
       const result = await db
         .prepare(
           `SELECT prize_id, record_json
-           FROM event_prize_withdrawals
+           FROM event_prize_withdrawals_canonical
            WHERE event_id = ?
            ORDER BY prize_id`,
         )
@@ -265,7 +263,7 @@ export function createD1EventPrizeWithdrawalReader(
 
 export function createD1EventPrizeWithdrawalStorage(
   db: D1Database,
-  { now = Date.now }: { now?: () => number } = {},
+  _options: { now?: () => number } = {},
 ): WithdrawalStorage {
   const replaceRecords = async (
     records: readonly EventPrizeWithdrawalReplacement[],
@@ -283,7 +281,7 @@ export function createD1EventPrizeWithdrawalStorage(
       if (value === null) {
         return db
           .prepare(
-            `DELETE FROM event_prize_withdrawals
+            `DELETE FROM event_prize_withdrawals_canonical
              WHERE event_id = ? AND prize_id = ?`,
           )
           .bind(identity.eventId, identity.prizeId);
@@ -295,19 +293,19 @@ export function createD1EventPrizeWithdrawalStorage(
       );
       return db
         .prepare(
-          `INSERT INTO event_prize_withdrawals (
+          `INSERT INTO event_prize_withdrawals_canonical (
              event_id, prize_id, record_json, version, updated_at_ms
            ) VALUES (?, ?, ?, 1, ?)
            ON CONFLICT (event_id, prize_id) DO UPDATE SET
              record_json = excluded.record_json,
-             version = event_prize_withdrawals.version + 1,
+             version = event_prize_withdrawals_canonical.version + 1,
              updated_at_ms = excluded.updated_at_ms`,
         )
         .bind(
           identity.eventId,
           identity.prizeId,
           encodeRecord(identity.eventId, identity.prizeId, normalized),
-          updatedAtMs(normalized, now),
+          updatedAtMs(normalized),
         );
     });
     if (statements.length > 0) await db.batch(statements);
@@ -336,19 +334,12 @@ export function createD1EventPrizeWithdrawalStorage(
       }
       return {
         read() {
-          return createD1EventPrizeWithdrawalStorage(db, { now }).get(
-            normalizedEventId,
-            normalizedPrizeId,
+          return readRow(db, normalizedEventId, normalizedPrizeId).then(
+            (snapshot) => snapshot?.record ?? null,
           );
         },
         transaction(updater) {
-          return transactRow(
-            db,
-            normalizedEventId,
-            normalizedPrizeId,
-            updater,
-            now,
-          );
+          return transactRow(db, normalizedEventId, normalizedPrizeId, updater);
         },
       };
     },
@@ -364,7 +355,7 @@ export function createD1EventPrizeWithdrawalStore(
   return {
     get: storage.get,
     record: (eventId, prizeId) =>
-      createWithdrawalRecordCommands(storage.record(eventId, prizeId)),
+      createWithdrawalRecordCommands(storage.record(eventId, prizeId), options),
     replaceCompleted: (records) => storage.replaceRecords(records),
   };
 }

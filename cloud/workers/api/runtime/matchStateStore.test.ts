@@ -1,18 +1,20 @@
+import { evictCanonicalMatchRoom as evictDurableObject } from "./canonicalMatchTestFixture.ts";
+import { matchEventEffectsFixture } from "./canonicalMatchTestFixture.ts";
+import { runInCanonicalMatchWriterFixture as runInDurableObject } from "./canonicalMatchTestFixture.ts";
 import { captureMatchEffectTarget } from "../src/matchEffectCodec.ts";
 import {
-  timerStartStoreFixture,
   timerClaimRecordFixture,
+  timerClaimFixture,
 } from "../test/matchClaimFixture.ts";
 import {
   matchDocumentFixture,
   matchRecordFixture,
 } from "../test/matchRecordFixture.ts";
-import type { MatchWireValue } from "../src/matchRecordCodec.ts";
+
 import { env } from "cloudflare:workers";
-import { evictDurableObject, runInDurableObject } from "cloudflare:test";
-import { afterEach, describe, expect, it, vi } from "vitest";
+
+import { afterEach, describe, expect, it } from "vitest";
 import { MATCH_TIMER_TERMINAL, formatMatchTimer } from "@mons/shared/timers";
-import { normalizeMatchSnapshot } from "@mons/shared/game-sessions";
 import type { InviteReactions } from "../src/inviteReactions.ts";
 import {
   MatchStateStore,
@@ -34,50 +36,25 @@ const game: MatchTimerGameState = {
 
 const match = (
   color: "white" | "black",
-  fields: Record<string, MatchWireValue> = {},
+  fields: Record<string, unknown> = {},
 ) =>
-  matchDocumentFixture<Record<string, MatchWireValue>>({
+  matchDocumentFixture({
     version: 2,
     color,
     emojiId: 1,
-    aura: "",
+    aura: "none" as const,
     gameVariant: "Classic",
     fen: "initial",
     flatMovesString: "",
     status: "",
     timer: "",
-    extra: { preserved: true },
     ...fields,
   });
-
-function timers(): MatchStateStoreOptions["timerStarts"] {
-  const markers = new Map<
-    string,
-    { timer: string; turnNumber: number; updatedAtMs: number }
-  >();
-  return timerStartStoreFixture<
-    Omit<MatchStateStoreOptions["timerStarts"], "deleteRetainedPair">
-  >({
-    async getOrAdvance(playerId, _opponentId, matchId, candidate, updatedAtMs) {
-      const key = `${playerId}/${matchId}`;
-      const current = markers.get(key);
-      if (!current || current.turnNumber < candidate.turnNumber) {
-        markers.set(key, { ...candidate, updatedAtMs });
-      }
-      return markers.get(key)!;
-    },
-    async deletePair(playerId, opponentId, matchId) {
-      markers.delete(`${playerId}/${matchId}`);
-      markers.delete(`${opponentId}/${matchId}`);
-    },
-  });
-}
 
 function options(
   extra: Partial<MatchStateStoreOptions> = {},
 ): MatchStateStoreOptions {
   return {
-    timerStarts: timers(),
     now: () => future,
     resolveGame: () => game,
     ...extra,
@@ -139,37 +116,22 @@ afterEach(async () => {
 });
 
 describe("canonical match state storage", () => {
-  it("omits null creation fields without changing exact import data", async () => {
+  it("rejects incomplete or extended creation records before mutation", async () => {
     const { room, input, records } = fixture();
     await runInDurableObject(room, (_instance, ctx) => {
       const store = new MatchStateStore(ctx.storage, options());
-      records[0].value.aura = null;
-      records[0].value.nested = { absent: null, retained: true };
-      store.createRecords({ ...input, records });
-      const current = store.readRecord(input);
-      expect(current).not.toHaveProperty("aura");
-      expect(matchRecordFixture(current)?.nested).toEqual({ retained: true });
-      expect(normalizeMatchSnapshot(current)?.aura).toBe("");
-    });
-    const importedFixture = fixture();
-    await runInDurableObject(importedFixture.room, async (_instance, ctx) => {
-      const store = new MatchStateStore(ctx.storage, options());
-      seedRetainedMatchState(ctx.storage, {
-        ...importedFixture.input,
-        importId: "null-import",
-        records: [
-          {
-            matchId: importedFixture.input.matchId,
-            playerId: importedFixture.input.playerId,
-            value: { ...match("white"), aura: null, nested: { absent: null } },
-          },
-        ],
-        claims: [],
-      });
-      expect(store.readRecord(importedFixture.input)).toMatchObject({
-        aura: null,
-        nested: { absent: null },
-      });
+      for (const value of [
+        { ...records[0]!.value, aura: null },
+        { ...records[0]!.value, extra: true },
+      ]) {
+        expect(() =>
+          store.createRecords({
+            ...input,
+            records: [{ ...records[0]!, value }],
+          } as never),
+        ).toThrow("match-state-invalid-creation");
+      }
+      expect(store.readSource().status).toBe("empty");
     });
   });
   it("creates both records atomically and preserves creation replays after moves", async () => {
@@ -190,9 +152,8 @@ describe("canonical match state storage", () => {
       expect(store.move(move(input)).outcome).toBe("applied");
       const replay = store.createRecords({ ...input, records });
       expect(replay.changedMatchIds).toEqual([]);
-      expect(replay.records[0].value).toMatchObject({
+      expect(replay.records[0]!.value).toMatchObject({
         fen: "first",
-        extra: { preserved: true },
       });
       const revision = store.readPair(input).revision;
       expect(store.move(move(input)).outcome).toBe("already-applied");
@@ -202,11 +163,11 @@ describe("canonical match state storage", () => {
           ...input,
           records: [
             {
-              ...records[0],
+              ...records[0]!,
               matchId: `${input.matchId}1`,
               marker: "new-rematch",
             },
-            { ...records[0], marker: "different-owner" },
+            { ...records[0]!, marker: "different-owner" },
           ],
         }),
       ).toThrow("match-creation-conflict");
@@ -236,7 +197,7 @@ describe("canonical match state storage", () => {
         records,
       });
       ctx.storage.sql.exec(
-        "UPDATE match_state_source SET active_epoch = NULL WHERE singleton = 1",
+        "UPDATE match_state_source_canonical SET active_epoch = NULL WHERE singleton = 1",
       );
     });
     await evictDurableObject(room);
@@ -285,7 +246,6 @@ describe("canonical match state storage", () => {
         color: "white",
         fen: "second",
         flatMovesString: "a-b",
-        extra: { preserved: true },
       });
     });
   });
@@ -307,251 +267,17 @@ describe("canonical match state storage", () => {
     });
   });
 
-  it("keeps first timer deadlines and rejects marker completions after a move", async () => {
-    const { room, input, records } = fixture();
-    await runInDurableObject(room, async (_instance, ctx) => {
-      let now = future;
-      const markerStore = timers();
-      const store = new MatchStateStore(
-        ctx.storage,
-        options({ timerStarts: markerStore, now: () => now }),
-      );
-      store.createRecords({ ...input, records });
-      const first = await store.startTimer(input);
-      now += 5000;
-      expect(await store.startTimer(input)).toEqual(first);
-      expect(first.timer).toBe(
-        formatMatchTimer(game.turnNumber, future + 90_500),
-      );
-      const racing = new MatchStateStore(
-        ctx.storage,
-        options({
-          timerStarts: {
-            ...markerStore,
-            async getOrAdvance(...args) {
-              const marker = await markerStore.getOrAdvance(...args);
-              store.move(move(input));
-              return marker;
-            },
-          },
-        }),
-      );
-      await expect(racing.startTimer(input)).rejects.toThrow(
-        "game state changed.",
-      );
-      expect(store.readPair(input).playerMatch).toMatchObject({
-        fen: "first",
-        timer: first.timer,
-      });
-    });
-  });
-
-  it("does not overwrite terminal state when D1 marker I/O finishes late", async () => {
-    const { room, input, records } = fixture();
-    await runInDurableObject(room, async (_instance, ctx) => {
-      let store: MatchStateStore;
-      const markerStore = timers();
-      const deletePair = vi.fn(markerStore.deletePair);
-      store = new MatchStateStore(
-        ctx.storage,
-        options({
-          timerStarts: timerStartStoreFixture({
-            ...markerStore,
-            deletePair,
-            async getOrAdvance(...args) {
-              const marker = await markerStore.getOrAdvance(...args);
-              store.surrender({
-                inviteId: input.inviteId,
-                matchId: input.matchId,
-                epoch: input.epoch,
-                playerId: input.opponentId,
-              });
-              return marker;
-            },
-          }),
-        }),
-      );
-      store.createRecords({ ...input, records });
-      await expect(store.startTimer(input)).rejects.toThrow(
-        "game is already over.",
-      );
-      expect(matchRecordFixture(store.readPair(input).playerMatch)?.timer).toBe(
-        "",
-      );
-      expect(
-        matchRecordFixture(store.readPair(input).opponentMatch)?.status,
-      ).toBe("surrendered");
-      expect(deletePair).toHaveBeenCalledExactlyOnceWith(
-        input.playerId,
-        input.opponentId,
-        input.matchId,
-      );
-    });
-  });
-
-  it("preserves the D1 marker and canonical state when a takeback precedes a timer restart", async () => {
-    const { room, input, records } = fixture();
-    await runInDurableObject(room, async (_instance, ctx) => {
-      let now = future;
-      const markerStore = timers();
-      const store = new MatchStateStore(
-        ctx.storage,
-        options({
-          timerStarts: markerStore,
-          now: () => now,
-          resolveGame: (player) => ({
-            ...game,
-            turnNumber: player.flatMovesString === "a" ? 9 : 7,
-          }),
-        }),
-      );
-      store.createRecords({ ...input, records });
-      const first = await store.startTimer(input);
-      store.move(move(input));
-      now += 10_000;
-      const advanced = await store.startTimer(input);
-      expect(advanced.timer).toBe(formatMatchTimer(9, now + 90_500));
-      const savedMarker = {
-        timer: advanced.timer,
-        turnNumber: 9,
-        updatedAtMs: now,
-      };
-      store.move(
-        move(input, {
-          previousFlatMovesString: "a",
-          flatMovesString: "a-takeback",
-          fen: "initial",
-        }),
-      );
-      now += 10_000;
-      const before = store.readPair(input);
-      await expect(store.startTimer(input)).rejects.toThrow(
-        "game state changed.",
-      );
-      expect(store.readPair(input)).toEqual(before);
-      ctx.storage.sql.exec(
-        "UPDATE match_state_records SET value_json = json_set(value_json, '$.timer', '') WHERE match_id = ? AND player_id = ?",
-        input.matchId,
-        input.playerId,
-      );
-      const withoutTimer = store.readPair(input);
-      await expect(store.startTimer(input)).rejects.toThrow(
-        "game state changed.",
-      );
-      expect(store.readPair(input)).toEqual(withoutTimer);
-      expect(
-        await markerStore.getOrAdvance(
-          input.playerId,
-          input.opponentId,
-          input.matchId,
-          { timer: first.timer, turnNumber: 7 },
-          now,
-        ),
-      ).toEqual(savedMarker);
-    });
-  });
-
-  it("concurrent timer starts keep the first deadline and change the match once", async () => {
-    const { room, input, records } = fixture();
-    await runInDurableObject(room, async (_instance, ctx) => {
-      const markerStore = timers();
-      let now = future;
-      let calls = 0;
-      let releaseFirst!: () => void;
-      let markFirstReady!: () => void;
-      const firstPending = new Promise<void>((resolve) => {
-        releaseFirst = resolve;
-      });
-      const firstReady = new Promise<void>((resolve) => {
-        markFirstReady = resolve;
-      });
-      const store = new MatchStateStore(
-        ctx.storage,
-        options({
-          now: () => now,
-          timerStarts: {
-            ...markerStore,
-            async getOrAdvance(...args) {
-              const first = ++calls === 1;
-              const marker = await markerStore.getOrAdvance(...args);
-              if (first) {
-                now += 5_000;
-                markFirstReady();
-                await firstPending;
-              } else {
-                releaseFirst();
-              }
-              return marker;
-            },
-          },
-        }),
-      );
-      store.createRecords({ ...input, records });
-      const before = store.readPair(input);
-      const pending = store.startTimer(input);
-      await firstReady;
-      const [first, second] = await Promise.all([
-        pending,
-        store.startTimer(input),
-      ]);
-      expect(first).toEqual(second);
-      expect(first.timer).toBe(
-        formatMatchTimer(game.turnNumber, future + 90_500),
-      );
-      expect(calls).toBe(2);
-      expect(store.readPair(input)).toEqual({
-        ...before,
-        revision: before.revision + 1,
-        playerMatch: {
-          ...matchRecordFixture(before.playerMatch),
-          timer: first.timer,
-        },
-      });
-    });
-  });
-
-  it("cleans terminal markers before trying to parse a malformed peer", async () => {
-    const { room, input, records } = fixture();
-    await runInDurableObject(room, async (_instance, ctx) => {
-      let deleted = 0;
-      const markerStore = timers();
-      const store = new MatchStateStore(
-        ctx.storage,
-        options({
-          timerStarts: {
-            ...markerStore,
-            async deletePair() {
-              deleted++;
-            },
-          },
-        }),
-      );
-      records[0].value.timer = MATCH_TIMER_TERMINAL;
-      records[1].value.fen = "";
-      store.createRecords({ ...input, records });
-      await expect(store.startTimer(input)).rejects.toThrow(
-        "game is already over.",
-      );
-      expect(deleted).toBe(1);
-      await expect(store.claimTimer(input)).rejects.toThrow(
-        "something is wrong with the game state.",
-      );
-      expect(deleted).toBe(2);
-      expect(store.effects.nextEffectAt()).toBeNull();
-    });
-  });
-
   it("commits timeout, fence, and an alarm-backed effect once", async () => {
     const { room, input, records } = fixture();
     await runInDurableObject(room, async (_instance, ctx) => {
       const store = new MatchStateStore(ctx.storage, options());
-      records[0].value.timer = formatMatchTimer(game.turnNumber, future - 1);
+      records[0]!.value.timer = formatMatchTimer(game.turnNumber, future - 1);
       store.createRecords({ ...input, records });
       expect(
         await store.claimTimer({ ...input, eventId: "event-one" }),
       ).toEqual({ ok: true });
       const pair = store.readPair(input);
-      expect(matchRecordFixture(pair.playerMatch)?.timer).toBe(
+      expect(matchRecordFixture(pair.playerMatch)?.timer).toEqual(
         MATCH_TIMER_TERMINAL,
       );
       expect(pair.claim).toMatchObject({
@@ -580,13 +306,15 @@ describe("canonical match state storage", () => {
         await store.claimTimer({ ...input, eventId: "event-one" }),
       ).toEqual({ ok: true });
       expect(store.readPair(input).revision).toBe(pair.revision);
-      const effect = store.effects.listDueEffects()[0];
+      const effect = store.effects.listDueEffects()[0]!;
       await store.effects.retryEffect(
         captureMatchEffectTarget(effect),
         future + 60_000,
       );
       expect(store.effects.listDueEffects()).toEqual([]);
-      expect(store.effects.listDueEffects(future + 60_000)[0].attempts).toBe(1);
+      expect(store.effects.listDueEffects(future + 60_000)[0]!.attempts).toBe(
+        1,
+      );
       store.effects.completeEffect(captureMatchEffectTarget(effect));
       expect(store.effects.nextEffectAt()).toBeNull();
       expect(
@@ -610,7 +338,7 @@ describe("canonical match state storage", () => {
           },
         }),
       );
-      records[0].value.timer = formatMatchTimer(game.turnNumber, future - 1);
+      records[0]!.value.timer = formatMatchTimer(game.turnNumber, future - 1);
       store.createRecords({ ...input, records });
       const before = store.readPair(input);
       await expect(store.claimTimer(input)).rejects.toThrow(
@@ -635,7 +363,7 @@ describe("canonical match state storage", () => {
           },
         }),
       );
-      records[0].value.timer = formatMatchTimer(game.turnNumber, future - 1);
+      records[0]!.value.timer = formatMatchTimer(game.turnNumber, future - 1);
       store.createRecords({ ...input, records });
       await store.claimTimer(input);
       const before = store.effects.listDueEffects();
@@ -643,7 +371,7 @@ describe("canonical match state storage", () => {
       failAlarm = true;
       await expect(
         store.effects.retryEffect(
-          captureMatchEffectTarget(before[0]),
+          captureMatchEffectTarget(before[0]!),
           future + 60_000,
         ),
       ).rejects.toThrow("injected-alarm-failure");
@@ -657,7 +385,7 @@ describe("canonical match state storage", () => {
     const { room, input, records } = fixture();
     await runInDurableObject(room, async (_instance, ctx) => {
       const store = new MatchStateStore(ctx.storage, options());
-      records[0].value.timer = formatMatchTimer(game.turnNumber, future - 1);
+      records[0]!.value.timer = formatMatchTimer(game.turnNumber, future - 1);
       store.createRecords({ ...input, records });
       await store.claimTimer({ ...input, eventId: "event-one" });
       const pair = store.readPair(input);
@@ -676,95 +404,6 @@ describe("canonical match state storage", () => {
     });
   });
 
-  it.each(["d1", "missing-cohort"] as const)(
-    "retries failed %s marker cleanup on terminal replay without changing the claim or effect",
-    async (cohort) => {
-      const { room, input, records } = fixture();
-      await runInDurableObject(room, async (_instance, ctx) => {
-        const markerStore = timers();
-        let cleanupAttempts = 0;
-        const store = new MatchStateStore(
-          ctx.storage,
-          options({
-            newMatchTimerStorage: "d1",
-            timerStarts: {
-              ...markerStore,
-              async deletePair(...args) {
-                cleanupAttempts++;
-                expect(args).toEqual([
-                  input.playerId,
-                  input.opponentId,
-                  input.matchId,
-                ]);
-                if (cleanupAttempts === 1)
-                  throw new Error("marker-cleanup-failed");
-                await markerStore.deletePair(...args);
-              },
-            },
-          }),
-        );
-        const timer = formatMatchTimer(game.turnNumber, future - 1);
-        records[0].value.timer = timer;
-        for (const [playerId, opponentId] of [
-          [input.playerId, input.opponentId],
-          [input.opponentId, input.playerId],
-        ]) {
-          await markerStore.getOrAdvance(
-            playerId,
-            opponentId,
-            input.matchId,
-            { timer, turnNumber: game.turnNumber },
-            future - 1,
-          );
-        }
-        store.createRecords({ ...input, records });
-        if (cohort === "missing-cohort")
-          ctx.storage.sql.exec(
-            "DELETE FROM match_state_timer_cohorts WHERE match_id = ?",
-            input.matchId,
-          );
-        const request = { ...input, eventId: "event-one" };
-        expect(await store.claimTimer(request)).toEqual({ ok: true });
-        const committed = store.readPair(input);
-        const effects = store.effects.listDueEffects();
-        const alarm = await ctx.storage.getAlarm();
-        expect(matchRecordFixture(committed.playerMatch)?.timer).toBe(
-          MATCH_TIMER_TERMINAL,
-        );
-
-        await expect(store.claimTimer(request)).rejects.toThrow(
-          "marker-cleanup-failed",
-        );
-        expect(store.readPair(input)).toEqual(committed);
-        expect(store.effects.listDueEffects()).toEqual(effects);
-        expect(await store.claimTimer(request)).toEqual({ ok: true });
-        expect(cleanupAttempts).toBe(2);
-        expect(store.readPair(input)).toEqual(committed);
-        expect(store.effects.listDueEffects()).toEqual(effects);
-        expect(await ctx.storage.getAlarm()).toBe(alarm);
-        for (const [playerId, opponentId] of [
-          [input.playerId, input.opponentId],
-          [input.opponentId, input.playerId],
-        ]) {
-          expect(
-            await markerStore.getOrAdvance(
-              playerId,
-              opponentId,
-              input.matchId,
-              {
-                timer: formatMatchTimer(game.turnNumber, future + 100),
-                turnNumber: game.turnNumber,
-              },
-              future,
-            ),
-          ).toMatchObject({
-            timer: formatMatchTimer(game.turnNumber, future + 100),
-          });
-        }
-      });
-    },
-  );
-
   for (const [condition, resolvedGame] of [
     ["the caller's own turn", { ...game, activeColor: "white" }],
     ["an engine-declared winner", { ...game, winner: "white" }],
@@ -773,17 +412,13 @@ describe("canonical match state storage", () => {
       it(`rejects ${operation} with ${condition} without changing canonical state`, async () => {
         const { room, input, records } = fixture();
         await runInDurableObject(room, async (_instance, ctx) => {
-          const markerStore = timers();
-          const getOrAdvance = vi.fn(markerStore.getOrAdvance);
-          const deletePair = vi.fn(markerStore.deletePair);
           const store = new MatchStateStore(
             ctx.storage,
             options({
               resolveGame: () => resolvedGame,
-              timerStarts: timerStartStoreFixture({ getOrAdvance, deletePair }),
             }),
           );
-          records[0].value.timer = formatMatchTimer(
+          records[0]!.value.timer = formatMatchTimer(
             game.turnNumber,
             future - 1,
           );
@@ -802,16 +437,6 @@ describe("canonical match state storage", () => {
                 : "can't claim timer victory on your own turn.",
           });
           expect(store.readPair(input)).toEqual(before);
-          expect(getOrAdvance).not.toHaveBeenCalled();
-          if (operation === "startTimer" && resolvedGame.winner) {
-            expect(deletePair).toHaveBeenCalledExactlyOnceWith(
-              input.playerId,
-              input.opponentId,
-              input.matchId,
-            );
-          } else {
-            expect(deletePair).not.toHaveBeenCalled();
-          }
           expect(store.effects.nextEffectAt()).toBeNull();
           expect(store.effects.listDueEffects()).toEqual([]);
           expect(await ctx.storage.getAlarm()).toBe(alarm);
@@ -824,7 +449,7 @@ describe("canonical match state storage", () => {
     const { room, input, records } = fixture();
     await runInDurableObject(room, async (_instance, ctx) => {
       await ctx.storage.setAlarm(future - 1000);
-      records[0].value.timer = formatMatchTimer(game.turnNumber, future + 10);
+      records[0]!.value.timer = formatMatchTimer(game.turnNumber, future + 10);
       const store = new MatchStateStore(ctx.storage, options());
       store.createRecords({ ...input, records });
       await expect(store.claimTimer(input)).rejects.toThrow(
@@ -858,7 +483,7 @@ describe("canonical match state storage", () => {
   it("does not claim after a move advanced the turn or after surrender", async () => {
     const { room, input, records } = fixture();
     await runInDurableObject(room, async (_instance, ctx) => {
-      records[0].value.timer = formatMatchTimer(game.turnNumber, future - 1);
+      records[0]!.value.timer = formatMatchTimer(game.turnNumber, future - 1);
       const store = new MatchStateStore(
         ctx.storage,
         options({
@@ -904,12 +529,18 @@ describe("canonical match state storage", () => {
       claims: [
         {
           matchId: input.matchId,
-          value: { status: "pending", expiresAtMs: future - 1 },
+          value: timerClaimFixture({
+            inviteId: input.inviteId,
+            playerId: input.playerId,
+            opponentId: input.opponentId,
+            status: "pending",
+            expiresAtMs: future - 1,
+          }),
         },
       ],
     };
     Reflect.set(
-      retained.records[0].value,
+      retained.records[0]!.value,
       "timer",
       formatMatchTimer(game.turnNumber, future - 60_000),
     );
@@ -923,7 +554,7 @@ describe("canonical match state storage", () => {
         digest: "a".repeat(64),
       });
       expect(store.readPair({ ...input, epoch: 4 }).playerMatch).toEqual(
-        retained.records[0].value,
+        retained.records[0]!.value,
       );
       expect(() => store.createRecords({ ...input, records })).toThrow(
         "match-state-authority-unavailable",
@@ -938,10 +569,10 @@ describe("canonical match state storage", () => {
         digest: "a".repeat(64),
       });
       expect(store.readPair({ ...input, epoch: 4 }).playerMatch).toEqual(
-        retained.records[0].value,
+        retained.records[0]!.value,
       );
       expect(store.readPair({ ...input, epoch: 4 }).claim).toEqual(
-        retained.claims[0].value,
+        retained.claims[0]!.value,
       );
       const evidence = ctx.storage.sql
         .exec<{ value_json: string }>(
@@ -950,7 +581,7 @@ describe("canonical match state storage", () => {
         )
         .one();
       expect(JSON.parse(evidence.value_json)).toEqual(
-        retained.records[0].value,
+        retained.records[0]!.value,
       );
       const claimEvidence = ctx.storage.sql
         .exec<{ value_json: string }>(
@@ -959,7 +590,7 @@ describe("canonical match state storage", () => {
         )
         .one();
       expect(JSON.parse(claimEvidence.value_json)).toEqual(
-        retained.claims[0].value,
+        retained.claims[0]!.value,
       );
     });
   });
@@ -1048,29 +679,31 @@ describe("canonical match state storage", () => {
 
   it("applies event effects atomically and fences replay payloads", async () => {
     const { room, input, records } = fixture();
-    await runInDurableObject(room, (_instance, ctx) => {
+    await runInDurableObject(room, async (_instance, ctx) => {
       const store = new MatchStateStore(ctx.storage, options());
       store.createRecords({ ...input, records });
-      const effect = {
+      const effect = matchEventEffectsFixture({
         ...input,
         operationId: "event-transition",
         terminalTimers: [{ matchId: input.matchId, playerId: input.playerId }],
-      };
-      expect(store.applyEventEffects(effect).changedMatchIds).toEqual([
+      });
+      expect((await store.applyEventEffects(effect)).changedMatchIds).toEqual([
         input.matchId,
       ]);
       const revision = store.readPair(input).revision;
-      expect(store.applyEventEffects(effect).changedMatchIds).toEqual([]);
+      expect((await store.applyEventEffects(effect)).changedMatchIds).toEqual(
+        [],
+      );
       expect(store.readPair(input).revision).toBe(revision);
-      expect(() =>
+      await expect(
         store.applyEventEffects({
           ...effect,
           terminalTimers: [
             { matchId: input.matchId, playerId: input.opponentId },
           ],
         }),
-      ).toThrow("match-state-event-effect-conflict");
-      expect(() =>
+      ).rejects.toThrow("match-state-event-effect-conflict");
+      await expect(
         store.applyEventEffects({
           ...effect,
           operationId: "failed-event-transition",
@@ -1079,10 +712,10 @@ describe("canonical match state storage", () => {
             { matchId: `${input.matchId}1`, playerId: input.playerId },
           ],
         }),
-      ).toThrow("match-state-event-match-missing");
+      ).rejects.toThrow("match-state-event-match-missing");
       expect(
         matchRecordFixture(store.readPair(input).opponentMatch)?.timer,
-      ).toBe("");
+      ).toEqual({ state: "idle" });
     });
   });
 });

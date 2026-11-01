@@ -1,3 +1,4 @@
+import { APPLICATION_DATA_SOCKET_PROTOCOL } from "@mons/shared/data-contract";
 import type {
   ApiSocketUrl,
   ApiRoutePath,
@@ -25,8 +26,8 @@ export const INVITE_WAGERS_REQUEST_TIMEOUT_MS = 10_000;
 
 export class InviteWagersApiError extends Error {
   readonly code: string;
-  readonly status?: number;
-  readonly retryAfterMs?: number;
+  readonly status: number | undefined;
+  readonly retryAfterMs: number | undefined;
 
   constructor(code: string, status?: number, retryAfterMs?: number) {
     super(code);
@@ -59,6 +60,7 @@ export function createInviteWagersSocketProtocols(token: string): string[] {
   return [
     INVITE_WAGERS_SOCKET_PROTOCOL,
     `${REACTION_AUTH_PROTOCOL_PREFIX}${token}`,
+    APPLICATION_DATA_SOCKET_PROTOCOL,
   ];
 }
 
@@ -70,8 +72,8 @@ export async function readInviteWagersViaApi(
   const path = wagersPath(inviteId);
   return readSnapshotJson({
     url: `${INVITE_WAGERS_API_ROOT}${path}`,
-    tokenProvider,
-    signal: options.signal,
+    ...(tokenProvider ? { tokenProvider } : {}),
+    ...(options.signal ? { signal: options.signal } : {}),
     timeoutMs: INVITE_WAGERS_REQUEST_TIMEOUT_MS,
     maxResponseBytes: INVITE_WAGERS_MAX_MESSAGE_BYTES,
     validate: (payload): payload is ReadInviteWagersResponse =>

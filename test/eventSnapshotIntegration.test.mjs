@@ -1,3 +1,5 @@
+import { createTimerHandle } from "./fixtures/timerHandle.mjs";
+import { required, canonicalEvent } from "./fixtures/canonicalData.mjs";
 import assert from "node:assert/strict";
 import { registerHooks } from "node:module";
 import test from "node:test";
@@ -24,20 +26,18 @@ const { createUserBoundAuthTokenProvider } =
 const { GAMEPLAY_API_TIMEOUT_MS } =
   await import("../src/services/gameplayApi.ts");
 const { EventClient } = await import("../src/connection/eventClient.ts");
-const { mapDatabaseEventRecord } =
-  await import("../src/connection/eventMappers.ts");
 const { eventSnapshotEtag } = await import("@mons/shared/events");
 const { createEventPrizeSelectionCoordinator } =
   await import("../src/ui/event/prizeSelectionCoordinator.ts");
 
 const flush = () => new Promise((resolve) => setImmediate(resolve));
+/** @template [T=void] @returns {Pick<PromiseWithResolvers<T>, "promise" | "resolve">} */
 const deferred = () => {
-  let resolve;
-  const promise = new Promise((yes) => {
-    resolve = yes;
-  });
-  return { promise, resolve };
+  /** @type {PromiseWithResolvers<T>} */
+  const pending = Promise.withResolvers();
+  return { promise: pending.promise, resolve: pending.resolve };
 };
+/** @returns {import("../src/navigation/routeState.ts").RouteState} */
 const route = () => ({
   mode: "event",
   path: "event/NN3eRzoZo80",
@@ -46,26 +46,24 @@ const route = () => ({
   eventId: "NN3eRzoZo80",
   autojoin: false,
 });
+/** @returns {import("@mons/shared/events").EventSnapshotSeed & {snapshot: {event: import("@mons/shared/events").EventRecord}}} */
 const seed = (revision = 1) => ({
   snapshot: {
     ok: true,
     eventId: "NN3eRzoZo80",
     revision,
-    event: mapDatabaseEventRecord(
-      {
-        eventId: "NN3eRzoZo80",
-        status: "scheduled",
-        startAtMs: revision * 1000,
-      },
-      "NN3eRzoZo80",
-    ),
+    event: canonicalEvent({
+      eventId: "NN3eRzoZo80",
+      startAtMs: revision * 1000,
+    }),
     prizeSelections: {
-      "profile-a": ["1092", "1111", "1514"][(revision - 1) % 3],
+      "profile-a": required(["1092", "1111", "1514"][(revision - 1) % 3]),
     },
   },
   etag: eventSnapshotEtag("NN3eRzoZo80", revision),
   bookmark: `mons-d1-v1:11111111-1111-4111-8111-111111111111:bookmark-${revision}`,
 });
+/** @returns {import("../src/services/gameplayTransport.ts").ConditionalRead<import("@mons/shared/events").EventSnapshotResponse>} */
 const modified = (value = seed()) => ({
   kind: "modified",
   value: value.snapshot,
@@ -73,6 +71,12 @@ const modified = (value = seed()) => ({
   bookmark: value.bookmark,
 });
 
+/**
+ * @typedef {import("../src/connection/eventClient.ts").EventClientApi} ClientApi
+ * @typedef {import("../src/services/gameplayTransport.ts").ConditionalReadOptions} ReadOptions
+ * @typedef {Awaited<ReturnType<ClientApi["readEventSnapshotViaApi"]>>} ReadResult
+ * @param {{restored?: boolean, enrichment?: boolean, eventRead?: (eventId: string, options: ReadOptions) => ReadResult | Promise<ReadResult>, postponeEvent?: ClientApi["postponeEventStartViaApi"], createEvent?: () => ReturnType<ClientApi["createEventViaApi"]>, syncEvent?: ClientApi["syncEventStateViaApi"], authenticate?: () => Promise<void>}} [options]
+ */
 function fixture({
   restored = false,
   enrichment = true,
@@ -88,6 +92,7 @@ function fixture({
     refreshSecret: "refresh",
     revokeSecret: "revoke",
   };
+  /** @type {import("../src/session/sessionStore.ts").SessionState} */
   let state = {
     initialized: true,
     generation: crypto.randomUUID(),
@@ -97,14 +102,20 @@ function fixture({
   };
   const gate = deferred();
   const dispatched = deferred();
+  /** @type {Parameters<typeof import("../src/services/sessionApi.ts").sessionApi.create>[1][]} */
   const authRequests = [];
+  /** @type {{eventId: string, options: ReadOptions}[]} */
   const readRequests = [];
+  /**
+   * @type {[eventId: string, user: import("../src/session/sessionAuth.ts").SessionUser][]}
+   */
   const takeRequests = [];
+  /** @type {Map<ReturnType<typeof createTimerHandle>, {callback: () => void, delayMs: number}>} */
   const timers = new Map();
-  let timerId = 0;
+  /** @type {typeof import("../src/services/sessionApi.ts").sessionApi.create} */
   const tokenRequest = async (session, target) => {
     authRequests.push(target);
-    dispatched.resolve();
+    required(dispatched.resolve)();
     await gate.promise;
     return {
       ok: true,
@@ -113,7 +124,7 @@ function fixture({
       accessToken: "token-a",
       accessExpiresAtMs: 1_300_000,
       accessDeadlineMs: 1_300_000,
-      ...(target && enrichment
+      ...(target && "eventId" in target && enrichment
         ? { eventBootstrap: { ...target, result: seed() } }
         : {}),
     };
@@ -134,9 +145,14 @@ function fixture({
     createSession: () => session,
     newGeneration: () => crypto.randomUUID(),
   });
-  const read = async (eventId, provider, options) => {
+  /** @type {ClientApi["readEventSnapshotViaApi"]} */
+  const read = async (eventId, provider, options = {}) => {
     readRequests.push({ eventId, options });
     await provider(false);
+    assert.ok(
+      "assertCurrentUser" in provider &&
+        typeof provider.assertCurrentUser === "function",
+    );
     provider.assertCurrentUser();
     return eventRead ? eventRead(eventId, options) : modified();
   };
@@ -153,7 +169,10 @@ function fixture({
     if (!auth.currentUser) await auth.signInAnonymously();
   };
   const tokenProvider = () =>
-    createUserBoundAuthTokenProvider(auth.currentUser, () => auth.currentUser);
+    createUserBoundAuthTokenProvider(
+      required(auth.currentUser),
+      () => auth.currentUser,
+    );
   const connection = new EventClient({
     getCurrentUser: () => auth.currentUser,
     onAuthStateChanged: (listener) => auth.onAuthStateChanged(listener),
@@ -170,7 +189,8 @@ function fixture({
       readEventSnapshotViaApi: read,
       readProfileEventPrizesViaApi: async () =>
         assert.fail("unexpected profile read"),
-      postponeEventStartViaApi: postponeEvent,
+      postponeEventStartViaApi:
+        postponeEvent ?? (async () => assert.fail("unexpected postpone")),
       createEventViaApi: async () =>
         createEvent
           ? createEvent()
@@ -180,7 +200,15 @@ function fixture({
               event: creationSeed.snapshot.event,
               eventSnapshot: creationSeed,
             },
-      syncEventStateViaApi: syncEvent,
+      syncEventStateViaApi:
+        syncEvent ?? (async () => assert.fail("unexpected sync")),
+      joinEventViaApi: async () => assert.fail("unexpected join"),
+      leaveEventViaApi: async () => assert.fail("unexpected leave"),
+      removeEventParticipantViaApi: async () =>
+        assert.fail("unexpected remove"),
+      disqualifyEventMatchWinnersViaApi: async () =>
+        assert.fail("unexpected disqualify"),
+      withdrawEventPrizeViaApi: async () => assert.fail("unexpected withdraw"),
       toggleEventPrizeSelectionViaApi: async ({ eventId, prizeId }) => ({
         ok: true,
         eventId,
@@ -192,7 +220,7 @@ function fixture({
     clearTimer: (id) => timers.delete(id),
     isVisible: () => true,
     setTimer(callback, delayMs) {
-      const id = ++timerId;
+      const id = createTimerHandle();
       timers.set(id, { callback, delayMs });
       return id;
     },
@@ -203,11 +231,14 @@ function fixture({
     bootstrap,
     connection,
     timers,
+    /** @param {ReturnType<typeof seed>} value */
     async create(value) {
       creationSeed = value;
       return connection.createEvent(5);
     },
+    /** @returns {import("@mons/shared/events").EventRecord | null | undefined} */
     currentEvent() {
+      /** @type {import("@mons/shared/events").EventRecord | null | undefined} */
       let event;
       connection.subscribeToEvent("NN3eRzoZo80", (value) => (event = value))();
       return event;
@@ -217,6 +248,9 @@ function fixture({
     takeRequests,
     gate,
     dispatched,
+    /**
+     * @param {number | undefined} [delayMs]
+     */
     async runNext(delayMs) {
       const next =
         delayMs === undefined
@@ -237,7 +271,13 @@ function fixture({
 for (const restored of [false, true]) {
   test(`${restored ? "restored" : "anonymous"} auth reset preserves pending bootstrap for the event poller`, async () => {
     const h = fixture({ restored });
+    /**
+     * @type {(import("@mons/shared/events").EventRecord | null)[]}
+     */
     const events = [];
+    /**
+     * @type {import("../src/connection/connectionModels.ts").EventPrizeSelections[]}
+     */
     const selections = [];
     h.bootstrap.start(route());
     const unsubscribe = h.connection.subscribeToEvent("NN3eRzoZo80", (event) =>
@@ -250,7 +290,7 @@ for (const restored of [false, true]) {
     assert.equal(await h.runNext(), 0);
     await h.dispatched.promise;
     assert.equal(h.authRequests.length, 1);
-    h.gate.resolve();
+    required(h.gate.resolve)();
     await flush();
     if (!events.some((event) => event !== null)) await h.runNext();
     assert.deepEqual(events.filter(Boolean), [seed().snapshot.event]);
@@ -260,7 +300,10 @@ for (const restored of [false, true]) {
     );
     assert.equal(h.readRequests.length, 0);
     assert.deepEqual(h.authRequests, [{ eventId: "NN3eRzoZo80" }]);
-    assert.equal([...h.timers.values()][0].delayMs, EVENT_POLL_INTERVAL_MS);
+    assert.equal(
+      required([...h.timers.values()][0]).delayMs,
+      EVENT_POLL_INTERVAL_MS,
+    );
     unsubscribe();
     unsubscribeSelections();
     assert.equal(h.timers.size, 0);
@@ -269,6 +312,7 @@ for (const restored of [false, true]) {
 
 test("a legacy session response yields one shared early event GET for both modal subscribers", async () => {
   const h = fixture({ enrichment: false });
+  /** @type {(import("@mons/shared/events").EventRecord | null)[]} */
   const events = [];
   h.bootstrap.start(route());
   const unsubscribe = h.connection.subscribeToEvent("NN3eRzoZo80", (value) =>
@@ -280,7 +324,7 @@ test("a legacy session response yields one shared early event GET for both modal
   );
   await h.runNext();
   await h.dispatched.promise;
-  h.gate.resolve();
+  required(h.gate.resolve)();
   await flush();
   if (!events.some(Boolean)) await h.runNext();
   assert.equal(h.authRequests.length, 1);
@@ -292,10 +336,12 @@ test("a legacy session response yields one shared early event GET for both modal
 
 test("a create response seeded before opening displays immediately without another GET", async () => {
   const h = fixture();
-  h.gate.resolve();
+  required(h.gate.resolve)();
   await h.auth.signInAnonymously();
   assert.deepEqual((await h.create(seed(2))).event, seed(2).snapshot.event);
+  /** @type {(import("@mons/shared/events").EventRecord | null)[]} */
   const events = [];
+  /** @type {(boolean)[]} */
   const fresh = [];
   const unsubscribeFreshness = h.connection.subscribeToEventFreshness(
     "NN3eRzoZo80",
@@ -306,24 +352,28 @@ test("a create response seeded before opening displays immediately without anoth
   );
   assert.deepEqual(events, [seed(2).snapshot.event]);
   assert.deepEqual(fresh, [false, true]);
-  assert.ok([...h.timers.values()][0].delayMs > 0);
+  assert.ok(required([...h.timers.values()][0]).delayMs > 0);
   assert.equal(h.readRequests.length, 0);
   unsubscribe();
   unsubscribeFreshness();
   h.connection.reset({ preserveSnapshots: true });
+  /** @type {(import("@mons/shared/events").EventRecord | null)[]} */
   const reopened = [];
   const close = h.connection.subscribeToEvent("NN3eRzoZo80", (value) =>
     reopened.push(value),
   );
   assert.deepEqual(reopened, [seed(2).snapshot.event]);
-  assert.equal([...h.timers.values()][0].delayMs, 0);
+  assert.equal(required([...h.timers.values()][0]).delayMs, 0);
   assert.equal(h.readRequests.length, 0);
   close();
 });
 
 test("a delayed postpone snapshot preserves a newer acknowledged prize while restarting its primary refresh", async () => {
+  /** @type {Pick<PromiseWithResolvers<Awaited<ReturnType<ClientApi["postponeEventStartViaApi"]>>>, "promise" | "resolve">} */
   const postpone = deferred();
+  /** @type {Pick<PromiseWithResolvers<ReadResult>, "promise" | "resolve">} */
   const primaryRead = deferred();
+  /** @type {Pick<PromiseWithResolvers<ReadResult>, "promise" | "resolve">} */
   const replacementRead = deferred();
   let reads = 0;
   const h = fixture({
@@ -331,11 +381,12 @@ test("a delayed postpone snapshot preserves a newer acknowledged prize while res
       ++reads === 1 ? primaryRead.promise : replacementRead.promise,
     postponeEvent: () => postpone.promise,
   });
-  h.gate.resolve();
+  required(h.gate.resolve)();
   await h.auth.signInAnonymously();
   const initial = seed(1);
   initial.snapshot.prizeSelections = {};
   await h.create(initial);
+  /** @type {(import("../src/connection/connectionModels.ts").EventPrizeSelections)[]} */
   const selections = [];
   const coordinator = createEventPrizeSelectionCoordinator({
     profileId: "profile-a",
@@ -354,10 +405,10 @@ test("a delayed postpone snapshot preserves a newer acknowledged prize while res
   await flush();
   await h.runNext();
   assert.deepEqual(selections.at(-1), { "profile-a": "1092" });
-  assert.equal(h.readRequests[0].options.bookmark, null);
+  assert.equal(required(h.readRequests[0]).options.bookmark, null);
   const older = seed(2);
   older.snapshot.prizeSelections = {};
-  postpone.resolve({
+  required(postpone.resolve)({
     ok: true,
     eventId: "NN3eRzoZo80",
     event: older.snapshot.event,
@@ -368,18 +419,21 @@ test("a delayed postpone snapshot preserves a newer acknowledged prize while res
   await pendingPostpone;
   await flush();
   assert.deepEqual(selections.at(-1), { "profile-a": "1092" });
-  assert.equal(h.readRequests[0].options.signal.aborted, true);
+  assert.equal(
+    required(required(h.readRequests[0]).options.signal).aborted,
+    true,
+  );
   assert.equal(await h.runNext(), 0);
   assert.equal(h.readRequests.length, 2);
-  assert.equal(h.readRequests[1].options.bookmark, null);
+  assert.equal(required(h.readRequests[1]).options.bookmark, null);
   const latest = seed(3);
   latest.snapshot.prizeSelections = { "profile-a": "1092" };
-  replacementRead.resolve(modified(latest));
+  required(replacementRead.resolve)(modified(latest));
   await flush();
-  assert.equal(h.currentEvent().startAtMs, 3000);
-  primaryRead.resolve(modified(older));
+  assert.equal(required(h.currentEvent()).startAtMs, 3000);
+  required(primaryRead.resolve)(modified(older));
   await flush();
-  assert.equal(h.currentEvent().startAtMs, 3000);
+  assert.equal(required(h.currentEvent()).startAtMs, 3000);
   assert.deepEqual(selections.at(-1), { "profile-a": "1092" });
   unsubscribe();
   coordinator.dispose();
@@ -387,6 +441,7 @@ test("a delayed postpone snapshot preserves a newer acknowledged prize while res
 
 for (const withSnapshot of [false, true]) {
   test(`a postponed event receives a primary refresh after an overlapping prize refresh completes (${withSnapshot ? "rejected seed" : "legacy response"})`, async () => {
+    /** @type {Pick<PromiseWithResolvers<Awaited<ReturnType<ClientApi["postponeEventStartViaApi"]>>>, "promise" | "resolve">} */
     const postpone = deferred();
     const beforePostpone = seed(2);
     beforePostpone.snapshot.event = seed(1).snapshot.event;
@@ -403,9 +458,10 @@ for (const withSnapshot of [false, true]) {
         ),
       postponeEvent: () => postpone.promise,
     });
-    h.gate.resolve();
+    required(h.gate.resolve)();
     await h.auth.signInAnonymously();
     await h.create(seed(1));
+    /** @type {(import("@mons/shared/events").EventRecord | null)[]} */
     const events = [];
     const unsubscribe = h.connection.subscribeToEvent("NN3eRzoZo80", (value) =>
       events.push(value),
@@ -414,9 +470,9 @@ for (const withSnapshot of [false, true]) {
     await flush();
     await h.connection.toggleEventPrizeSelection("NN3eRzoZo80", "1092");
     assert.equal(await h.runNext(), 0);
-    assert.equal(h.currentEvent().startAtMs, 1000);
+    assert.equal(required(h.currentEvent()).startAtMs, 1000);
     committed = true;
-    postpone.resolve({
+    required(postpone.resolve)({
       ok: true,
       eventId: "NN3eRzoZo80",
       event: afterPostpone.snapshot.event,
@@ -428,8 +484,9 @@ for (const withSnapshot of [false, true]) {
     assert.deepEqual(events.at(-1), beforePostpone.snapshot.event);
     assert.equal(await h.runNext(), 0);
     assert.equal(h.readRequests.length, 2);
-    assert.equal(h.readRequests[1].options.bookmark, null);
+    assert.equal(required(h.readRequests[1]).options.bookmark, null);
     assert.deepEqual(events.at(-1), afterPostpone.snapshot.event);
+    /** @type {(import("../src/connection/connectionModels.ts").EventPrizeSelections)[]} */
     const selections = [];
     const closeSelections = h.connection.subscribeToEventPrizeSelections(
       "NN3eRzoZo80",
@@ -442,12 +499,13 @@ for (const withSnapshot of [false, true]) {
 }
 
 test("a postpone completion from an earlier auth generation cannot restart the current owner's reads", async () => {
+  /** @type {Pick<PromiseWithResolvers<Awaited<ReturnType<ClientApi["postponeEventStartViaApi"]>>>, "promise" | "resolve">} */
   const postpone = deferred();
   const h = fixture({
     eventRead: () => modified(seed(4)),
     postponeEvent: () => postpone.promise,
   });
-  h.gate.resolve();
+  required(h.gate.resolve)();
   await h.auth.signInAnonymously();
   await h.create(seed(1));
   const unsubscribe = h.connection.subscribeToEvent("NN3eRzoZo80", () => {});
@@ -456,7 +514,7 @@ test("a postpone completion from an earlier auth generation cannot restart the c
   h.connection.reset();
   assert.equal(await h.runNext(), 0);
   const timer = [...h.timers.entries()][0];
-  postpone.resolve({
+  required(postpone.resolve)({
     ok: true,
     eventId: "NN3eRzoZo80",
     event: seed(2).snapshot.event,
@@ -465,18 +523,20 @@ test("a postpone completion from an earlier auth generation cannot restart the c
     startAtMs: 2000,
   });
   await pendingPostpone;
-  assert.equal(h.currentEvent().startAtMs, 4000);
+  assert.equal(required(h.currentEvent()).startAtMs, 4000);
   assert.equal(h.readRequests.length, 1);
   assert.deepEqual([...h.timers.entries()], [timer]);
-  assert.equal(timer[1].delayMs, EVENT_POLL_INTERVAL_MS);
+  assert.equal(required(timer)[1].delayMs, EVENT_POLL_INTERVAL_MS);
   unsubscribe();
 });
 
 test("late legacy sync data cannot replace an already-observed newer event", async () => {
+  /** @type {Pick<PromiseWithResolvers<Awaited<ReturnType<ClientApi["syncEventStateViaApi"]>>>, "promise" | "resolve">} */
   const sync = deferred();
   const h = fixture({ syncEvent: () => sync.promise });
-  h.gate.resolve();
+  required(h.gate.resolve)();
   await h.auth.signInAnonymously();
+  /** @type {(import("@mons/shared/events").EventRecord | null)[]} */
   const events = [];
   const unsubscribe = h.connection.subscribeToEvent("NN3eRzoZo80", (value) =>
     events.push(value),
@@ -484,7 +544,12 @@ test("late legacy sync data cannot replace an already-observed newer event", asy
   const pending = h.connection.syncEventState("NN3eRzoZo80");
   await flush();
   await h.create(seed(3));
-  sync.resolve({ ok: true, didChange: true, event: seed(1).snapshot.event });
+  required(sync.resolve)({
+    ok: true,
+    eventId: "NN3eRzoZo80",
+    didChange: true,
+    event: seed(1).snapshot.event,
+  });
   await pending;
   assert.deepEqual(
     (await h.connection.syncEventState("NN3eRzoZo80")).event,
@@ -497,10 +562,12 @@ test("late legacy sync data cannot replace an already-observed newer event", asy
 });
 
 test("auth reset rejects pending mutation seeds even when the same event stays mounted", async () => {
+  /** @type {Pick<PromiseWithResolvers<Awaited<ReturnType<ClientApi["createEventViaApi"]>>>, "promise" | "resolve">} */
   const creation = deferred();
   const h = fixture({ createEvent: () => creation.promise });
-  h.gate.resolve();
+  required(h.gate.resolve)();
   await h.auth.signInAnonymously();
+  /** @type {(import("@mons/shared/events").EventRecord | null)[]} */
   const events = [];
   const unsubscribe = h.connection.subscribeToEvent("NN3eRzoZo80", (value) =>
     events.push(value),
@@ -509,7 +576,7 @@ test("auth reset rejects pending mutation seeds even when the same event stays m
   const pending = h.connection.createEvent(5);
   await flush();
   h.connection.reset();
-  creation.resolve({
+  required(creation.resolve)({
     ok: true,
     eventId: "NN3eRzoZo80",
     event: seed(2).snapshot.event,
@@ -530,7 +597,7 @@ test("closing an event while shared authentication stalls promptly releases the 
   assert.equal(h.timers.size, 0);
   assert.equal(h.takeRequests.length, 0);
   assert.equal(h.readRequests.length, 0);
-  authentication.resolve();
+  required(authentication.resolve)();
   await flush();
   assert.equal(h.takeRequests.length, 0);
   assert.equal(h.readRequests.length, 0);
@@ -539,6 +606,7 @@ test("closing an event while shared authentication stalls promptly releases the 
 test("event read deadline includes authentication without canceling shared authentication", async () => {
   const authentication = deferred();
   const h = fixture({ authenticate: () => authentication.promise });
+  /** @type {unknown[]} */
   const errors = [];
   const unsubscribe = h.connection.subscribeToEvent(
     "NN3eRzoZo80",
@@ -548,10 +616,12 @@ test("event read deadline includes authentication without canceling shared authe
   await h.runNext();
   await h.runNext(GAMEPLAY_API_TIMEOUT_MS);
   assert.equal(errors.length, 1);
-  assert.equal(errors[0].code, "unavailable");
+  const error = required(errors[0]);
+  assert.ok(error instanceof Error && "code" in error);
+  assert.equal(error.code, "unavailable");
   assert.equal(h.takeRequests.length, 0);
   assert.equal(h.readRequests.length, 0);
-  authentication.resolve();
+  required(authentication.resolve)();
   await flush();
   assert.equal(h.takeRequests.length, 0);
   assert.equal(h.readRequests.length, 0);

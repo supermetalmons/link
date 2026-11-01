@@ -142,7 +142,6 @@ export function createProfileGameProjectionBatchDependencies(
   const runtime = createProfileGameProjectionRuntime(env, { state });
   const locks = createProfileGameProjectionLockStore(env.PROFILE_GAMES_DB);
   return {
-    forwardEventTasks: true,
     createLocks: () => locks,
     createRating: () => rating,
     createStateRepository: () => state,

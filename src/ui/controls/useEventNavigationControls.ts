@@ -39,14 +39,12 @@ const mapEventRecordToNavigationPreview = (
     .map((participant) => {
       const displayName = participant.displayName?.trim();
       const username = participant.username?.trim();
-      const emojiId = Number.isFinite(participant.emojiId)
-        ? Math.trunc(participant.emojiId)
-        : NaN;
+      const emojiId = participant.emojiId;
       return {
         profileId: participant.profileId?.trim() || null,
         displayName: displayName || username || null,
-        emojiId: Number.isFinite(emojiId) && emojiId > 0 ? emojiId : null,
-        aura: participant.aura?.trim() || null,
+        emojiId,
+        aura: participant.aura,
       };
     });
 };

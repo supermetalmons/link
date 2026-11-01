@@ -19,7 +19,7 @@ const buildAutomatchTelegramProjectionChanges: (input: {
     kind: "telegram-outbox",
     inviteId,
     value: {
-      schemaVersion: 1,
+      schemaVersion: 2,
       status: "pending",
       requestId,
       updatedAtMs: timestamp,
@@ -38,8 +38,12 @@ const buildPendingAutomatchTelegramSource: (
   canceledText,
   timestamp,
 }) => ({
+  schemaVersion: 1,
   version: TELEGRAM_AUTOMATCH_VERSION,
   generation: 1,
+  matchedText: null,
+  matchedInstanceKey: null,
+  results: {},
   lifecycle: "pending",
   waitingText,
   canceledText,

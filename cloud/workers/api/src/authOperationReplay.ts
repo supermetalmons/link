@@ -1,7 +1,8 @@
-import { isAuthProfileResponse, type AuthMethodKey } from "@mons/shared/auth";
+import { type AuthMethodKey } from "@mons/shared/auth";
 import { AuthApiFailure } from "./authErrors.ts";
 import type { LinkInput } from "./authIdentity.ts";
-import { cleanString, hashMethodValue } from "./authPolicy.ts";
+import { hashMethodValue } from "./authPolicy.ts";
+import type { VerifyOperationMetadata } from "./profileCanonical/contracts.ts";
 import type {
   CanonicalAuthMethodSnapshot,
   CanonicalAuthOperationSnapshot,
@@ -9,11 +10,7 @@ import type {
 
 const AUTH_OP_REPLAY_TTL_MS = 10 * 60 * 1_000;
 
-export type VerifyOperationMeta = {
-  methodValue: string;
-  methodValueHash: string;
-  intentId?: string;
-};
+export type VerifyOperationMeta = VerifyOperationMetadata;
 
 type AuthOperationContext = {
   kind: "unlink" | "verify";
@@ -31,21 +28,19 @@ export function createVerifyOperationMeta(
         ? "redacted"
         : input.methodValueRaw,
     methodValueHash: hashMethodValue(input.method, input.normalizedMethodValue),
-    ...(input.intentId ? { intentId: input.intentId } : {}),
+    intentId: input.intentId ?? null,
   };
 }
 
-export function readVerifyOperationMeta(value: unknown): {
+export function readVerifyOperationMeta(
+  value: VerifyOperationMetadata | null | undefined,
+): {
   methodValueHash: string;
-  intentId: string;
+  intentId: string | null;
 } {
-  const fields =
-    value && typeof value === "object" && !Array.isArray(value)
-      ? (value as Record<string, unknown>)
-      : {};
   return {
-    methodValueHash: cleanString(fields.methodValueHash),
-    intentId: cleanString(fields.intentId),
+    methodValueHash: value?.methodValueHash ?? "",
+    intentId: value?.intentId ?? null,
   };
 }
 
@@ -110,10 +105,7 @@ export function verifyReplayState(
     isAuthOperationReplayExpired(operation, nowMs)
   )
     return null;
-  if (
-    operation.status === "success" &&
-    isAuthProfileResponse(operation.result)
-  ) {
+  if (operation.status === "success" && operation.result.kind === "verify") {
     return "completed";
   }
   return operation.status === "started" || operation.status === "failed"

@@ -139,7 +139,7 @@ export async function handleSessionRoute(
     > = {
       ...session,
       ...bootstrap,
-      ...(includeIdentity ? { identityBootstrap } : {}),
+      ...(identityBootstrap === undefined ? {} : { identityBootstrap }),
     };
     const baseLimit = target
       ? "eventId" in target
@@ -199,7 +199,7 @@ export async function handleSessionRoute(
       const contentType = request.headers
         .get("Content-Type")
         ?.split(";", 1)[0]
-        .trim()
+        ?.trim()
         .toLowerCase();
       if (contentType !== "application/json") {
         throw new AuthApiFailure(

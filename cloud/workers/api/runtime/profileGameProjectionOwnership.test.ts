@@ -1,9 +1,18 @@
+import { applyCanonicalTestMigrations } from "./canonicalTestMigrations.ts";
 import { retainedInviteSourceFixture } from "../test/inviteDocumentFixture.ts";
 import { eventDocumentFixture } from "../test/eventCompatibilityFixture.ts";
-import type { CompletePlayerProfile } from "@mons/shared/profiles";
-import { decodeAutomatchEntry } from "../../../runtime/automatchRecords.js";
-import { applyD1Migrations, type D1Migration } from "cloudflare:test";
-import { env } from "cloudflare:workers";
+import { profileFixture } from "../test/profileDataBoundaryFixture.ts";
+import type { StoredPlayerProfile } from "../src/profileCanonical/contracts.ts";
+import { canonicalAutomatchFixture } from "../test/automatchRecordFixture.ts";
+import type { D1Migration } from "cloudflare:test";
+import { env as baseEnv } from "cloudflare:workers";
+import { activateCanonicalApplicationFixture } from "./applicationRoomFixture.ts";
+import { eventApplicationEnvironment } from "./eventApplicationFixture.ts";
+import {
+  canonicalRatingFixture,
+  canonicalRatingInsert,
+} from "./canonicalRatingFixture.ts";
+import { projectionDocumentFixture } from "../test/profileDataBoundaryFixture.ts";
 import { beforeAll, describe, expect, it } from "vitest";
 import { createGameplayRepository } from "../src/gameplayRepository.ts";
 import { resolveInviteRole } from "../src/inviteAccess.ts";
@@ -29,14 +38,17 @@ import { gameplayTestPort } from "../test/gameSessionTestPorts.ts";
 import type { StateRepository } from "../test/stateRepositoryTestTypes.ts";
 import { activateDurableMatchPresentationTestState } from "./matchPresentationTestFixture.ts";
 import { applyRetiredProfileMigrations } from "./profileTestMigrations.ts";
+const decodeAutomatchEntry = (value: unknown) =>
+  canonicalAutomatchFixture("automatch", value);
 
+const env = eventApplicationEnvironment(baseEnv);
 const testEnv = env as Env & {
   TEST_D1_MIGRATIONS: D1Migration[];
   TEST_PROFILE_D1_MIGRATIONS: D1Migration[];
 };
 
-function profile(id: string): CompletePlayerProfile {
-  return {
+function profile(id: string): StoredPlayerProfile {
+  return profileFixture({
     id,
     completedProblemIds: [],
     emoji: 2,
@@ -52,7 +64,7 @@ function profile(id: string): CompletePlayerProfile {
     totalManaPoints: 1,
     username: `${id}Name`,
     win: true,
-  };
+  });
 }
 
 async function insertProfileOwner(
@@ -63,7 +75,6 @@ async function insertProfileOwner(
   const value = materializeCanonicalProfile({
     createdAtMs: 1,
     emojiPresent,
-    ...(emojiPresent ? {} : { gameplayEmoji: "" }),
     profile: profile(profileId),
     updatedAtMs: 1,
   });
@@ -166,7 +177,6 @@ async function insertDeletedMergeSource(
         redirect: {
           mergedAtMs,
           opId: `projection-budget-${sourceProfileId}`,
-          sourceLegacyFields: source.legacyFields,
           sourceProfileId,
           targetProfileId,
         },
@@ -292,7 +302,6 @@ async function insertMergedProfileOwner(
         redirect: {
           mergedAtMs: 3,
           opId: "projection-ownership-merge",
-          sourceLegacyFields: sourceSnapshot.legacyFields,
           sourceProfileId,
           targetProfileId,
         },
@@ -304,13 +313,17 @@ async function insertMergedProfileOwner(
 describe("D1-authoritative profile game projection ownership", () => {
   beforeAll(async () => {
     await Promise.all([
-      applyD1Migrations(testEnv.PROFILE_GAMES_DB, testEnv.TEST_D1_MIGRATIONS),
+      applyCanonicalTestMigrations(
+        testEnv.PROFILE_GAMES_DB,
+        testEnv.TEST_D1_MIGRATIONS,
+      ),
       applyRetiredProfileMigrations(
         testEnv.PROFILE_DB,
         testEnv.TEST_PROFILE_D1_MIGRATIONS,
         "b".repeat(64),
       ),
     ]);
+    await activateCanonicalApplicationFixture();
     await activateDurableMatchPresentationTestState(testEnv.PROFILE_GAMES_DB);
     await testEnv.PROFILE_GAMES_DB.prepare(
       `UPDATE login_match_discovery_control SET discovery_backend = 'd1',
@@ -404,7 +417,7 @@ describe("D1-authoritative profile game projection ownership", () => {
     const hostLoginId = "presentation-projection-host";
     const guestLoginId = "presentation-projection-anon";
     const hostProfileId = "presentation-projection-profile";
-    const guestSeed = { emojiId: 1, aura: "" };
+    const guestSeed = { emojiId: 1, aura: "none" as const };
     await insertProfileOwner(hostProfileId, hostLoginId);
     const registrations = await prepareCreatedMatchPresentations(testEnv, [
       {
@@ -456,7 +469,7 @@ describe("D1-authoritative profile game projection ownership", () => {
       operationId: crypto.randomUUID(),
       expectedRevision: 0,
       emojiId: 7,
-      aura: "",
+      aura: "none" as const,
     });
     await runtime.recomputeInviteProjection(inviteId, "rating-completed", {
       eventTimestampMs: 200,
@@ -469,7 +482,7 @@ describe("D1-authoritative profile game projection ownership", () => {
     ).resolves.toMatchObject({
       data: { latestMatchId: matchId, opponentEmoji: 7, status: "ended" },
     });
-    expect(guestSeed).toEqual({ emojiId: 1, aura: "" });
+    expect(guestSeed).toEqual({ emojiId: 1, aura: "none" as const });
   });
 
   it("shares one canonical presentation read across both owner projections without Firebase cosmetic reads", async () => {
@@ -498,7 +511,7 @@ describe("D1-authoritative profile game projection ownership", () => {
               matchId,
               actorUid: hostLoginId,
               emojiId: 3,
-              aura: "",
+              aura: "none" as const,
               revision: 2,
             },
             [guestLoginId]: {
@@ -582,7 +595,7 @@ describe("D1-authoritative profile game projection ownership", () => {
                 matchId: selectedMatchId,
                 actorUid: guestLoginId,
                 emojiId: 8,
-                aura: "",
+                aura: "none" as const,
                 revision: kind === "malformed" ? -1 : 0,
               },
             },
@@ -640,24 +653,36 @@ describe("D1-authoritative profile game projection ownership", () => {
     ] as const;
     for (const entry of cases) {
       if (entry.status) {
-        await testEnv.PROFILE_DB.prepare(
-          `INSERT INTO rating_updates (
-             operation_id, payload_json, status, invite_id, match_id,
-             player_id, opponent_id, owner_uid, owner_token, started_at_ms,
-             updated_at_ms, lease_expires_at_ms, completed_at_ms
-           ) VALUES (?, '{}', ?, ?, ?, ?, ?, ?, 'owner', 1, 2, 3, ?)`,
-        )
-          .bind(
-            `${entry.inviteId}__${entry.inviteId}`,
-            entry.status,
-            entry.inviteId,
-            entry.inviteId,
-            hostLoginId,
-            guestLoginId,
-            hostLoginId,
-            entry.status === "done" ? 2 : null,
-          )
-          .run();
+        const row = canonicalRatingFixture(entry.inviteId, {
+          matchId: entry.inviteId,
+          atMs: 2,
+        });
+        if (row.status !== "done")
+          throw new Error("expected-completed-rating-fixture");
+        const value = {
+          ...row,
+          playerId: hostLoginId,
+          opponentId: guestLoginId,
+        };
+        await canonicalRatingInsert(
+          testEnv.PROFILE_DB,
+          entry.status === "done"
+            ? value
+            : {
+                ...value,
+                status: "processing",
+                completedAtMs: null,
+                profileGameProjectionState: null,
+                profileGameProjectionUpdatedAtMs: null,
+                profileGameProjectionVersion: null,
+                telegramProjectionState: null,
+                telegramProjectionUpdatedAtMs: null,
+                telegramProjectionVersion: null,
+                eventProgressState: null,
+                eventProgressUpdatedAtMs: null,
+                eventProgressVersion: null,
+              },
+        ).run();
       }
       const runtime = createProfileGameProjectionRuntime(testEnv, {
         state: {
@@ -665,11 +690,10 @@ describe("D1-authoritative profile game projection ownership", () => {
             expect(candidateInviteId).toBe(entry.inviteId);
             return retainedInviteSourceFixture({
               eventOwned: true,
+              eventId: "event",
+              eventRoundIndex: 0,
               hostId: hostLoginId,
               guestId: guestLoginId,
-              ...(entry.status === "done"
-                ? {}
-                : { matchesRatingUpdates: { [entry.inviteId]: true } }),
             });
           },
           async readAutomatchEntry(id) {
@@ -751,7 +775,7 @@ describe("D1-authoritative profile game projection ownership", () => {
       { length: 40 },
       (_, index) => `d1-budget-login-${index}`,
     );
-    await insertProfileOwner(profileId, loginUids[0]);
+    await insertProfileOwner(profileId, loginUids[0]!);
     await Promise.all(
       loginUids
         .slice(1)
@@ -804,8 +828,8 @@ describe("D1-authoritative profile game projection ownership", () => {
       (_, index) => `d1-full-budget-guest-${index}`,
     );
     await Promise.all([
-      insertProfileOwner(hostProfileId, hostLoginUids[0]),
-      insertProfileOwner(guestProfileId, guestLoginUids[0]),
+      insertProfileOwner(hostProfileId, hostLoginUids[0]!),
+      insertProfileOwner(guestProfileId, guestLoginUids[0]!),
     ]);
     await Promise.all([
       ...hostLoginUids
@@ -823,7 +847,7 @@ describe("D1-authoritative profile game projection ownership", () => {
     );
     for (let index = 0; index < cleanupSourceProfileIds.length; index += 1) {
       await insertDeletedMergeSource(
-        cleanupSourceProfileIds[index],
+        cleanupSourceProfileIds[index]!,
         hostProfileId,
         10 + index,
       );
@@ -875,7 +899,7 @@ describe("D1-authoritative profile game projection ownership", () => {
     await captureLoginMatchDiscovery(
       testEnv.PROFILE_GAMES_DB,
       inviteIds.map((inviteId) => ({
-        loginUid: hostLoginUids[0],
+        loginUid: hostLoginUids[0]!,
         matchId: inviteId,
         inviteId,
       })),
@@ -884,11 +908,20 @@ describe("D1-authoritative profile game projection ownership", () => {
       cleanupSourceProfileIds.flatMap((profileId) =>
         inviteIds.map((inviteId) =>
           testEnv.PROFILE_GAMES_DB.prepare(
-            `INSERT INTO profile_game_projections (
+            `INSERT INTO profile_game_projections_canonical (
                profile_id, projection_id, entity_type, status, sort_bucket,
                list_sort_at_ms, updated_at_ms, version, payload_json
-             ) VALUES (?, ?, 'game', 'waiting', 1, 1, 1, 1, '{}')`,
-          ).bind(profileId, inviteId),
+             ) VALUES (?, ?, 'game', 'waiting', 30, 1, 1, 1, ?)`,
+          ).bind(
+            profileId,
+            inviteId,
+            JSON.stringify(
+              projectionDocumentFixture({
+                inviteId,
+                ownerProfileId: profileId,
+              }),
+            ),
+          ),
         ),
       ),
     );
@@ -927,7 +960,7 @@ describe("D1-authoritative profile game projection ownership", () => {
       projectionStatements = 0;
       const result = await runtime.process({
         cleanupProfileIds: cleanupSourceProfileIds,
-        loginUid: hostLoginUids[0],
+        loginUid: hostLoginUids[0]!,
         matchCursor,
         profileId: hostProfileId,
         sourceUpdatedAtMs: 100,
@@ -965,8 +998,13 @@ describe("D1-authoritative profile game projection ownership", () => {
         "UPDATE invite_source_control SET backend = 'd1', state = 'active', epoch = 1, verified_at_ms = 1, activated_at_ms = 1 WHERE singleton = 1",
       ),
       testEnv.PROFILE_GAMES_DB.prepare(
-        "INSERT INTO invite_sources (invite_id, source_json, revision, updated_at_ms) VALUES (?, ?, 1, 1)",
-      ).bind(inviteId, JSON.stringify({ hostId: hostUid, guestId: null })),
+        "INSERT INTO invite_sources_canonical (invite_id, source_json, revision, updated_at_ms) VALUES (?, ?, 1, 1)",
+      ).bind(
+        inviteId,
+        JSON.stringify(
+          retainedInviteSourceFixture({ hostId: hostUid, guestId: null }),
+        ),
+      ),
     ]);
     const reads: string[] = [];
     const stateClient: StateRepository = {

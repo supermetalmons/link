@@ -1,7 +1,9 @@
 // Generated from src/telegram/taskIdentity.ts. Run npm run generate:runtime.
 export type TelegramTaskKind =
   "desired" | "manual-recovery" | "pending-delete" | "rate-limit-proof";
-type TelegramTaskFields = {
+export type TelegramTaskFields = {
+  schemaVersion: 1;
+  dataEpoch: 1;
   messageKey: string;
   revision: string;
   taskKind: TelegramTaskKind;
@@ -41,3 +43,6 @@ export {
   normalizeOptionalTimestamp,
   normalizeTaskPayload,
 };
+export declare function parseTelegramTaskPayload(
+  value: unknown,
+): TelegramTaskPayload | null;

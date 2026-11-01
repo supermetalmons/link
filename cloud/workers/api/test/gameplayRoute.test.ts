@@ -1,3 +1,5 @@
+import { wagerRecordFixture } from "./wagerRecordFixture.ts";
+import { canonicalQueuePayloadFixture } from "./canonicalQueueFixture.ts";
 import { retainedInviteSourceFixture } from "./inviteDocumentFixture.ts";
 import { matchDocumentFixture } from "./matchRecordFixture.ts";
 import { gameplayTestPort } from "./gameSessionTestPorts.ts";
@@ -20,10 +22,7 @@ import {
   type SubmitMoveRequest,
 } from "@mons/shared/game-sessions";
 import { AuthApiFailure } from "../src/authErrors.ts";
-import {
-  GameSessionMutationLockFailure,
-  MatchTimerStartStoreFailure,
-} from "../src/gameplayCoordinationD1.ts";
+import { GameSessionMutationLockFailure } from "../src/gameplayCoordinationD1.ts";
 import {
   cancelAutomatch as cancelAutomatchImpl,
   handleGameplayRoute as handleGameplayRouteImpl,
@@ -103,14 +102,15 @@ function handleGameplayRoute(
     (dependencies.repository
       ? coordinationFor(dependencies.repository)
       : createMemoryGameplayCoordinationStores());
+  const wagerReservations =
+    dependencies.wagerReservations ||
+    (dependencies.repository
+      ? createTestWagerReservationRuntime(dependencies.repository)
+      : undefined);
   return handleGameplayRouteImpl(request, env, ctx, {
     ...dependencies,
     coordination,
-    wagerReservations:
-      dependencies.wagerReservations ||
-      (dependencies.repository
-        ? createTestWagerReservationRuntime(dependencies.repository)
-        : undefined),
+    ...(wagerReservations === undefined ? {} : { wagerReservations }),
   });
 }
 
@@ -122,7 +122,7 @@ type OwnershipState = Readonly<{
 
 function gameplayProfile(profileId: string): GameplayProfile {
   return {
-    aura: "",
+    aura: "none",
     emoji: 1,
     eth: "",
     profileId,
@@ -259,8 +259,20 @@ function applyTransaction(
     value?: unknown;
   };
   return decision.commit === false
-    ? { committed: false, decision: decision.decision, value: current }
-    : { committed: true, decision: decision.decision, value: decision.value };
+    ? {
+        committed: false,
+        ...(decision.decision === undefined
+          ? {}
+          : { decision: decision.decision }),
+        value: current,
+      }
+    : {
+        committed: true,
+        ...(decision.decision === undefined
+          ? {}
+          : { decision: decision.decision }),
+        value: decision.value,
+      };
 }
 
 async function modernWagerProposal(
@@ -302,14 +314,21 @@ function miningWithProposal(
     },
     operations: {
       [proposal.reservationOperationId]: {
-        appliedAtMs: 1,
-        count: proposal.count,
-        deltas: { [proposal.material]: proposal.count },
-        fingerprint: operationFingerprint(
-          "send-reserve",
-          proposal.material,
-          proposal.count,
-        ),
+        schemaVersion: 1,
+        status: "active",
+        operation: {
+          kind: "send-reserve",
+          material: proposal.material,
+          requestedCount: proposal.count,
+          appliedAtMs: 1,
+          count: proposal.count,
+          deltas: { [proposal.material]: proposal.count },
+          fingerprint: operationFingerprint(
+            "send-reserve",
+            proposal.material,
+            proposal.count,
+          ),
+        },
       },
     },
   };
@@ -402,6 +421,7 @@ test("cancels the deterministic UID automatch with exact v2 multipath updates", 
       },
     }),
     {
+      now: () => 1_000,
       createProjectionRequestId: () => "request-canceled",
       enqueueProfileGameProjection: async (task) => {
         profileProjectionTasks.push(task);
@@ -421,25 +441,28 @@ test("cancels the deterministic UID automatch with exact v2 multipath updates", 
     {
       "automatch/auto-newer": null,
       "invites/auto-newer/automatchStateHint": "canceled",
-      "invites/auto-newer/automatchCanceledAt": { ".sv": "timestamp" },
+      "invites/auto-newer/automatchCanceledAt": 1_000,
       "profileGameProjectionOutbox/automatch/auto-newer": {
-        schemaVersion: 1,
+        schemaVersion: 2,
         status: "pending",
         requestId: "request-canceled",
         reason: "automatch-queue",
-        sourceUpdatedAtMs: { ".sv": "timestamp" },
-        lastQueuedAtMs: { ".sv": "timestamp" },
+        historicalMatches: {},
+        archiveRetry: null,
+        sourceUpdatedAtMs: { kind: "timestamp" },
+        lastQueuedAtMs: { kind: "timestamp" },
       },
       "telegramAutomatches/auto-newer/lifecycle": "canceled",
-      "telegramAutomatches/auto-newer/updatedAtMs": { ".sv": "timestamp" },
+      "telegramAutomatches/auto-newer/updatedAtMs": { kind: "timestamp" },
       "telegramAutomatches/auto-newer/generation": {
-        ".sv": { increment: 1 },
+        kind: "increment",
+        delta: 1,
       },
       "telegramProjectionOutbox/automatch/auto-newer": {
-        schemaVersion: 1,
+        schemaVersion: 2,
         status: "pending",
         requestId: "request-canceled",
-        updatedAtMs: { ".sv": "timestamp" },
+        updatedAtMs: { kind: "timestamp" },
       },
     },
   ]);
@@ -468,25 +491,25 @@ test("cancels every queue owned by merged logins", async () => {
           return matches.length ? Object.fromEntries(matches) : null;
         }
         const queue = /^automatch\/(.+)$/.exec(path);
-        if (queue) return queues.get(queue[1]) || null;
+        if (queue) return queues.get(queue[1]!) || null;
         const metadata = /^invites\/(.+)$/.exec(path);
-        if (metadata && !metadata[1].includes("/"))
+        if (metadata && !metadata[1]!.includes("/"))
           return {
-            hostId: queues.get(metadata[1])?.uid || null,
+            hostId: queues.get(metadata[1]!)?.uid || null,
             guestId: null,
           };
         const invite = /^invites\/(.+)\/(guestId|hostId)$/.exec(path);
         if (invite) {
-          return invite[2] === "guestId"
+          return invite[2]! === "guestId"
             ? null
-            : queues.get(invite[1])?.uid || null;
+            : queues.get(invite[1]!)?.uid || null;
         }
         return null;
       },
       patchStateRoot: async (updates) => {
         for (const [path, value] of Object.entries(updates)) {
           const queue = /^automatch\/(.+)$/.exec(path);
-          if (queue && value === null) queues.delete(queue[1]);
+          if (queue && value === null) queues.delete(queue[1]!);
         }
       },
     }),
@@ -542,6 +565,7 @@ test("skips cancellation when a guest wins the invite lease race", async () => {
       },
     }),
     {
+      now: () => 1_000,
       createProjectionRequestId: () => "request-canceled",
       enqueueProfileGameProjection: async (task) => {
         profileProjectionTasks.push(task);
@@ -561,7 +585,7 @@ test("shared cancellation rejects changed queue timestamps and versions", async 
   };
   for (const [name, current] of [
     ["timestamp", { ...discovered, timestamp: 2 }],
-    ["version", { ...discovered, telegramDeliveryVersion: 1 }],
+    ["version", { ...discovered, telegramDeliveryVersion: null }],
   ] as const) {
     await t.test(name, async () => {
       let patches = 0;
@@ -669,7 +693,7 @@ test("cancels an alternate-login legacy queue without a root scan", async () => 
   assert.equal(queries.length, 3);
   assert.equal(ownershipReads, 1);
   assert.equal(patches.length, 1);
-  assert.equal(patches[0]["automatch/auto-alias"], null);
+  assert.equal(patches[0]!["automatch/auto-alias"], null);
 });
 
 test("returns false without writes for missing queues and existing guests", async () => {
@@ -705,7 +729,7 @@ test("returns false without writes for missing queues and existing guests", asyn
   assert.equal(patches, 0);
 });
 
-test("keeps legacy automatch cancellation free of Telegram v2 updates", async () => {
+test("keeps automatches without Telegram delivery free of Telegram updates", async () => {
   const patches: Array<Record<string, unknown>> = [];
   const profileProjectionTasks: unknown[] = [];
   let queueExists = true;
@@ -721,7 +745,7 @@ test("keeps legacy automatch cancellation free of Telegram v2 updates", async ()
                   uid: identity.uid,
                   profileId: "profile",
                   timestamp: 1,
-                  telegramDeliveryVersion: 1,
+                  telegramDeliveryVersion: null,
                 },
               }
             : null;
@@ -731,7 +755,7 @@ test("keeps legacy automatch cancellation free of Telegram v2 updates", async ()
             uid: identity.uid,
             profileId: "profile",
             timestamp: 1,
-            telegramDeliveryVersion: 1,
+            telegramDeliveryVersion: null,
           };
         }
         if (path === "invites/auto-legacy")
@@ -746,6 +770,7 @@ test("keeps legacy automatch cancellation free of Telegram v2 updates", async ()
       },
     }),
     {
+      now: () => 1_000,
       createProjectionRequestId: () => "legacy-request",
       enqueueProfileGameProjection: async (task) => {
         profileProjectionTasks.push(task);
@@ -757,14 +782,16 @@ test("keeps legacy automatch cancellation free of Telegram v2 updates", async ()
     {
       "automatch/auto-legacy": null,
       "invites/auto-legacy/automatchStateHint": "canceled",
-      "invites/auto-legacy/automatchCanceledAt": { ".sv": "timestamp" },
+      "invites/auto-legacy/automatchCanceledAt": 1_000,
       "profileGameProjectionOutbox/automatch/auto-legacy": {
-        schemaVersion: 1,
+        schemaVersion: 2,
         status: "pending",
         requestId: "legacy-request",
         reason: "automatch-queue",
-        sourceUpdatedAtMs: { ".sv": "timestamp" },
-        lastQueuedAtMs: { ".sv": "timestamp" },
+        historicalMatches: {},
+        archiveRetry: null,
+        sourceUpdatedAtMs: { kind: "timestamp" },
+        lastQueuedAtMs: { kind: "timestamp" },
       },
     },
   ]);
@@ -845,7 +872,7 @@ test("preserves every navigation precondition outcome", async () => {
             : path === "invites/auto_invite1"
               ? { automatchStateHint: "pending" }
               : path === "automatch/auto_invite1"
-                ? { queued: true }
+                ? { uid: identity.uid, timestamp: 1 }
                 : null,
       },
       expected: {
@@ -1260,7 +1287,7 @@ test("committed gameplay does not wait for projection Queues", async () => {
       PROFILE_GAME_PROJECTION_QUEUE: {
         ...env.PROFILE_GAME_PROJECTION_QUEUE,
         send: async (task) => {
-          profileProjectionTasks.push(task);
+          profileProjectionTasks.push(canonicalQueuePayloadFixture(task));
           return {
             metadata: { metrics: { backlogCount: 0, backlogBytes: 0 } },
           };
@@ -1452,7 +1479,7 @@ test("logs typed coordination failures while keeping responses sanitized", async
       }),
       timer: {
         startCanonical: async () => {
-          throw new MatchTimerStartStoreFailure("get-or-advance");
+          throw new Error("timer-service-unavailable");
         },
       },
       verifyIdentity: async () => identity,
@@ -1467,7 +1494,6 @@ test("logs typed coordination failures while keeping responses sanitized", async
   assert.deepEqual(failures, [
     { operation: "acquire", store: "mutation-lock" },
     { operation: "release", store: "mutation-lock" },
-    { operation: "get-or-advance", store: "timer-start" },
   ]);
   assert.deepEqual(routeFailures, [
     "gameplay-service-unavailable",
@@ -1601,7 +1627,7 @@ test("pending auto-link joins enqueue Telegram projection immediately", async ()
       TELEGRAM_PROJECTION_QUEUE: {
         ...env.TELEGRAM_PROJECTION_QUEUE,
         send: async (task) => {
-          telegramTasks.push(task);
+          telegramTasks.push(canonicalQueuePayloadFixture(task));
           return {
             metadata: { metrics: { backlogCount: 0, backlogBytes: 0 } },
           };
@@ -1623,6 +1649,8 @@ test("pending auto-link joins enqueue Telegram projection immediately", async ()
         readState: async (path) => {
           if (path === `invites/${inviteId}`) {
             return {
+              kind: "automatch",
+              password: "auto-secret",
               hostId: "host-uid",
               hostColor: "white",
               guestId: null,
@@ -1632,17 +1660,17 @@ test("pending auto-link joins enqueue Telegram projection immediately", async ()
             return null;
           }
           if (path === `players/host-uid/matches/${inviteId}`) {
-            return {
+            return matchDocumentFixture({
               version: 2,
               color: "white",
               emojiId: 1,
-              aura: "",
+              aura: "none",
               gameVariant: "Classic",
               fen: new Game().toFen(),
-              status: "",
+              status: "active",
               flatMovesString: "",
-              timer: "",
-            };
+              timer: { state: "idle" },
+            });
           }
           if (path === `automatch/${inviteId}`) {
             return {
@@ -1656,7 +1684,7 @@ test("pending auto-link joins enqueue Telegram projection immediately", async ()
       verifyIdentity: async () => identity,
     },
   );
-  assert.equal(response.status, 200);
+  assert.equal(response.status, 200, await response.clone().text());
   assert.equal(background.length, 1);
   await Promise.all(background);
   assert.deepEqual(telegramTasks, [
@@ -1683,6 +1711,7 @@ test("routes exact authenticated rating updates without a new rate limit", async
   };
   const patches: Record<string, unknown>[] = [];
   const ratingRepository: RatingRepository = {
+    readWagerAgreement: async () => null,
     hasCompletedRatingUpdate: async () => false,
     applyFebruaryChallengeReplay: async () => undefined,
     finalizeRatingUpdate: async (_input, buildPlan) => {
@@ -1739,7 +1768,7 @@ test("routes exact authenticated rating updates without a new rate limit", async
       PROFILE_GAME_PROJECTION_QUEUE: {
         ...env.PROFILE_GAME_PROJECTION_QUEUE,
         send: async (task) => {
-          profileProjectionTasks.push(task);
+          profileProjectionTasks.push(canonicalQueuePayloadFixture(task));
           return {
             metadata: { metrics: { backlogCount: 0, backlogBytes: 0 } },
           };
@@ -1758,9 +1787,9 @@ test("routes exact authenticated rating updates without a new rate limit", async
   assert.equal(response.headers.get("Server-Timing"), null);
   assert.equal(response.headers.get("Timing-Allow-Origin"), null);
   assert.equal(timingLogs.length, 1);
-  assert.equal(timingLogs[0].operation, "ratings.update");
-  assert.equal(timingLogs[0].status, 200);
-  assert.ok((timingLogs[0].d1 as { calls: number }).calls > 0);
+  assert.equal(timingLogs[0]!.operation, "ratings.update");
+  assert.equal(timingLogs[0]!.status, 200);
+  assert.ok((timingLogs[0]!.d1 as { calls: number }).calls > 0);
   assert.equal(
     JSON.stringify(timingLogs).includes(ratingRequest.inviteId),
     false,
@@ -1842,7 +1871,11 @@ test("routes match timer starts through the canonical command with rate limiting
       timer: {
         startCanonical: async (input) => {
           calls.push(input);
-          return { ok: true, timer: "4;12345", duration: 90_000 };
+          return {
+            ok: true,
+            timer: { state: "running", turnNumber: 4, deadlineAtMs: 12345 },
+            duration: 90_000,
+          };
         },
       },
       verifyIdentity: async () => identity,
@@ -1851,7 +1884,7 @@ test("routes match timer starts through the canonical command with rate limiting
   assert.equal(response.status, 200);
   assert.deepEqual(await response.json(), {
     ok: true,
-    timer: "4;12345",
+    timer: { state: "running", turnNumber: 4, deadlineAtMs: 12345 },
     duration: 90_000,
   });
   assert.equal(rateLimitKey, `timer:${identity.uid}`);
@@ -1910,7 +1943,9 @@ test("routes canonical timer claims with their invite, separate limit and retain
   assert.equal(response.status, 200);
   assert.deepEqual(await response.json(), { ok: true });
   assert.equal(rateLimitKey, `timer-claim:${identity.uid}`);
-  assert.deepEqual(calls, [{ input: body, inviteValue: invite }]);
+  assert.deepEqual(calls, [
+    { input: body, inviteValue: retainedInviteSourceFixture(invite) },
+  ]);
 });
 
 test("rejects rate-limited timer claims before repository access", async () => {
@@ -2066,9 +2101,9 @@ test("routes wager cancellation and decline to their exact proposal owners", asy
     const transactionPaths: string[] = [];
     const hostProposal = await modernWagerProposal("host", "dust", 1);
     const guestProposal = await modernWagerProposal("guest", "ice", 2);
-    let wager: unknown = {
+    let wager: unknown = wagerRecordFixture({
       proposals: { host: hostProposal, guest: guestProposal },
-    };
+    });
     const mining: Record<string, unknown> = {
       host: miningWithProposal(hostProposal),
       guest: miningWithProposal(guestProposal),
@@ -2144,7 +2179,10 @@ test("routes wager send and accept through the authenticated gameplay surface", 
         getMiningMaterials: async (_profileId) => {
           return { dust: 2, slime: 0, gum: 0, metal: 0, ice: 0 };
         },
-        readState: async () => ({ hostId: "host", guestId: "guest" }),
+        readState: async (path) =>
+          path === "invites/invite"
+            ? { hostId: "host", guestId: "guest" }
+            : null,
         transactState: async (path, updater) =>
           applyTransaction(
             updater,
@@ -2165,7 +2203,9 @@ test("routes wager send and accept through the authenticated gameplay surface", 
   assert.deepEqual(await send.json(), { ok: true, count: 2 });
 
   const guestProposal = await modernWagerProposal("guest", "dust", 2);
-  let acceptWager: unknown = { proposals: { guest: guestProposal } };
+  let acceptWager: unknown = wagerRecordFixture({
+    proposals: { guest: guestProposal },
+  });
   let acceptMining: unknown = {
     frozen: { dust: 0, slime: 0, gum: 0, metal: 0, ice: 0 },
   };
@@ -2262,7 +2302,10 @@ test("returns wager permission and infrastructure failures without details", asy
       repository: wagerRepository({
         readProfileOwnershipSnapshot: async (query) =>
           ownershipForLogins(query, (uid) => `profile-${uid}`),
-        readState: async () => ({ hostId: "host", guestId: "guest" }),
+        readState: async (path) =>
+          path === "invites/invite"
+            ? { hostId: "host", guestId: "guest" }
+            : null,
       }),
       verifyIdentity: async () => ({
         uid: "other",
@@ -2280,7 +2323,9 @@ test("returns wager permission and infrastructure failures without details", asy
   const materialFailures: Array<Record<string, unknown>> = [];
   let transactions = 0;
   const failureProposal = await modernWagerProposal("host", "dust", 1);
-  let failureWager: unknown = { proposals: { host: failureProposal } };
+  let failureWager: unknown = wagerRecordFixture({
+    proposals: { host: failureProposal },
+  });
   let failureMining: unknown = miningWithProposal(failureProposal);
   const unavailable = await handleGameplayRoute(
     request("/wagers/proposals/cancel", {
@@ -2367,7 +2412,7 @@ test("returns wager permission and infrastructure failures without details", asy
           }
           if (path === "reservations/host") return sendMining;
           if (path === "invites/invite/wagers/match") {
-            return { proposedBy: { host: true } };
+            return wagerRecordFixture({ proposedBy: { host: true } });
           }
           return null;
         },
@@ -2381,7 +2426,10 @@ test("returns wager permission and infrastructure failures without details", asy
             if (result.committed) sendMining = result.value;
             return result;
           }
-          return applyTransaction(updater, { proposedBy: { host: true } });
+          return applyTransaction(
+            updater,
+            wagerRecordFixture({ proposedBy: { host: true } }),
+          );
         },
       }),
       verifyIdentity: async () => ({
@@ -2389,6 +2437,7 @@ test("returns wager permission and infrastructure failures without details", asy
       }),
     },
   );
+  assert.equal(sendTransactions, 3);
   assert.equal(sendFailure.status, 503);
   const sendPayload = await sendFailure.json();
   assert.deepEqual(sendPayload, {
@@ -2432,7 +2481,7 @@ test("authenticates before body parsing and sanitizes route failures", async () 
       "/automatch/start",
       {
         emojiId: 1,
-        aura: "",
+        aura: "none",
         extra: true,
       },
     ],
@@ -2782,7 +2831,7 @@ test("surrender rejects unauthorized players and invalid invites or rematches be
     ],
     [surrenderFixture({ playerId: "unrelated" }), 403],
     [surrenderFixture({ inviteValue: null }), 404],
-    [surrenderFixture({ inviteValue: [] }), 409],
+    [surrenderFixture({ inviteValue: [] }), 503],
   ] as const) {
     assert.equal((await h.call()).status, status);
     assert.deepEqual(h.calls, []);
@@ -3001,12 +3050,12 @@ test("moves reject unauthorized players and invalid invites or rematches before 
     ],
     [moveFixture({ playerId: "unrelated" }), 403],
     [moveFixture({ inviteValue: null }), 404],
-    [moveFixture({ inviteValue: [] }), 409],
+    [moveFixture({ inviteValue: [] }), 503],
     [
       moveFixture({
         inviteValue: { hostId: identity.uid, guestId: identity.uid },
       }),
-      409,
+      503,
     ],
   ] as const) {
     assert.equal((await h.call()).status, status);
@@ -3236,7 +3285,11 @@ test("match mutation routes observe request cancellation before canonical dispat
         timer: {
           startCanonical: async (input) => {
             calls.push(input);
-            return { ok: true, timer: "4;12345", duration: 90_000 };
+            return {
+              ok: true,
+              timer: { state: "running", turnNumber: 4, deadlineAtMs: 12345 },
+              duration: 90_000,
+            };
           },
           claimCanonical: async (input) => {
             calls.push(input);

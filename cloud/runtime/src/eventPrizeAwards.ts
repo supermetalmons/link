@@ -1,5 +1,6 @@
 import type { EventPrizeAssignmentRecord } from "./eventReads.js";
 import type { EventPlacement } from "./events/model.js";
+import { isEventPrizeAssignments } from "./shared/event-views.js";
 
 import {
   getEventPrizeDefinitions,
@@ -7,55 +8,14 @@ import {
 } from "@mons/shared/event-prizes";
 const EVENT_PRIZE_PLACES = Object.freeze([1, 2, 3] as const);
 
-const normalizeString = (value: unknown) =>
-  typeof value === "string" && value.trim() !== "" ? value.trim() : "";
-
 const normalizeEventPrizeAssignments = (
   value: unknown,
-  eventId: unknown,
+  eventId: string,
 ): Record<string, EventPrizeAssignmentRecord> => {
-  if (!value || typeof value !== "object") {
-    return {};
+  if (!isEventPrizeAssignments(value, eventId)) {
+    throw new TypeError("invalid-canonical-event-prizes");
   }
-  const normalizedEventId = normalizeString(eventId);
-  const assignments: Record<string, EventPrizeAssignmentRecord> = {};
-  const assignedProfileIds = new Set();
-  const assignedPrizeIds = new Set();
-
-  for (const place of EVENT_PRIZE_PLACES) {
-    const assignment = (
-      value as Record<string, Record<string, unknown> | null>
-    )[String(place)];
-    if (!assignment || typeof assignment !== "object") {
-      continue;
-    }
-    const assignmentEventId = normalizeString(assignment.eventId);
-    const profileId = normalizeString(assignment.profileId);
-    const prizeId = normalizeString(assignment.prizeId);
-    const assignedAtMs = Number(assignment.assignedAtMs);
-    if (
-      assignmentEventId !== normalizedEventId ||
-      Number(assignment.place) !== place ||
-      !profileId ||
-      !isEventPrizeId(normalizedEventId, prizeId) ||
-      !Number.isFinite(assignedAtMs) ||
-      assignedProfileIds.has(profileId) ||
-      assignedPrizeIds.has(prizeId)
-    ) {
-      continue;
-    }
-    assignments[String(place)] = {
-      eventId: normalizedEventId,
-      profileId,
-      place,
-      prizeId,
-      assignedAtMs: Math.floor(assignedAtMs),
-    };
-    assignedProfileIds.add(profileId);
-    assignedPrizeIds.add(prizeId);
-  }
-
-  return assignments;
+  return { ...value };
 };
 
 const buildEventPrizeAssignments = ({
@@ -64,31 +24,26 @@ const buildEventPrizeAssignments = ({
   selections,
   assignedAtMs,
 }: {
-  eventId: unknown;
-  placements: unknown;
-  selections: unknown;
-  assignedAtMs: unknown;
+  eventId: string;
+  placements: readonly EventPlacement[];
+  selections: Readonly<Record<string, string>>;
+  assignedAtMs: number;
 }): Record<string, EventPrizeAssignmentRecord> => {
-  const normalizedEventId = normalizeString(eventId);
-  const normalizedAssignedAtMs = Math.floor(Number(assignedAtMs));
-  const eventPrizeIds = getEventPrizeDefinitions(normalizedEventId).map(
+  if (!Number.isSafeInteger(assignedAtMs) || assignedAtMs < 0) {
+    throw new TypeError("invalid-event-prize-assignment-time");
+  }
+  const eventPrizeIds = getEventPrizeDefinitions(eventId).map(
     (prize) => prize.id,
   );
-  if (
-    !normalizedEventId ||
-    eventPrizeIds.length === 0 ||
-    !Number.isFinite(normalizedAssignedAtMs)
-  ) {
+  if (eventPrizeIds.length === 0) {
     return {};
   }
 
   const normalizedPlacements: EventPlacement[] = [];
   const placedProfileIds = new Set();
   for (const place of EVENT_PRIZE_PLACES) {
-    const placement = Array.isArray(placements)
-      ? placements.find((candidate) => Number(candidate?.place) === place)
-      : null;
-    const profileId = normalizeString(placement?.profileId);
+    const placement = placements.find((candidate) => candidate.place === place);
+    const profileId = placement?.profileId;
     if (!profileId || placedProfileIds.has(profileId)) {
       continue;
     }
@@ -100,23 +55,19 @@ const buildEventPrizeAssignments = ({
   const assignedPrizeIds = new Set();
   const assignPrize = (placement: EventPlacement, prizeId: string) => {
     assignments[String(placement.place)] = {
-      eventId: normalizedEventId,
+      eventId,
       profileId: placement.profileId,
       place: placement.place,
       prizeId,
-      assignedAtMs: normalizedAssignedAtMs,
+      assignedAtMs,
     };
     assignedPrizeIds.add(prizeId);
   };
 
   for (const placement of normalizedPlacements) {
-    const preferredPrizeId = normalizeString(
-      selections && typeof selections === "object"
-        ? (selections as Record<string, unknown>)[placement.profileId]
-        : "",
-    );
+    const preferredPrizeId = selections[placement.profileId];
     if (
-      isEventPrizeId(normalizedEventId, preferredPrizeId) &&
+      isEventPrizeId(eventId, preferredPrizeId) &&
       !assignedPrizeIds.has(preferredPrizeId)
     ) {
       assignPrize(placement, preferredPrizeId);

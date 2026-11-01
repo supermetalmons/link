@@ -6,6 +6,8 @@
     "moduleDetection": "force",
     "allowJs": false,
     "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "exactOptionalPropertyTypes": true,
     "noEmit": true,
     "declaration": true,
     "rootDir": "src",

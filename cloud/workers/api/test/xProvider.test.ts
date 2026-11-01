@@ -25,7 +25,7 @@ test("uses the exact confidential PKCE token exchange and authenticated-user req
     ),
   ];
   const fetcher: typeof fetch = async (input, init) => {
-    requests.push({ input, init });
+    requests.push({ input, ...(init ? { init } : {}) });
     const response = responses.shift();
     if (!response) {
       throw new Error("missing response");
@@ -44,14 +44,14 @@ test("uses the exact confidential PKCE token exchange and authenticated-user req
     username: "XDevelopers",
   });
 
-  assert.equal(String(requests[0].input), "https://api.x.com/2/oauth2/token");
-  assert.equal(requests[0].init?.method, "POST");
+  assert.equal(String(requests[0]!.input), "https://api.x.com/2/oauth2/token");
+  assert.equal(requests[0]!.init?.method, "POST");
   assert.equal(
-    new Headers(requests[0].init?.headers).get("authorization"),
+    new Headers(requests[0]!.init?.headers).get("authorization"),
     `Basic ${Buffer.from("x-client-id:x-client-secret").toString("base64")}`,
   );
   assert.deepEqual(
-    Object.fromEntries(new URLSearchParams(String(requests[0].init?.body))),
+    Object.fromEntries(new URLSearchParams(String(requests[0]!.init?.body))),
     {
       code: "authorization-code",
       grant_type: "authorization_code",
@@ -61,15 +61,15 @@ test("uses the exact confidential PKCE token exchange and authenticated-user req
     },
   );
   assert.equal(
-    String(requests[1].input),
+    String(requests[1]!.input),
     "https://api.x.com/2/users/me?user.fields=username",
   );
   assert.equal(
-    new Headers(requests[1].init?.headers).get("authorization"),
+    new Headers(requests[1]!.init?.headers).get("authorization"),
     "Bearer user-access-token",
   );
-  assert.ok(requests[0].init?.signal instanceof AbortSignal);
-  assert.ok(requests[1].init?.signal instanceof AbortSignal);
+  assert.ok(requests[0]!.init?.signal instanceof AbortSignal);
+  assert.ok(requests[1]!.init?.signal instanceof AbortSignal);
 });
 
 test("normalizes X token and user lookup errors without returning response bodies", async () => {

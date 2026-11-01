@@ -1,77 +1,25 @@
-import type { AuthMethodKey, AuthProfileResponse } from "@mons/shared/auth";
-
-export type AuthIntentDocument = {
-  consumedAtMs: null;
-  createdAtMs: number;
-  expiresAtMs: number;
-  intentId: string;
-  method: AuthMethodKey;
-  nonce: string;
-  state: string;
-  uid: string;
-};
-
-export type AuthIntentRecord = Omit<AuthIntentDocument, "consumedAtMs"> & {
-  consumedAtMs: number;
-  consumedByOpId: string;
-};
-
-export type XRedirectFlowDocument = {
-  callbackUri: string;
-  codeChallenge: string;
-  codeVerifier: string;
-  consentSource: string;
-  createdAtMs: number;
-  errorCode: null;
-  expiresAtMs: number;
-  flowId: string;
-  intentId: string;
-  method: "x";
-  returnUrl: string;
-  status: "created";
-  uid: string;
-  updatedAtMs: number;
-  xUserId: null;
-  xUsername: null;
-};
-
-type XFlowStatus =
-  "completed" | "created" | "failed" | "processing" | "verified";
-
-export type XFlowResult = Pick<AuthProfileResponse, "opId" | "profileId">;
-
-export type XRedirectFlow = {
-  callbackUri: string;
-  codeChallenge: string;
-  codeVerifier: string;
-  completedAtMs: number;
-  consentSource: string;
-  createdAtMs: number;
-  errorCode: string;
-  expiresAtMs: number;
-  flowId: string;
-  intentId: string;
-  method: "x";
-  processingStartedAtMs: number;
-  result: XFlowResult | null;
-  returnUrl: string;
-  revision: number;
-  status: XFlowStatus;
-  uid: string;
-  updatedAtMs: number;
-  xUserId: string;
-  xUsername: string;
-};
-
-export type XFlowUpdate = Partial<
-  Pick<XRedirectFlow, "result" | "status" | "updatedAtMs">
-> & {
-  completedAtMs?: number | null;
-  errorCode?: string | null;
-  processingStartedAtMs?: number | null;
-  xUserId?: string | null;
-  xUsername?: string | null;
-};
+import type { AuthMethodKey } from "@mons/shared/auth";
+import {
+  AuthStateFailure,
+  decodeAuthIntentRow as decodeIntent,
+  decodeXFlowRow as decodeFlow,
+  parseAuthIntent,
+  parseXRedirectFlow,
+  type AuthIntentDocument,
+  type AuthIntentRecord,
+  type XRedirectFlowDocument,
+  type XRedirectFlow,
+  type XFlowUpdate,
+} from "./authStateRecords.ts";
+export { AuthStateFailure } from "./authStateRecords.ts";
+export type {
+  AuthIntentDocument,
+  AuthIntentRecord,
+  XRedirectFlowDocument,
+  XRedirectFlow,
+  XFlowUpdate,
+  XFlowResult,
+} from "./authStateRecords.ts";
 
 export type AuthStateRepository = {
   consumeAuthIntent: (input: {
@@ -101,50 +49,6 @@ export type XFlowRepository = Pick<
   "getXFlow" | "updateXFlow"
 >;
 
-type AuthIntentRow = {
-  consumed_at_ms: number | null;
-  consumed_by_op_id: string | null;
-  created_at_ms: number;
-  expires_at_ms: number;
-  intent_id: string;
-  method: string;
-  nonce: string;
-  state: string;
-  uid: string;
-};
-
-type XFlowRow = {
-  callback_uri: string;
-  code_challenge: string;
-  code_verifier: string;
-  completed_at_ms: number | null;
-  consent_source: string;
-  created_at_ms: number;
-  error_code: string | null;
-  expires_at_ms: number;
-  flow_id: string;
-  intent_id: string;
-  method: string;
-  processing_started_at_ms: number | null;
-  result_op_id: string | null;
-  result_profile_id: string | null;
-  return_url: string;
-  revision: number;
-  status: string;
-  uid: string;
-  updated_at_ms: number;
-  x_user_id: string | null;
-  x_username: string | null;
-};
-
-const AUTH_METHODS = new Set<AuthMethodKey>(["apple", "eth", "sol", "x"]);
-const X_FLOW_STATUSES = new Set<XFlowStatus>([
-  "completed",
-  "created",
-  "failed",
-  "processing",
-  "verified",
-]);
 const AUTH_STATE_NONTERMINAL_RETENTION_MS = 60 * 60 * 1_000;
 const AUTH_STATE_TERMINAL_RETENTION_MS = 30 * 24 * 60 * 60 * 1_000;
 const AUTH_STATE_SWEEP_BATCH_SIZE = 1_000;
@@ -159,12 +63,6 @@ const FLOW_COLUMNS: Record<Exclude<keyof XFlowUpdate, "result">, string> = {
   xUsername: "x_username",
 };
 
-export class AuthStateFailure extends Error {
-  constructor(options?: ErrorOptions) {
-    super("auth-state-unavailable", options);
-  }
-}
-
 export class AuthStateConflict extends AuthStateFailure {}
 
 function nonEmptyString(value: unknown): string {
@@ -172,11 +70,6 @@ function nonEmptyString(value: unknown): string {
     throw new AuthStateFailure();
   }
   return value;
-}
-
-function nullableString(value: unknown): string | null {
-  if (value === null) return null;
-  return nonEmptyString(value);
 }
 
 function safeInteger(value: unknown, allowZero = false): number {
@@ -200,76 +93,6 @@ function record(value: unknown): Record<string, unknown> | null {
     : null;
 }
 
-function authMethod(value: unknown): AuthMethodKey {
-  const method = nonEmptyString(value) as AuthMethodKey;
-  if (!AUTH_METHODS.has(method)) throw new AuthStateFailure();
-  return method;
-}
-
-function flowStatus(value: unknown): XFlowStatus {
-  const status = nonEmptyString(value) as XFlowStatus;
-  if (!X_FLOW_STATUSES.has(status)) throw new AuthStateFailure();
-  return status;
-}
-
-function decodeIntent(row: AuthIntentRow): AuthIntentRecord {
-  const createdAtMs = safeInteger(row.created_at_ms);
-  const expiresAtMs = safeInteger(row.expires_at_ms);
-  if (expiresAtMs < createdAtMs) throw new AuthStateFailure();
-  return {
-    consumedAtMs: nullableInteger(row.consumed_at_ms) || 0,
-    consumedByOpId: nullableString(row.consumed_by_op_id) || "",
-    createdAtMs,
-    expiresAtMs,
-    intentId: nonEmptyString(row.intent_id),
-    method: authMethod(row.method),
-    nonce: nonEmptyString(row.nonce),
-    state: nonEmptyString(row.state),
-    uid: nonEmptyString(row.uid),
-  };
-}
-
-function decodeFlow(row: XFlowRow): XRedirectFlow {
-  const createdAtMs = safeInteger(row.created_at_ms);
-  const expiresAtMs = safeInteger(row.expires_at_ms);
-  const updatedAtMs = safeInteger(row.updated_at_ms);
-  const resultProfileId = nullableString(row.result_profile_id);
-  const resultOpId = nullableString(row.result_op_id);
-  if (
-    row.method !== "x" ||
-    expiresAtMs < createdAtMs ||
-    updatedAtMs < createdAtMs ||
-    Boolean(resultProfileId) !== Boolean(resultOpId)
-  ) {
-    throw new AuthStateFailure();
-  }
-  return {
-    callbackUri: nonEmptyString(row.callback_uri),
-    codeChallenge: nonEmptyString(row.code_challenge),
-    codeVerifier: nonEmptyString(row.code_verifier),
-    completedAtMs: nullableInteger(row.completed_at_ms) || 0,
-    consentSource: nonEmptyString(row.consent_source),
-    createdAtMs,
-    errorCode: nullableString(row.error_code) || "",
-    expiresAtMs,
-    flowId: nonEmptyString(row.flow_id),
-    intentId: nonEmptyString(row.intent_id),
-    method: "x",
-    processingStartedAtMs: nullableInteger(row.processing_started_at_ms) || 0,
-    result:
-      resultProfileId && resultOpId
-        ? { profileId: resultProfileId, opId: resultOpId }
-        : null,
-    returnUrl: nonEmptyString(row.return_url),
-    revision: safeInteger(row.revision),
-    status: flowStatus(row.status),
-    uid: nonEmptyString(row.uid),
-    updatedAtMs,
-    xUserId: nullableString(row.x_user_id) || "",
-    xUsername: nullableString(row.x_username) || "",
-  };
-}
-
 function stateFailure(error: unknown): never {
   if (error instanceof AuthStateFailure) throw error;
   throw new AuthStateFailure({ cause: error });
@@ -281,10 +104,10 @@ export function createAuthStateRepository(db: D1Database): AuthStateRepository {
       try {
         const result = await db
           .prepare(
-            `UPDATE auth_intents
+            `UPDATE auth_intents_canonical
              SET consumed_at_ms = ?, consumed_by_op_id = ?
              WHERE intent_id = ? AND uid = ? AND method = ?
-               AND consumed_at_ms IS NULL`,
+               AND consumed_at_ms IS NULL AND cancelled_at_ms IS NULL AND data_epoch = 1`,
           )
           .bind(
             input.consumedAtMs,
@@ -302,9 +125,16 @@ export function createAuthStateRepository(db: D1Database): AuthStateRepository {
 
     async createAuthIntent(document) {
       try {
+        parseAuthIntent({
+          ...document,
+          dataEpoch: 1,
+          status: "created",
+          consumedByOpId: null,
+          cancelledAtMs: null,
+        });
         const result = await db
           .prepare(
-            `INSERT INTO auth_intents (
+            `INSERT INTO auth_intents_canonical (
                intent_id, uid, method, nonce, state, created_at_ms,
                expires_at_ms, consumed_at_ms, consumed_by_op_id
              ) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, NULL)
@@ -328,9 +158,17 @@ export function createAuthStateRepository(db: D1Database): AuthStateRepository {
 
     async createXFlow(document) {
       try {
+        parseXRedirectFlow({
+          ...document,
+          dataEpoch: 1,
+          completedAtMs: null,
+          processingStartedAtMs: null,
+          result: null,
+          revision: 1,
+        });
         const result = await db
           .prepare(
-            `INSERT INTO x_redirect_flows (
+            `INSERT INTO x_redirect_flows_canonical (
                flow_id, intent_id, uid, method, callback_uri, code_challenge,
                code_verifier, consent_source, return_url, status, error_code,
                x_user_id, x_username, result_profile_id, result_op_id,
@@ -366,13 +204,13 @@ export function createAuthStateRepository(db: D1Database): AuthStateRepository {
       try {
         const row = await db
           .prepare(
-            `SELECT intent_id, uid, method, nonce, state, created_at_ms,
+            `SELECT data_epoch, cancelled_at_ms, intent_id, uid, method, nonce, state, created_at_ms,
                     expires_at_ms, consumed_at_ms, consumed_by_op_id
-             FROM auth_intents
+             FROM auth_intents_canonical
              WHERE intent_id = ?`,
           )
           .bind(intentId)
-          .first<AuthIntentRow>();
+          .first<unknown>();
         return row ? decodeIntent(row) : null;
       } catch (error) {
         stateFailure(error);
@@ -383,17 +221,17 @@ export function createAuthStateRepository(db: D1Database): AuthStateRepository {
       try {
         const row = await db
           .prepare(
-            `SELECT flow_id, intent_id, uid, method, callback_uri,
+            `SELECT data_epoch, flow_id, intent_id, uid, method, callback_uri,
                     code_challenge, code_verifier, consent_source, return_url,
                     status, error_code, x_user_id, x_username,
                     result_profile_id, result_op_id, created_at_ms,
                     expires_at_ms, updated_at_ms, processing_started_at_ms,
                     completed_at_ms, revision
-             FROM x_redirect_flows
+             FROM x_redirect_flows_canonical
              WHERE flow_id = ?`,
           )
           .bind(flowId)
-          .first<XFlowRow>();
+          .first<unknown>();
         return row ? decodeFlow(row) : null;
       } catch (error) {
         stateFailure(error);
@@ -405,6 +243,15 @@ export function createAuthStateRepository(db: D1Database): AuthStateRepository {
         if (!Number.isSafeInteger(expectedRevision) || expectedRevision <= 0) {
           throw new AuthStateFailure();
         }
+        const current = await createAuthStateRepository(db).getXFlow(flowId);
+        if (!current || current.revision !== expectedRevision)
+          throw new AuthStateConflict();
+        if (current.status === "cancelled") throw new AuthStateFailure();
+        parseXRedirectFlow({
+          ...current,
+          ...updates,
+          revision: expectedRevision + 1,
+        });
         const assignments: string[] = [];
         const values: unknown[] = [];
         for (const [name, value] of Object.entries(updates)) {
@@ -433,7 +280,7 @@ export function createAuthStateRepository(db: D1Database): AuthStateRepository {
           if (!column) throw new AuthStateFailure();
           assignments.push(`${column} = ?`);
           if (name === "status") {
-            values.push(flowStatus(value));
+            values.push(nonEmptyString(value));
           } else if (name === "updatedAtMs") {
             values.push(safeInteger(value));
           } else if (
@@ -451,7 +298,7 @@ export function createAuthStateRepository(db: D1Database): AuthStateRepository {
         assignments.push("revision = revision + 1");
         const result = await db
           .prepare(
-            `UPDATE x_redirect_flows
+            `UPDATE x_redirect_flows_canonical
              SET ${assignments.join(", ")}
              WHERE flow_id = ? AND revision = ?`,
           )
@@ -494,9 +341,9 @@ export async function sweepExpiredAuthState(
     ] = await db.batch([
       db
         .prepare(
-          `DELETE FROM x_redirect_flows
+          `DELETE FROM x_redirect_flows_canonical
            WHERE flow_id IN (
-             SELECT flow_id FROM x_redirect_flows
+             SELECT flow_id FROM x_redirect_flows_canonical
              WHERE expires_at_ms < ?
                AND status IN ('created', 'processing')
              ORDER BY expires_at_ms, flow_id
@@ -506,11 +353,11 @@ export async function sweepExpiredAuthState(
         .bind(cutoffMs, AUTH_STATE_SWEEP_BATCH_SIZE),
       db
         .prepare(
-          `DELETE FROM x_redirect_flows
+          `DELETE FROM x_redirect_flows_canonical
            WHERE flow_id IN (
-             SELECT flow_id FROM x_redirect_flows
+             SELECT flow_id FROM x_redirect_flows_canonical
              WHERE updated_at_ms < ?
-               AND status IN ('verified', 'completed', 'failed')
+               AND status IN ('verified', 'completed', 'failed', 'cancelled')
              ORDER BY updated_at_ms, flow_id
              LIMIT ?
            )`,
@@ -518,13 +365,13 @@ export async function sweepExpiredAuthState(
         .bind(terminalCutoffMs, AUTH_STATE_SWEEP_BATCH_SIZE),
       db
         .prepare(
-          `DELETE FROM auth_intents
+          `DELETE FROM auth_intents_canonical
            WHERE intent_id IN (
-             SELECT intent_id FROM auth_intents
+             SELECT intent_id FROM auth_intents_canonical
              WHERE expires_at_ms < ?
                AND NOT EXISTS (
-                 SELECT 1 FROM x_redirect_flows
-                 WHERE x_redirect_flows.intent_id = auth_intents.intent_id
+                 SELECT 1 FROM x_redirect_flows_canonical
+                 WHERE x_redirect_flows_canonical.intent_id = auth_intents_canonical.intent_id
                )
              ORDER BY expires_at_ms, intent_id
              LIMIT ?
@@ -533,12 +380,12 @@ export async function sweepExpiredAuthState(
         .bind(cutoffMs, AUTH_STATE_SWEEP_BATCH_SIZE),
       db
         .prepare(
-          `UPDATE x_redirect_flows
+          `UPDATE x_redirect_flows_canonical
            SET code_challenge = 'retired', code_verifier = 'retired'
            WHERE flow_id IN (
-             SELECT flow_id FROM x_redirect_flows
+             SELECT flow_id FROM x_redirect_flows_canonical
              WHERE expires_at_ms < ?
-               AND status IN ('verified', 'completed', 'failed')
+               AND status IN ('verified', 'completed', 'failed', 'cancelled')
                AND (code_challenge <> 'retired' OR code_verifier <> 'retired')
              ORDER BY expires_at_ms, flow_id
              LIMIT ?
@@ -547,16 +394,16 @@ export async function sweepExpiredAuthState(
         .bind(cutoffMs, AUTH_STATE_SWEEP_BATCH_SIZE),
       db
         .prepare(
-          `UPDATE auth_intents
+          `UPDATE auth_intents_canonical
            SET nonce = 'retired', state = 'retired'
            WHERE intent_id IN (
-             SELECT intent_id FROM auth_intents
+             SELECT intent_id FROM auth_intents_canonical
              WHERE expires_at_ms < ?
                AND (nonce <> 'retired' OR state <> 'retired')
                AND EXISTS (
-                 SELECT 1 FROM x_redirect_flows
-                 WHERE x_redirect_flows.intent_id = auth_intents.intent_id
-                   AND x_redirect_flows.status IN ('verified', 'completed', 'failed')
+                 SELECT 1 FROM x_redirect_flows_canonical
+                 WHERE x_redirect_flows_canonical.intent_id = auth_intents_canonical.intent_id
+                   AND x_redirect_flows_canonical.status IN ('verified', 'completed', 'failed', 'cancelled')
                )
              ORDER BY expires_at_ms, intent_id
              LIMIT ?
@@ -565,11 +412,11 @@ export async function sweepExpiredAuthState(
         .bind(cutoffMs, AUTH_STATE_SWEEP_BATCH_SIZE),
     ]);
     const result = {
-      flowsCompacted: compactedFlows.meta.changes,
-      flowsDeleted: deletedFlows.meta.changes,
-      intentsCompacted: compactedIntents.meta.changes,
-      intentsDeleted: deletedIntents.meta.changes,
-      terminalFlowsDeleted: deletedTerminalFlows.meta.changes,
+      flowsCompacted: compactedFlows!.meta.changes,
+      flowsDeleted: deletedFlows!.meta.changes,
+      intentsCompacted: compactedIntents!.meta.changes,
+      intentsDeleted: deletedIntents!.meta.changes,
+      terminalFlowsDeleted: deletedTerminalFlows!.meta.changes,
     };
     if (Object.values(result).some((count) => count > 0)) {
       console.info(JSON.stringify({ event: "auth_state_sweep", ...result }));

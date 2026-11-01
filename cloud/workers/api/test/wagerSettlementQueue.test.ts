@@ -182,10 +182,10 @@ test("validates and processes durable wager settlement retries without Telegram 
   assert.equal(queued.acknowledgements(), 1);
   assert.deepEqual(queued.retries, []);
   assert.equal(resumed.length, 1);
-  assert.deepEqual(resumed[0].input, recoverableWagerTask);
-  assert.equal(typeof resumed[0].repository.wagerFrozen.transact, "function");
+  assert.deepEqual(resumed[0]!.input, recoverableWagerTask);
+  assert.equal(typeof resumed[0]!.repository.wagerFrozen.transact, "function");
   assert.equal(
-    typeof resumed[0].repository.wagerWriter.completeSettlement,
+    typeof resumed[0]!.repository.wagerWriter.completeSettlement,
     "function",
   );
 });
@@ -286,7 +286,7 @@ test("durably defers pending and unclaimed wagers while writes are disabled", as
       queued.message,
       envWithQueue(async (body, options) => {
         assert.equal(queued.acknowledgements(), 0);
-        deferred.push({ body, options });
+        deferred.push({ body, ...(options === undefined ? {} : { options }) });
         return {
           metadata: { metrics: { backlogCount: 0, backlogBytes: 0 } },
         };
@@ -307,12 +307,18 @@ test("durably defers pending and unclaimed wagers while writes are disabled", as
     );
     assert.equal(queued.acknowledgements(), 1);
     assert.deepEqual(queued.retries, []);
-    assert.deepEqual(deferred, [
-      {
-        body: recoverableWagerTask,
-        options: { delaySeconds: WAGER_SETTLEMENT_RETRY_DELAY_SECONDS },
-      },
-    ]);
+    assert.deepEqual(
+      deferred.map((entry) => ({
+        ...entry,
+        body: (entry.body as { payload: unknown }).payload,
+      })),
+      [
+        {
+          body: recoverableWagerTask,
+          options: { delaySeconds: WAGER_SETTLEMENT_RETRY_DELAY_SECONDS },
+        },
+      ],
+    );
     assert.deepEqual(logs, [
       {
         event: "wager_settlement_queue_deferred",
@@ -332,7 +338,7 @@ test("defers a wager that freezes at a settlement write boundary", async () => {
   await handleWagerSettlementQueueMessage(
     queued.message,
     envWithQueue(async (body, options) => {
-      deferred.push({ body, options });
+      deferred.push({ body, ...(options === undefined ? {} : { options }) });
       return {
         metadata: { metrics: { backlogCount: 0, backlogBytes: 0 } },
       };
@@ -353,12 +359,18 @@ test("defers a wager that freezes at a settlement write boundary", async () => {
   assert.equal(controlReads, 2);
   assert.equal(queued.acknowledgements(), 1);
   assert.deepEqual(queued.retries, []);
-  assert.deepEqual(deferred, [
-    {
-      body: recoverableWagerTask,
-      options: { delaySeconds: WAGER_SETTLEMENT_RETRY_DELAY_SECONDS },
-    },
-  ]);
+  assert.deepEqual(
+    deferred.map((entry) => ({
+      ...entry,
+      body: (entry.body as { payload: unknown }).payload,
+    })),
+    [
+      {
+        body: recoverableWagerTask,
+        options: { delaySeconds: WAGER_SETTLEMENT_RETRY_DELAY_SECONDS },
+      },
+    ],
+  );
 });
 
 test("durably defers wagers when frozen-state classification is unavailable", async () => {
@@ -367,7 +379,7 @@ test("durably defers wagers when frozen-state classification is unavailable", as
   await handleWagerSettlementQueueMessage(
     queued.message,
     envWithQueue(async (body, options) => {
-      deferred.push({ body, options });
+      deferred.push({ body, ...(options === undefined ? {} : { options }) });
       return {
         metadata: { metrics: { backlogCount: 0, backlogBytes: 0 } },
       };
@@ -383,12 +395,18 @@ test("durably defers wagers when frozen-state classification is unavailable", as
   );
   assert.equal(queued.acknowledgements(), 1);
   assert.deepEqual(queued.retries, []);
-  assert.deepEqual(deferred, [
-    {
-      body: recoverableWagerTask,
-      options: { delaySeconds: WAGER_SETTLEMENT_RETRY_DELAY_SECONDS },
-    },
-  ]);
+  assert.deepEqual(
+    deferred.map((entry) => ({
+      ...entry,
+      body: (entry.body as { payload: unknown }).payload,
+    })),
+    [
+      {
+        body: recoverableWagerTask,
+        options: { delaySeconds: WAGER_SETTLEMENT_RETRY_DELAY_SECONDS },
+      },
+    ],
+  );
 });
 
 test("falls back to Queue retry when durable wager deferral fails", async () => {
@@ -417,7 +435,7 @@ test("acks terminal wager cancellations without requeueing", async () => {
   await handleWagerSettlementQueueMessage(
     queued.message,
     envWithQueue(async (body, options) => {
-      deferred.push({ body, options });
+      deferred.push({ body, ...(options === undefined ? {} : { options }) });
       return {
         metadata: { metrics: { backlogCount: 0, backlogBytes: 0 } },
       };

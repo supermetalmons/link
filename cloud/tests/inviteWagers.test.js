@@ -12,6 +12,9 @@ const {
 const { isInviteRoomMessage } = require("../runtime/shared/reactions");
 
 const wager = {
+  schemaVersion: 1,
+  state: "settled",
+  blocked: null,
   proposals: { host: { material: "dust", count: 2, createdAt: 1 } },
   proposedBy: { host: true, guest: false },
   agreed: {
@@ -37,23 +40,24 @@ const snapshot = {
   wagers: { "invite-one": wager },
 };
 
-test("wager snapshots retain the full public state and legacy optional fields", () => {
+test("wager snapshots require complete canonical state and reject legacy omissions", () => {
   assert.equal(isInviteWagersSnapshot(snapshot), true);
   assert.equal(isInviteWagersSnapshot({ ...snapshot, wagers: {} }), true);
-  assert.equal(isPublicMatchWagerState({}), true);
+  assert.equal(isPublicMatchWagerState({}), false);
+  /** @type {Omit<typeof wager, "proposals" | "agreed" | "resolved"> & { proposals: {host: Partial<typeof wager.proposals.host>}, agreed: Partial<typeof wager.agreed>, resolved: Partial<typeof wager.resolved> }} */
   const legacy = structuredClone(wager);
   delete legacy.proposals.host.createdAt;
   delete legacy.agreed.total;
   delete legacy.agreed.acceptedAt;
   delete legacy.resolved.total;
   delete legacy.resolved.resolvedAt;
-  assert.equal(isPublicMatchWagerState(legacy), true);
+  assert.equal(isPublicMatchWagerState(legacy), false);
   assert.equal(
     isInviteWagersSnapshot({
       ...snapshot,
       wagers: { "invite-one": {}, "invite-one1": legacy },
     }),
-    true,
+    false,
   );
 });
 

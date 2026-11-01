@@ -71,7 +71,9 @@ export const HowToPlayContent = () => {
       ? `data:image/png;base64,${assets[iconName]}`
       : ICON_FALLBACK;
 
-  const getEmojiImage = (emojiName: string) =>
+  const getEmojiImage = (
+    emojiName: "statusMove" | "statusAction" | "statusMana",
+  ) =>
     emojis?.[emojiName]
       ? `data:image/png;base64,${emojis[emojiName]}`
       : ICON_FALLBACK;

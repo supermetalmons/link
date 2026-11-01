@@ -58,7 +58,7 @@ test("delegates when a profile appears after no-profile cleanup", async () => {
   const result = await syncProfile(identity, env, {
     repository: {
       getLinkedAuthMethods: async () =>
-        sources[Math.min(reads++, sources.length - 1)],
+        sources[Math.min(reads++, sources.length - 1)]!,
     },
     syncCurrentCallerProfile: async (uid) => {
       calls.push(uid);
@@ -78,7 +78,7 @@ test("rechecks a changing owner before canonical caller synchronization", async 
   const result = await syncProfile(identity, env, {
     repository: {
       getLinkedAuthMethods: async () =>
-        sources[Math.min(reads++, sources.length - 1)],
+        sources[Math.min(reads++, sources.length - 1)]!,
     },
     syncCurrentCallerProfile: async () => {
       calls++;
@@ -114,7 +114,7 @@ test("fails closed after bounded profile source instability", async () => {
     syncProfile(identity, env, {
       repository: {
         getLinkedAuthMethods: async () =>
-          sources[Math.min(reads++, sources.length - 1)],
+          sources[Math.min(reads++, sources.length - 1)]!,
       },
     }),
     (error: unknown) =>

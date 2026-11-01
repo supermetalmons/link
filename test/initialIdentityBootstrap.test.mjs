@@ -1,3 +1,4 @@
+import { required, canonicalProfile } from "./fixtures/canonicalData.mjs";
 import assert from "node:assert/strict";
 import { registerHooks } from "node:module";
 import test from "node:test";
@@ -17,13 +18,10 @@ registerHooks({
 const { createInitialIdentityBootstrap } =
   await import("../src/services/initialIdentityBootstrap.ts");
 const { AuthApiError } = await import("../src/services/authApi.ts");
-const deferred = () => {
-  let resolve;
-  const promise = new Promise((done) => {
-    resolve = done;
-  });
-  return { promise, resolve };
-};
+/** @typedef {Parameters<typeof createInitialIdentityBootstrap>[0]} Dependencies */
+/** @template [T=Awaited<ReturnType<Dependencies["read"]>>] @returns {PromiseWithResolvers<T>} */
+const deferred = () => Promise.withResolvers();
+/** @param {{ bootstrap?: import("../src/session/sessionAuth.ts").InitialIdentitySession["bootstrap"] | null, fetch?: () => ReturnType<Dependencies["read"]> }} [options] */
 const make = ({
   bootstrap = { ok: true, profile: null },
   fetch = async () => ({ ok: true, profile: null }),
@@ -36,21 +34,27 @@ const make = ({
   };
   let preparations = 0;
   let reads = 0;
+  /** @type {Omit<Dependencies["auth"], "currentUser" | "prepareInitialIdentity"> & { currentUser: import("../src/session/sessionAuth.ts").SessionUser | null, prepareInitialIdentity: () => Promise<Omit<import("../src/session/sessionAuth.ts").InitialIdentitySession, "bootstrap"> & { bootstrap: import("../src/session/sessionAuth.ts").InitialIdentitySession["bootstrap"] | null }> }} */
   const auth = {
     currentUser: user,
     prepareInitialIdentity: async () => {
       preparations++;
-      return { user: auth.currentUser, bootstrap };
+      return { user: required(auth.currentUser), bootstrap };
     },
   };
-  const helper = createInitialIdentityBootstrap({
+  /** @type {Omit<Dependencies, "auth"> & { auth: typeof auth }} */
+  const input = {
     auth,
     read: async (provider) => {
       reads++;
       await provider(false);
       return fetch();
     },
-  });
+  };
+  /** @type {ReturnType<typeof createInitialIdentityBootstrap>} */
+  const helper = Reflect.apply(createInitialIdentityBootstrap, undefined, [
+    input,
+  ]);
   return { helper, auth, user, counts: () => ({ preparations, reads }) };
 };
 
@@ -69,7 +73,10 @@ test("startup and simultaneous consumers share a verified seed until successful 
 });
 
 test("missing and unavailable seeds use read-only identity fallback", async () => {
-  for (const bootstrap of [null, { ok: false, status: 503 }]) {
+  for (const bootstrap of /** @type {const} */ ([
+    null,
+    { ok: false, status: 503 },
+  ])) {
     const h = make({ bootstrap });
     assert.deepEqual((await h.helper.read()).read(), {
       ok: true,
@@ -92,7 +99,9 @@ test("409 remains explicit and a failed fallback is evicted for retry", async ()
       throw new AuthApiError("failed-precondition", "profile-repair-required");
     },
   });
-  assert.equal((await getRepair.helper.read()).read().status, 409);
+  const repairedIdentity = (await getRepair.helper.read()).read();
+  assert.ok(!repairedIdentity.ok);
+  assert.equal(repairedIdentity.status, 409);
   let fail = true;
   const h = make({
     bootstrap: null,
@@ -113,7 +122,7 @@ test("mutation invalidation and same-uid replacement fence retained and in-fligh
   const stale = h.helper.read();
   await new Promise(setImmediate);
   h.helper.invalidate();
-  pending.resolve({ ok: true, profile: null });
+  required(pending.resolve)({ ok: true, profile: null });
   await assert.rejects(stale, /authentication-changed/);
   const result = await h.helper.read();
   h.auth.currentUser = { ...h.user, generation: "new-generation" };
@@ -127,6 +136,7 @@ test("mutation invalidation and same-uid replacement fence retained and in-fligh
 test("repair is shared and refreshes authoritative identity even after the original consumer disappears", async () => {
   const h = make({ bootstrap: { ok: false, status: 409 } });
   const source = await h.helper.read();
+  /** @type {PromiseWithResolvers<void>} */
   const gate = deferred();
   let repairs = 0;
   const repair = () => {
@@ -139,7 +149,7 @@ test("repair is shared and refreshes authoritative identity even after the origi
     user: h.user,
     bootstrap: undefined,
   });
-  gate.resolve();
+  required(gate.resolve)();
   const repaired = await first;
   assert.equal(repairs, 1);
   assert.deepEqual(repaired.read(), { ok: true, profile: null });
@@ -158,10 +168,11 @@ test("failed repairs can retry while logout or mutation fences a late successful
     }),
     /offline/,
   );
+  /** @type {PromiseWithResolvers<void>} */
   const gate = deferred();
   const pending = h.helper.repair(source, () => gate.promise);
   h.helper.invalidate();
-  gate.resolve();
+  required(gate.resolve)();
   await assert.rejects(pending, /authentication-changed/);
 });
 
@@ -183,9 +194,9 @@ test("standalone identity GET keeps the four-megabyte profile response bound", a
   let canceled = false;
   globalThis.fetch = async (url, options) => {
     assert.equal(url, "https://api.mons.link/auth/identity");
-    assert.equal(options.method, "GET");
+    assert.equal(required(options).method, "GET");
     assert.equal(
-      new Headers(options.headers).get("Authorization"),
+      new Headers(required(options).headers).get("Authorization"),
       "Bearer token",
     );
     return new Response(
@@ -209,7 +220,9 @@ test("standalone identity GET keeps the four-megabyte profile response bound", a
 });
 
 test("applied-startup eligibility is exact-user scoped and cleared by mutation invalidation", async () => {
-  const h = make({ bootstrap: { ok: true, profile: { id: "profile" } } });
+  const h = make({
+    bootstrap: { ok: true, profile: canonicalProfile({ id: "profile" }) },
+  });
   assert.equal(h.helper.wasConsumed(h.user), false);
   h.helper.consume(await h.helper.read());
   assert.equal(h.helper.wasConsumed(h.user), true);

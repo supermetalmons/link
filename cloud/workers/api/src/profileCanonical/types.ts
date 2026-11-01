@@ -1,13 +1,15 @@
 import type {
-  CanonicalProfileLegacyDocument,
-  CanonicalAuthMetadataDocument,
-  CanonicalAuthResultDocument,
-  CanonicalRatingPayloadDocument,
-} from "./retainedRecords.ts";
+  StoredPlayerProfile,
+  VerifyOperationMetadata,
+  VerifyOperationReceipt,
+  UnlinkOperationReceipt,
+  CanonicalRatingPayload,
+} from "./contracts.ts";
 import { MAX_PROFILE_MERGE_TARGET_HOPS } from "../../../../runtime/profileMergeTargets.js";
 import { type MiningMaterialName } from "@mons/shared/mining";
-import { type CompletePlayerProfile } from "@mons/shared/profiles";
-import { type AuthMethodKey } from "@mons/shared/auth";
+import type { EmojiId } from "@mons/shared/appearance";
+import { type AuthMethodKey, type AuthCooldownScope } from "@mons/shared/auth";
+import type { AuthErrorCode } from "../authErrors.ts";
 
 export const CANONICAL_PROFILE_REDIRECT_LIMIT = 4;
 
@@ -43,11 +45,10 @@ export class CanonicalProfileCorruption extends Error {
 export type CanonicalProfileValue = {
   createdAtMs: number;
   emojiPresent: boolean;
-  gameplayEmoji: string | number;
-  legacyFields: CanonicalProfileLegacyDocument;
+  gameplayEmoji: EmojiId;
   mergedAtMs: number | null;
   mergedIntoProfileId: string | null;
-  profile: CompletePlayerProfile;
+  profile: StoredPlayerProfile;
   sortPresence: Record<CanonicalSortKey, boolean>;
   sortValues: Record<CanonicalSortKey, number | null>;
   state: CanonicalProfileState;
@@ -61,19 +62,14 @@ export type CanonicalProfileSnapshot = CanonicalProfileValue & {
   revision: number;
 };
 
-export type CanonicalProfileFieldsValue = Omit<
-  CanonicalProfileValue,
-  "legacyFields"
->;
+export type CanonicalProfileFieldsValue = CanonicalProfileValue;
 
 export type CanonicalProfileFieldsSnapshot = CanonicalProfileFieldsValue & {
   profileId: string;
   revision: number;
 };
 
-export type CanonicalMutableProfileSnapshot =
-  | (CanonicalProfileFieldsSnapshot & { storageShape: "mutable" })
-  | (CanonicalProfileSnapshot & { storageShape: "full" });
+export type CanonicalMutableProfileSnapshot = CanonicalProfileFieldsSnapshot;
 
 export type CanonicalMutableProfileValue = Pick<
   CanonicalProfileFieldsValue,
@@ -89,9 +85,9 @@ export type CanonicalMutableProfileValue = Pick<
 
 export type CanonicalPublicProfileSnapshot = {
   emojiPresent: boolean;
-  gameplayEmoji: string | number;
+  gameplayEmoji: EmojiId;
   mergedIntoProfileId: string | null;
-  profile: CompletePlayerProfile;
+  profile: StoredPlayerProfile;
   profileId: string;
   sortPresence: Record<CanonicalSortKey, boolean>;
   sortValues: Record<CanonicalSortKey, number | null>;
@@ -133,54 +129,68 @@ export type CanonicalMergeTarget = {
   targetProfileId: string;
 };
 
-export type CanonicalMergeTargetValue = CanonicalMergeTarget & {
-  sourceLegacyFields: CanonicalProfileLegacyDocument;
-};
+export type CanonicalMergeTargetValue = CanonicalMergeTarget;
 
-export type CanonicalAuthOperationValue = {
-  errorCode: string | null;
-  errorMessage: string | null;
-  kind: "unlink" | "verify";
+type CanonicalAuthOperationIdentity = {
   loginUid: string;
-  meta: CanonicalAuthMetadataDocument | null;
   method: AuthMethodKey;
   operationId: string;
-  result: CanonicalAuthResultDocument | null;
   startedAtMs: number;
-  status: "failed" | "started" | "success";
   updatedAtMs: number;
 };
-
-export type CanonicalAuthOperationStartWrite = Omit<
-  CanonicalAuthOperationValue,
-  "kind" | "meta" | "status" | "result" | "errorCode" | "errorMessage"
-> & {
-  status: "started";
-  result: null;
-  errorCode: null;
-  errorMessage: null;
-} & (
-    | { kind: "verify"; meta: CanonicalAuthMetadataDocument }
-    | { kind: "unlink"; meta: null }
-  );
-export type CanonicalAuthOperationUpdateWrite = Omit<
-  CanonicalAuthOperationValue,
-  "status" | "result" | "errorCode" | "errorMessage"
-> &
+type CanonicalAuthContext =
+  | { kind: "verify"; meta: VerifyOperationMetadata }
+  | { kind: "unlink"; meta: null };
+type UncancelledAuthOperation = {
+  cancelledAtMs: null;
+  cancellationReason: null;
+};
+export type CanonicalAuthOperationStartWrite = CanonicalAuthOperationIdentity &
+  CanonicalAuthContext &
+  UncancelledAuthOperation & {
+    status: "started";
+    result: null;
+    errorCode: null;
+    errorMessage: null;
+  };
+export type CanonicalAuthOperationUpdateWrite = CanonicalAuthOperationIdentity &
+  UncancelledAuthOperation &
   (
     | {
+        kind: "verify";
+        meta: VerifyOperationMetadata;
         status: "success";
-        result: CanonicalAuthResultDocument;
+        result: VerifyOperationReceipt;
         errorCode: null;
         errorMessage: null;
       }
     | {
+        kind: "unlink";
+        meta: null;
+        status: "success";
+        result: UnlinkOperationReceipt;
+        errorCode: null;
+        errorMessage: null;
+      }
+    | (CanonicalAuthContext & {
         status: "failed";
         result: null;
-        errorCode: string;
+        errorCode: AuthErrorCode;
         errorMessage: string;
-      }
+      })
   );
+export type CanonicalAuthOperationValue =
+  | CanonicalAuthOperationStartWrite
+  | CanonicalAuthOperationUpdateWrite
+  | (CanonicalAuthOperationIdentity &
+      CanonicalAuthContext & {
+        status: "cancelled";
+        result: null;
+        errorCode: "aborted";
+        errorMessage: "operation-cancelled";
+        cancelledAtMs: number;
+        cancellationReason: "canonical-data-cutover";
+      });
 
 export type CanonicalAuthOperationSnapshot = CanonicalAuthOperationValue & {
   revision: number;
@@ -191,7 +201,7 @@ export type CanonicalCooldownValue = {
   method: AuthMethodKey;
   profileId: string;
   retryAtMs: number;
-  scope: string;
+  scope: AuthCooldownScope;
   startedAtMs: number;
   unlinkedByUid: string;
   updatedAtMs: number;
@@ -218,10 +228,10 @@ export type CanonicalAuthRecoverySnapshot = CanonicalAuthRecoveryValue & {
   revision: number;
 };
 
-export type CanonicalProjectionState = "dead" | "done" | "pending";
+export type CanonicalProjectionState =
+  "dead" | "done" | "pending" | "cancelled";
 
-export type CanonicalRatingUpdateValue = {
-  completedAtMs: number | null;
+type CanonicalRatingUpdateFields = {
   eventProgressState: CanonicalProjectionState | null;
   eventProgressUpdatedAtMs: number | null;
   eventProgressVersion: number | null;
@@ -233,19 +243,39 @@ export type CanonicalRatingUpdateValue = {
   opponentProfileId: string | null;
   ownerToken: string;
   ownerUid: string;
-  payload: CanonicalRatingPayloadDocument;
+  payload: CanonicalRatingPayload;
   playerId: string;
   playerProfileId: string | null;
   profileGameProjectionState: CanonicalProjectionState | null;
   profileGameProjectionUpdatedAtMs: number | null;
   profileGameProjectionVersion: number | null;
   startedAtMs: number;
-  status: "done" | "processing";
   telegramProjectionState: CanonicalProjectionState | null;
   telegramProjectionUpdatedAtMs: number | null;
   telegramProjectionVersion: number | null;
   updatedAtMs: number;
 };
+export type CanonicalRatingUpdateValue = CanonicalRatingUpdateFields &
+  (
+    | {
+        status: "processing";
+        completedAtMs: null;
+        blockedAtMs: null;
+        blockReason: null;
+      }
+    | {
+        status: "done";
+        completedAtMs: number;
+        blockedAtMs: null;
+        blockReason: null;
+      }
+    | {
+        status: "blocked";
+        completedAtMs: null;
+        blockedAtMs: number;
+        blockReason: "canonical-data-cutover";
+      }
+  );
 
 export type CanonicalRatingUpdateSnapshot = CanonicalRatingUpdateValue & {
   revision: number;
@@ -339,7 +369,7 @@ export type PublicProfileRow = {
   dust_sort: number | null;
   dust_sort_present: number;
   emoji_present: number;
-  gameplay_emoji_json: string;
+  gameplay_emoji: number;
   gum_sort: number | null;
   gum_sort_present: number;
   ice_sort: number | null;
@@ -353,6 +383,7 @@ export type PublicProfileRow = {
   nonce_sort_present: number;
   payload_json: string;
   profile_id: string;
+  schema_version: 1;
   rating_sort: number | null;
   rating_sort_present: number;
   slime_sort: number | null;
@@ -364,7 +395,6 @@ export type PublicProfileRow = {
 
 export type ProfileRow = PublicProfileRow & {
   created_at_ms: number;
-  legacy_fields_json: string;
   merged_at_ms: number | null;
   revision: number;
   updated_at_ms: number;
@@ -418,6 +448,9 @@ export type RecoveryRow = {
 };
 
 export type AuthOperationRow = {
+  schema_version: 1;
+  cancelled_at_ms: number | null;
+  cancellation_reason: string | null;
   error_code: string | null;
   error_message: string | null;
   kind: string;
@@ -433,6 +466,9 @@ export type AuthOperationRow = {
 };
 
 export type RatingRow = {
+  schema_version: 1;
+  blocked_at_ms: number | null;
+  block_reason: string | null;
   completed_at_ms: number | null;
   event_progress_state: string | null;
   event_progress_updated_at_ms: number | null;
@@ -668,12 +704,6 @@ export type CanonicalMutation =
   | { kind: "update-rating-update"; value: CanonicalRatingUpdateValue }
   | {
       kind: "update-rating-projection";
-      projection: CanonicalRatingProjectionKind;
-      value: CanonicalRatingUpdateValue;
-    }
-  | {
-      kind: "patch-rating-projection";
-      currentRevision: number;
       projection: CanonicalRatingProjectionKind;
       value: CanonicalRatingUpdateValue;
     }

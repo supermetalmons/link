@@ -204,7 +204,7 @@ export const canRenderSymmetricalBracket = (rounds: EventRound[]): boolean => {
   const hasCanonicalMatchKeys = rounds.every((round) => {
     const matches = getSortedMatches(round);
     for (let i = 0; i < matches.length; i += 1) {
-      const parsed = parseEventMatchKey(matches[i].matchKey);
+      const parsed = parseEventMatchKey(matches[i]!.matchKey);
       if (!parsed || parsed.roundIndex !== round.roundIndex) {
         return false;
       }
@@ -227,7 +227,7 @@ export const canRenderSymmetricalBracket = (rounds: EventRound[]): boolean => {
   }
 
   for (let i = 0; i < rounds.length - 1; i += 1) {
-    if (matchCounts[i] !== matchCounts[i + 1] * 2) {
+    if (matchCounts[i] !== matchCounts[i + 1]! * 2) {
       return false;
     }
   }
@@ -247,10 +247,10 @@ export const computeSymmetricalBracket = (
   const roundLayouts = rounds.map((_, roundIndex) =>
     getBracketMatchLayout(roundIndex, totalRounds),
   );
-  const finalLayout = roundLayouts[totalRounds - 1];
+  const finalLayout = roundLayouts[totalRounds - 1]!;
 
   if (sideRounds === 0) {
-    const match = getSortedMatches(rounds[0])[0];
+    const match = getSortedMatches(rounds[0]!)[0];
     if (!match) return null;
     return {
       width: finalLayout.width,
@@ -293,7 +293,7 @@ export const computeSymmetricalBracket = (
       if (inwardColumnIndex === sideRounds) {
         return BRACKET_CONNECTOR_W;
       }
-      const inwardRoundIndex = columnRoundIndices[inwardColumnIndex];
+      const inwardRoundIndex = columnRoundIndices[inwardColumnIndex]!;
       return roundLayouts[inwardRoundIndex]?.useCompactEntry
         ? BRACKET_COMPACT_CONNECTOR_W
         : BRACKET_CONNECTOR_W;
@@ -303,10 +303,12 @@ export const computeSymmetricalBracket = (
   let currentX = 0;
   for (let i = 0; i < totalCols; i += 1) {
     columnX.push(currentX);
-    currentX += columnWidths[i] + (gapAfterColumn[i] ?? 0);
+    currentX += columnWidths[i]! + (gapAfterColumn[i] ?? 0);
   }
   const width =
-    totalCols === 0 ? 0 : columnX[totalCols - 1] + columnWidths[totalCols - 1];
+    totalCols === 0
+      ? 0
+      : columnX[totalCols - 1]! + columnWidths[totalCols - 1]!;
 
   const positions: ClassicBracketMatchPosition[] = [];
   const connectors: ClassicBracketConnector[] = [];
@@ -348,22 +350,22 @@ export const computeSymmetricalBracket = (
   };
 
   for (let r = 0; r < sideRounds; r++) {
-    const layout = roundLayouts[r];
+    const layout = roundLayouts[r]!;
     const x = colX(r);
-    const roundMatches = getSortedMatches(rounds[r]);
+    const roundMatches = getSortedMatches(rounds[r]!);
     const perSideCount = Math.ceil(roundMatches.length / 2);
 
     for (let m = 0; m < perSideCount; m++) {
-      const match = roundMatches[m];
+      const match = roundMatches[m]!;
       const y = getBracketMatchTop(r, m, layout.height);
       pushPosition(x, y, `L${r}_${m}`, match, layout);
     }
 
     if (r < sideRounds - 1) {
       const nextX = colX(r + 1);
-      const nextLayout = roundLayouts[r + 1];
+      const nextLayout = roundLayouts[r + 1]!;
       const nextPerSideCount = Math.ceil(
-        getSortedMatches(rounds[r + 1]).length / 2,
+        getSortedMatches(rounds[r + 1]!).length / 2,
       );
       for (let j = 0; j < nextPerSideCount; j++) {
         const srcA = 2 * j;
@@ -442,7 +444,7 @@ export const computeSymmetricalBracket = (
 
   {
     const x = colX(sideRounds);
-    const finalRound = rounds[totalRounds - 1];
+    const finalRound = rounds[totalRounds - 1]!;
     const finalMatches = getSortedMatches(finalRound);
     const match = finalMatches[0];
     if (match) {
@@ -452,16 +454,16 @@ export const computeSymmetricalBracket = (
   }
 
   for (let r = 0; r < sideRounds; r++) {
-    const layout = roundLayouts[r];
+    const layout = roundLayouts[r]!;
     const col = 2 * sideRounds - r;
     const x = colX(col);
-    const roundMatches = getSortedMatches(rounds[r]);
+    const roundMatches = getSortedMatches(rounds[r]!);
     const totalCount = roundMatches.length;
     const perSideCount = Math.ceil(totalCount / 2);
     const offset = perSideCount;
 
     for (let m = 0; m < totalCount - perSideCount; m++) {
-      const match = roundMatches[offset + m];
+      const match = roundMatches[offset + m]!;
       const y = getBracketMatchTop(r, m, layout.height);
       pushPosition(x, y, `R${r}_${m}`, match, layout);
     }
@@ -469,8 +471,8 @@ export const computeSymmetricalBracket = (
     if (r < sideRounds - 1) {
       const innerCol = 2 * sideRounds - (r + 1);
       const innerX = colX(innerCol);
-      const nextLayout = roundLayouts[r + 1];
-      const nextRoundMatches = getSortedMatches(rounds[r + 1]);
+      const nextLayout = roundLayouts[r + 1]!;
+      const nextRoundMatches = getSortedMatches(rounds[r + 1]!);
       const nextTotalCount = nextRoundMatches.length;
       const nextPerSide = Math.ceil(nextTotalCount / 2);
       const innerMatchCount = nextTotalCount - nextPerSide;

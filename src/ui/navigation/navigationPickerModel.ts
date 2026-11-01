@@ -101,9 +101,7 @@ export function deriveEventPreview(event: NavigationEventItem): {
   showUnknownOpponent: boolean;
   overflowCount: number | null;
 } {
-  const normalizedParticipantCount = Number.isFinite(event.participantCount)
-    ? Math.max(0, Math.trunc(event.participantCount))
-    : 0;
+  const normalizedParticipantCount = event.participantCount;
   const showBadge = normalizedParticipantCount > 6;
   const maxVisible = showBadge ? 5 : 6;
   const previewEmojiIds = event.participantPreview.reduce<number[]>(
@@ -111,11 +109,7 @@ export function deriveEventPreview(event: NavigationEventItem): {
       if (result.length >= maxVisible) {
         return result;
       }
-      const normalizedEmojiId =
-        participant.emojiId == null ? NaN : Number(participant.emojiId);
-      if (Number.isFinite(normalizedEmojiId) && normalizedEmojiId > 0) {
-        result.push(Math.trunc(normalizedEmojiId));
-      }
+      if (participant.emojiId !== null) result.push(participant.emojiId);
       return result;
     },
     [],

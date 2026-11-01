@@ -4,66 +4,66 @@ import {
   type EventInviteWrite,
 } from "../shared/invite-records.js";
 import type {
-  EventMatchView,
-  EventParticipantSnapshot,
-  EventParticipantState,
-  EventRoundStatus,
-  EventStatus,
-  EventTelegramAnnouncements,
-} from "../shared/events.js";
+  EventRecord,
+  EventRecordFields,
+  EventParticipantRecord,
+  EventParticipantFields,
+  EventMatchRecord,
+  EventMatchFields,
+  EventRoundRecord,
+  EventRoundFields,
+} from "../shared/event-types.js";
 import type { EventPrizeAssignmentRecord } from "../eventReads.js";
-declare const eventDocumentKind: unique symbol;
-type Document<Kind extends string> = {
-  readonly [eventDocumentKind]: Kind;
-};
-export type EventDocument = Document<"event">;
-export type EventParticipantDocument = Document<"participant">;
-export type EventMatchDocument = Document<"match">;
-export type EventRoundDocument = Document<"round">;
-export type EventParticipantsDocument = Document<"participants">;
-export type EventMatchesDocument = Document<"matches">;
-export type EventRoundsDocument = Document<"rounds">;
-export declare function readEventDocument(value: unknown): EventDocument | null;
-export declare function readPlainEventDocument(
+export type EventDocument = EventRecord;
+export type EventParticipantDocument = EventParticipantRecord;
+export type EventMatchDocument = EventMatchRecord;
+export type EventRoundDocument = EventRoundRecord;
+export type EventParticipantsDocument = Record<string, EventParticipantRecord>;
+export type EventMatchesDocument = Record<string, EventMatchRecord>;
+export type EventRoundsDocument = Record<string, EventRoundRecord>;
+export declare const readEventDocument: (
   value: unknown,
-): EventDocument | null;
-export declare function readEventParticipantDocument(
+) => EventDocument | null;
+export declare const readPlainEventDocument: (
   value: unknown,
-): EventParticipantDocument | null;
-export declare function readPlainEventParticipantDocument(
+) => EventDocument | null;
+export declare const readEventParticipantDocument: (
   value: unknown,
-): EventParticipantDocument | null;
-export declare function readEventMatchDocument(
+) => EventParticipantDocument | null;
+export declare const readPlainEventParticipantDocument: (
   value: unknown,
-): EventMatchDocument | null;
-export declare function readEventRoundDocument(
+) => EventParticipantDocument | null;
+export declare const readEventMatchDocument: (
   value: unknown,
-): EventRoundDocument | null;
-export declare function readEventParticipantsDocument(
+) => EventMatchDocument | null;
+export declare const readEventRoundDocument: (
   value: unknown,
-): EventParticipantsDocument | null;
-export declare function readEventRoundsDocument(
+) => EventRoundDocument | null;
+export declare const readEventParticipantsDocument: (
   value: unknown,
-): EventRoundsDocument | null;
-export declare function readEventMatchesDocument(
+) => EventParticipantsDocument | null;
+export declare const readEventRoundsDocument: (
   value: unknown,
-): EventMatchesDocument | null;
+) => EventRoundsDocument | null;
+export declare const readEventMatchesDocument: (
+  value: unknown,
+) => EventMatchesDocument | null;
 export declare function eventState(event: EventDocument | null | undefined): {
   eventId: string | undefined;
-  status: string | undefined;
+  status: "ended" | "active" | "dismissed" | "scheduled" | undefined;
   createdAtMs: number | undefined;
   updatedAtMs: number | undefined;
   startAtMs: number | undefined;
-  startedAtMs: number | undefined;
-  endedAtMs: number | undefined;
-  currentRoundIndex: number | undefined;
+  startedAtMs: number | null | undefined;
+  endedAtMs: number | null | undefined;
+  currentRoundIndex: number | null | undefined;
   bracketSize: number | undefined;
   roundCount: number | undefined;
   createdByLoginUid: string | undefined;
   createdByProfileId: string | undefined;
   winnerProfileId: string | null | undefined;
   winnerDisplayName: string | null | undefined;
-  prizeSelectionsLockedAtMs: number | undefined;
+  prizeSelectionsLockedAtMs: number | null | undefined;
   hasPrizeSelectionLock: boolean;
   supportsThirdPlaceMatch: boolean;
 };
@@ -71,37 +71,24 @@ export declare function eventParticipantState(
   participant: EventParticipantDocument | null | undefined,
 ): {
   profileId: string | undefined;
-  loginUid: string | undefined;
+  loginUid: string | null | undefined;
   username: string | undefined;
   displayName: string | undefined;
   emojiId: number | undefined;
-  aura: string | null | undefined;
+  aura: import("../shared/appearance.js").Aura | undefined;
   joinedAtMs: number | undefined;
-  state: string | undefined;
-  eliminatedRoundIndex: number | undefined;
+  state: "active" | "eliminated" | "winner" | undefined;
+  eliminatedRoundIndex: number | null | undefined;
   eliminatedByProfileId: string | null | undefined;
 };
-export declare function eventParticipantProjectionState(
-  participant: EventParticipantDocument,
-): {
-  emojiId: string | number | undefined;
-  profileId: string | undefined;
-  loginUid: string | undefined;
-  username: string | undefined;
-  displayName: string | undefined;
-  aura: string | null | undefined;
-  joinedAtMs: number | undefined;
-  state: string | undefined;
-  eliminatedRoundIndex: number | undefined;
-  eliminatedByProfileId: string | null | undefined;
-};
+export declare const eventParticipantProjectionState: typeof eventParticipantState;
 export declare function eventMatchState(
   match: EventMatchDocument | null | undefined,
 ): {
   matchKey: string | undefined;
   inviteId: string | null | undefined;
-  status: string | undefined;
-  resolvedAtMs: number | undefined;
+  status: "pending" | "host" | "guest" | "upcoming" | "bye" | undefined;
+  resolvedAtMs: number | null | undefined;
   winnerDisqualified: boolean;
   winnerProfileId: string | null | undefined;
   loserProfileId: string | null | undefined;
@@ -109,20 +96,20 @@ export declare function eventMatchState(
   hostProfileId: string | null | undefined;
   hostLoginUid: string | null | undefined;
   hostDisplayName: string | null | undefined;
-  hostEmojiId: number | undefined;
-  hostAura: string | null | undefined;
+  hostEmojiId: number | null | undefined;
+  hostAura: import("../shared/appearance.js").Aura | null | undefined;
   guestSlotBlocked: boolean;
   guestProfileId: string | null | undefined;
   guestLoginUid: string | null | undefined;
   guestDisplayName: string | null | undefined;
-  guestEmojiId: number | undefined;
-  guestAura: string | null | undefined;
+  guestEmojiId: number | null | undefined;
+  guestAura: import("../shared/appearance.js").Aura | null | undefined;
 };
 export declare function eventRoundState(round: EventRoundDocument): {
-  roundIndex: number | undefined;
-  status: string | undefined;
-  createdAtMs: number | undefined;
-  completedAtMs: number | undefined;
+  roundIndex: number;
+  status: "active" | "completed" | "upcoming";
+  createdAtMs: number;
+  completedAtMs: number | null;
   completedAtIsNull: boolean;
 };
 export declare const eventCurrentRoundIndex: (
@@ -131,142 +118,96 @@ export declare const eventCurrentRoundIndex: (
 ) => number;
 export declare const eventParticipantJoinedOrder: (
   participant: EventParticipantDocument,
-  fallback?: number,
 ) => number;
 export declare function eventParticipants(
-  event: EventDocument | null | undefined,
+  event: Pick<EventDocument, "participants"> | null | undefined,
 ): EventParticipantsDocument | null;
-export declare function plainEventParticipants(
-  event: EventDocument,
-): EventParticipantsDocument | null;
-export declare function eventRounds(
+export declare const plainEventParticipants: typeof eventParticipants;
+export declare const eventRounds: (
   event: EventDocument | null | undefined,
-): EventRoundsDocument | null;
-export declare function eventThirdPlaceMatch(
+) => EventRoundsDocument | null;
+export declare const eventThirdPlaceMatch: (
   event: EventDocument | null | undefined,
-): EventMatchDocument | null;
-export declare function eventRoundAt(
+) => EventMatchDocument | null;
+export declare const eventRoundAt: (
   rounds: EventRoundsDocument | null | undefined,
   key: string,
-): EventRoundDocument | null;
-export declare function eventRoundMatches(
+) => EventRoundDocument | null;
+export declare const eventRoundMatches: (
   round: EventRoundDocument | null | undefined,
-): EventMatchesDocument | null;
-export declare function eventMatchAt(
+) => EventMatchesDocument | null;
+export declare const eventMatchAt: (
   matches: EventMatchesDocument | null | undefined,
   key: string,
-): EventMatchDocument | null;
-export declare function eventMatchEntryKind(
+) => EventMatchDocument | null;
+export declare const eventMatchEntryKind: (
   matches: EventMatchesDocument | null | undefined,
   key: string,
-): "missing" | "match" | "invalid";
+) => "missing" | "match";
 export declare function eventPlacementMatches(
   round: EventRoundDocument | null,
 ): Record<
   string,
   {
-    present: boolean;
-    match: EventMatchDocument | null;
+    present: true;
+    match: EventMatchDocument;
   }
 >;
-export declare function eventParticipantAt(
+export declare const eventParticipantAt: (
   participants: EventParticipantsDocument | null | undefined,
   key: string,
-): EventParticipantDocument | null;
-export declare function plainEventParticipantAt(
+) => EventParticipantDocument | null;
+export declare const plainEventParticipantAt: (
   participants: EventParticipantsDocument | null | undefined,
   key: string,
-): EventParticipantDocument | null;
-export declare function eventParticipantIsAbsent(
+) => EventParticipantDocument | null;
+export declare const eventParticipantIsAbsent: (
   participants: EventParticipantsDocument | null,
   profileId: string,
-): boolean;
-export declare function eventParticipantEntries(
+) => boolean;
+export declare const eventParticipantEntries: (
   participants: EventParticipantsDocument | null | undefined,
-): Array<[string, EventParticipantDocument]>;
-export declare function plainEventParticipantEntries(
+) => Array<[string, EventParticipantDocument]>;
+export declare const plainEventParticipantEntries: (
   participants: EventParticipantsDocument | null | undefined,
-): Array<[string, EventParticipantDocument]>;
-export declare function eventMatchEntries(
+) => Array<[string, EventParticipantDocument]>;
+export declare const eventMatchEntries: (
   matches: EventMatchesDocument | null | undefined,
-): Array<[string, EventMatchDocument | null]>;
-export declare function eventPrizeOwnerProfileIds(
-  event: EventDocument,
-): string[];
+) => Array<[string, EventMatchDocument]>;
+export declare const eventPrizeOwnerProfileIds: (
+  event: EventDocument | null,
+) => string[];
 export declare function eventPrizeAssignments(
   event: EventDocument | null | undefined,
   eventId: string,
 ): Record<string, EventPrizeAssignmentRecord>;
-export type EventParticipantWrite = EventParticipantSnapshot;
-export type EventParticipantPatch = Partial<{
-  profileId: string;
-  loginUid: string;
-  username: string;
-  displayName: string;
-  emojiId: number;
-  aura: string | null;
-  joinedAtMs: number;
-  state: EventParticipantState;
-  eliminatedRoundIndex: number | null;
-  eliminatedByProfileId: string | null;
-}>;
-export type EventMatchWrite = EventMatchView;
-export type EventMatchPatch = Partial<EventMatchWrite>;
-export type EventRoundWrite = {
-  roundIndex: number;
-  status: EventRoundStatus;
-  createdAtMs: number;
-  completedAtMs: number | null;
-  matches: EventMatchesDocument;
-};
-export type EventRoundPatch = Partial<EventRoundWrite>;
-export type EventWrite = {
-  schemaVersion: number;
-  eventId: string;
-  status: EventStatus;
-  createdAtMs: number;
-  updatedAtMs: number;
-  startAtMs: number;
-  isSundayMons: boolean;
-  telegramAnnouncements: EventTelegramAnnouncements;
-  telegramDeliveryVersion: number;
-  startedAtMs: number | null;
-  endedAtMs: number | null;
-  createdByProfileId: string;
-  createdByLoginUid: string;
-  createdByUsername: string;
-  winnerProfileId: string | null;
-  winnerDisplayName: string | null;
-  currentRoundIndex: number | null;
-  bracketSize: number;
-  roundCount: number;
-  supportsThirdPlaceMatch: boolean;
-  thirdPlaceMatch: EventMatchDocument | null;
-  participants: EventParticipantsDocument;
-  rounds: EventRoundsDocument;
-  prizeSelectionsLockedAtMs?: number | null;
-  prizeAssignments?: Record<string, EventPrizeAssignmentRecord>;
-};
-export type EventPatch = Partial<EventWrite>;
-export declare const createEventDocument: (value: EventWrite) => EventDocument;
-export declare const createEventParticipantDocument: (
+export type EventParticipantWrite = EventParticipantFields;
+export type EventParticipantPatch = Partial<EventParticipantFields>;
+export type EventMatchWrite = EventMatchFields;
+export type EventMatchPatch = Partial<EventMatchFields>;
+export type EventRoundWrite = EventRoundFields;
+export type EventRoundPatch = Partial<EventRoundFields>;
+export type EventWrite = EventRecordFields;
+export type EventPatch = Partial<EventRecordFields>;
+export declare function createEventDocument(value: EventWrite): EventDocument;
+export declare function createEventParticipantDocument(
   value: EventParticipantWrite,
-) => EventParticipantDocument;
-export declare const createEventMatchDocument: (
+): EventParticipantDocument;
+export declare function createEventMatchDocument(
   value: EventMatchWrite,
-) => EventMatchDocument;
-export declare const createEventRoundDocument: (
+): EventMatchDocument;
+export declare function createEventRoundDocument(
   value: EventRoundWrite,
-) => EventRoundDocument;
-export declare const createEventParticipantsDocument: (
-  value?: Record<string, EventParticipantDocument>,
-) => EventParticipantsDocument;
-export declare const createEventRoundsDocument: (
-  value?: Record<string, EventRoundDocument>,
-) => EventRoundsDocument;
-export declare const createEventMatchesDocument: (
-  value?: Record<string, EventMatchDocument>,
-) => EventMatchesDocument;
+): EventRoundDocument;
+export declare function createEventParticipantsDocument(
+  value?: EventParticipantsDocument,
+): EventParticipantsDocument;
+export declare function createEventRoundsDocument(
+  value?: EventRoundsDocument,
+): EventRoundsDocument;
+export declare function createEventMatchesDocument(
+  value?: EventMatchesDocument,
+): EventMatchesDocument;
 export declare function patchEventDocument(
   event: EventDocument,
   patch: EventPatch,
@@ -308,17 +249,17 @@ export declare function setEventMatch(
 ): void;
 export declare function cloneEventDocument(
   event: EventDocument,
-  mode?: "json" | "structured",
+  _mode?: "json" | "structured",
 ): EventDocument;
-export declare function cloneEventRounds(
+export declare const cloneEventRounds: (
   rounds: EventRoundsDocument,
-): EventRoundsDocument;
-export declare function cloneEventParticipants(
+) => EventRoundsDocument;
+export declare const cloneEventParticipants: (
   participants: EventParticipantsDocument,
-): EventParticipantsDocument;
-export declare function cloneEventMatch(
+) => EventParticipantsDocument;
+export declare const cloneEventMatch: (
   match: EventMatchDocument,
-): EventMatchDocument;
+) => EventMatchDocument;
 export declare function setEventMatchSlotBlocked(
   match: EventMatchDocument,
   slot: "host" | "guest",
@@ -339,4 +280,3 @@ export declare function createEventMatchInvite(
   matchKey: string,
   useStoredMatchKey?: boolean,
 ): InviteDocument;
-export {};

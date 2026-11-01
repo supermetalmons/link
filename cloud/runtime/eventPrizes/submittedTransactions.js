@@ -29,7 +29,7 @@ const deserializePersistedSubmittedTransaction = (umi, withdrawal) => {
     !encoded ||
     !transactionSignature ||
     !blockhash ||
-    !Number.isFinite(lastValidBlockHeight)
+    lastValidBlockHeight === null
   ) {
     return null;
   }
@@ -40,7 +40,7 @@ const deserializePersistedSubmittedTransaction = (umi, withdrawal) => {
       ),
       transactionSignature,
       blockhash,
-      lastValidBlockHeight: Math.floor(lastValidBlockHeight),
+      lastValidBlockHeight,
     };
   } catch {
     return null;
@@ -71,9 +71,14 @@ const buildSubmittedTransaction = async ({
       "The prize transfer could not be simulated.",
     );
   }
-  const transactionSignature = base58.deserialize(
-    signedTransaction.signatures[0],
-  )[0];
+  const signature = signedTransaction.signatures[0];
+  if (!signature) {
+    throw new errors_js_1.EventPrizeWithdrawalError(
+      "failed-precondition",
+      "The prize transfer was not signed.",
+    );
+  }
+  const transactionSignature = base58.deserialize(signature)[0];
   const signedTransactionBase64 = Buffer.from(
     umi.transactions.serialize(signedTransaction),
   ).toString("base64");
@@ -254,7 +259,9 @@ const sendAndConfirmSubmittedTransaction = async ({
     const status = await waitForSubmittedTransactionStatus({
       umi,
       submitted,
-      retryDelaysMs: statusRetryDelaysMs,
+      ...(statusRetryDelaysMs === undefined
+        ? {}
+        : { retryDelaysMs: statusRetryDelaysMs }),
       statusRequestTimeoutMs,
     });
     if (status.kind === "failed") {

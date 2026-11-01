@@ -110,12 +110,12 @@ test("API Wrangler configuration preserves its route, secrets, and bindings", ()
   assert.deepEqual(config.workflows, [
     {
       binding: "EVENT_PROGRESS_WORKFLOW",
-      name: "mons-link-event-progress",
+      name: "mons-link-event-progress-data1",
       class_name: "EventProgressWorkflow",
     },
     {
       binding: "EVENT_PRIZE_WITHDRAWAL_WORKFLOW",
-      name: "mons-link-event-prize-withdrawal",
+      name: "mons-link-event-prize-withdrawal-data1",
       class_name: "EventPrizeWithdrawalWorkflow",
     },
   ]);
@@ -123,7 +123,6 @@ test("API Wrangler configuration preserves its route, secrets, and bindings", ()
     "APPLE_AUDIENCES",
     "AUTH_MUTATIONS_DISABLED",
     "EVENT_DB_BOOKMARK_EPOCH",
-    "NEW_MATCH_TIMER_STORAGE",
   ]);
   assert.equal(
     config.vars?.EVENT_DB_BOOKMARK_EPOCH,
@@ -132,7 +131,7 @@ test("API Wrangler configuration preserves its route, secrets, and bindings", ()
   );
   assert.equal(config.vars?.APPLE_AUDIENCES, "link.mons");
   assert.match(config.vars?.AUTH_MUTATIONS_DISABLED || "", /^(?:true|false)$/);
-  assert.match(config.vars?.NEW_MATCH_TIMER_STORAGE || "", /^(?:d1|local)$/);
+  assert.equal(config.vars?.NEW_MATCH_TIMER_STORAGE, undefined);
   assert.equal(config.vars?.FIREBASE_RTDB_URL, undefined);
   assert.deepEqual(config.d1_databases, [
     {
@@ -215,32 +214,32 @@ test("API Wrangler configuration preserves its route, secrets, and bindings", ()
     producers: [
       {
         binding: "AUTH_RECOVERY_QUEUE",
-        queue: "mons-link-auth-recovery",
+        queue: "mons-link-auth-recovery-data1",
       },
       {
         binding: "TELEGRAM_DELIVERY_QUEUE",
-        queue: "mons-link-telegram-delivery",
+        queue: "mons-link-telegram-delivery-data1",
       },
       {
         binding: "WAGER_SETTLEMENT_QUEUE",
-        queue: "mons-link-wager-settlement",
+        queue: "mons-link-wager-settlement-data1",
       },
       {
         binding: "TELEGRAM_PROJECTION_QUEUE",
-        queue: "mons-link-telegram-projection",
+        queue: "mons-link-telegram-projection-data1",
       },
       {
         binding: "PROFILE_GAME_PROJECTION_QUEUE",
-        queue: "mons-link-profile-game-projection",
+        queue: "mons-link-profile-game-projection-data1",
       },
       {
         binding: "EVENT_PROFILE_GAME_PROJECTION_QUEUE",
-        queue: "mons-link-event-profile-game-projection",
+        queue: "mons-link-event-profile-game-projection-data1",
       },
     ],
     consumers: [
       {
-        queue: "mons-link-auth-recovery",
+        queue: "mons-link-auth-recovery-data1",
         max_batch_size: 1,
         max_batch_timeout: 1,
         max_retries: 100,
@@ -248,38 +247,38 @@ test("API Wrangler configuration preserves its route, secrets, and bindings", ()
         max_concurrency: 1,
       },
       {
-        queue: "mons-link-telegram-delivery",
+        queue: "mons-link-telegram-delivery-data1",
         max_batch_size: 1,
         max_batch_timeout: 0,
         max_retries: 100,
-        dead_letter_queue: "mons-link-telegram-delivery-dlq",
+        dead_letter_queue: "mons-link-telegram-delivery-data1-dlq",
         max_concurrency: 1,
       },
       {
-        queue: "mons-link-wager-settlement",
+        queue: "mons-link-wager-settlement-data1",
         max_batch_size: 1,
         max_batch_timeout: 0,
         max_retries: 100,
-        dead_letter_queue: "mons-link-wager-settlement-dlq",
+        dead_letter_queue: "mons-link-wager-settlement-data1-dlq",
         max_concurrency: 1,
       },
       {
-        queue: "mons-link-telegram-projection",
+        queue: "mons-link-telegram-projection-data1",
         max_batch_size: 5,
         max_batch_timeout: 1,
         max_retries: 20,
-        dead_letter_queue: "mons-link-telegram-projection-dlq",
+        dead_letter_queue: "mons-link-telegram-projection-data1-dlq",
         max_concurrency: 5,
       },
       {
-        queue: "mons-link-profile-game-projection",
+        queue: "mons-link-profile-game-projection-data1",
         max_batch_size: 1,
         max_batch_timeout: 1,
         max_retries: 100,
         max_concurrency: 5,
       },
       {
-        queue: "mons-link-event-profile-game-projection",
+        queue: "mons-link-event-profile-game-projection-data1",
         max_batch_size: 1,
         max_batch_timeout: 1,
         max_retries: 100,
@@ -373,6 +372,55 @@ test("retired provider tools and migration entry points stay removed", () => {
   );
 });
 
+test("completed cleanup ingress stays retired while permanent match writers remain", () => {
+  for (const name of [
+    "canonicalCleanupAuthorization.ts",
+    "canonicalCleanupCommands.ts",
+    "canonicalCleanupRoute.ts",
+    "canonicalCleanupScope.ts",
+    "canonicalStorageCleanup.ts",
+    "timerHandoffStore.ts",
+    "timerHandoffRecords.ts",
+    "timerHandoffSql.ts",
+    "timerStorageHandoffD1.ts",
+    "matchTimerStartSweep.ts",
+  ])
+    assert.equal(
+      existsSync(resolve(repositoryRoot, "cloud/workers/api/src", name)),
+      false,
+      name,
+    );
+  for (const name of [
+    "matchWriterStore.ts",
+    "matchWriterRecords.ts",
+    "matchWriterSql.ts",
+  ])
+    assert.equal(
+      existsSync(resolve(repositoryRoot, "cloud/workers/api/src", name)),
+      true,
+      name,
+    );
+  assert.doesNotMatch(
+    `${readText("cloud/workers/api/src/router.ts")}\n${readText("cloud/workers/api/src/inviteReactions.ts")}`,
+    /canonicalCleanup|\/internal\/canonical-cleanup/,
+  );
+  assert.doesNotMatch(
+    `${readText("cloud/workers/api/wrangler.jsonc")}\n${readText("cloud/workers/api/worker-configuration.d.ts")}`,
+    /CANONICAL_CLEANUP_SECRET|NEW_MATCH_TIMER_STORAGE/,
+  );
+  for (const name of [
+    "workerHandler.ts",
+    "gameplayCoordinationD1.ts",
+    "inviteEventEffects.ts",
+    "matchStateStore.ts",
+  ])
+    assert.doesNotMatch(
+      readText(`cloud/workers/api/src/${name}`),
+      /\bmatch_timer_starts_canonical\b|\bcreateMatchTimerStartStore\b|\bsweepMatchTimerStarts\b/,
+      name,
+    );
+});
+
 test("package manifests preserve public scripts and deployment command vectors", () => {
   const rootPackage = readJson<PackageManifest>("package.json");
   const runtimePackage = readJson<PackageManifest>(
@@ -451,7 +499,7 @@ test("package manifests preserve public scripts and deployment command vectors",
   );
   assert.equal(
     rootPackage.scripts?.["check:runtime"],
-    `npm run lint:runtime && ${runtimeGenerationCommand} --check`,
+    `npm run lint:runtime && ${runtimeGenerationCommand} --check && npm run typecheck:runtime-tests`,
   );
   assert.equal(
     rootPackage.scripts?.["lint:runtime"],
@@ -462,7 +510,7 @@ test("package manifests preserve public scripts and deployment command vectors",
   }
   assert.equal(
     rootPackage.scripts?.["check:all"]
-      .split(" && ")
+      ?.split(" && ")
       .includes("npm run check:runtime"),
     true,
   );
@@ -553,9 +601,11 @@ test("package manifests preserve public scripts and deployment command vectors",
   assert.equal(runtimePackage.dependencies?.["firebase-admin"], undefined);
   assert.equal(adminPackage.dependencies?.["firebase-admin"], undefined);
   assert.deepEqual(adminPackage.scripts, {
-    "recover:telegram": "node recoverTelegramDelivery.js",
-    start: "node listAddresses.js",
-    "shooting:alert": "node shootingStarAlert.js",
+    "recover:telegram":
+      "node --experimental-strip-types recoverTelegramDelivery.ts",
+    start: "node --experimental-strip-types listAddresses.ts",
+    "shooting:alert": "node --experimental-strip-types shootingStarAlert.ts",
+    typecheck: "tsc --noEmit -p tsconfig.json",
   });
   assert.equal(apiPackage.private, true);
   assert.equal(apiPackage.type, "module");
@@ -582,6 +632,9 @@ test("shared package preserves every direct export subpath", () => {
     "cloud/runtime/shared/package.json",
   );
   const expectedExports = {
+    "./api-errors": "./api-errors.js",
+    "./appearance": "./appearance.js",
+    "./data-contract": "./data-contract.js",
     "./api-contracts": "./api-contracts.js",
     "./auth": "./auth.js",
     "./event-prizes": "./event-prizes.js",
@@ -599,6 +652,7 @@ test("shared package preserves every direct export subpath", () => {
     "./mining": "./mining.js",
     "./navigation": "./navigation.js",
     "./nfts": "./nfts.js",
+    "./profile-game-projections": "./profile-game-projections.js",
     "./profiles": "./profiles.js",
     "./ratings": "./ratings.js",
     "./reactions": "./reactions.js",
@@ -745,6 +799,12 @@ test("operations documentation keeps candidate releases and canonical recovery e
     assert.ok(guide.includes(command), command);
   assert.match(guide, /PRAGMA foreign_key_check/);
   assert.match(guide, /Never bulk-delete admissions/);
+  const timerStorage = section("Canonical timer storage");
+  assert.match(timerStorage, /no D1 timer backend/);
+  assert.match(timerStorage, /0039_retire_canonical_timer_starts\.sql/);
+  assert.match(timerStorage, /version-pinned Workflow/);
+  assert.match(section("Canonical operators"), /native D1 binding batch/);
+  assert.match(section("Canonical operators"), /reported operation ID/);
   assert.match(
     guide,
     /Successful transition receipts are immutable coordination evidence/,

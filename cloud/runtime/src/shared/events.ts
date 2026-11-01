@@ -1,7 +1,20 @@
-import { isSafeRecordKey } from "./ids.js";
+import { isSafeRecordKey, isCanonicalLoginUid } from "./ids.js";
 import { cropAddress } from "./profiles.js";
 import { THIRD_PLACE_MATCH_KEY } from "./event-types.js";
+import type { EventRecord, EventTelegramAnnouncements } from "./event-types.js";
+import { isEventRecord } from "./event-views.js";
+import { isAura, isEmojiId, type Aura, type EmojiId } from "./appearance.js";
 export type {
+  EventRecord,
+  EventRecordFields,
+  EventParticipantRecord,
+  EventParticipantFields,
+  EventMatchRecord,
+  EventMatchFields,
+  EventRoundRecord,
+  EventRoundFields,
+  EventRoundBye,
+  EventTelegramAnnouncements,
   EventStatus,
   EventParticipantState,
   EventMatchStatus,
@@ -14,6 +27,16 @@ export type {
   EventView,
 } from "./event-types.js";
 export {
+  isEventRecord,
+  parseEventRecord,
+  isEventParticipantRecord,
+  isEventParticipants,
+  isEventMatchRecord,
+  isEventMatches,
+  isEventRoundRecord,
+  isEventRounds,
+  isEventPrizeAssignments,
+  isEventAnnouncements,
   decodeEventParticipantView,
   decodeEventMatchView,
   decodeEventRoundView,
@@ -36,12 +59,6 @@ export type EventCreateDateTimePayload = {
 
 export type EventPostponeMinutes = 5 | 10 | 15;
 
-export type EventTelegramAnnouncements = {
-  invite: boolean;
-  matches: boolean;
-  results: boolean;
-};
-
 export type EventCreateOptions = {
   isSundayMons?: boolean;
   telegramAnnouncements?: EventTelegramAnnouncements;
@@ -62,12 +79,7 @@ export type DisqualifyEventMatchWinnersRequest = {
 
 export type SyncEventStateRequest = { eventId: string };
 
-export type EventCompatibilityRecord = {
-  eventId: string;
-  status: string;
-  isSundayMons?: boolean;
-};
-export type EventApiRecord = EventCompatibilityRecord;
+export type EventApiRecord = EventRecord;
 
 export type CreateEventResponse = {
   ok: true;
@@ -121,8 +133,8 @@ export type EventParticipantSnapshot = {
   loginUid: string;
   username: string;
   displayName: string;
-  emojiId: number;
-  aura: string;
+  emojiId: EmojiId;
+  aura: Aura;
   joinedAtMs: number;
   state: "active";
   eliminatedRoundIndex: null;
@@ -134,8 +146,8 @@ export type EventParticipantProfile = Readonly<{
   username: string;
   eth: string;
   sol: string;
-  emoji: number | string;
-  aura: string;
+  emoji: EmojiId;
+  aura: Aura;
 }>;
 
 export type JoinEventRequest = { eventId: string };
@@ -194,7 +206,7 @@ function isEventOwnedInvite(value: unknown): boolean {
   );
 }
 
-const EVENT_SCHEMA_VERSION = 2;
+const EVENT_SCHEMA_VERSION = 3;
 const MIN_STARTS_IN_MINUTES = 1;
 const MAX_STARTS_IN_DAYS = 50;
 const MAX_STARTS_IN_MINUTES: 72000 = (MAX_STARTS_IN_DAYS * 24 * 60) as 72000;
@@ -230,7 +242,7 @@ function eventBookmarkEpoch(value: unknown): string | null {
     match[2] === "first-unconstrained"
   )
     return null;
-  return match[1].toLowerCase();
+  return match[1]!.toLowerCase();
 }
 
 const isExactSafeRecordKey = (value: unknown): value is string =>
@@ -339,13 +351,12 @@ function isEventParticipantSnapshot(
       "eliminatedRoundIndex",
       "eliminatedByProfileId",
     ]) &&
-    isSafeRecordKey(value.profileId) &&
-    isSafeRecordKey(value.loginUid) &&
+    isExactSafeRecordKey(value.profileId) &&
+    isCanonicalLoginUid(value.loginUid) &&
     isBoundedParticipantText(value.username) &&
     isBoundedParticipantText(value.displayName) &&
-    Number.isSafeInteger(value.emojiId) &&
-    (value.emojiId as number) >= 0 &&
-    isBoundedParticipantText(value.aura) &&
+    isEmojiId(value.emojiId) &&
+    isAura(value.aura) &&
     Number.isSafeInteger(value.joinedAtMs) &&
     (value.joinedAtMs as number) >= 0 &&
     value.state === "active" &&
@@ -359,7 +370,7 @@ function buildEventParticipantSnapshot(
   loginUid: string,
   joinedAtMs: number,
 ): EventParticipantSnapshot | null {
-  const parsedEmojiId = Math.floor(Number(profile.emoji));
+  if (!isEmojiId(profile.emoji) || !isAura(profile.aura)) return null;
   const participant: EventParticipantSnapshot = {
     profileId: profile.profileId,
     loginUid,
@@ -371,11 +382,8 @@ function buildEventParticipantSnapshot(
         : profile.sol
           ? cropAddress(profile.sol)
           : "anon"),
-    emojiId:
-      Number.isSafeInteger(parsedEmojiId) && parsedEmojiId >= 0
-        ? parsedEmojiId
-        : 0,
-    aura: profile.aura.trim(),
+    emojiId: profile.emoji,
+    aura: profile.aura,
     joinedAtMs,
     state: "active",
     eliminatedRoundIndex: null,
@@ -426,23 +434,15 @@ function hasExactOptionalKeys(
 }
 
 function resolveEventTelegramAnnouncements(input: {
-  announceOnTelegram?: unknown;
-  telegramAnnouncements?: unknown;
+  telegramAnnouncements?: EventTelegramAnnouncements;
 }): EventTelegramAnnouncements {
-  const preferences = input.telegramAnnouncements;
-  if (
-    preferences &&
-    typeof preferences === "object" &&
-    !Array.isArray(preferences)
-  ) {
-    return {
-      invite: (preferences as Record<string, unknown>).invite === true,
-      matches: (preferences as Record<string, unknown>).matches === true,
-      results: (preferences as Record<string, unknown>).results === true,
-    };
-  }
-  const enabled = input.announceOnTelegram === true;
-  return { invite: enabled, matches: enabled, results: enabled };
+  return (
+    input.telegramAnnouncements ?? {
+      invite: false,
+      matches: false,
+      results: false,
+    }
+  );
 }
 
 function isEventTelegramAnnouncements(
@@ -533,14 +533,7 @@ function isEventApiRecord(
   value: unknown,
   eventId: string,
 ): value is EventApiRecord {
-  return (value &&
-    typeof value === "object" &&
-    !Array.isArray(value) &&
-    (value as Record<string, unknown>).eventId === eventId &&
-    typeof (value as Record<string, unknown>).status === "string" &&
-    (!Object.hasOwn(value, "isSundayMons") ||
-      typeof (value as Record<string, unknown>).isSundayMons ===
-        "boolean")) as boolean;
+  return isEventRecord(value) && value.eventId === eventId;
 }
 
 function isCreateEventResponse(value: unknown): value is CreateEventResponse {

@@ -1,3 +1,5 @@
+import { createDefaultProfileAppearance } from "@mons/shared/appearance";
+import { createStoredPlayerProfile } from "../src/profileCanonical/contracts.ts";
 import { expect } from "vitest";
 import {
   newAuthRecoveryJob,
@@ -113,23 +115,17 @@ export async function seedCombinedCronAuth(
       lastEnqueuedAtMs: createdAtMs,
     };
     const profile = materializeCanonicalProfile({
-      profile: {
-        id: profileId,
-        nonce: index + 1,
-        rating: 1500,
-        totalManaPoints: index,
-        win: false,
-        emoji: 1,
-        username: `cronauth${suffix}`,
-        eth: null,
-        sol: null,
-        completedProblemIds: [],
-        isTutorialCompleted: false,
-        mining: {
-          lastRockDate: null,
-          materials: { dust: 0, slime: 0, gum: 0, metal: 0, ice: 0 },
+      profile: createStoredPlayerProfile(
+        profileId,
+        createDefaultProfileAppearance(1),
+        {
+          nonce: index + 1,
+          rating: 1500,
+          totalManaPoints: index,
+          win: false,
+          username: `cronauth${suffix}`,
         },
-      },
+      ),
       createdAtMs,
       updatedAtMs: createdAtMs,
     });
@@ -193,7 +189,7 @@ export async function seedCombinedCronAuth(
         ).toEqual(job.owner);
         expect(
           await env.PROFILE_DB.prepare(
-            "SELECT profile_id FROM profile_auth_recovery_quarantine WHERE profile_id = ?",
+            "SELECT profile_id FROM profile_auth_recovery_quarantine_canonical WHERE profile_id = ?",
           )
             .bind(job.profileId)
             .first(),

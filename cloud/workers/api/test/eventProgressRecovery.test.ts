@@ -1,3 +1,4 @@
+import { requiredFixture } from "./requiredFixture.ts";
 import { retainEventProgressRecord } from "../../../runtime/eventProgressRecords.js";
 import assert from "node:assert/strict";
 import test from "node:test";
@@ -25,7 +26,7 @@ async function fixture(runAtMs: number | null = 20_000_000) {
   const repository: EventProgressSweepRepository = {
     readEvent: async () => null,
     readEventProgressOutbox: async () =>
-      retainEventProgressRecord("pending", record),
+      record === null ? null : retainEventProgressRecord("pending", record),
     listDueEventProgressOutboxes: async () =>
       record
         ? [
@@ -360,7 +361,7 @@ for (const status of ["waiting", "complete"] as const) {
     test(`${status} status cannot checkpoint or remove a concurrently ${replaced ? "replaced" : "deleted"} outbox`, async () => {
       const f = await fixture();
       const replacement = replaced
-        ? { ...f.plan.outbox, firstQueuedAtMs: 200 }
+        ? { ...f.plan.outbox, firstQueuedAtMs: 50 }
         : null;
       f.instance.status = async () => {
         f.replace(replacement);
@@ -418,10 +419,13 @@ test("checkpoint failure does not replace the provider failure", async (t) => {
   };
   const logged = t.mock.method(console, "error", () => {});
   await assert.rejects(f.dispatch(), (error) => error === failure);
-  assert.deepEqual(JSON.parse(logged.mock.calls[0].arguments[0]), {
-    event: "event_progress_recovery_checkpoint_failed",
-    outboxId: f.plan.outboxId,
-  });
+  assert.deepEqual(
+    JSON.parse(requiredFixture(logged.mock.calls[0]).arguments[0]),
+    {
+      event: "event_progress_recovery_checkpoint_failed",
+      outboxId: f.plan.outboxId,
+    },
+  );
   logged.mock.mockImplementation(() => {
     throw new Error("logger-unavailable");
   });

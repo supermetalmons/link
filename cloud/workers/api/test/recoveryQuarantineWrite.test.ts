@@ -158,7 +158,7 @@ for (const lane of lanes) {
     const harness = database();
     const observation = observationFor(lane);
     observation.keyType = "blob";
-    observation.fields[0].storageType = "blob";
+    observation.fields[0]!.storageType = "blob";
     const result = await invoke(lane, harness.db, observation);
     const expected = bindingsFor(lane);
     const keyOffset = lane === "auth" || lane === "profile-link" ? 2 : 0;
@@ -168,11 +168,11 @@ for (const lane of lanes) {
 
     assert.deepEqual(harness.bindings, [expected]);
     assert.strictEqual(
-      harness.bindings[0][keyOffset + 1],
+      harness.bindings[0]![keyOffset + 1]!,
       observation.keyBytes,
     );
     assert.strictEqual(
-      harness.bindings[0][keyOffset + 2],
+      harness.bindings[0]![keyOffset + 2]!,
       observation.keyBytes,
     );
     assert.deepEqual(result, baselines[lane].result);
@@ -253,7 +253,7 @@ for (const lane of lanes) {
       if (lane === "auth") {
         assert.strictEqual(await rejectedValue(work), failure);
         assert.deepEqual(harness.calls, ["prepare", "bind", "run"]);
-        assert.ok(Object.is(harness.bindings[0][1], nowMs));
+        assert.ok(Object.is(harness.bindings[0]![1]!, nowMs));
       } else {
         await assert.rejects(work, {
           name: "TypeError",

@@ -6,6 +6,8 @@ exports.acknowledgeSendRecord = acknowledgeSendRecord;
 const deliveryState_js_1 = require("./deliveryState.js");
 const deliveryPolicy_js_1 = require("./deliveryPolicy.js");
 const values_js_1 = require("./values.js");
+const recordCodec_js_1 = require("./recordCodec.js");
+const deliveryState_js_2 = require("./deliveryState.js");
 function markSendInFlightRecord(current, delivery, input) {
   const { desired, marker } = input;
   const apply = (record) => {
@@ -36,8 +38,7 @@ function markSendInFlightRecord(current, delivery, input) {
       },
     };
   };
-  const output = apply(asObject(current));
-  return output;
+  return (0, recordCodec_js_1.requireTelegramMessageDocument)(apply(current));
 }
 function acknowledgeSendRecord(current, delivery, input) {
   const {
@@ -49,14 +50,16 @@ function acknowledgeSendRecord(current, delivery, input) {
     previousApplied: retainedPreviousApplied,
     result,
   } = input;
-  const applied = asObject(retainedApplied);
+  const applied = (0, deliveryState_js_2.documentFields)(retainedApplied);
   const previousApplied =
-    retainedPreviousApplied === null ? null : asObject(retainedPreviousApplied);
+    retainedPreviousApplied === null
+      ? null
+      : (0, deliveryState_js_2.documentFields)(retainedPreviousApplied);
   const apply = (record) => {
     const latestRevision = (0, deliveryState_js_1.normalizeString)(
       (0, values_js_1.readProperty)(record.desired, "revision"),
     );
-    const nextDelivery = asObject(
+    const nextDelivery = (0, deliveryState_js_2.documentFields)(
       (0, deliveryState_js_1.writeDelivery)({
         ...(0, deliveryPolicy_js_1.omitRetryState)(
           (0, deliveryState_js_1.omitKeys)(delivery, [
@@ -127,17 +130,5 @@ function acknowledgeSendRecord(current, delivery, input) {
       delivery: nextDelivery,
     };
   };
-  const output = apply(asObject(current));
-  return output;
+  return (0, recordCodec_js_1.requireTelegramMessageDocument)(apply(current));
 }
-const asObject = (value) => {
-  const retained =
-    value instanceof deliveryState_js_1.DeliverySnapshot
-      ? (0, deliveryState_js_1.deliveryDocument)(value)
-      : value instanceof deliveryState_js_1.PendingDeleteSnapshot
-        ? (0, deliveryState_js_1.pendingDeleteDocument)(value)
-        : value;
-  return retained && typeof retained === "object" && !Array.isArray(retained)
-    ? retained
-    : {};
-};

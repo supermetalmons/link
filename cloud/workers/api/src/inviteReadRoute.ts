@@ -15,7 +15,7 @@ import {
 } from "./authHttp.ts";
 import { cancelResponseBody } from "./boundedStreams.ts";
 import { summarizeError } from "./errorSummary.ts";
-import { resolveInviteRoleFromSnapshot } from "./inviteAccess.ts";
+import { resolveInviteActor } from "./inviteAccess.ts";
 import { createInviteReadRepository } from "./inviteReadRepository.ts";
 import type { InviteAccessRepository } from "./gameplayContracts.ts";
 import type { ProfileOwnershipReader } from "./profileOwnership.ts";
@@ -120,7 +120,7 @@ export function readInviteRoute(
   const match = channels[channel].pattern.exec(url.pathname);
   let inviteId = "";
   try {
-    inviteId = match ? decodeURIComponent(match[1]) : "";
+    inviteId = match ? decodeURIComponent(match[1]!) : "";
   } catch {
     throw new AuthApiFailure(400, "invalid-argument", "invalid-invite-id");
   }
@@ -139,17 +139,21 @@ export async function resolveInviteReadRole(
   snapshot: InviteMetadataSnapshot,
   passwordProtected: boolean,
 ): Promise<InviteReadRole> {
+  if (snapshot.inviteId !== inviteId)
+    throw new AuthApiFailure(409, "failed-precondition", "invite-invalid");
   if (!identity && !snapshot.guestId) {
     throw new AuthApiFailure(403, "permission-denied", "permission-denied");
   }
-  return identity
-    ? resolveInviteRoleFromSnapshot(
-        identity,
-        { inviteId },
-        { ...snapshot, ...(passwordProtected ? { password: true } : {}) },
-        repository,
-      )
-    : { role: "watch", actorUid: null };
+  if (!identity) return { role: "watch", actorUid: null };
+  const { role, actorUid } = await resolveInviteActor(
+    identity,
+    snapshot.hostId,
+    snapshot.guestId,
+    repository,
+  );
+  if (passwordProtected && snapshot.guestId === null && role === "watch")
+    throw new AuthApiFailure(403, "permission-denied", "permission-denied");
+  return { role, actorUid };
 }
 
 export async function handleInviteReadRoute<

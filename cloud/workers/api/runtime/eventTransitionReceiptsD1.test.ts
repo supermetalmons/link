@@ -1,5 +1,6 @@
+import { applyCanonicalTestMigrations } from "./canonicalTestMigrations.ts";
 import { env } from "cloudflare:workers";
-import { applyD1Migrations, type D1Migration } from "cloudflare:test";
+import type { D1Migration } from "cloudflare:test";
 import { beforeAll, beforeEach, describe, expect, it } from "vitest";
 import {
   EVENT_RECEIPT_ADMISSION_KIND,
@@ -109,7 +110,7 @@ function interceptedDatabase(input: {
 
 describe("D1 event transition receipts", () => {
   beforeAll(async () => {
-    await applyD1Migrations(db, testEnv.TEST_D1_MIGRATIONS);
+    await applyCanonicalTestMigrations(db, testEnv.TEST_D1_MIGRATIONS);
   });
 
   beforeEach(async () => {
@@ -129,18 +130,16 @@ describe("D1 event transition receipts", () => {
   });
 
   it("preserves complete V1 and V2 JSON while canonicalizing object order", () => {
-    const original = {
-      ...receipt,
-      extra: { z: [null, { b: 2, a: "value" }], a: false },
-    };
+    const original = { ...receipt };
     const parsed = parseEventTransitionReceipt(original, receipt.transitionId);
     expect(parsed).toEqual(original);
     expect(parsed).not.toBe(original);
     expect(serializeEventTransitionReceipt(parsed)).toBe(
-      serializeEventTransitionReceipt({
-        extra: { a: false, z: [null, { a: "value", b: 2 }] },
-        ...receipt,
-      }),
+      serializeEventTransitionReceipt(
+        parseEventTransitionReceipt(
+          Object.fromEntries(Object.entries(receipt).reverse()),
+        ),
+      ),
     );
     expect(
       normalizeEventTransitionReceiptRow(
@@ -183,7 +182,7 @@ describe("D1 event transition receipts", () => {
   });
 
   it("imports historical receipts without an event foreign key and preserves exact content", async () => {
-    const archived = { ...legacyReceipt, legacyEvidence: { retained: true } };
+    const archived = { ...legacyReceipt };
     await insertRow(
       normalizeEventTransitionReceiptRow(archived.transitionId, archived, 20),
     ).run();
@@ -238,7 +237,7 @@ describe("D1 event transition receipts", () => {
     ).rejects.toThrow("immutable");
     const conflict = normalizeEventTransitionReceiptRow(
       receipt.transitionId,
-      { ...receipt, extra: true },
+      { ...receipt, expectedRevision: receipt.expectedRevision + 1 },
       21,
     );
     await expect(insertRow(conflict, true).run()).rejects.toThrow(
@@ -379,17 +378,15 @@ describe("D1 event transition receipts", () => {
 
   it("treats changes to any stored receipt content as conflicts", async () => {
     await activate();
-    const original = { ...receipt, evidence: { preserved: true } };
+    const original = { ...receipt };
     await ensureEventTransitionReceipt(db, original, {
       recordedAtMs: 20,
       guards: () => [],
     });
     for (const conflict of [
-      receipt,
       { ...original, expectedRevision: 5 },
       { ...original, eventId: "another-event" },
       { ...original, payloadDigest: "c".repeat(64) },
-      { ...original, evidence: { preserved: false } },
     ]) {
       await expect(
         ensureEventTransitionReceipt(db, conflict, {
@@ -431,7 +428,10 @@ describe("D1 event transition receipts", () => {
       db.batch(
         eventTransitionReceiptGuardStatements(
           db,
-          parseEventTransitionReceipt({ ...receipt, extra: true }),
+          parseEventTransitionReceipt({
+            ...receipt,
+            expectedRevision: receipt.expectedRevision + 1,
+          }),
         ),
       ),
     ).rejects.toThrow();

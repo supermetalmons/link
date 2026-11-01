@@ -10,31 +10,23 @@ type WithoutRequestId<Value> = Value extends unknown
   ? Omit<Value, "requestId">
   : never;
 type RecoveryChoice = WithoutRequestId<TelegramManualRecoveryWrite>;
-type SourceRecord = Record<string, unknown>;
-const record = (value: unknown): SourceRecord =>
-  value && typeof value === "object" && !Array.isArray(value)
-    ? (value as SourceRecord)
-    : {};
-const nonEmptyString = (value: unknown): string =>
-  typeof value === "string" ? value.trim() : "";
-
-function sameRecovery(request: SourceRecord, command: RecoveryChoice): boolean {
+function sameRecovery(
+  request: TelegramManualRecoveryWrite | undefined,
+  command: RecoveryChoice,
+): boolean {
   return (
-    nonEmptyString(request.action) === command.action &&
+    request?.action === command.action &&
     (command.messageId === undefined
       ? request.messageId === undefined
-      : Number(request.messageId) === command.messageId)
+      : request.messageId === command.messageId)
   );
 }
-
 function recoveryEligibility(
   value: TelegramMessageDocument | null,
-): SourceRecord | null {
-  const message = record(value);
-  const delivery = record(message.delivery);
-  const sendInFlight = record(delivery.sendInFlight);
-  const attemptId = nonEmptyString(sendInFlight.attemptId);
-  return delivery.status === "uncertain" && attemptId ? message : null;
+): TelegramMessageDocument | null {
+  return value?.delivery?.status === "uncertain" && value.delivery.sendInFlight
+    ? value
+    : null;
 }
 
 export function previewTelegramRecovery(
@@ -50,10 +42,10 @@ export function previewTelegramRecovery(
     } {
   const message = recoveryEligibility(value);
   if (!message) return { eligible: false };
-  const pending = record(message.manualRecovery);
-  const delivery = record(message.delivery);
-  const pendingRequestId = nonEmptyString(pending.requestId);
-  const processedRequestId = nonEmptyString(delivery.lastRecoveryRequestId);
+  const pending = message.manualRecovery;
+  const delivery = message.delivery;
+  const pendingRequestId = pending?.requestId ?? "";
+  const processedRequestId = delivery?.lastRecoveryRequestId ?? "";
   const conflict = Boolean(
     pendingRequestId &&
     pendingRequestId !== processedRequestId &&
@@ -73,10 +65,10 @@ export function requestTelegramRecovery(
     observeConflict("recovery-not-required");
     return { commit: false, decision: "recovery-not-required" };
   }
-  const delivery = record(message.delivery);
-  const pending = record(message.manualRecovery);
-  const pendingRequestId = nonEmptyString(pending.requestId);
-  const processedRequestId = nonEmptyString(delivery.lastRecoveryRequestId);
+  const delivery = message.delivery;
+  const pending = message.manualRecovery;
+  const pendingRequestId = pending?.requestId ?? "";
+  const processedRequestId = delivery?.lastRecoveryRequestId ?? "";
   if (pendingRequestId && pendingRequestId !== processedRequestId) {
     if (!sameRecovery(pending, command)) observeConflict("recovery-conflict");
     return { commit: false, decision: currentConflict() || "recovery-resumed" };
@@ -99,8 +91,8 @@ export function persistedTelegramRecovery(
   value: TelegramMessageDocument | null,
   command: RecoveryChoice,
 ): { requestId: string; matches: boolean } {
-  const request = record(record(value).manualRecovery);
-  const requestId = nonEmptyString(request.requestId);
+  const request = value?.manualRecovery;
+  const requestId = request?.requestId ?? "";
   return {
     requestId,
     matches: Boolean(requestId && sameRecovery(request, command)),
@@ -118,24 +110,16 @@ export function readTelegramRecoveryStatus(
   value: TelegramMessageDocument | null,
   requestId: string,
 ): TelegramRecoveryStatus | null {
-  const message = record(value);
-  const delivery = record(message.delivery);
-  const result = record(message.manualRecoveryResult);
-  if (nonEmptyString(result.requestId) === requestId) {
+  const delivery = value?.delivery;
+  const result = value?.manualRecoveryResult;
+  if (result?.requestId === requestId)
     return {
-      status: nonEmptyString(result.status) || "rejected",
-      action: nonEmptyString(result.action),
-      deliveryStatus: nonEmptyString(delivery.status) || null,
-      ...(nonEmptyString(result.code)
-        ? { code: nonEmptyString(result.code) }
-        : {}),
+      status: result.status,
+      action: result.action,
+      deliveryStatus: delivery?.status ?? null,
+      ...(result.code ? { code: result.code } : {}),
     };
-  }
-  const pending = record(message.manualRecovery);
-  return nonEmptyString(pending.requestId) === requestId
-    ? {
-        status: "pending",
-        deliveryStatus: nonEmptyString(delivery.status) || null,
-      }
+  return value?.manualRecovery?.requestId === requestId
+    ? { status: "pending", deliveryStatus: delivery?.status ?? null }
     : null;
 }

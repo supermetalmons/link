@@ -63,6 +63,7 @@ export async function readEventRepositoryFixture(
   query?: StateQuery,
 ): Promise<unknown> {
   const [root, id, ...parts] = path.split("/");
+  if (!id) throw new Error("event-d1-query-unsupported");
   if (root === "events" && id === undefined) {
     throw new Error("event-d1-query-unsupported");
   }
@@ -73,8 +74,12 @@ export async function readEventRepositoryFixture(
       query.orderBy === "$key"
     )
       return store.listProfileEventPrizeAssignments(id, {
-        startAt: typeof query.startAt === "string" ? query.startAt : undefined,
-        limit: query.limitToFirst,
+        ...(typeof query.startAt === "string"
+          ? { startAt: query.startAt }
+          : {}),
+        ...(query.limitToFirst !== undefined
+          ? { limit: query.limitToFirst }
+          : {}),
       });
     throw new Error("event-d1-query-unsupported");
   }
@@ -91,13 +96,13 @@ export async function readEventRepositoryFixture(
     return nested(await store.readEventPrizeSelections(id), parts);
   if (root === "profileEventPrizes")
     return parts.length === 1
-      ? store.readProfileEventPrizeAssignment(id, parts[0])
+      ? store.readProfileEventPrizeAssignment(id, parts[0]!)
       : nested((await store.readProfileEventPrizes(id)).prizes, parts);
   if (root === "eventProgressOutbox") return store.readEventProgressOutbox(id);
   if (root === "profileGameProjectionOutbox" && id === "event")
-    return store.readEventProfileGameProjectionOutbox(parts[0]);
+    return store.readEventProfileGameProjectionOutbox(parts[0]!);
   if (root === "telegramProjectionOutbox" && id === "event")
-    return store.readEventTelegramProjectionOutbox(parts[0]);
+    return store.readEventTelegramProjectionOutbox(parts[0]!);
   if (root === "eventTelegramProjectionGenerations")
     return (await store.readEventTelegramProjectionState(id))?.generation || 0;
   if (root === "eventTelegramProjections")
@@ -115,6 +120,7 @@ export async function transactEventRepositoryFixture(
   signal?: AbortSignal,
 ) {
   const [root, id, ...parts] = path.split("/");
+  if (!id) throw new Error("event-d1-query-unsupported");
   if (
     root === "eventLocks" ||
     root === "eventTelegramProjectionLocks" ||
@@ -128,7 +134,7 @@ export async function transactEventRepositoryFixture(
             : root === "eventTelegramProjectionLocks"
               ? "telegram-projection"
               : "profile-game-projection",
-        id: root === "profileGameProjectionLocks" ? parts[0] : id,
+        id: root === "profileGameProjectionLocks" ? parts[0]! : id,
       },
       updater as Parameters<EventStore["transactEventLease"]>[1],
       signal,
@@ -136,14 +142,14 @@ export async function transactEventRepositoryFixture(
   if (root === "eventPrizeSelections" && parts.length === 1)
     return store.transactEventPrizeSelection(
       id,
-      parts[0],
+      parts[0]!,
       updater as Parameters<EventStore["transactEventPrizeSelection"]>[2],
       signal,
     );
   if (root === "profileEventPrizes" && parts.length === 1)
     return store.transactProfileEventPrize(
       id,
-      parts[0],
+      parts[0]!,
       updater as Parameters<EventStore["transactProfileEventPrize"]>[2],
       signal,
     );

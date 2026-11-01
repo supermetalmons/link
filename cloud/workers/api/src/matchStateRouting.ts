@@ -1,6 +1,6 @@
 import { assertDurableMatchState } from "./matchStateAuthority.ts";
 import {
-  readLegacyMatchStates,
+  readArchivedMatchStates,
   readMatchStateControl,
   readMatchStateRouteSnapshot,
   type MatchStateControl,
@@ -120,7 +120,7 @@ export async function readMatchStateRecord(
   request: ReadMatchSnapshotRequest,
   options: { signal?: AbortSignal; fetcher?: typeof fetch } = {},
 ): Promise<RetainedMatchValue> {
-  return (await readMatchStateRecords(env, [request], options))[0];
+  return (await readMatchStateRecords(env, [request], options))[0]!;
 }
 
 async function withReadCancellation<T>(
@@ -176,7 +176,7 @@ export async function readMatchStateRecords(
         if (route.epoch !== control.epoch)
           throw new Error("match-state-route-epoch-conflict");
         const input = inputs[index];
-        if (route.kind === "legacy") {
+        if (route.kind === "archive") {
           legacy.push({ input, index });
         } else {
           if (!route.inviteId) throw new Error("match-state-route-invalid");
@@ -187,13 +187,13 @@ export async function readMatchStateRecords(
       }
       if (legacy.length > 0) {
         reads.push(async () => {
-          const records = await readLegacyMatchStates(
+          const records = await readArchivedMatchStates(
             env.PROFILE_GAMES_DB,
             legacy.map(({ input }) => input),
             signal,
           );
           for (const [offset, entry] of legacy.entries())
-            results[entry.index] = records[offset];
+            results[entry.index] = records[offset]!;
         });
       }
       for (const [inviteId, entries] of rooms) {
@@ -207,7 +207,7 @@ export async function readMatchStateRecords(
             (value) => decodeRoutedMatchRecords(value, entries.length),
           );
           for (const [offset, entry] of entries.entries()) {
-            const record = records[offset];
+            const record = records[offset]!;
             results[entry.index] = record;
           }
         });
@@ -215,6 +215,6 @@ export async function readMatchStateRecords(
       await runMatchStateReads(reads, signal);
       return results;
     },
-    { signal },
+    { ...(signal ? { signal } : {}) },
   );
 }

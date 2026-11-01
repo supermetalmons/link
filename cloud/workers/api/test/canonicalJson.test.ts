@@ -102,7 +102,7 @@ for (const { name, canonical, digest, error } of codecs) {
     ]) {
       for (const input of [value, { nested: [value] }]) {
         assert.throws(() => canonical(input), error);
-        await assert.rejects(digest(input), error);
+        await assert.rejects(async () => digest(input), error);
       }
     }
   });

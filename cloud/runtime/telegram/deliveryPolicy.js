@@ -17,15 +17,6 @@ const TELEGRAM_SAFE_RETRY_WINDOW_MS = 10 * 60 * 1000;
 exports.TELEGRAM_SAFE_RETRY_WINDOW_MS = TELEGRAM_SAFE_RETRY_WINDOW_MS;
 const TELEGRAM_SAFE_RETRY_MAX_DELAY_MS = 60_000;
 exports.TELEGRAM_SAFE_RETRY_MAX_DELAY_MS = TELEGRAM_SAFE_RETRY_MAX_DELAY_MS;
-const asObject = (value) =>
-  value && typeof value === "object" && !Array.isArray(value) ? value : {};
-const omitKeys = (value, keys) => {
-  const output = { ...asObject(value) };
-  for (const key of keys) {
-    delete output[key];
-  }
-  return output;
-};
 const normalizeString = (value) =>
   typeof value === "string" && value.trim() !== "" ? value.trim() : "";
 const createTelegramLocalRetryBarrier = (initialRetryNotBeforeMs = 0) => {
@@ -66,8 +57,7 @@ const normalizeRetrySequence = (value) =>
     ? value
     : 0;
 exports.normalizeRetrySequence = normalizeRetrySequence;
-const resolveRetryDeadlineAtMs = (value) => {
-  const state = asObject(value);
+const resolveRetryDeadlineAtMs = (state) => {
   const retryDeadlineAtMs = normalizeTimestamp(state.retryDeadlineAtMs);
   if (retryDeadlineAtMs) {
     return retryDeadlineAtMs;
@@ -79,7 +69,7 @@ const resolveRetryDeadlineAtMs = (value) => {
 };
 exports.resolveRetryDeadlineAtMs = resolveRetryDeadlineAtMs;
 const buildSafeRetryState = ({ current, result, nowMs }) => {
-  const value = asObject(current);
+  const value = current;
   const retryStartedAtMs =
     normalizeTimestamp(value.retryStartedAtMs) ||
     normalizeTimestamp(value.apiGateStartedAtMs) ||
@@ -120,13 +110,17 @@ const buildRateLimitBarrierAtMs = ({ result, retryState, nowMs }) => {
   );
 };
 exports.buildRateLimitBarrierAtMs = buildRateLimitBarrierAtMs;
-const omitRetryState = (value) =>
-  omitKeys(value, [
+const omitRetryState = (value) => {
+  const output = { ...value };
+  for (const key of [
     "retryStartedAtMs",
     "retryDeadlineAtMs",
     "retryAtMs",
     "retrySequence",
-  ]);
+  ])
+    Reflect.deleteProperty(output, key);
+  return output;
+};
 exports.omitRetryState = omitRetryState;
 const buildErrorState = (result, nowMs) => {
   const error = {

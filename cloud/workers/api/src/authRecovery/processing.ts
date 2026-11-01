@@ -62,7 +62,7 @@ function authRecoveryLogError(error: unknown): unknown {
 
 export type AuthRecoveryDependencies = {
   catchupStore?: ProfileLinkCatchupStore;
-  buildPrizeCopy?: PrizeRecoveryOptions["buildPrizeCopy"];
+  buildPrizeCopy?: NonNullable<PrizeRecoveryOptions["buildPrizeCopy"]>;
   d1?: D1Database;
   logger?: Pick<Console, "error" | "info">;
   now?: () => number;
@@ -185,7 +185,7 @@ function createCanonicalAuthRecoveryService(
         ? "done"
         : "deferred";
     }
-    const sourceProfileId = job.sourceProfileIds[0];
+    const sourceProfileId = job.sourceProfileIds[0]!;
     let progressed = false;
     try {
       if (job.sourcePhase === "prizes") {

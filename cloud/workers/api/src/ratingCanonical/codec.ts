@@ -1,12 +1,12 @@
 import {
-  retainCanonicalRatingPayload,
-  type CanonicalRatingPayloadDocument,
-} from "../profileCanonical/retainedRecords.ts";
-import type { canonicalRatingProjectionFields } from "../profileCanonical/accounting.ts";
+  createEmptyRatingPayload,
+  parseCanonicalRatingPayload,
+} from "../profileCanonical/contracts.ts";
+import type { canonicalRatingProjectionFields } from "../profileCanonical/accountingRecords.ts";
 import {
-  isHistoricalMatchPair,
-  type HistoricalMatchPair,
-} from "@mons/shared/game-sessions";
+  parseCanonicalRatingUpdateRow,
+  ratingWriteRow,
+} from "../profileCanonical/accountingRecords.ts";
 import type {
   CanonicalRatingUpdateSnapshot,
   CanonicalRatingUpdateValue,
@@ -17,42 +17,7 @@ import type {
   RatingUpdateData,
   RatingCompletionPatch,
   RatingLeaseInput,
-} from "../ratingContracts.ts";
-
-function payloadFields(
-  value: CanonicalRatingPayloadDocument,
-): Record<string, unknown> {
-  const retained: unknown = value;
-  return retained as Record<string, unknown>;
-}
-
-function string(value: unknown): string {
-  return typeof value === "string" ? value.trim() : "";
-}
-
-export function number(value: unknown): number {
-  return typeof value === "number" && Number.isFinite(value) ? value : 0;
-}
-
-function nullableNumber(value: unknown): number | null {
-  return typeof value === "number" && Number.isFinite(value) ? value : null;
-}
-
-function nullableProfileId(value: unknown): string | null {
-  return string(value) || null;
-}
-
-function projectionState(value: unknown): "dead" | "done" | "pending" | null {
-  return value === "dead" || value === "done" || value === "pending"
-    ? value
-    : null;
-}
-
-function projectionVersion(value: unknown): number | null {
-  return Number.isSafeInteger(value) && Number(value) >= 0
-    ? Number(value)
-    : null;
-}
+} from "../ratingStateContracts.ts";
 
 export function ratingProfileFromSnapshot(
   value: {
@@ -63,185 +28,165 @@ export function ratingProfileFromSnapshot(
   } | null,
 ): RatingProfile | null {
   if (!value) return null;
-  const snapshot = value.profile;
-  const profile = snapshot.profile;
+  const snapshot = value.profile,
+    profile = snapshot.profile;
   return {
-    aura: profile.aura || "",
+    aura: profile.aura,
     emoji: snapshot.gameplayEmoji,
-    eth: profile.eth || "",
+    eth: profile.eth ?? "",
+    sol: profile.sol ?? "",
+    username: profile.username ?? "",
     nonce: snapshot.sortPresence.nonce ? (snapshot.sortValues.nonce ?? 0) : -1,
     profileId: profile.id,
     rating:
       snapshot.sortPresence.rating && snapshot.sortValues.rating !== null
         ? snapshot.sortValues.rating
         : 1500,
-    sol: profile.sol || "",
     totalManaPoints: profile.totalManaPoints,
-    username: profile.username || "",
   };
 }
 
 export function ratingData(
   snapshot: CanonicalRatingUpdateSnapshot,
 ): RatingUpdateData {
-  const fields = payloadFields(snapshot.payload);
-  const historicalMatchArchiveVersion = Object.hasOwn(
-    fields,
-    "historicalMatchArchiveVersion",
-  )
-    ? typeof fields.historicalMatchArchiveVersion === "number" &&
-      Number.isSafeInteger(fields.historicalMatchArchiveVersion)
-      ? fields.historicalMatchArchiveVersion
-      : -1
-    : undefined;
-  const historicalMatchPair: HistoricalMatchPair | undefined =
-    isHistoricalMatchPair(fields.historicalMatchPair)
-      ? fields.historicalMatchPair
-      : undefined;
+  const fields = snapshot.payload;
   return {
-    completedAtMs: number(fields.completedAtMs),
-    eventId: string(fields.eventId),
-    eventOwned: fields.eventOwned === true,
-    eventProgressReason: string(fields.eventProgressReason),
-    eventProgressState: string(fields.eventProgressState),
-    eventProgressUpdatedAtMs: number(fields.eventProgressUpdatedAtMs),
-    eventProgressVersion: number(fields.eventProgressVersion),
-    ...(historicalMatchArchiveVersion === undefined
-      ? {}
-      : { historicalMatchArchiveVersion }),
-    inviteId: string(fields.inviteId) || snapshot.inviteId,
-    ...(historicalMatchPair ? { historicalMatchPair } : {}),
-    isEventMatch: fields.isEventMatch === true,
+    completedAtMs: snapshot.completedAtMs,
+    eventId: fields.eventId,
+    eventOwned: fields.eventOwned,
+    eventProgressReason: fields.eventProgressReason,
+    eventProgressState: snapshot.eventProgressState,
+    eventProgressUpdatedAtMs: snapshot.eventProgressUpdatedAtMs,
+    eventProgressVersion: snapshot.eventProgressVersion,
+    historicalMatchArchiveVersion:
+      fields.historicalMatchPair === null ? null : 1,
+    inviteId: snapshot.inviteId,
+    historicalMatchPair: fields.historicalMatchPair,
+    isEventMatch: fields.isEventMatch,
     leaseExpiresAtMs: snapshot.leaseExpiresAtMs,
-    matchId: string(fields.matchId) || snapshot.matchId,
-    opponentId: string(fields.opponentId) || snapshot.opponentId,
-    ...(typeof fields.opponentManaPoints === "number" &&
-    Number.isFinite(fields.opponentManaPoints)
-      ? { opponentManaPoints: fields.opponentManaPoints }
-      : {}),
-    opponentProfileId:
-      string(fields.opponentProfileId) || snapshot.opponentProfileId || "",
-    ownerToken: string(fields.ownerToken) || snapshot.ownerToken,
-    playerId: string(fields.playerId) || snapshot.playerId,
-    ...(typeof fields.playerManaPoints === "number" &&
-    Number.isFinite(fields.playerManaPoints)
-      ? { playerManaPoints: fields.playerManaPoints }
-      : {}),
-    playerProfileId:
-      string(fields.playerProfileId) || snapshot.playerProfileId || "",
-    profileGameProjectionReason: string(fields.profileGameProjectionReason),
-    profileGameProjectionState:
-      string(fields.profileGameProjectionState) ||
-      snapshot.profileGameProjectionState ||
-      "",
-    profileGameProjectionUpdatedAtMs:
-      snapshot.profileGameProjectionUpdatedAtMs || 0,
-    profileGameProjectionVersion: snapshot.profileGameProjectionVersion || 0,
-    shouldUpdateFebruaryChallenge:
-      fields.shouldUpdateFebruaryChallenge === true,
+    matchId: snapshot.matchId,
+    opponentId: snapshot.opponentId,
+    opponentManaPoints: fields.opponentManaPoints,
+    opponentProfileId: snapshot.opponentProfileId,
+    ownerToken: snapshot.ownerToken,
+    playerId: snapshot.playerId,
+    playerManaPoints: fields.playerManaPoints,
+    playerProfileId: snapshot.playerProfileId,
+    profileGameProjectionReason: fields.profileGameProjectionReason,
+    profileGameProjectionState: snapshot.profileGameProjectionState,
+    profileGameProjectionUpdatedAtMs: snapshot.profileGameProjectionUpdatedAtMs,
+    profileGameProjectionVersion: snapshot.profileGameProjectionVersion,
+    shouldUpdateFebruaryChallenge: fields.shouldUpdateFebruaryChallenge,
     startedAtMs: snapshot.startedAtMs,
     status: snapshot.status,
-    telegramDeliveryVersion:
-      number(fields.telegramDeliveryVersion) > 0
-        ? number(fields.telegramDeliveryVersion)
-        : null,
-    telegramProjectionReason: string(fields.telegramProjectionReason),
-    telegramProjectionState:
-      string(fields.telegramProjectionState) ||
-      snapshot.telegramProjectionState ||
-      "",
-    telegramProjectionUpdatedAtMs: snapshot.telegramProjectionUpdatedAtMs || 0,
-    telegramProjectionVersion: snapshot.telegramProjectionVersion || 0,
-    updateRatingMessage: string(fields.updateRatingMessage),
+    telegramDeliveryVersion: fields.telegramDeliveryVersion,
+    telegramProjectionReason: fields.telegramProjectionReason,
+    telegramProjectionState: snapshot.telegramProjectionState,
+    telegramProjectionUpdatedAtMs: snapshot.telegramProjectionUpdatedAtMs,
+    telegramProjectionVersion: snapshot.telegramProjectionVersion,
+    updateRatingMessage: fields.updateRatingMessage,
   };
 }
 
-export function ratingValue(
-  operationId: string,
-  document: CanonicalRatingPayloadDocument,
+export function validateRatingValue(
+  value: CanonicalRatingUpdateValue,
 ): CanonicalRatingUpdateValue {
-  const fields = payloadFields(document);
-  const status = fields.status === "done" ? "done" : "processing";
-  const startedAtMs = number(fields.startedAtMs);
-  const completedAtMs =
-    status === "done" ? nullableNumber(fields.completedAtMs) : null;
-  if (status === "done" && completedAtMs === null) {
-    throw new TypeError("invalid-canonical-rating-completion");
-  }
-  return {
-    operationId,
-    payload: document,
-    status,
-    inviteId: string(fields.inviteId),
-    matchId: string(fields.matchId),
-    playerId: string(fields.playerId),
-    opponentId: string(fields.opponentId),
-    playerProfileId: nullableProfileId(fields.playerProfileId),
-    opponentProfileId: nullableProfileId(fields.opponentProfileId),
-    ownerUid: string(fields.ownerUid),
-    ownerToken: string(fields.ownerToken),
-    startedAtMs,
-    updatedAtMs: number(fields.updatedAtMs),
-    leaseExpiresAtMs: number(fields.leaseExpiresAtMs),
-    completedAtMs,
-    telegramProjectionState: projectionState(fields.telegramProjectionState),
-    telegramProjectionUpdatedAtMs: nullableNumber(
-      fields.telegramProjectionUpdatedAtMs,
-    ),
-    telegramProjectionVersion: projectionVersion(
-      fields.telegramProjectionVersion,
-    ),
-    profileGameProjectionState: projectionState(
-      fields.profileGameProjectionState,
-    ),
-    profileGameProjectionUpdatedAtMs: nullableNumber(
-      fields.profileGameProjectionUpdatedAtMs,
-    ),
-    profileGameProjectionVersion: projectionVersion(
-      fields.profileGameProjectionVersion,
-    ),
-    eventProgressState: projectionState(fields.eventProgressState),
-    eventProgressUpdatedAtMs: nullableNumber(fields.eventProgressUpdatedAtMs),
-    eventProgressVersion: projectionVersion(fields.eventProgressVersion),
-  };
-}
-
-function mergedRatingFields(
-  snapshot: CanonicalRatingUpdateSnapshot,
-  patch: RatingCompletionPatch | RatingProjectionPatch,
-): CanonicalRatingUpdateValue {
-  return ratingValue(
-    snapshot.operationId,
-    retainCanonicalRatingPayload({
-      ...snapshot.payload,
-      updatedAtMs: snapshot.updatedAtMs,
-      ...patch,
-    }),
-  );
+  const { revision: _revision, ...validated } = parseCanonicalRatingUpdateRow({
+    ...ratingWriteRow(value),
+    revision: 1,
+  });
+  return validated;
 }
 
 export function mergedRatingValue(
   snapshot: CanonicalRatingUpdateSnapshot,
   patch: RatingCompletionPatch,
 ): CanonicalRatingUpdateValue {
-  return mergedRatingFields(snapshot, patch);
+  if (snapshot.status !== "processing")
+    throw new TypeError("invalid-canonical-rating-completion");
+  const prior = snapshot.payload;
+  const value: CanonicalRatingUpdateValue = {
+    ...snapshot,
+    status: "done",
+    completedAtMs: patch.completedAtMs,
+    blockedAtMs: null,
+    blockReason: null,
+    updatedAtMs: patch.updatedAtMs,
+    leaseExpiresAtMs: patch.leaseExpiresAtMs,
+    inviteId: patch.inviteId ?? snapshot.inviteId,
+    matchId: patch.matchId ?? snapshot.matchId,
+    playerId: patch.playerId ?? snapshot.playerId,
+    opponentId: patch.opponentId ?? snapshot.opponentId,
+    playerProfileId:
+      patch.playerProfileId === undefined
+        ? snapshot.playerProfileId
+        : patch.playerProfileId || null,
+    opponentProfileId:
+      patch.opponentProfileId === undefined
+        ? snapshot.opponentProfileId
+        : patch.opponentProfileId || null,
+    profileGameProjectionState: patch.profileGameProjectionState ?? null,
+    profileGameProjectionUpdatedAtMs:
+      patch.profileGameProjectionUpdatedAtMs ?? null,
+    profileGameProjectionVersion: patch.profileGameProjectionVersion ?? null,
+    telegramProjectionState: patch.telegramProjectionState ?? null,
+    telegramProjectionUpdatedAtMs: patch.telegramProjectionUpdatedAtMs ?? null,
+    telegramProjectionVersion: patch.telegramProjectionVersion ?? null,
+    eventProgressState: patch.eventProgressState ?? null,
+    eventProgressUpdatedAtMs: patch.eventProgressUpdatedAtMs ?? null,
+    eventProgressVersion: patch.eventProgressVersion ?? null,
+    payload: parseCanonicalRatingPayload({
+      schemaVersion: 1,
+      eventId: patch.eventId === undefined ? prior.eventId : patch.eventId,
+      eventOwned: patch.eventOwned ?? prior.eventOwned,
+      isEventMatch: patch.isEventMatch ?? prior.isEventMatch,
+      result: patch.result ?? prior.result,
+      canUpdateRatings: patch.canUpdateRatings ?? prior.canUpdateRatings,
+      didApplyRatingDelta:
+        patch.didApplyRatingDelta ?? prior.didApplyRatingDelta,
+      winnerDisplayName: patch.winnerDisplayName ?? prior.winnerDisplayName,
+      loserDisplayName: patch.loserDisplayName ?? prior.loserDisplayName,
+      winnerNewRating:
+        patch.winnerNewRating === undefined
+          ? prior.winnerNewRating
+          : patch.winnerNewRating,
+      loserNewRating:
+        patch.loserNewRating === undefined
+          ? prior.loserNewRating
+          : patch.loserNewRating,
+      playerManaPoints: patch.playerManaPoints ?? prior.playerManaPoints,
+      opponentManaPoints: patch.opponentManaPoints ?? prior.opponentManaPoints,
+      shouldUpdateFebruaryChallenge:
+        patch.shouldUpdateFebruaryChallenge ??
+        prior.shouldUpdateFebruaryChallenge,
+      updateRatingMessage:
+        patch.updateRatingMessage ?? prior.updateRatingMessage,
+      telegramDeliveryVersion:
+        patch.telegramDeliveryVersion === undefined
+          ? prior.telegramDeliveryVersion
+          : patch.telegramDeliveryVersion,
+      historicalMatchPair:
+        patch.historicalMatchPair ?? prior.historicalMatchPair,
+      profileGameProjectionReason: patch.profileGameProjectionReason ?? null,
+      telegramProjectionReason: patch.telegramProjectionReason ?? null,
+      eventProgressReason: patch.eventProgressReason ?? null,
+    }),
+  };
+  return validateRatingValue(value);
 }
 
 type RatingProjectionFields = ReturnType<
   typeof canonicalRatingProjectionFields
 >;
-type RatingProjectionPatch = Partial<
-  Record<RatingProjectionFields["state"], "dead" | "done">
-> &
-  Partial<Record<RatingProjectionFields["updated"], number>> &
-  Partial<Record<RatingProjectionFields["reason"], string | null>>;
 
 export function claimedRatingProjectionValue(
   snapshot: CanonicalRatingUpdateSnapshot,
   fields: RatingProjectionFields,
   claimedAtMs: number,
 ): CanonicalRatingUpdateValue {
-  return mergedRatingFields(snapshot, { [fields.updated]: claimedAtMs });
+  if (snapshot.status !== "done" || snapshot[fields.state] !== "pending")
+    throw new TypeError("rating-projection-not-pending");
+  return validateRatingValue({ ...snapshot, [fields.updated]: claimedAtMs });
 }
 
 export function markedRatingProjectionValue(
@@ -251,43 +196,49 @@ export function markedRatingProjectionValue(
   updatedAtMs: number,
   reason: string | undefined,
 ): CanonicalRatingUpdateValue {
-  return mergedRatingFields(snapshot, {
+  if (snapshot.status !== "done" || snapshot[fields.state] === "cancelled")
+    throw new TypeError("rating-projection-unavailable");
+  return validateRatingValue({
+    ...snapshot,
     [fields.state]: state,
     [fields.updated]: updatedAtMs,
-    [fields.reason]: reason?.trim() || null,
+    payload: { ...snapshot.payload, [fields.reason]: reason ?? null },
   });
 }
 
-export type RatingLeasePayloadWrite = {
-  inviteId: string;
-  matchId: string;
-  playerId: string;
-  opponentId: string;
-  ownerUid: string;
-  ownerToken: string;
-  status: "processing";
-  startedAtMs: number;
-  updatedAtMs: number;
-  leaseExpiresAtMs: number;
-};
-
-export function ratingLeasePayload(
+export function ratingLeaseValue(
   snapshot: CanonicalRatingUpdateSnapshot | null,
   input: RatingLeaseInput,
-  data: RatingUpdateData | null,
   attemptNowMs: number,
-): CanonicalRatingPayloadDocument {
-  return retainCanonicalRatingPayload({
-    ...(snapshot?.payload || {}),
+): CanonicalRatingUpdateValue {
+  if (snapshot !== null && snapshot.status !== "processing")
+    throw new TypeError("rating-operation-not-retryable");
+  return validateRatingValue({
+    operationId: `${input.inviteId}__${input.matchId}`,
     inviteId: input.inviteId,
     matchId: input.matchId,
     playerId: input.playerId,
     opponentId: input.opponentId,
+    playerProfileId: snapshot?.playerProfileId ?? null,
+    opponentProfileId: snapshot?.opponentProfileId ?? null,
     ownerUid: input.ownerUid,
     ownerToken: input.ownerToken,
     status: "processing",
-    startedAtMs: data?.startedAtMs || attemptNowMs,
+    startedAtMs: snapshot?.startedAtMs ?? attemptNowMs,
     updatedAtMs: attemptNowMs,
     leaseExpiresAtMs: attemptNowMs + input.leaseMs,
-  } satisfies RatingLeasePayloadWrite);
+    completedAtMs: null,
+    blockedAtMs: null,
+    blockReason: null,
+    payload: snapshot?.payload ?? createEmptyRatingPayload(),
+    profileGameProjectionState: null,
+    profileGameProjectionUpdatedAtMs: null,
+    profileGameProjectionVersion: null,
+    telegramProjectionState: null,
+    telegramProjectionUpdatedAtMs: null,
+    telegramProjectionVersion: null,
+    eventProgressState: null,
+    eventProgressUpdatedAtMs: null,
+    eventProgressVersion: null,
+  });
 }

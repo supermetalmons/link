@@ -1,16 +1,12 @@
 import type { EventProgressDocument } from "../../../../runtime/eventProgressRecords.js";
 import type { EventProjectionOutboxDocument } from "../../../../runtime/eventProjectionOutboxRecords.js";
-import type {
-  InviteSourceMutation,
-  RetainedInviteMutationBatch,
-} from "../inviteSourceD1.ts";
-import { STATE_EFFECTS_FIELD } from "../stateCompatibility.ts";
 import type { EventTelegramProjectionStateDocument } from "../../../../runtime/telegram/eventProjectionRecords.js";
 import type {
   EventJsonRecord,
   EventPrizeAssignmentRecord,
   EventSnapshot as DomainEventSnapshot,
 } from "../../../../runtime/eventReads.js";
+import type { EventRecordFields } from "@mons/shared/events";
 
 export const MAX_EVENT_TRANSACTION_ATTEMPTS = 12;
 
@@ -40,44 +36,13 @@ export type EventLeaseGuard = {
   ownerUid: string;
 };
 
-declare const eventIntentUpdates: unique symbol;
-export type EventIntentUpdates = { readonly [eventIntentUpdates]: true };
-declare const eventIntentEffects: unique symbol;
-export type EventIntentEffects = { readonly [eventIntentEffects]: true };
-declare const eventIntentEnvelope: unique symbol;
-type EventTransitionIntentBase = {
-  readonly [eventIntentEnvelope]: true;
-  canonicalUpdates: EventIntentUpdates;
-  createdAtMs: number;
-  eventId: string;
-  expectedRevision: number;
-  [STATE_EFFECTS_FIELD]: EventIntentEffects;
-  transitionId: string;
-  updatedAtMs: number;
-};
-
-export type EventInviteSourceMutation = InviteSourceMutation;
-export type EventTransitionDraftInput = {
-  schemaVersion: 1;
-  canonicalUpdates: EventIntentUpdates;
-  createdAtMs: number;
-  eventId: string;
-  expectedRevision: number;
-  [STATE_EFFECTS_FIELD]: EventIntentEffects;
-  transitionId: string;
-  updatedAtMs: number;
-};
-
-export type EventTransitionIntent = EventTransitionIntentBase &
-  (
-    | { schemaVersion: 1 }
-    | {
-        schemaVersion: 2;
-        sourceEpoch: number;
-        payloadDigest: string;
-        inviteMutations: RetainedInviteMutationBatch;
-      }
-  );
+export type {
+  EventIntentUpdates,
+  EventIntentEffects,
+  EventInviteSourceMutation,
+  EventTransitionDraftInput,
+  EventTransitionIntent,
+} from "../../../../runtime/eventTransitionRecords.js";
 
 export class EventD1Failure extends Error {
   constructor(message = "event-d1-unavailable", options?: ErrorOptions) {
@@ -133,7 +98,7 @@ export type DecodedEventRow = {
 
 export type EventMutationState = {
   current: EventJsonRecord | null;
-  next: EventJsonRecord | null;
+  next: EventRecordFields | null;
   originalSelections: Readonly<Record<string, string>> | null;
   pendingTransitionId: string | null;
   revision: number;

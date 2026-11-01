@@ -159,8 +159,8 @@ describe("batched automatch coordination", () => {
             .bind(1),
         ]);
         nativeResults.push(...results);
-        expect(results[0].results).toEqual([{ state: "active" }]);
-        expect(results[1].results).toEqual([{ epoch: 1 }]);
+        expect(results[0]!.results).toEqual([{ state: "active" }]);
+        expect(results[1]!.results).toEqual([{ epoch: 1 }]);
         expect(
           await session
             .prepare(
@@ -178,7 +178,7 @@ describe("batched automatch coordination", () => {
       'd1;desc="2 calls"',
     );
     expect(records).toHaveLength(1);
-    expect(records[0].d1).toMatchObject({
+    expect(records[0]!.d1).toMatchObject({
       calls: 2,
       failedCalls: 0,
       metadataResults: 2,
@@ -197,8 +197,8 @@ describe("batched automatch coordination", () => {
         0,
       ),
     });
-    expect(records[0].databases).toMatchObject({
-      PROFILE_GAMES_DB: records[0].d1,
+    expect(records[0]!.databases).toMatchObject({
+      PROFILE_GAMES_DB: records[0]!.d1,
     });
   });
 
@@ -475,7 +475,7 @@ describe("batched automatch coordination", () => {
       .all();
     expect(automatch.results).toHaveLength(1);
     expect(invite.results).toEqual(automatch.results);
-    expect(automatch.results[0]).toMatchObject({
+    expect(automatch.results[0]!).toMatchObject({
       kind: "uncertain-retained",
       created_at_ms: 10,
     });

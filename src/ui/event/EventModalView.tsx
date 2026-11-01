@@ -707,7 +707,7 @@ const EventModal: React.FC = () => {
           : null;
       } else {
         for (let i = 0; i < event.changedTouches.length; i++) {
-          const touch = event.changedTouches[i];
+          const touch = event.changedTouches[i]!;
           if (touch.identifier === pendingTouchId) {
             matchedTouchPoint = {
               clientX: touch.clientX,
@@ -744,7 +744,7 @@ const EventModal: React.FC = () => {
         return;
       }
       for (let i = 0; i < event.changedTouches.length; i++) {
-        if (event.changedTouches[i].identifier === pendingTouchId) {
+        if (event.changedTouches[i]!.identifier === pendingTouchId) {
           pendingBackdropTouchDismissTouchIdRef.current = null;
           break;
         }

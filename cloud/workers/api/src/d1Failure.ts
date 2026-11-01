@@ -28,6 +28,7 @@ export function classifyD1Failure(error: unknown): D1FailureKind {
       case "NOT NULL constraint failed: profile_transaction_guards.singleton":
         return "profile-conflict";
       case "UNIQUE constraint failed: profile_records.username_key":
+      case "UNIQUE constraint failed: profile_records_canonical.username_key":
         return "username-conflict";
       case "CHECK constraint failed: automatch_revision_guard":
         return "automatch-conflict";

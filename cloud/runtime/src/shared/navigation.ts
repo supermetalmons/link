@@ -1,3 +1,8 @@
+import {
+  isProfileGameProjectionRecord,
+  PROJECTION_SORT_BUCKETS,
+} from "./profile-game-projections.js";
+import { isAura, isEmojiId, type Aura, type EmojiId } from "./appearance.js";
 import type { ReadGameBootstrapResponse } from "./game-bootstrap.js";
 import { isAutoInviteId } from "./ids.js";
 import {
@@ -28,7 +33,7 @@ export interface NavigationGameItem extends NavigationOrderingItem {
   guestLoginId: string | null;
   opponentProfileId: string | null;
   opponentName: string | null;
-  opponentEmoji: number | null;
+  opponentEmoji: EmojiId | null;
   automatchStateHint: AutomatchStateHint | null;
   isPendingAutomatch: boolean;
   isOptimistic?: boolean;
@@ -37,8 +42,8 @@ export interface NavigationGameItem extends NavigationOrderingItem {
 export interface EventNavigationPreviewParticipant {
   profileId: string | null;
   displayName: string | null;
-  emojiId: number | null;
-  aura: string | null;
+  emojiId: EmojiId | null;
+  aura: Aura | null;
 }
 
 export interface NavigationEventItem extends NavigationOrderingItem {
@@ -84,8 +89,8 @@ export interface AutomatchStateHintInput {
 }
 
 export interface StartAutomatchRequest {
-  emojiId: number;
-  aura: string;
+  emojiId: EmojiId;
+  aura: Aura;
 }
 
 export type StartAutomatchResponse =
@@ -130,15 +135,7 @@ export interface RemoveNavigationGameResponse {
 const AUTOMATCH_API_MAX_RESPONSE_BYTES: number =
   GAME_BOOTSTRAP_MAX_RESPONSE_BYTES + 1024;
 
-const NAVIGATION_SORT_BUCKETS: Readonly<
-  Record<NavigationStatus, 20 | 30 | 40 | 50>
-> = Object.freeze({
-  pending: 20,
-  waiting: 30,
-  active: 40,
-  ended: 50,
-  dismissed: 50,
-});
+const NAVIGATION_SORT_BUCKETS = PROJECTION_SORT_BUCKETS;
 
 const normalizeStrictAutomatchStateHint = (
   value: unknown,
@@ -229,26 +226,6 @@ const exactKeys = (value: object, expected: readonly string[]): boolean => {
   );
 };
 
-const readTimestampMillis = (value: unknown) => {
-  if (typeof value === "number" && Number.isFinite(value)) {
-    return Math.floor(value);
-  }
-  return 0;
-};
-
-const normalizeStringOrNull = (value: unknown) =>
-  typeof value === "string" && value !== "" ? value : null;
-
-const normalizeFiniteNumber = (value: unknown, fallback = 0) => {
-  const parsed =
-    typeof value === "number"
-      ? value
-      : typeof value === "string" && value !== ""
-        ? Number(value)
-        : NaN;
-  return Number.isFinite(parsed) ? Math.floor(parsed) : fallback;
-};
-
 const normalizeNavigationStatus = (status: unknown) =>
   status === "pending" ||
   status === "waiting" ||
@@ -258,96 +235,44 @@ const normalizeNavigationStatus = (status: unknown) =>
     ? status
     : "waiting";
 
-const mapProjectionParticipantPreview = (value: unknown) => {
-  if (!Array.isArray(value)) return [];
-  return value.reduce((participants, candidate) => {
-    if (!isRecord(candidate)) return participants;
-    const emojiId = normalizeFiniteNumber(candidate.emojiId, NaN);
-    participants.push({
-      profileId: normalizeStringOrNull(candidate.profileId),
-      displayName: normalizeStringOrNull(candidate.displayName),
-      emojiId: Number.isFinite(emojiId) ? emojiId : null,
-      aura: normalizeStringOrNull(candidate.aura),
-    });
-    return participants;
-  }, []);
-};
-
 const mapProfileGameProjection = (
-  rawData: unknown,
-  fallbackProjectionId: string,
+  value: unknown,
+  projectionId: string,
 ): NavigationItem | null => {
-  if (!isRecord(rawData)) return null;
-  const entityType = rawData.entityType === "event" ? "event" : "game";
-  if (entityType === "event") {
-    const eventId = normalizeStringOrNull(rawData.eventId);
-    if (!eventId) return null;
-    const rawStatus = normalizeNavigationStatus(rawData.status);
-    if (rawStatus === "pending") return null;
-    const participantPreview = mapProjectionParticipantPreview(
-      rawData.participantPreview,
-    );
+  if (!isProfileGameProjectionRecord(value)) return null;
+  if (value.entityType === "event") {
+    if (projectionId !== value.id) return null;
     return {
-      id:
-        typeof rawData.id === "string" && rawData.id !== ""
-          ? rawData.id
-          : `event_${eventId}`,
+      id: value.id,
       entityType: "event",
-      eventId,
-      status: rawStatus,
-      sortBucket: getNavigationSortBucket(rawStatus),
-      listSortAtMs: readTimestampMillis(rawData.listSortAt) || Date.now(),
-      startAtMs: readTimestampMillis(rawData.startAt) || null,
-      updatedAtMs: readTimestampMillis(rawData.updatedAt) || null,
-      endedAtMs: readTimestampMillis(rawData.endedAt) || null,
-      participantCount: normalizeFiniteNumber(
-        rawData.participantCount,
-        participantPreview.length,
-      ),
-      participantPreview,
-      winnerDisplayName: normalizeStringOrNull(rawData.winnerDisplayName),
+      eventId: value.eventId,
+      status: value.status,
+      sortBucket: value.sortBucket,
+      listSortAtMs: value.listSortAt,
+      startAtMs: value.startAt,
+      updatedAtMs: value.updatedAt,
+      endedAtMs: value.endedAt,
+      participantCount: value.participantCount,
+      participantPreview: value.participantPreview,
+      winnerDisplayName: value.winnerDisplayName,
     };
   }
-
-  const inviteId =
-    typeof rawData.inviteId === "string" && rawData.inviteId !== ""
-      ? rawData.inviteId
-      : fallbackProjectionId;
-  if (!inviteId) return null;
-  const rawStatus = normalizeNavigationStatus(rawData.status);
-  const status = rawStatus === "dismissed" ? "ended" : rawStatus;
-  const rawOpponentEmoji = rawData.opponentEmoji ?? rawData.opponentEmojiId;
-  const rawOpponentName = rawData.opponentName ?? rawData.opponentDisplayName;
-  const opponentEmoji = normalizeFiniteNumber(rawOpponentEmoji, NaN);
-  const normalizedOpponentEmoji = Number.isFinite(opponentEmoji)
-    ? opponentEmoji
-    : null;
-  if (
-    (status === "active" || status === "ended") &&
-    normalizedOpponentEmoji === null
-  ) {
-    return null;
-  }
+  if (projectionId !== value.inviteId) return null;
   return {
-    id: inviteId,
+    id: value.inviteId,
     entityType: "game",
-    inviteId,
-    kind: rawData.kind === "auto" ? "auto" : "direct",
-    status,
-    sortBucket: getNavigationSortBucket(status),
-    listSortAtMs: readTimestampMillis(rawData.listSortAt) || Date.now(),
-    hostLoginId: normalizeStringOrNull(rawData.hostLoginId),
-    guestLoginId: normalizeStringOrNull(rawData.guestLoginId),
-    opponentProfileId: normalizeStringOrNull(rawData.opponentProfileId),
-    opponentName: typeof rawOpponentName === "string" ? rawOpponentName : null,
-    opponentEmoji: normalizedOpponentEmoji,
-    automatchStateHint: normalizeStrictAutomatchStateHint(
-      rawData.automatchStateHint,
-    ),
-    isPendingAutomatch:
-      typeof rawData.isPendingAutomatch === "boolean"
-        ? rawData.isPendingAutomatch
-        : status === "pending",
+    inviteId: value.inviteId,
+    kind: value.kind,
+    status: value.status,
+    sortBucket: value.sortBucket,
+    listSortAtMs: value.listSortAt,
+    hostLoginId: value.hostLoginId,
+    guestLoginId: value.guestLoginId,
+    opponentProfileId: value.opponentProfileId,
+    opponentName: value.opponentName,
+    opponentEmoji: value.opponentEmoji,
+    automatchStateHint: value.automatchStateHint,
+    isPendingAutomatch: value.isPendingAutomatch,
   };
 };
 
@@ -366,8 +291,8 @@ const isNavigationParticipantPreview = (
       exactKeys(participant, ["profileId", "displayName", "emojiId", "aura"]) &&
       isNullableString(participant.profileId) &&
       isNullableString(participant.displayName) &&
-      isNullableNumber(participant.emojiId) &&
-      isNullableString(participant.aura),
+      (participant.emojiId === null || isEmojiId(participant.emojiId)) &&
+      (participant.aura === null || isAura(participant.aura)),
   );
 
 const isNavigationItem = (value: unknown): value is NavigationItem => {
@@ -438,7 +363,7 @@ const isNavigationItem = (value: unknown): value is NavigationItem => {
     isNullableString(value.guestLoginId) &&
     isNullableString(value.opponentProfileId) &&
     isNullableString(value.opponentName) &&
-    isNullableNumber(value.opponentEmoji) &&
+    (value.opponentEmoji === null || isEmojiId(value.opponentEmoji)) &&
     normalizeStrictAutomatchStateHint(value.automatchStateHint) ===
       value.automatchStateHint &&
     typeof value.isPendingAutomatch === "boolean"
@@ -488,9 +413,8 @@ const isStartAutomatchRequest = (
 ): value is StartAutomatchRequest =>
   isRecord(value) &&
   Object.keys(value).length === 2 &&
-  Number.isSafeInteger(value.emojiId) &&
-  (value.emojiId as number) > 0 &&
-  typeof value.aura === "string";
+  isEmojiId(value.emojiId) &&
+  isAura(value.aura);
 
 const isStartAutomatchResponse = (
   value: unknown,

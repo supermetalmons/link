@@ -7,23 +7,52 @@ import {
   partitionNavigationItems,
 } from "../src/ui/navigation/navigationPickerModel.ts";
 
+/**
+ * @typedef {import("@mons/shared/navigation").NavigationGameItem} GameItem
+ * @typedef {import("@mons/shared/navigation").NavigationEventItem} EventItem
+ */
+/** @param {string} id @param {GameItem["status"]} [status] @returns {GameItem} */
 const game = (id, status = "active") => ({
   id,
   entityType: "game",
+  inviteId: id,
+  kind: "direct",
+  sortBucket: 1,
+  hostLoginId: null,
+  guestLoginId: null,
+  opponentProfileId: null,
+  opponentName: null,
+  opponentEmoji: null,
+  automatchStateHint: null,
+  isPendingAutomatch: false,
   status,
   listSortAtMs: Date.UTC(2026, 5, 10),
 });
+/** @param {Partial<EventItem>} [overrides] @returns {EventItem} */
 const event = (overrides = {}) => ({
   id: "event",
   entityType: "event",
+  eventId: "event",
+  sortBucket: 1,
+  startAtMs: null,
+  updatedAtMs: null,
+  endedAtMs: null,
+  winnerDisplayName: null,
   status: "waiting",
   listSortAtMs: Date.UTC(2026, 5, 10),
   participantCount: 0,
   participantPreview: [],
   ...overrides,
 });
+/** @param {{ id: string }[]} items */
 const ids = (items) => items.map((item) => item.id);
-const participants = (...emojiIds) => emojiIds.map((emojiId) => ({ emojiId }));
+const participants = (/** @type {(number | null)[]} */ ...emojiIds) =>
+  emojiIds.map((emojiId) => ({
+    profileId: null,
+    displayName: null,
+    emojiId,
+    aura: null,
+  }));
 
 test("navigation sections preserve source order while grouping waiting games and hiding dismissed events", () => {
   const top = [
@@ -88,9 +117,9 @@ test("event status labels keep timestamp precedence and treat invalid chosen tim
   const endedAtMs = new Date(2026, 3, 1).getTime();
   const updatedAtMs = new Date(2025, 4, 2).getTime();
   const listSortAtMs = new Date(2024, 5, 3).getTime();
-  for (const status of ["ended", "dismissed"]) {
+  for (const status of /** @type {const} */ (["ended", "dismissed"])) {
     const item = event({ status, endedAtMs, updatedAtMs, listSortAtMs });
-    const label = (timestamp) =>
+    const label = (/** @type {number} */ timestamp) =>
       getGameStatusLabel(
         { ...game("ended", "ended"), listSortAtMs: timestamp },
         now,
@@ -116,7 +145,7 @@ test("event status labels keep timestamp precedence and treat invalid chosen tim
 });
 
 test("event previews keep the six-avatar boundary and reserve a slot for overflow", () => {
-  const preview = (participantCount) =>
+  const preview = (/** @type {number} */ participantCount) =>
     deriveEventPreview(
       event({
         participantCount,
@@ -150,26 +179,12 @@ test("event previews keep the six-avatar boundary and reserve a slot for overflo
   );
 });
 
-test("event preview normalization retains valid avatar order and existing count semantics", () => {
+test("event previews retain canonical avatar order including zero and explicit unknown slots", () => {
   assert.deepEqual(
     deriveEventPreview(
       event({
-        participantCount: 7.9,
-        participantPreview: participants(
-          null,
-          undefined,
-          NaN,
-          Infinity,
-          -1,
-          0,
-          "bad",
-          0.9,
-          3.9,
-          "4",
-          5,
-          6,
-          7,
-        ),
+        participantCount: 7,
+        participantPreview: participants(null, 0, 3, 4, 5, 6, 7),
       }),
     ),
     {
@@ -180,10 +195,7 @@ test("event preview normalization retains valid avatar order and existing count 
   );
   assert.deepEqual(
     deriveEventPreview(
-      event({
-        participantCount: 7,
-        participantPreview: participants(null, -1, 5),
-      }),
+      event({ participantCount: 7, participantPreview: participants(null, 5) }),
     ),
     {
       emojiIds: [5],
@@ -191,15 +203,9 @@ test("event preview normalization retains valid avatar order and existing count 
       overflowCount: 6,
     },
   );
-  for (const participantCount of [-1, NaN, Infinity, 0]) {
-    assert.deepEqual(deriveEventPreview(event({ participantCount })), {
-      emojiIds: [],
-      showUnknownOpponent: false,
-      overflowCount: null,
-    });
-  }
-  assert.equal(
-    deriveEventPreview(event({ participantCount: 1.9 })).showUnknownOpponent,
-    true,
-  );
+  assert.deepEqual(deriveEventPreview(event({ participantCount: 0 })), {
+    emojiIds: [],
+    showUnknownOpponent: false,
+    overflowCount: null,
+  });
 });

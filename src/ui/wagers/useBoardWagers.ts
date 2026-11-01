@@ -740,7 +740,7 @@ export const useBoardWagers = ({
           if (!frame) {
             continue;
           }
-          const icon = icons[i];
+          const icon = icons[i]!;
           if (icon.dataset.src !== materialUrl) {
             icon.dataset.src = materialUrl;
             icon.src = materialUrl;
@@ -759,7 +759,7 @@ export const useBoardWagers = ({
             requestAnimationFrame(() => {
               requestAnimationFrame(() => {
                 for (let i = newIconsStartIndex; i < visibleCount; i += 1) {
-                  const icon = icons[i];
+                  const icon = icons[i]!;
                   if (icon) {
                     const delay = (i - newIconsStartIndex) * 25;
                     icon.style.transition = `opacity ${APPEAR_ANIMATION_DURATION_MS}ms cubic-bezier(0.22, 1, 0.36, 1) ${delay}ms, transform ${APPEAR_ANIMATION_DURATION_MS}ms cubic-bezier(0.22, 1, 0.36, 1) ${delay}ms`;
@@ -864,7 +864,7 @@ export const useBoardWagers = ({
         for (let i = 0; i < visibleCount; i += 1) {
           const frame = disappearingState.frames[i];
           if (!frame) continue;
-          const icon = icons[i];
+          const icon = icons[i]!;
           if (icon.dataset.src !== materialUrl) {
             icon.dataset.src = materialUrl;
             icon.src = materialUrl;

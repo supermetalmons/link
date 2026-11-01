@@ -14,20 +14,15 @@ function createGameVariantHelpers(monsRules) {
     return variants.length > 0 ? variants : [legacyDefaultGameVariant];
   }
   function normalizeStoredGameVariant(value) {
-    if (typeof value !== "string") {
-      return legacyDefaultGameVariant;
-    }
-    const normalized = value.trim();
+    const normalized = getStoredGameVariantForPersistence(value).trim();
     return getAllGameVariantNames().includes(normalized)
       ? normalized
       : legacyDefaultGameVariant;
   }
   function getStoredGameVariantForPersistence(value) {
-    if (typeof value !== "string") {
-      return legacyDefaultGameVariant;
-    }
-    const normalized = value.trim();
-    return normalized !== "" ? normalized : legacyDefaultGameVariant;
+    if (typeof value !== "string" || value === "")
+      throw new TypeError("invalid-game-variant");
+    return value;
   }
   function runtimeGameVariantFromStoredValue(value) {
     return normalizeStoredGameVariant(value);

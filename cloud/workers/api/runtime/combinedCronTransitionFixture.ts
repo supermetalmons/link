@@ -1,4 +1,6 @@
-import { eventIntentFixture } from "../test/transitionIntentFixture.ts";
+import { inviteDocumentFixture } from "../test/inviteDocumentFixture.ts";
+import { eventDocumentFixture } from "../test/eventCompatibilityFixture.ts";
+import { eventDraftFixture } from "../test/transitionIntentFixture.ts";
 import { expect } from "vitest";
 import {
   acquireEventWriteAdmission,
@@ -28,7 +30,20 @@ function ids(prefix: string, count: number) {
   );
 }
 
+async function assertRetiredTimerStorageAbsent(db: D1Database) {
+  expect(
+    (
+      await db
+        .prepare(
+          "SELECT name FROM sqlite_schema WHERE name IN ('match_timer_starts_canonical', 'timer_storage_handoff_delete_context')",
+        )
+        .all()
+    ).results,
+  ).toEqual([]);
+}
+
 async function seedEventTransitions(env: Env, nowMs: number) {
+  await assertRetiredTimerStorageAbsent(env.PROFILE_GAMES_DB);
   const createdAtMs = nowMs - 60_000;
   const eventIds = ids(eventPrefix, eventTransitionLimit + 1);
   const digest = "a".repeat(64);
@@ -44,8 +59,7 @@ async function seedEventTransitions(env: Env, nowMs: number) {
     .bind(digest, digest)
     .run();
   const admission = await acquireEventWriteAdmission(env.EVENT_DB);
-  const transitions: Extract<EventTransitionIntent, { schemaVersion: 2 }>[] =
-    [];
+  const transitions: EventTransitionIntent[] = [];
   try {
     for (const eventId of eventIds) {
       await commitEventMutations(
@@ -54,29 +68,28 @@ async function seedEventTransitions(env: Env, nowMs: number) {
           {
             kind: "event",
             eventId,
-            value: {
-              schemaVersion: 2,
+            value: eventDocumentFixture({
+              schemaVersion: 3,
               eventId,
               status: "ended",
               createdAtMs,
               updatedAtMs: createdAtMs,
               startAtMs: createdAtMs,
               participants: {},
-              rounds: {},
-            },
+            }),
           },
         ],
         { admission },
       );
       const intent = await prepareInviteEventIntent(
         env.PROFILE_GAMES_DB,
-        eventIntentFixture({
-          schemaVersion: 1,
+        eventDraftFixture({
+          schemaVersion: 3,
           transitionId: `intent-${eventId}`,
           eventId,
           expectedRevision: 1,
           canonicalUpdates: { [`events/${eventId}/updatedAtMs`]: nowMs },
-          rtdbEffects: {
+          effects: {
             [`matchTimerStarts/${eventId}/cron-transition-host`]: null,
           },
           createdAtMs,
@@ -89,15 +102,6 @@ async function seedEventTransitions(env: Env, nowMs: number) {
   } finally {
     await releaseEventWriteAdmission(env.EVENT_DB, admission);
   }
-  await env.PROFILE_GAMES_DB.batch(
-    [eventIds[0], eventIds[eventTransitionLimit]].map((matchId) =>
-      env.PROFILE_GAMES_DB.prepare(
-        `INSERT INTO match_timer_starts
-         (player_id, match_id, timer, turn_number, updated_at_ms)
-         VALUES ('cron-transition-host', ?, ?, 1, ?)`,
-      ).bind(matchId, `1;${nowMs}`, createdAtMs),
-    ),
-  );
   return transitions;
 }
 
@@ -119,13 +123,13 @@ async function seedGameSessionTransitions(env: Env, nowMs: number) {
       await source.prepareChanges(
         sessions.map(({ inviteId, hostId }) => ({
           inviteId,
-          value: {
+          value: inviteDocumentFixture({
             hostId,
             guestId: `guest-${inviteId}`,
             hostColor: "white",
             hostRematches: "1",
             guestRematches: "1",
-          },
+          }),
         })),
       ),
     ),
@@ -135,8 +139,8 @@ async function seedGameSessionTransitions(env: Env, nowMs: number) {
       db
         .prepare(
           `INSERT INTO game_session_mutation_locks
-         (lock_id, owner_id, operation_id, expires_at_ms, writer_generation)
-         VALUES (?, 'cron-transition-owner', ?, ?, 2)`,
+         (lock_id, owner_id, operation_id, expires_at_ms, writer_generation, writer_owner_id)
+         VALUES (?, 'cron-transition-owner', ?, ?, 2, 'cron-transition-owner')`,
         )
         .bind(inviteId, operationId, nowMs - 1),
     ),
@@ -144,7 +148,7 @@ async function seedGameSessionTransitions(env: Env, nowMs: number) {
   await db
     .prepare(
       `CREATE TRIGGER cron_transition_fixture_interrupt
-     BEFORE UPDATE OF status ON game_session_transitions
+     BEFORE UPDATE OF status ON game_session_transitions_canonical
      WHEN NEW.status = 'completed' AND NEW.invite_id LIKE '${sessionPrefix}%'
      BEGIN SELECT RAISE(ABORT, 'cron-transition-fixture-interrupted'); END`,
     )
@@ -160,12 +164,18 @@ async function seedGameSessionTransitions(env: Env, nowMs: number) {
       await expect(
         transitions.commit(
           [
-            { kind: "invite-rematches", inviteId, role: "host", value: "1x" },
+            {
+              kind: "invite-rematches",
+              inviteId,
+              role: "host",
+              value: { state: "ended", indices: [1] },
+            },
             {
               kind: "mutation-receipt",
               operationId,
               value: {
-                schemaVersion: 1,
+                schemaVersion: 2,
+                effects: { state: "enabled" },
                 kind: "rematch-end",
                 inviteId,
                 operationId,
@@ -177,10 +187,10 @@ async function seedGameSessionTransitions(env: Env, nowMs: number) {
                   ok: true,
                   inviteId,
                   actorUid: hostId,
-                  rematches: "1x",
+                  rematches: { state: "ended", indices: [1] },
                 },
               },
-              expiration: { completedAtMs: createdAtMs },
+              expiration: { schemaVersion: 1, completedAtMs: createdAtMs },
             },
           ],
           [{ lockId: inviteId, ownerId: "cron-transition-owner", operationId }],
@@ -193,7 +203,7 @@ async function seedGameSessionTransitions(env: Env, nowMs: number) {
   expect(
     await db
       .prepare(
-        `SELECT COUNT(*) AS count FROM game_session_transitions
+        `SELECT COUNT(*) AS count FROM game_session_transitions_canonical
        WHERE invite_id LIKE ? AND status = 'pending' AND attempt_count = 1`,
       )
       .bind(`${sessionPrefix}%`)
@@ -212,8 +222,8 @@ export async function seedCombinedCronTransitions(env: Env, nowMs: number) {
       const eventRows = await env.EVENT_DB.prepare(
         `SELECT event.event_id, event.revision, event.pending_transition_id,
                 event.updated_at_ms, intent.status, intent.attempts, intent.last_error
-         FROM event_records AS event
-         LEFT JOIN event_transition_intents AS intent ON intent.event_id = event.event_id
+         FROM event_records_canonical AS event
+         LEFT JOIN event_transition_intents_canonical AS intent ON intent.event_id = event.event_id
          WHERE event.event_id LIKE ? ORDER BY event.event_id`,
       )
         .bind(`${eventPrefix}%`)
@@ -243,7 +253,7 @@ export async function seedCombinedCronTransitions(env: Env, nowMs: number) {
                 transitionId: intent.transitionId,
                 eventId: intent.eventId,
                 expectedRevision: 1,
-                payloadDigest: intent.payloadDigest,
+                payloadDigest: intent.operationDigest,
               }
             : null,
         );
@@ -261,23 +271,15 @@ export async function seedCombinedCronTransitions(env: Env, nowMs: number) {
         eventTransitions.slice(0, eventTransitionLimit).map((intent) => ({
           transition_id: intent.transitionId,
           event_id: intent.eventId,
-          payload_digest: intent.payloadDigest,
+          payload_digest: intent.operationDigest,
         })),
       );
-      expect(
-        (
-          await env.PROFILE_GAMES_DB.prepare(
-            "SELECT match_id FROM match_timer_starts WHERE match_id LIKE ? ORDER BY match_id",
-          )
-            .bind(`${eventPrefix}%`)
-            .all()
-        ).results,
-      ).toEqual([{ match_id: eventTransitions[eventTransitionLimit].eventId }]);
+      await assertRetiredTimerStorageAbsent(env.PROFILE_GAMES_DB);
       for (const [index, session] of gameSessions.entries()) {
         const recovered = index < GAME_SESSION_TRANSITION_SWEEP_LIMIT;
         expect(
           await env.PROFILE_GAMES_DB.prepare(
-            `SELECT status, attempt_count, last_error FROM game_session_transitions
+            `SELECT status, attempt_count, last_error FROM game_session_transitions_canonical
            WHERE transition_id = ?`,
           )
             .bind(session.transitionId)
@@ -295,11 +297,14 @@ export async function seedCombinedCronTransitions(env: Env, nowMs: number) {
           revision: recovered ? 2 : 1,
           value: {
             hostId: session.hostId,
-            hostRematches: recovered ? "1x" : "1",
+            hostRematches: {
+              state: recovered ? "ended" : "open",
+              indices: [1],
+            },
           },
         });
         const receipt = await env.PROFILE_GAMES_DB.prepare(
-          "SELECT payload_json FROM game_session_mutation_receipts WHERE record_key = ?",
+          "SELECT payload_json FROM game_session_mutation_receipts_canonical WHERE record_key = ?",
         )
           .bind(session.operationId)
           .first<string>("payload_json");
@@ -308,15 +313,15 @@ export async function seedCombinedCronTransitions(env: Env, nowMs: number) {
             kind: "rematch-end",
             inviteId: session.inviteId,
             operationId: session.operationId,
-            response: { ok: true, rematches: "1x" },
+            response: { ok: true, rematches: { state: "ended", indices: [1] } },
           });
         else expect(receipt).toBeNull();
       }
-      const remainder = gameSessions[GAME_SESSION_TRANSITION_SWEEP_LIMIT];
+      const remainder = gameSessions[GAME_SESSION_TRANSITION_SWEEP_LIMIT]!;
       expect(
         (
           await env.PROFILE_GAMES_DB.prepare(
-            `SELECT resource_key FROM game_session_transition_resources
+            `SELECT resource_key FROM game_session_transition_resources_canonical
          WHERE transition_id LIKE ? ORDER BY resource_key`,
           )
             .bind(`intent-${sessionPrefix}%`)

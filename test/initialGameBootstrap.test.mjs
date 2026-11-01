@@ -1,3 +1,4 @@
+import { required } from "./fixtures/canonicalData.mjs";
 import assert from "node:assert/strict";
 import { registerHooks } from "node:module";
 import test from "node:test";
@@ -24,14 +25,20 @@ const { SessionAuth } = await import("../src/session/sessionAuth.ts");
 const { readPendingRematchEnd, rematchEndDeliveryStorageKey } =
   await import("../src/connection/rematchEndDelivery.ts");
 const flush = () => new Promise((resolve) => setImmediate(resolve));
+/**
+ * @template [T=void]
+ * @returns {PromiseWithResolvers<T>}
+ */
 const deferred = () => {
-  let resolve, reject;
-  const promise = new Promise((yes, no) => {
-    resolve = yes;
-    reject = no;
-  });
-  return { promise, resolve, reject };
+  return Promise.withResolvers();
 };
+/**
+ * @typedef {Parameters<typeof createInitialGameBootstrap>[0]} BootstrapDependencies
+ * @typedef {import("../src/session/sessionAuth.ts").SessionUser} SessionUser
+ * @typedef {Parameters<ReturnType<typeof createInitialGameBootstrap>["seedAutomatch"]>[0]} AutomatchSeed
+ * @typedef {import("@mons/shared/session-bootstrap").SessionBootstrapResult} BootstrapResult
+ */
+/** @returns {import("../src/navigation/routeState.ts").RouteState} */
 const invite = (inviteId = "match-a") => ({
   mode: "invite",
   path: inviteId,
@@ -41,6 +48,7 @@ const invite = (inviteId = "match-a") => ({
   autojoin: false,
 });
 
+/** @param {ReturnType<typeof fixture>} h @param {Partial<AutomatchSeed>} [overrides] */
 function seedAutomatch(h, overrides = {}) {
   const seed = {
     inviteId: "auto_bootstrap",
@@ -77,20 +85,22 @@ test("automatch adopts a matching in-memory seed once without another read", asy
 
 test("automatch seeds are fenced by operation, invite, user, selection, and expiry", (t) => {
   t.mock.timers.enable({ apis: ["setTimeout", "Date"], now: 1_000 });
-  for (const change of [
-    (h, seed) => {
+  /** @type {Array<(h: ReturnType<typeof fixture>, seed: AutomatchSeed) => void>} */
+  const changes = [
+    (_h, seed) => {
       seed.operationId = "00000000-0000-4000-8000-000000000002";
     },
-    (h, seed) => {
+    (_h, seed) => {
       seed.inviteId = "auto_other";
     },
     (h, seed) => {
       h.changeUser({ ...h.user, generation: "other" });
-      seed.user = h.auth.currentUser;
+      seed.user = required(h.auth.currentUser);
     },
     (h) => h.setSelection("approved"),
     () => t.mock.timers.tick(5_000),
-  ]) {
+  ];
+  for (const change of changes) {
     const h = fixture({ mode: "home" });
     const seed = seedAutomatch(h);
     h.navigate(invite(seed.inviteId));
@@ -126,7 +136,7 @@ test("leaving the target route and replacing a seed invalidate the previous auto
     "current",
     next.operationId,
   );
-  assert.deepEqual(await taken.promise, next.bootstrap);
+  assert.deepEqual(await required(taken).promise, next.bootstrap);
   assert.equal(h.routeListeners.size, 0);
 });
 
@@ -141,32 +151,47 @@ test("a seed cannot resolve across a session replacement or abort after adoption
       "current",
       seed.operationId,
     );
-    if (abort) taken.abort();
+    if (abort) required(taken).abort();
     else h.changeUser({ ...h.user, sessionId: "replacement" });
-    await assert.rejects(taken.promise, (error) => error.code === "aborted");
+    await assert.rejects(
+      required(taken).promise,
+      (error) =>
+        error instanceof Error && "code" in error && error.code === "aborted",
+    );
   }
 });
 
+/** @param {{mode?: import("../src/navigation/routeState.ts").RouteState["mode"]; selection?: "current" | "approved"; anonymous?: boolean; combined?: boolean}} [options] */
 function fixture({
   mode = "invite",
   selection = "current",
   anonymous = false,
   combined = false,
 } = {}) {
+  /** @type {PromiseWithResolvers<BootstrapResult>} */
   const response = deferred();
+  /** @type {SessionUser} */
   const user = {
     uid: "a".repeat(28),
     sessionId: "session-a",
     generation: "generation-a",
     getIdToken: async () => "token",
   };
+  /** @type {Set<(route: import("../src/navigation/routeState.ts").RouteState) => void>} */
   const routeListeners = new Set();
+  /** @type {Set<Parameters<BootstrapDependencies["auth"]["onAuthStateChanged"]>[0]>} */
   const authListeners = new Set();
+  /** @type {import("../src/navigation/routeState.ts").RouteState} */
   let route =
     mode === "invite" ? invite() : { ...invite(), mode, inviteId: null };
+  /**
+   * @type {{ inviteId: string; options: { signal?: AbortSignal; selection?: "current" | "approved"; } | undefined; }[]}
+   */
   const requests = [];
+  /** @type {Array<{inviteId: string; options: Parameters<BootstrapDependencies["auth"]["prepareInitialGame"]>[1]}>} */
   const preparations = [];
   let anonymousStarts = 0;
+  /** @type {BootstrapDependencies["auth"]} */
   const auth = {
     currentUser: anonymous ? null : user,
     authStateReady: async () => {},
@@ -178,12 +203,12 @@ function fixture({
       preparations.push({ inviteId, options });
       if (!auth.currentUser) await auth.signInAnonymously();
       options.onSessionBound?.({
-        sessionId: auth.currentUser.sessionId,
-        generation: auth.currentUser.generation,
+        sessionId: required(auth.currentUser).sessionId,
+        generation: required(auth.currentUser).generation,
       });
       return {
-        user: auth.currentUser,
-        selection: options.selectionForUid(auth.currentUser.uid),
+        user: required(auth.currentUser),
+        selection: options.selectionForUid(required(auth.currentUser).uid),
         bootstrap: combined ? await response.promise : null,
       };
     },
@@ -202,8 +227,12 @@ function fixture({
     selection: () => selection,
     async read(inviteId, tokenProvider, options) {
       requests.push({ inviteId, options });
-      tokenProvider.assertCurrentUser();
-      return response.promise;
+      const provider = required(tokenProvider);
+      assert.ok(provider.assertCurrentUser);
+      provider.assertCurrentUser();
+      const value = await response.promise;
+      assert.ok(value.ok);
+      return value;
     },
   });
   return {
@@ -219,13 +248,22 @@ function fixture({
       bootstrap.start(route);
     },
     anonymousStarts: () => anonymousStarts,
+    /**
+     * @param {"current" | "approved"} next
+     */
     setSelection(next) {
       selection = next;
     },
+    /**
+     * @param {import("../src/navigation/routeState.ts").RouteState} next
+     */
     navigate(next) {
       route = next;
       routeListeners.forEach((listener) => listener(route));
     },
+    /**
+     * @param {SessionUser | null} next
+     */
     changeUser(next) {
       auth.currentUser = next;
       authListeners.forEach((listener) => listener(next));
@@ -238,7 +276,8 @@ function anonymousSessionFixture() {
   const originalSessionId = crypto.randomUUID();
   const requested = deferred();
   const responseGate = deferred();
-  const inlineGame = { ok: true, schemaVersion: 1 };
+  const inlineGame = automatchBootstrap({ inviteId: "match-a", hostId: uid });
+  /** @type {import("../src/session/sessionStore.ts").SessionState} */
   let state = {
     initialized: true,
     generation: crypto.randomUUID(),
@@ -246,13 +285,26 @@ function anonymousSessionFixture() {
     revocations: [],
     session: null,
   };
+  /**
+   * @type {{ sessionId: string; target: (import("@mons/shared/session-bootstrap").SessionBootstrapTarget | import("@mons/shared/session-bootstrap").SessionEventBootstrapTarget) | undefined; }[]}
+   */
   const creates = [];
+  /**
+   * @type {{ sessionId: string; target: (import("@mons/shared/session-bootstrap").SessionBootstrapTarget | import("@mons/shared/session-bootstrap").SessionEventBootstrapTarget) | undefined; }[]}
+   */
   const refreshes = [];
+  /**
+   * @type {{ inviteId: string; token: string; }[]}
+   */
   const reads = [];
+  /**
+   * @type {{ selectionForUid: (uid: string) => import("@mons/shared/session-bootstrap").SessionBootstrapTarget["selection"]; signal: AbortSignal; onSessionBound?: NonNullable<((owner: import("../src/session/sessionAuth.ts").InitialGameSessionOwner) => void) | undefined>; }[]}
+   */
   const preparations = [];
+  /** @param {import("../src/session/sessionStore.ts").StoredSession} session @returns {import("../src/services/sessionApi.ts").SessionTokenResult} */
   const token = (session) => ({
     ok: true,
-    uid: session.uid,
+    uid: required(session.uid),
     sessionId: session.sessionId,
     accessToken: `token-${session.sessionId}`,
     accessExpiresAtMs: 1_300_000,
@@ -267,6 +319,7 @@ function anonymousSessionFixture() {
     },
     api: {
       async create(session, target) {
+        if (target) assert.ok("inviteId" in target);
         creates.push({ sessionId: session.sessionId, target });
         requested.resolve();
         await responseGate.promise;
@@ -278,6 +331,7 @@ function anonymousSessionFixture() {
         };
       },
       async refresh(session, target) {
+        if (target) assert.ok("inviteId" in target);
         refreshes.push({ sessionId: session.sessionId, target });
         return token(session);
       },
@@ -303,7 +357,7 @@ function anonymousSessionFixture() {
     subscribeRoute: () => () => {},
     selection: () => "current",
     async read(inviteId, tokenProvider) {
-      reads.push({ inviteId, token: await tokenProvider(false) });
+      reads.push({ inviteId, token: await required(tokenProvider)(false) });
       return inlineGame;
     },
   });
@@ -319,13 +373,16 @@ function anonymousSessionFixture() {
     inlineGame,
     uid,
     start: () => bootstrap.start(invite()),
+    /**
+     * @param {string} nextUid
+     */
     async replace(nextUid, pendingFirst = false) {
       state = {
         ...state,
         generation: crypto.randomUUID(),
         revision: state.revision + 1,
         session: {
-          ...state.session,
+          ...required(state.session),
           sessionId: crypto.randomUUID(),
           uid: pendingFirst ? null : nextUid,
         },
@@ -336,7 +393,7 @@ function anonymousSessionFixture() {
         state = {
           ...state,
           revision: state.revision + 1,
-          session: { ...state.session, uid: nextUid },
+          session: { ...required(state.session), uid: nextUid },
         };
         await auth.reconcile();
       }
@@ -347,9 +404,10 @@ function anonymousSessionFixture() {
 
 test("a fresh anonymous inline game is adoptable as its first user is published", async () => {
   const h = anonymousSessionFixture();
-  let taken;
+  /** @type {{ value?: ReturnType<ReturnType<typeof createInitialGameBootstrap>["take"]> }} */
+  const captured = {};
   const unsubscribe = h.auth.onAuthStateChanged((user) => {
-    if (user) taken = h.bootstrap.take("match-a", user);
+    if (user) captured.value = h.bootstrap.take("match-a", user);
   });
   try {
     h.start();
@@ -357,11 +415,14 @@ test("a fresh anonymous inline game is adoptable as its first user is published"
     assert.equal(h.auth.currentUser, null);
     h.responseGate.resolve();
     await flush();
-    assert.ok(taken);
+    const taken = required(captured.value);
     assert.equal(await taken.promise, h.inlineGame);
-    assert.equal(h.bootstrap.take("match-a", h.auth.currentUser), null);
+    assert.equal(
+      h.bootstrap.take("match-a", required(readCurrentUser(h.auth))),
+      null,
+    );
     assert.equal(h.creates.length, 1);
-    assert.deepEqual(h.creates[0].target, {
+    assert.deepEqual(required(h.creates[0]).target, {
       inviteId: "match-a",
       selection: "current",
     });
@@ -394,14 +455,17 @@ for (const joinedExistingCreation of [false, true]) {
             sameUid ? h.uid : "b".repeat(28),
             sameUid,
           );
-          const taken = h.bootstrap.take("match-a", replacement);
+          const taken = h.bootstrap.take("match-a", required(replacement));
           void taken?.promise.catch(() => undefined);
           assert.equal(taken, null);
-          assert.equal(h.preparations[0].signal.aborted, true);
-          const replacementToken = await replacement.getIdToken();
-          assert.equal(replacementToken, `token-${replacement.sessionId}`);
+          assert.equal(required(h.preparations[0]).signal.aborted, true);
+          const replacementToken = await required(replacement).getIdToken();
+          assert.equal(
+            replacementToken,
+            `token-${required(replacement).sessionId}`,
+          );
           assert.deepEqual(h.refreshes, [
-            { sessionId: replacement.sessionId, target: undefined },
+            { sessionId: required(replacement).sessionId, target: undefined },
           ]);
           if (lateFailure)
             h.responseGate.reject(new Error("old-session-unavailable"));
@@ -409,11 +473,17 @@ for (const joinedExistingCreation of [false, true]) {
           await creation?.catch(() => undefined);
           await flush();
           assert.equal(h.auth.currentUser, replacement);
-          assert.equal(await replacement.getIdToken(), replacementToken);
+          assert.equal(
+            await required(replacement).getIdToken(),
+            replacementToken,
+          );
           assert.equal(h.creates.length, 1);
           assert.equal(h.refreshes.length, 1);
           assert.equal(h.reads.length, 0);
-          assert.equal(h.bootstrap.take("match-a", replacement), null);
+          assert.equal(
+            h.bootstrap.take("match-a", required(replacement)),
+            null,
+          );
         } finally {
           h.responseGate.resolve();
           await creation?.catch(() => undefined);
@@ -426,17 +496,22 @@ for (const joinedExistingCreation of [false, true]) {
 
 test("adoption checks a bound anonymous owner even without an auth notification", async () => {
   const h = fixture({ anonymous: true, combined: true });
+  /** @type {PromiseWithResolvers<import("../src/session/sessionAuth.ts").InitialGameSession>} */
+  const preparation = deferred();
   h.auth.prepareInitialGame = (_inviteId, options) => {
     options.onSessionBound?.({
       sessionId: h.user.sessionId,
       generation: h.user.generation,
     });
-    return h.response.promise;
+    return preparation.promise;
   };
   h.start();
   h.auth.currentUser = { ...h.user, sessionId: "replacement" };
-  assert.equal(h.bootstrap.take("match-a", h.auth.currentUser), null);
-  h.response.resolve({ user: h.user, selection: "current", bootstrap: null });
+  assert.equal(
+    h.bootstrap.take("match-a", required(readCurrentUser(h.auth))),
+    null,
+  );
+  preparation.resolve({ user: h.user, selection: "current", bootstrap: null });
   await flush();
   assert.equal(h.requests.length, 0);
 });
@@ -448,7 +523,10 @@ test("initial request starts independently and is adopted exactly once, before o
     h.start();
     await flush();
     assert.equal(h.requests.length, 1);
-    const value = { ok: true };
+    const value = automatchBootstrap({
+      inviteId: "match-a",
+      hostId: h.user.uid,
+    });
     if (completedFirst) {
       h.response.resolve(value);
       await flush();
@@ -469,7 +547,10 @@ test("combined session results are adopted once without a separate game read", a
     const h = fixture({ combined: true });
     h.start();
     assert.equal(h.preparations.length, 1);
-    const value = { ok: true, schemaVersion: 1 };
+    const value = automatchBootstrap({
+      inviteId: "match-a",
+      hostId: h.user.uid,
+    });
     if (completedFirst) {
       h.response.resolve(value);
       await flush();
@@ -487,9 +568,14 @@ test("an already-restored user owns the pending combined request before adoption
   const h = fixture({ combined: true });
   h.start();
   h.changeUser({ ...h.user, generation: "replacement" });
-  assert.equal(h.bootstrap.take("match-a", h.auth.currentUser), null);
-  assert.equal(h.preparations[0].options.signal.aborted, true);
-  h.response.resolve({ ok: true });
+  assert.equal(
+    h.bootstrap.take("match-a", required(readCurrentUser(h.auth))),
+    null,
+  );
+  assert.equal(required(h.preparations[0]).options.signal.aborted, true);
+  h.response.resolve(
+    automatchBootstrap({ inviteId: "match-a", hostId: h.user.uid }),
+  );
   await flush();
   assert.equal(h.requests.length, 0);
 });
@@ -498,6 +584,7 @@ test("session replacement during restoration cannot adopt the previous user's co
   for (const sameUid of [false, true]) {
     const uid = "a".repeat(28);
     const sessionId = crypto.randomUUID();
+    /** @type {import("../src/session/sessionStore.ts").SessionState} */
     let state = {
       initialized: true,
       generation: crypto.randomUUID(),
@@ -512,6 +599,7 @@ test("session replacement during restoration cannot adopt the previous user's co
     };
     const requested = deferred();
     const response = deferred();
+    /** @type {Array<{ sessionId: string; target: (import("@mons/shared/session-bootstrap").SessionBootstrapTarget | import("@mons/shared/session-bootstrap").SessionEventBootstrapTarget) | undefined; }>} */
     const refreshes = [];
     const auth = new SessionAuth({
       store: {
@@ -525,6 +613,7 @@ test("session replacement during restoration cannot adopt the previous user's co
           throw new Error("unexpected-create");
         },
         async refresh(session, target) {
+          if (target) assert.ok("inviteId" in target);
           refreshes.push({ sessionId: session.sessionId, target });
           if (session.sessionId === sessionId) {
             requested.resolve();
@@ -532,7 +621,7 @@ test("session replacement during restoration cannot adopt the previous user's co
           }
           return {
             ok: true,
-            uid: session.uid,
+            uid: required(session.uid),
             sessionId: session.sessionId,
             accessToken: `token-${session.sessionId}`,
             accessExpiresAtMs: 1_300_000,
@@ -573,7 +662,7 @@ test("session replacement during restoration cannot adopt the previous user's co
         generation: crypto.randomUUID(),
         revision: state.revision + 1,
         session: {
-          ...state.session,
+          ...required(state.session),
           sessionId: crypto.randomUUID(),
           uid: sameUid ? uid : "b".repeat(28),
         },
@@ -581,21 +670,21 @@ test("session replacement during restoration cannot adopt the previous user's co
       await auth.reconcile();
       const replacement = auth.currentUser;
       assert.notEqual(replacement, previous);
-      const taken = bootstrap.take("match-a", replacement);
+      const taken = bootstrap.take("match-a", required(replacement));
       void taken?.promise.catch(() => undefined);
       assert.equal(taken, null);
       assert.equal(
-        await replacement.getIdToken(),
-        `token-${replacement.sessionId}`,
+        await required(replacement).getIdToken(),
+        `token-${required(replacement).sessionId}`,
       );
       assert.equal(refreshes.length, 2);
-      assert.equal(refreshes[1].target, undefined);
+      assert.equal(required(refreshes[1]).target, undefined);
       response.resolve();
       await flush();
       assert.equal(auth.currentUser, replacement);
       assert.equal(
-        await replacement.getIdToken(),
-        `token-${replacement.sessionId}`,
+        await required(replacement).getIdToken(),
+        `token-${required(replacement).sessionId}`,
       );
       assert.equal(refreshes.length, 2);
     } finally {
@@ -606,9 +695,10 @@ test("session replacement during restoration cannot adopt the previous user's co
 });
 
 test("selection changes after early adoption are distinguished from authentication changes", async () => {
-  for (const original of ["current", "approved"]) {
+  for (const original of /** @type {const} */ (["current", "approved"])) {
     const latest = original === "current" ? "approved" : "current";
     const h = fixture({ selection: original });
+    /** @type {PromiseWithResolvers<import("../src/session/sessionAuth.ts").InitialGameSession>} */
     const preparation = deferred();
     h.auth.prepareInitialGame = () => preparation.promise;
     h.start();
@@ -620,10 +710,12 @@ test("selection changes after early adoption are distinguished from authenticati
       code: "initial-game-bootstrap-selection-changed",
     });
     preparation.resolve({ user: h.user, selection: latest, bootstrap: null });
-    h.response.resolve({ ok: true });
+    h.response.resolve(
+      automatchBootstrap({ inviteId: "match-a", hostId: h.user.uid }),
+    );
     await rejected;
     assert.equal(h.requests.length, 1);
-    assert.equal(h.requests[0].options.selection, latest);
+    assert.equal(required(required(h.requests[0]).options).selection, latest);
     assert.equal(h.bootstrap.take("match-a", h.user, latest), null);
   }
 });
@@ -632,6 +724,7 @@ test("explicit combined game failures remain adoptable before and after session 
   for (const completedFirst of [false, true]) {
     const h = fixture({ combined: true });
     h.start();
+    /** @type {import("@mons/shared/session-bootstrap").SessionBootstrapFailure} */
     const failure = { ok: false, status: 429, retryAfterMs: 3000 };
     if (completedFirst) {
       h.response.resolve(failure);
@@ -664,20 +757,25 @@ test("navigation discards a combined failure before it can be adopted", async ()
   await flush();
   assert.equal(h.bootstrap.take("match-a", h.user), null);
   assert.equal(h.requests.length, 0);
-  assert.equal(h.preparations[0].options.signal.aborted, true);
+  assert.equal(required(h.preparations[0]).options.signal.aborted, true);
 });
 
 test("completed response is discarded when leaving and returning to the initial invite", async () => {
   const h = fixture();
   h.start();
   await flush();
-  h.response.resolve({ ok: true });
+  h.response.resolve(
+    automatchBootstrap({ inviteId: "match-a", hostId: h.user.uid }),
+  );
   await flush();
   assert.equal(h.routeListeners.size, 1);
   h.navigate(invite("match-b"));
   h.navigate(invite());
   assert.equal(h.bootstrap.take("match-a", h.user), null);
-  assert.equal(h.requests[0].options.signal.aborted, true);
+  assert.equal(
+    required(required(required(h.requests[0]).options).signal).aborted,
+    true,
+  );
   assert.equal(h.routeListeners.size, 0);
   assert.equal(h.authListeners.size, 0);
 });
@@ -686,23 +784,39 @@ test("same-background overlays preserve the response; another auth object with t
   const h = fixture();
   h.start();
   await flush();
-  h.response.resolve({ ok: true });
+  h.response.resolve(
+    automatchBootstrap({ inviteId: "match-a", hostId: h.user.uid }),
+  );
   await flush();
   h.navigate({ ...invite(), eventId: "event-a" });
-  assert.equal(h.requests[0].options.signal.aborted, false);
+  assert.equal(
+    required(required(required(h.requests[0]).options).signal).aborted,
+    false,
+  );
   h.changeUser({ ...h.user });
-  assert.equal(h.bootstrap.take("match-a", h.auth.currentUser), null);
-  assert.equal(h.requests[0].options.signal.aborted, true);
+  assert.equal(
+    h.bootstrap.take("match-a", required(readCurrentUser(h.auth))),
+    null,
+  );
+  assert.equal(
+    required(required(required(h.requests[0]).options).signal).aborted,
+    true,
+  );
 });
 
 test("approved/current selection is part of adoption identity", async () => {
   const h = fixture({ selection: "approved" });
   h.start();
   await flush();
-  assert.equal(h.requests[0].options.selection, "approved");
+  assert.equal(required(required(h.requests[0]).options).selection, "approved");
   assert.equal(h.bootstrap.take("match-a", h.user, "current"), null);
-  assert.equal(h.requests[0].options.signal.aborted, true);
-  h.response.resolve({ ok: true });
+  assert.equal(
+    required(required(required(h.requests[0]).options).signal).aborted,
+    true,
+  );
+  h.response.resolve(
+    automatchBootstrap({ inviteId: "match-a", hostId: h.user.uid }),
+  );
   await flush();
 });
 
@@ -711,10 +825,15 @@ test("caller abort owns an adopted request, and early failures release listeners
   h.start();
   await flush();
   const taken = h.bootstrap.take("match-a", h.user);
-  taken.abort();
-  assert.equal(h.requests[0].options.signal.aborted, true);
-  h.response.resolve({ ok: true });
-  await assert.rejects(taken.promise, /canceled/);
+  required(taken).abort();
+  assert.equal(
+    required(required(required(h.requests[0]).options).signal).aborted,
+    true,
+  );
+  h.response.resolve(
+    automatchBootstrap({ inviteId: "match-a", hostId: h.user.uid }),
+  );
+  await assert.rejects(required(taken).promise, /canceled/);
   const failure = fixture();
   failure.start();
   await flush();
@@ -726,7 +845,12 @@ test("caller abort owns an adopted request, and early failures release listeners
 });
 
 test("local, bots, snapshot, and event modes warm the shared session without reading a game", async () => {
-  for (const mode of ["home", "watch", "snapshot", "event"]) {
+  for (const mode of /** @type {const} */ ([
+    "home",
+    "watch",
+    "snapshot",
+    "event",
+  ])) {
     const h = fixture({ mode, anonymous: true });
     h.start();
     await flush();
@@ -745,7 +869,7 @@ test("pending rematch-end selection uses the same validated persisted record as 
     operationId: crypto.randomUUID(),
   };
   const persistence = {
-    getItem(key) {
+    getItem(/** @type {string} */ key) {
       assert.equal(key, rematchEndDeliveryStorageKey(scope));
       return JSON.stringify({ version: 1, record });
     },
@@ -772,6 +896,11 @@ test("pending rematch-end selection uses the same validated persisted record as 
   } finally {
     if (previousWindow)
       Object.defineProperty(globalThis, "window", previousWindow);
-    else delete globalThis.window;
+    else Reflect.deleteProperty(globalThis, "window");
   }
 });
+
+/** @param {{currentUser: SessionUser | null}} auth @returns {SessionUser | null} */
+function readCurrentUser(auth) {
+  return auth.currentUser;
+}

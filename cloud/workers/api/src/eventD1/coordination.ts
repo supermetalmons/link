@@ -86,7 +86,7 @@ export async function acquireEventWriteAdmission(
     )
     .bind(admissionId, nowMs, nowMs + ttlMs)
     .all<{ freeze_generation: number }>();
-  const freezeGeneration = result.results[0]?.freeze_generation;
+  const freezeGeneration = result.results[0]!?.freeze_generation;
   if (freezeGeneration === undefined) throw new EventWritesDisabled();
   return {
     admissionId,
@@ -116,7 +116,7 @@ async function runCoordinationMutation(
       eventWriteAdmissionGuard(db, options.admission),
       statement,
     ]);
-    return results[1];
+    return results[1]!;
   } catch (error) {
     return rethrowEventBatchFailure(db, error, options);
   }

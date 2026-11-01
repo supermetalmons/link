@@ -1,10 +1,9 @@
-import { GAME_SESSION_OPERATION_ID_PATTERN } from "@mons/shared/game-sessions";
+import { readInviteDocument } from "@mons/shared/invite-records";
 import {
   INVITE_METADATA_MAX_MESSAGE_BYTES,
   isInviteMetadataSnapshot,
   type InviteMetadataSnapshot,
 } from "@mons/shared/invite-metadata";
-import { isCanonicalLoginUid } from "./recordKeys.ts";
 
 export type InviteMetadataReadResult =
   | {
@@ -15,50 +14,36 @@ export type InviteMetadataReadResult =
     }
   | { status: "missing" | "invalid" };
 
-function record(value: unknown): Record<string, unknown> | null {
-  return value && typeof value === "object" && !Array.isArray(value)
-    ? (value as Record<string, unknown>)
-    : null;
-}
-
 export function normalizeInviteMetadata(
   inviteId: string,
   value: unknown,
 ): InviteMetadataReadResult {
   if (value === null || value === undefined) return { status: "missing" };
-  const invite = record(value);
+  const invite = readInviteDocument(value);
   if (!invite) return { status: "invalid" };
-  const snapshot = {
+  const snapshot: InviteMetadataSnapshot = {
     inviteId,
     revision: 0,
     hostId: invite.hostId,
-    guestId: invite.guestId ?? null,
+    guestId: invite.guestId,
     hostColor: invite.hostColor,
-    hostRematches: invite.hostRematches ?? "",
-    guestRematches: invite.guestRematches ?? "",
-    automatchStateHint: invite.automatchStateHint ?? null,
-    eventId: invite.eventId ?? null,
-    eventOwned: invite.eventOwned === true,
+    hostRematches: invite.hostRematches,
+    guestRematches: invite.guestRematches,
+    automatchStateHint: invite.automatchStateHint,
+    eventId: invite.eventId,
+    eventOwned: invite.eventOwned,
   };
   if (
     !isInviteMetadataSnapshot(snapshot) ||
     new TextEncoder().encode(
       JSON.stringify({ schemaVersion: 1, type: "snapshot", snapshot }),
     ).byteLength > INVITE_METADATA_MAX_MESSAGE_BYTES
-  ) {
+  )
     return { status: "invalid" };
-  }
   return {
     status: "ok",
     snapshot,
-    passwordProtected: Object.hasOwn(invite, "password"),
-    automatchOperationIds: Object.fromEntries(
-      Object.entries(record(invite.automatchOperationIds) || {}).filter(
-        (entry): entry is [string, string] =>
-          isCanonicalLoginUid(entry[0]) &&
-          typeof entry[1] === "string" &&
-          GAME_SESSION_OPERATION_ID_PATTERN.test(entry[1]),
-      ),
-    ),
+    passwordProtected: invite.password !== null,
+    automatchOperationIds: structuredClone(invite.automatchOperationIds),
   };
 }

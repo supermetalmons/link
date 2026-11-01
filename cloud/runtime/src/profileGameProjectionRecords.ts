@@ -1,217 +1,122 @@
-import type {
-  NavigationEventStatus,
-  NavigationGameStatus,
-} from "@mons/shared/navigation";
-
-declare const projectionDocument: unique symbol;
-declare const projectionProfile: unique symbol;
-export type ProfileGameProjectionDocument = {
-  readonly [projectionDocument]: true;
-};
-export type ProjectionProfileDocument = { readonly [projectionProfile]: true };
-
-export type GameProjectionWrite = {
-  schemaVersion: 2;
-  projectorVersion: 2;
-  source: "rtdb-projector";
-  entityType: "game";
-  inviteId: string;
-  kind: "auto" | "direct";
-  hostLoginId: string | null;
-  guestLoginId: string | null;
-  hostProfileId: string | null;
-  guestProfileId: string | null;
-  status: NavigationGameStatus;
-  sortBucket: number;
-  isPendingAutomatch: boolean;
-  automatchStateHint: string | null;
-  automatchCanceledAt: number | null;
-  latestMatchId: string;
-  ownerProfileId: string;
-  ownerRole: "host" | "guest";
-  ownerLoginId: string | null;
-  opponentProfileId: string | null;
-  opponentLoginId: string | null;
-  opponentName: string | null;
-  opponentDisplayName: string | null;
-  opponentEmoji: number | null;
-  opponentEmojiId: number | null;
-  listSortAt: number;
-  createdAt: number;
-  updatedAt: number;
-  endedAt: number | null;
-  lastEventFingerprint: string;
-  lastEventType: string | null;
-  lastEventReason: string | null;
-  lastEventAt: number;
-};
-
-export type EventProjectionPayloadWrite = {
-  schemaVersion: 1;
-  source: "event-projector";
-  entityType: "event";
-  id: string;
-  eventId: string;
-  status: NavigationEventStatus;
-  sortBucket: number;
-  listSortAt: number;
-  ownerProfileId: string;
-  startAt: number | null;
-  updatedAt: number;
-  endedAt: number | null;
-  participantCount: number;
-  participantPreview: Array<{
-    profileId: string | null;
-    displayName: string | null;
-    emojiId: number | null;
-    aura: string | null;
-  }>;
-  winnerDisplayName: string | null;
-};
-export type ProfileGameProjectionWrite =
-  GameProjectionWrite | EventProjectionPayloadWrite;
-export type ProjectionProfileWrite = {
+import { isEmojiId, type EmojiId } from "./shared/appearance.js";
+import {
+  parseProfileGameProjectionRecord,
+  type GameProjectionRecord,
+  type EventProjectionRecord,
+  type ProfileGameProjectionRecord,
+} from "./shared/profile-game-projections.js";
+export {
+  parseProfileGameProjectionRecord,
+  isProfileGameProjectionRecord,
+} from "./shared/profile-game-projections.js";
+export type ProfileGameProjectionDocument = ProfileGameProjectionRecord;
+export type GameProjectionWrite = GameProjectionRecord;
+export type EventProjectionPayloadWrite = EventProjectionRecord;
+export type ProfileGameProjectionWrite = ProfileGameProjectionRecord;
+export type ProjectionProfileDocument = {
   eth: string;
   sol: string;
   username: string;
-  custom?: { emoji: string | number };
-  emoji?: string | number;
+  emoji: EmojiId | null;
 };
-
-type Fields = Record<string, unknown>;
-const fields = (value: ProfileGameProjectionDocument): Fields => {
-  const retained: unknown = value;
-  return retained as Fields;
-};
-const text = (value: unknown): string | null =>
-  typeof value === "string" && value.trim() !== "" ? value.trim() : null;
-const timestamp = (value: unknown): number | null =>
-  typeof value === "number" && Number.isFinite(value)
-    ? Math.floor(value)
-    : null;
-const emoji = (value: unknown): number | null => {
-  if (typeof value === "number" && Number.isFinite(value))
-    return Math.floor(value);
-  if (typeof value === "string" && value.trim() !== "") {
-    const parsed = Number(value);
-    if (Number.isFinite(parsed)) return Math.floor(parsed);
-  }
-  return null;
-};
+export type ProjectionProfileWrite = ProjectionProfileDocument;
 
 export function retainProfileGameProjection(
   value: unknown,
 ): ProfileGameProjectionDocument {
-  return value as ProfileGameProjectionDocument;
+  return parseProfileGameProjectionRecord(value);
 }
-
 export function createGameProjection(
   value: GameProjectionWrite,
 ): ProfileGameProjectionDocument {
-  const retained: unknown = value;
-  return retained as ProfileGameProjectionDocument;
+  return parseProfileGameProjectionRecord(value);
 }
-
 export function createEventProjection(
   value: EventProjectionPayloadWrite,
 ): ProfileGameProjectionDocument {
-  const retained: unknown = value;
-  return retained as ProfileGameProjectionDocument;
+  return parseProfileGameProjectionRecord(value);
 }
-
 export function retainProjectionProfile(
   value: unknown,
 ): ProjectionProfileDocument {
-  return value as ProjectionProfileDocument;
+  if (value === null || typeof value !== "object" || Array.isArray(value))
+    throw new TypeError("invalid-projection-profile");
+  const fields = Object.fromEntries(Object.entries(value));
+  if (
+    Object.keys(fields).length !== 4 ||
+    typeof fields.eth !== "string" ||
+    typeof fields.sol !== "string" ||
+    typeof fields.username !== "string" ||
+    !(fields.emoji === null || isEmojiId(fields.emoji))
+  )
+    throw new TypeError("invalid-projection-profile");
+  return {
+    eth: fields.eth,
+    sol: fields.sol,
+    username: fields.username,
+    emoji: fields.emoji,
+  };
 }
-
 export function createProjectionProfile(
   value: ProjectionProfileWrite,
 ): ProjectionProfileDocument {
-  const retained: unknown = value;
-  return retained as ProjectionProfileDocument;
+  return retainProjectionProfile(value);
 }
-
 export function projectionOwnerLoginId(
   value: ProfileGameProjectionDocument,
 ): string | null {
-  return text(fields(value).ownerLoginId);
+  return value.entityType === "game" ? value.ownerLoginId : null;
 }
-
 export function projectionOwnerRole(
-  profileId: string,
+  _profileId: string,
   value: ProfileGameProjectionDocument | null,
 ): "host" | "guest" | null {
-  const data = value && fields(value);
-  const ownerRole = text(data && data.ownerRole);
-  if (ownerRole === "host" || ownerRole === "guest") return ownerRole;
-  const ownerProfileId = text(data && data.ownerProfileId) || profileId;
-  if (ownerProfileId === text(data && data.hostProfileId)) return "host";
-  if (ownerProfileId === text(data && data.guestProfileId)) return "guest";
-  return null;
+  return value?.entityType === "game" ? value.ownerRole : null;
 }
-
 export function projectionOpponentName(
   value: ProfileGameProjectionDocument | null,
 ): string | null {
-  const data = value && fields(value);
-  return text(data ? (data.opponentName ?? data.opponentDisplayName) : null);
+  return value?.entityType === "game" ? value.opponentName : null;
 }
-
 export function projectionOpponentEmoji(
   value: ProfileGameProjectionDocument | null,
-): number | null {
-  const data = value && fields(value);
-  return emoji(data ? (data.opponentEmoji ?? data.opponentEmojiId) : null);
+): EmojiId | null {
+  return value?.entityType === "game" ? value.opponentEmoji : null;
 }
-
 export function projectionFreshness(
   value: ProfileGameProjectionDocument,
 ): number {
-  const data = fields(value);
-  return [
-    data.updatedAt,
-    data.lastEventAt,
-    data.listSortAt,
-    data.createdAt,
-  ].reduce<number>((current, value) => {
-    const millis = timestamp(value);
-    return Number.isFinite(millis)
-      ? Math.max(current, millis as number)
-      : current;
-  }, Number.NEGATIVE_INFINITY);
+  return value.entityType === "game"
+    ? Math.max(
+        value.updatedAt,
+        value.lastEventAt,
+        value.listSortAt,
+        value.createdAt,
+      )
+    : Math.max(value.updatedAt, value.listSortAt);
 }
-
 export function projectionLastFingerprint(
   value: ProfileGameProjectionDocument | null,
 ): string | null {
-  const data = value && fields(value);
-  return data && typeof data.lastEventFingerprint === "string"
-    ? data.lastEventFingerprint
-    : null;
+  return value?.entityType === "game" ? value.lastEventFingerprint : null;
 }
-
 export function projectionTime(
   value: ProfileGameProjectionDocument | null,
   field: "listSortAt" | "createdAt" | "endedAt",
 ): number | null {
-  const data = value && fields(value);
-  return timestamp(data && data[field]);
+  if (value === null) return null;
+  if (field === "createdAt")
+    return value.entityType === "game" ? value.createdAt : null;
+  return value[field];
 }
-
 export function projectionMergeFreshness(
   value: ProfileGameProjectionDocument,
 ): number {
-  const data = fields(value);
-  return Math.max(
-    timestamp(data.updatedAt) ?? 0,
-    timestamp(data.listSortAt) ?? 0,
-  );
+  return Math.max(value.updatedAt, value.listSortAt);
 }
-
 export function copyProjectionOwner(
   value: ProfileGameProjectionDocument,
   ownerProfileId: string,
 ): ProfileGameProjectionDocument {
-  return retainProfileGameProjection({ ...value, ownerProfileId });
+  return parseProfileGameProjectionRecord({ ...value, ownerProfileId });
 }

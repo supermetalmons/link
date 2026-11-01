@@ -42,9 +42,9 @@ export function parseMatchStateArgs(argv: string[]): MatchStateArguments {
     argv.length === 3 &&
     argv[0] === "--inspect-admissions" &&
     argv[1] === "--directory" &&
-    isAbsolute(argv[2])
+    isAbsolute(argv[2]!)
   )
-    return { operation: "inspect-admissions", directory: argv[2] };
+    return { operation: "inspect-admissions", directory: argv[2]! };
   throw new Error(
     "match-state supports only --status or --inspect-admissions --directory <absolute protected output path>; migration commands are retired",
   );
@@ -79,12 +79,12 @@ async function counts(
       await deps.run(
         `SELECT
     (SELECT COUNT(*) FROM match_state_write_admissions) AS admissions,
-    (SELECT COUNT(*) FROM game_session_transitions WHERE status = 'pending') AS session_intents,
-    (SELECT COUNT(*) FROM game_session_transition_resources) AS session_resources,
+    (SELECT COUNT(*) FROM game_session_transitions_canonical WHERE status = 'pending') AS session_intents,
+    (SELECT COUNT(*) FROM game_session_transition_resources_canonical) AS session_resources,
     (SELECT COUNT(*) FROM invite_source_write_admissions) AS invite_admissions,
     (SELECT COUNT(*) FROM automatch_write_admissions) AS automatch_admissions,
     (SELECT COUNT(*) FROM game_session_mutation_locks WHERE expires_at_ms > ?) AS session_leases,
-    (SELECT COUNT(*) FROM match_state_routes) AS routes,
+    (SELECT COUNT(*) FROM match_state_routes_canonical) AS routes,
     (SELECT COUNT(*) FROM match_state_import_receipts) AS bundles`,
         DATABASE,
         [deps.now()],
@@ -96,7 +96,7 @@ async function counts(
       await deps.run(
         `SELECT
     (SELECT COUNT(*) FROM event_write_admissions) AS event_admissions,
-    (SELECT COUNT(*) FROM event_transition_intents WHERE status = 'pending') AS event_intents,
+    (SELECT COUNT(*) FROM event_transition_intents_canonical WHERE status = 'pending') AS event_intents,
     (SELECT COUNT(*) FROM event_leases WHERE expires_at_ms > ?) AS event_leases`,
         EVENTS,
         [deps.now()],

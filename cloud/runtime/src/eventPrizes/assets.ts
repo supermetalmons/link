@@ -119,7 +119,7 @@ const parseCompressedPrizeObservation = ({
     );
   }
   const observedCollectionAddress = normalizeSolanaAddress(
-    collectionGroups[0].group_value,
+    collectionGroups[0]!.group_value,
   );
   if (!observedCollectionAddress) {
     throw createPrizeAssetVerificationError(

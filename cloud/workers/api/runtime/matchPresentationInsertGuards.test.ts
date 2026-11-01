@@ -1,5 +1,7 @@
+import { applyCanonicalTestMigrations } from "./canonicalTestMigrations.ts";
+import { matchDocumentFixture } from "../test/matchRecordFixture.ts";
 import { env } from "cloudflare:workers";
-import { applyD1Migrations, type D1Migration } from "cloudflare:test";
+import type { D1Migration } from "cloudflare:test";
 import { beforeAll, beforeEach, expect, it } from "vitest";
 import {
   buildMatchPresentationRegistrationStatements,
@@ -18,7 +20,7 @@ const original: MatchPresentationRegistration = {
   sourceId: "original-creation",
 };
 
-beforeAll(() => applyD1Migrations(db, testEnv.TEST_D1_MIGRATIONS));
+beforeAll(() => applyCanonicalTestMigrations(db, testEnv.TEST_D1_MIGRATIONS));
 beforeEach(() =>
   resetMatchPresentationTestState(db, testEnv.TEST_D1_MIGRATIONS, true),
 );
@@ -26,7 +28,7 @@ beforeEach(() =>
 function replace(row: MatchPresentationRegistration, nowMs = 20) {
   return db
     .prepare(
-      `INSERT OR REPLACE INTO match_presentation_registrations
+      `INSERT OR REPLACE INTO match_presentation_registrations_canonical
        (invite_id, match_id, actor_uid, seed_digest, provenance, source_id, registered_at_ms)
        VALUES (?, ?, ?, ?, ?, ?, ?)`,
     )
@@ -72,23 +74,34 @@ it("preserves initial provenance, source and time across creation, import and re
     buildMatchPresentationRegistrationStatements(db, [original], 10),
   );
   const stored = await db
-    .prepare("SELECT * FROM match_presentation_registrations")
+    .prepare("SELECT * FROM match_presentation_registrations_canonical")
     .first();
   const retry = {
     ...original,
     provenance: "backfill" as const,
     sourceId: "later-import",
   };
-  await db.batch(buildMatchPresentationRegistrationStatements(db, [retry], 20));
-  await replace(retry, 30);
+  await db.batch(
+    buildMatchPresentationRegistrationStatements(db, [original], 10),
+  );
+  await expect(
+    db.batch(buildMatchPresentationRegistrationStatements(db, [retry], 20)),
+  ).rejects.toThrow("match-presentation-registration-immutable");
+  await expect(replace(retry, 30)).rejects.toThrow(
+    "match-presentation-registration-immutable",
+  );
   expect(
-    await db.prepare("SELECT * FROM match_presentation_registrations").first(),
+    await db
+      .prepare("SELECT * FROM match_presentation_registrations_canonical")
+      .first(),
   ).toEqual(stored);
   const next = { ...original, actorUid: "new-actor", sourceId: "new-creation" };
   await db.batch(buildMatchPresentationRegistrationStatements(db, [next], 40));
   expect(
     await db
-      .prepare("SELECT COUNT(*) AS count FROM match_presentation_registrations")
+      .prepare(
+        "SELECT COUNT(*) AS count FROM match_presentation_registrations_canonical",
+      )
       .first("count"),
   ).toBe(2);
 });
@@ -98,7 +111,7 @@ it("rejects conflicting invite or seed replacement without changing the original
     buildMatchPresentationRegistrationStatements(db, [original], 10),
   );
   const stored = await db
-    .prepare("SELECT * FROM match_presentation_registrations")
+    .prepare("SELECT * FROM match_presentation_registrations_canonical")
     .first();
   for (const conflict of [
     { ...original, inviteId: "different-invite" },
@@ -109,7 +122,7 @@ it("rejects conflicting invite or seed replacement without changing the original
     );
     expect(
       await db
-        .prepare("SELECT * FROM match_presentation_registrations")
+        .prepare("SELECT * FROM match_presentation_registrations_canonical")
         .first(),
     ).toEqual(stored);
   }
@@ -124,28 +137,45 @@ it("rejects exception actors regardless of which insertion guard runs first", as
     .run();
   await db
     .prepare(
-      `INSERT INTO match_presentation_source_exceptions
+      `INSERT INTO match_presentation_source_exceptions_canonical
      (migration_id, invite_id, match_id, actor_uid, disposition, seed_digest,
       source_digest, source_json, evidence_json, canonical_actor_uid,
       canonical_seed_digest, manifest_digest, imported_at_ms)
      VALUES ('00000000-0000-4000-8000-000000000002', 'invite', 'invite', 'actor',
-       'archive', ?, ?, '{}', '{}', NULL, NULL, ?, 10)`,
+       'archive', ?, ?, ?, ?, NULL, NULL, ?, 10)`,
     )
-    .bind(original.seedDigest, "c".repeat(64), "b".repeat(64))
+    .bind(
+      original.seedDigest,
+      "c".repeat(64),
+      JSON.stringify(matchDocumentFixture({})),
+      JSON.stringify({
+        schemaVersion: 1,
+        disposition: "archive",
+        sourceDigest: "c".repeat(64),
+        canonicalActorUid: null,
+        canonicalSeedDigest: null,
+        ownership: [],
+        profileId: "profile",
+        reason: "no-canonical-owner",
+      }),
+      "b".repeat(64),
+    )
     .run();
   const exceptions = testEnv.TEST_D1_MIGRATIONS.find((migration) =>
-    migration.name.includes("0022_match_presentation_source_exceptions"),
+    migration.name.startsWith("0030_"),
   );
   const guard = exceptions?.queries.find((query) =>
     query.includes(
-      "CREATE TRIGGER match_presentation_registration_exception_guard",
+      "CREATE TRIGGER match_presentation_registration_canonical_exception_guard",
     ),
   );
   if (!guard) throw new Error("missing-source-exception-test-guard");
   for (const reorder of [false, true]) {
     if (reorder) {
       await db
-        .prepare("DROP TRIGGER match_presentation_registration_exception_guard")
+        .prepare(
+          "DROP TRIGGER match_presentation_registration_canonical_exception_guard",
+        )
         .run();
       await db.prepare(guard).run();
     }
@@ -160,7 +190,9 @@ it("rejects exception actors regardless of which insertion guard runs first", as
   }
   expect(
     await db
-      .prepare("SELECT COUNT(*) AS count FROM match_presentation_registrations")
+      .prepare(
+        "SELECT COUNT(*) AS count FROM match_presentation_registrations_canonical",
+      )
       .first("count"),
   ).toBe(0);
 });

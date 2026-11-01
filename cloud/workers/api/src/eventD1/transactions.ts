@@ -66,7 +66,7 @@ async function transactEventValue<T>(
 ): Promise<TransactionResult<T>> {
   return runOptimisticTransaction({
     maxAttempts: MAX_EVENT_TRANSACTION_ATTEMPTS,
-    signal: options.signal,
+    ...(options.signal ? { signal: options.signal } : {}),
     read: load,
     getValue: (loaded) => loaded.value,
     decide(value) {
@@ -102,7 +102,7 @@ export function transactEventPrizeSelection(
 ) {
   return runOptimisticTransaction({
     maxAttempts: MAX_EVENT_TRANSACTION_ATTEMPTS,
-    signal: options.signal,
+    ...(options.signal ? { signal: options.signal } : {}),
     read: () => readEventPrizeSelectionSnapshot(db, eventId, profileId),
     getValue: (snapshot) => snapshot.value,
     decide(current) {
@@ -124,7 +124,7 @@ export function transactEventPrizeSelection(
         eventMutationGuard(db, eventId, snapshot.event),
         db
           .prepare(
-            "UPDATE event_records SET revision = revision + 1 WHERE event_id = ?",
+            "UPDATE event_records_canonical SET revision = revision + 1 WHERE event_id = ?",
           )
           .bind(eventId),
       );
@@ -133,12 +133,12 @@ export function transactEventPrizeSelection(
           selection === null
             ? db
                 .prepare(
-                  "DELETE FROM event_prize_selections WHERE event_id = ? AND profile_id = ?",
+                  "DELETE FROM event_prize_selections_canonical WHERE event_id = ? AND profile_id = ?",
                 )
                 .bind(eventId, profileId)
             : db
                 .prepare(
-                  `INSERT INTO event_prize_selections (
+                  `INSERT INTO event_prize_selections_canonical (
                      event_id, profile_id, prize_id, updated_at_ms
                    ) VALUES (?, ?, ?, ?)
                    ON CONFLICT (event_id, profile_id) DO UPDATE SET

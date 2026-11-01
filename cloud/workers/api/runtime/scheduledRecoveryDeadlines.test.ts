@@ -1,3 +1,4 @@
+import { eventDocumentFixture } from "../test/eventCompatibilityFixture.ts";
 import { LEGACY_CORE_PRIZES_EVENT_ID } from "@mons/shared/event-prizes";
 import type { D1Migration } from "cloudflare:test";
 import { env } from "cloudflare:workers";
@@ -19,8 +20,8 @@ const hourMs = 60 * 60 * 1_000;
 const marginMs = 10 * 60 * 1_000;
 
 function eventRecord(eventId: string, startAtMs: number, isSundayMons = false) {
-  return {
-    schemaVersion: 2,
+  return eventDocumentFixture({
+    schemaVersion: 3,
     eventId,
     status: "scheduled" as const,
     createdAtMs: 100,
@@ -32,7 +33,7 @@ function eventRecord(eventId: string, startAtMs: number, isSundayMons = false) {
     isSundayMons,
     participants: {},
     rounds: {},
-  };
+  });
 }
 
 function ordinaryId(index: number) {
@@ -45,7 +46,7 @@ async function seedEvents(records: ReturnType<typeof eventRecord>[]) {
       records.slice(index, index + 100).map((record) =>
         db
           .prepare(
-            `INSERT INTO event_records
+            `INSERT INTO event_records_canonical
              (event_id, status, start_at_ms, updated_at_ms, revision, record_json)
              VALUES (?, 'scheduled', ?, 100, 1, ?)`,
           )
@@ -59,7 +60,7 @@ async function storedOutboxes() {
     await db
       .prepare(
         `SELECT outbox_id, event_id, status, run_at_ms, last_queued_at_ms,
-           record_json FROM event_progress_outboxes ORDER BY outbox_id`,
+           record_json FROM event_progress_outboxes_canonical ORDER BY outbox_id`,
       )
       .all<{
         outbox_id: string;
@@ -93,9 +94,9 @@ beforeAll(async () => {
 
 beforeEach(async () => {
   await db.batch([
-    db.prepare("DELETE FROM event_progress_outboxes"),
+    db.prepare("DELETE FROM event_progress_outboxes_canonical"),
     db.prepare("DELETE FROM event_write_admissions"),
-    db.prepare("DELETE FROM event_records"),
+    db.prepare("DELETE FROM event_records_canonical"),
     db.prepare(
       `UPDATE event_scheduled_recovery_cursor
        SET start_at_ms = NULL, event_id = NULL, revision = 0, updated_at_ms = 0`,
@@ -209,7 +210,7 @@ it.each([
     });
     expect(
       await db
-        .prepare("SELECT COUNT(*) AS count FROM event_records")
+        .prepare("SELECT COUNT(*) AS count FROM event_records_canonical")
         .first("count"),
     ).toBe(801);
     expect(

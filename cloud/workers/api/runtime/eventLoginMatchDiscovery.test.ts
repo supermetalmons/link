@@ -1,6 +1,13 @@
+import { serializeGameSessionIntent } from "../src/gameSessionIntentRecords.ts";
+import { inviteDocumentFixture } from "../test/inviteDocumentFixture.ts";
+import { eventDocumentFixture } from "../test/eventCompatibilityFixture.ts";
+import {
+  eventApplicationEnvironment,
+  activateEventApplicationFixture,
+} from "./eventApplicationFixture.ts";
 import { retainedInviteSourceFixture } from "../test/inviteDocumentFixture.ts";
 import { commitEventCompatibilityFixture } from "../test/eventCompatibilityFixture.ts";
-import { decodeEventUpdates } from "../src/eventCompatibilityCodec.ts";
+import { decodeEventUpdates } from "../test/eventLegacyFixtureCodec.ts";
 import {
   eventMatchTestPort,
   readEventRepositoryFixture,
@@ -37,7 +44,7 @@ import {
   resetEventReceiptTestState,
 } from "./eventTransitionTestFixture.ts";
 
-const testEnv = env as Env & {
+const testEnv = eventApplicationEnvironment(env) as Env & {
   TEST_D1_MIGRATIONS: D1Migration[];
   TEST_EVENT_D1_MIGRATIONS: D1Migration[];
   TEST_PROFILE_D1_MIGRATIONS: D1Migration[];
@@ -48,8 +55,8 @@ const hostUid = "original-anonymous-host";
 const guestUid = "original-guest-login";
 
 function eventRecord() {
-  return {
-    schemaVersion: 2,
+  return eventDocumentFixture({
+    schemaVersion: 3,
     eventId,
     status: "scheduled",
     createdAtMs: 100,
@@ -59,22 +66,27 @@ function eventRecord() {
     createdByLoginUid: hostUid,
     createdByUsername: "ivan",
     participants: {},
-    rounds: {},
-  };
+  });
 }
 
 function eventRounds() {
-  return {
-    0: {
-      matches: {
-        "0_0": {
-          inviteId,
-          hostLoginUid: "changed-bracket-login",
-          guestLoginUid: null,
+  return eventDocumentFixture({
+    status: "active",
+    rounds: {
+      0: {
+        matches: {
+          "0_0": {
+            inviteId,
+            status: "pending",
+            hostProfileId: "host-profile",
+            guestProfileId: "guest-profile",
+            hostLoginUid: "changed-bracket-login",
+            guestLoginUid: "changed-guest-login",
+          },
         },
       },
     },
-  };
+  }).rounds;
 }
 
 function matchEffects() {
@@ -200,7 +212,7 @@ function captureFixture(count: number) {
 async function indexedRows() {
   return (
     await testEnv.PROFILE_GAMES_DB.prepare(
-      "SELECT login_uid, match_id, invite_id, resolution, provenance FROM login_match_discovery ORDER BY login_uid, match_id",
+      "SELECT login_uid, match_id, invite_id, resolution, provenance FROM login_match_discovery_canonical ORDER BY login_uid, match_id",
     ).all()
   ).results;
 }
@@ -209,17 +221,22 @@ async function seedInvite(id: string, hostId = hostUid, guestId = guestUid) {
   await testEnv.PROFILE_GAMES_DB.batch(
     [hostId, guestId].map((actorUid) =>
       testEnv.PROFILE_GAMES_DB.prepare(
-        `INSERT INTO match_presentation_registrations
+        `INSERT INTO match_presentation_registrations_canonical
          (invite_id, match_id, actor_uid, seed_digest, provenance, source_id, registered_at_ms)
          VALUES (?, ?, ?, ?, 'creation', 'discovery-test', 100)`,
       ).bind(id, id, actorUid, "a".repeat(64)),
     ),
   );
   await testEnv.PROFILE_GAMES_DB.prepare(
-    `INSERT INTO invite_sources (invite_id, source_json, revision, updated_at_ms)
+    `INSERT INTO invite_sources_canonical (invite_id, source_json, revision, updated_at_ms)
      VALUES (?, ?, 1, 100)`,
   )
-    .bind(id, JSON.stringify({ eventId, eventOwned: true, hostId, guestId }))
+    .bind(
+      id,
+      JSON.stringify(
+        inviteDocumentFixture({ eventId, eventOwned: true, hostId, guestId }),
+      ),
+    )
     .run();
 }
 
@@ -238,7 +255,7 @@ async function seedCapturedInvite(id: string) {
 async function rejectIndexWrites() {
   await testEnv.PROFILE_GAMES_DB.prepare(
     `CREATE TRIGGER reject_event_discovery_capture
-     BEFORE INSERT ON login_match_discovery
+     BEFORE INSERT ON login_match_discovery_canonical
      BEGIN SELECT RAISE(ABORT, 'event-discovery-write-failed'); END`,
   ).run();
 }
@@ -255,6 +272,7 @@ describe("event login-match discovery", () => {
       testEnv.PROFILE_GAMES_DB,
       testEnv.TEST_D1_MIGRATIONS,
     );
+    await activateEventApplicationFixture(testEnv.PROFILE_GAMES_DB);
     await applyEventTestMigrations(
       testEnv.EVENT_DB,
       testEnv.TEST_EVENT_D1_MIGRATIONS,
@@ -274,14 +292,16 @@ describe("event login-match discovery", () => {
     );
     await permitIndexWrites();
     await testEnv.PROFILE_GAMES_DB.prepare(
-      "DELETE FROM login_match_discovery",
+      "DELETE FROM login_match_discovery_canonical",
     ).run();
     await testEnv.PROFILE_GAMES_DB.batch([
-      testEnv.PROFILE_GAMES_DB.prepare("DELETE FROM invite_sources"),
+      testEnv.PROFILE_GAMES_DB.prepare("DELETE FROM invite_sources_canonical"),
       testEnv.PROFILE_GAMES_DB.prepare(
-        "DELETE FROM game_session_transition_resources",
+        "DELETE FROM game_session_transition_resources_canonical",
       ),
-      testEnv.PROFILE_GAMES_DB.prepare("DELETE FROM game_session_transitions"),
+      testEnv.PROFILE_GAMES_DB.prepare(
+        "DELETE FROM game_session_transitions_canonical",
+      ),
       testEnv.PROFILE_GAMES_DB.prepare(
         `INSERT INTO automatch_runtime_control
          (singleton, backend, state, epoch, freeze_generation)
@@ -306,15 +326,17 @@ describe("event login-match discovery", () => {
     );
     await testEnv.EVENT_DB.batch([
       testEnv.EVENT_DB.prepare(
-        "UPDATE event_records SET pending_transition_id = NULL",
+        "UPDATE event_records_canonical SET pending_transition_id = NULL",
       ),
-      testEnv.EVENT_DB.prepare("DELETE FROM event_transition_intents"),
+      testEnv.EVENT_DB.prepare(
+        "DELETE FROM event_transition_intents_canonical",
+      ),
       testEnv.EVENT_DB.prepare("DELETE FROM event_leases"),
       testEnv.EVENT_DB.prepare("DELETE FROM event_write_admissions"),
       testEnv.EVENT_DB.prepare(
-        "DELETE FROM event_profile_game_projection_outboxes",
+        "DELETE FROM event_profile_game_projection_outboxes_canonical",
       ),
-      testEnv.EVENT_DB.prepare("DELETE FROM event_records"),
+      testEnv.EVENT_DB.prepare("DELETE FROM event_records_canonical"),
     ]);
   });
 
@@ -437,6 +459,25 @@ describe("event login-match discovery", () => {
     ).toBe("different-invite");
   });
 
+  it("uses covered canonical discovery after retiring source transitions", async () => {
+    await seedCapturedInvite(inviteId);
+    const fixture = stateFixture();
+    expect(
+      (
+        await testEnv.PROFILE_GAMES_DB.prepare(
+          "SELECT name FROM sqlite_schema WHERE name IN ('game_session_transitions', 'game_session_transition_resources')",
+        ).all()
+      ).results,
+    ).toEqual([]);
+    await expect(
+      ensureEventMatchDiscovery(testEnv.PROFILE_GAMES_DB, fixture.reader, [
+        inviteId,
+      ]),
+    ).resolves.toBeUndefined();
+    expect(fixture.metadataBatches).toEqual([]);
+    expect(fixture.matchBatches).toEqual([]);
+  });
+
   it("allows covered frozen reads but rejects pending session transitions", async () => {
     await seedCapturedInvite(inviteId);
     const fixture = stateFixture();
@@ -455,10 +496,29 @@ describe("event login-match discovery", () => {
     ).resolves.toBeUndefined();
     await testEnv.PROFILE_GAMES_DB.batch([
       testEnv.PROFILE_GAMES_DB.prepare(
-        "INSERT INTO game_session_transitions (transition_id, invite_id, payload_json, status, created_at_ms, updated_at_ms) VALUES ('pending-session', ?, '{}', 'pending', 1, 1)",
-      ).bind(inviteId),
+        "INSERT INTO game_session_transitions_canonical (transition_id, invite_id, payload_json, status, created_at_ms, updated_at_ms) VALUES ('pending-session', ?, ?, 'pending', 1, 1)",
+      ).bind(
+        inviteId,
+        serializeGameSessionIntent({
+          version: 3,
+          inviteId,
+          inviteSourceEpoch: 1,
+          inviteMutations: [
+            {
+              current: { inviteId, revision: 0, value: null },
+              value: inviteDocumentFixture({ hostId: hostUid }),
+            },
+          ],
+          transitionId: "pending-session",
+          operationDigest: "a".repeat(64),
+          resources: [inviteId],
+          mutations: [],
+          creations: [],
+          createdAtMs: 1,
+        }),
+      ),
       testEnv.PROFILE_GAMES_DB.prepare(
-        "INSERT INTO game_session_transition_resources (resource_key, transition_id) VALUES (?, 'pending-session')",
+        "INSERT INTO game_session_transition_resources_canonical (resource_key, transition_id) VALUES (?, 'pending-session')",
       ).bind(inviteId),
     ]);
     await expect(
@@ -505,11 +565,7 @@ describe("event login-match discovery", () => {
         ensureEventMatchDiscovery(testEnv.PROFILE_GAMES_DB, fixture.reader, [
           inviteId,
         ]),
-      ).rejects.toThrow(
-        authority === "missing"
-          ? "automatch-control-unavailable"
-          : "automatch-persistence-backend-retired",
-      );
+      ).rejects.toThrow("automatch-control-unavailable");
       expect(fixture.metadataBatches).toEqual([]);
       expect(fixture.metadataReads).toEqual([]);
       expect(fixture.reads).toEqual([]);
@@ -529,8 +585,11 @@ describe("event login-match discovery", () => {
         commitEventCompatibilityFixture(
           repository,
           decodeEventUpdates({
-            [`events/${eventId}/status`]: "active",
-            [`events/${eventId}/rounds`]: eventRounds(),
+            [`events/${eventId}`]: eventDocumentFixture({
+              ...eventRecord(),
+              status: "active",
+              rounds: eventRounds(),
+            }),
             ...matchEffects(),
           }),
         ),
@@ -584,11 +643,11 @@ describe("event login-match discovery", () => {
       await commitEventCompatibilityFixture(
         repository,
         decodeEventUpdates({
-          [`events/${eventId}`]: {
+          [`events/${eventId}`]: eventDocumentFixture({
             ...eventRecord(),
             status: "active",
             rounds: eventRounds(),
-          },
+          }),
           [outboxPath]: {
             schemaVersion: 1,
             status: "pending",
@@ -651,11 +710,12 @@ describe("event login-match discovery", () => {
   it("captures original actors even when current profile ownership is unavailable", async () => {
     const fixture = stateFixture({
       ...matchEffects(),
-      [`events/${eventId}`]: {
+      [`events/${eventId}`]: eventDocumentFixture({
         ...eventRecord(),
+        status: "active",
         rounds: eventRounds(),
         participants: { absent: { profileId: "absent", loginUid: hostUid } },
-      },
+      }),
     });
     const runtime = createEventProfileGameProjectionRuntime(testEnv, {
       state: {
@@ -673,10 +733,18 @@ describe("event login-match discovery", () => {
   it("requires both physical matches and includes the third-place invite", async () => {
     const fixture = stateFixture(matchEffects());
     fixture.values.delete(`players/${guestUid}/matches/${inviteId}`);
-    const ids = eventMatchInviteIds({
-      rounds: {},
-      thirdPlaceMatch: { inviteId },
-    });
+    const ids = eventMatchInviteIds(
+      eventDocumentFixture({
+        status: "active",
+        supportsThirdPlaceMatch: true,
+        thirdPlaceMatch: {
+          inviteId,
+          status: "pending",
+          hostProfileId: "host",
+          guestProfileId: "guest",
+        },
+      }),
+    );
     await expect(
       captureEventMatchDiscovery(testEnv.PROFILE_GAMES_DB, fixture.reader, ids),
     ).rejects.toThrow("event-match-discovery-match-unavailable");
@@ -824,13 +892,7 @@ describe("event login-match discovery", () => {
     );
   });
 
-  it("reads sparse Firebase arrays and rejects malformed bracket collections", () => {
-    expect(
-      eventMatchInviteIds({
-        rounds: [null, { matches: [null, { inviteId }] }],
-        thirdPlaceMatch: { inviteId: "third-place-invite" },
-      }),
-    ).toEqual([inviteId, "third-place-invite"]);
+  it("rejects sparse arrays and malformed bracket collections before discovery", () => {
     for (const malformed of [
       { rounds: "invalid" },
       { rounds: [false] },
@@ -838,9 +900,7 @@ describe("event login-match discovery", () => {
       { rounds: [{ matches: [false] }] },
       { thirdPlaceMatch: false },
     ]) {
-      expect(() => eventMatchInviteIds(malformed)).toThrow(
-        "event-match-discovery-invalid-bracket",
-      );
+      expect(() => eventDocumentFixture(malformed)).toThrow();
     }
   });
 

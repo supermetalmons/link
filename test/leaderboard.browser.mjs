@@ -1,3 +1,5 @@
+import { browserServerOrigin } from "./browserViteServer.mjs";
+import { canonicalAppearance, required } from "./fixtures/canonicalData.mjs";
 import assert from "node:assert/strict";
 import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
@@ -5,13 +7,17 @@ import { after, before, test } from "node:test";
 import { createBrowserViteServer } from "./browserViteServer.mjs";
 
 const require = createRequire(import.meta.url);
+/** @type {typeof import("playwright")} */
 const { chromium } = require(process.env.MONS_PLAYWRIGHT_PATH || "playwright");
 const repository = fileURLToPath(new URL("../", import.meta.url));
 const environmentPath = fileURLToPath(
   new URL("./fixtures/leaderboardEnvironment.ts", import.meta.url),
 );
+/** @type {import("vite").ViteDevServer | undefined} */
 let server;
+/** @type {import("playwright").Browser | undefined} */
 let browser;
+/** @type {string} */
 let origin;
 
 before(async () => {
@@ -47,7 +53,7 @@ before(async () => {
     ],
   });
   await server.listen();
-  origin = `http://127.0.0.1:${server.httpServer.address().port}`;
+  origin = browserServerOrigin(server);
   browser = await chromium.launch({
     headless: true,
     ...(process.env.MONS_BROWSER_EXECUTABLE
@@ -61,8 +67,11 @@ after(async () => {
   await server?.close();
 });
 
+/** @param {(page: import("playwright").Page) => Promise<void>} run */
 async function fixture(run) {
+  assert.ok(browser);
   const page = await browser.newPage({ viewport: { width: 900, height: 700 } });
+  /** @type {string[]} */
   const errors = [];
   page.on("pageerror", (error) => errors.push(error.message));
   await page.route("https://cdn.lil.org/**", (route) =>
@@ -81,28 +90,48 @@ async function fixture(run) {
   }
 }
 
+/** @param {string} name @param {(page: import("playwright").Page) => Promise<void>} run */
 const mounted = (name, run) =>
   test(name, { timeout: 60000 }, () => fixture(run));
+/**
+ * @template {keyof typeof import("./fixtures/leaderboardHarness.tsx").leaderboardHarness} Method
+ * @param {import("playwright").Page} page
+ * @param {Method} method
+ * @param {Parameters<typeof import("./fixtures/leaderboardHarness.tsx").leaderboardHarness[Method]>} args
+ * @returns {Promise<Awaited<ReturnType<typeof import("./fixtures/leaderboardHarness.tsx").leaderboardHarness[Method]>>>}
+ */
 const call = (page, method, ...args) =>
   page.evaluate(
-    ({ method, args }) => window.leaderboardHarness[method](...args),
-    {
-      method,
-      args,
-    },
+    ({ method, args }) =>
+      Reflect.apply(
+        window.leaderboardHarness[method],
+        window.leaderboardHarness,
+        args,
+      ),
+    { method, args },
   );
+/** @param {import("playwright").Page} page */
 const snapshot = (page) => call(page, "snapshot");
+/** @param {import("playwright").Page} page */
 const latestRequest = async (page) =>
   (await snapshot(page)).requests.length - 1;
+/** @param {readonly {id: string}[] | null | undefined} entries */
 const ids = (entries) => entries?.map((entry) => entry.id) ?? null;
+/** @param {string} id @param {Partial<import("../src/connection/connectionModels").PlayerProfile>} [patch] @returns {import("../src/connection/connectionModels").PlayerProfile} */
 const profile = (id, patch = {}) => ({
+  ...canonicalAppearance(),
   id,
+  eth: null,
+  sol: null,
   username: id,
   emoji: 7,
   rating: 1500,
   totalManaPoints: 4,
   ...patch,
 });
+/** @param {string} id @param {Record<string, unknown>} patch @returns {Record<string, unknown>} */
+const rawProfile = (id, patch) => ({ ...profile(id), ...patch });
+/** @param {import("playwright").Page} page */
 const refresh = async (page) => {
   await call(page, "render", { show: false });
   await call(page, "render", { show: true });
@@ -202,7 +231,7 @@ mounted(
     await call(page, "writeStorage", { username: "After request" });
     await call(page, "queueCosmetics", {
       cardBackgroundId: 0,
-      profileMons: "",
+      profileMons: null,
     });
     assert.equal((await snapshot(page)).cosmeticWrites, 0);
     await call(page, "complete", await latestRequest(page), [
@@ -210,14 +239,14 @@ mounted(
     ]);
     const result = await snapshot(page);
     assert.deepEqual(ids(result.data), ["ranked", "own"]);
-    const own = result.data[1];
+    const own = required(required(result.data)[1]);
     assert.equal(own.username, "After request");
     assert.equal(own.rating, 1678);
     assert.equal(own.emoji, 1);
     assert.equal(own.aura, "rainbow");
     assert.equal(own.profile.nonce, 8);
     assert.equal(own.profile.cardBackgroundId, 0);
-    assert.equal(own.profile.profileMons, "");
+    assert.equal(own.profile.profileMons, null);
     assert.equal(result.cosmeticWrites, 2);
     assert.deepEqual(own.materials, {
       dust: 5,
@@ -244,17 +273,17 @@ mounted(
     });
     await call(
       page,
-      "stashProfile",
+      "stashRawProfile",
       "login",
-      profile("own", {
+      rawProfile("own", {
         username: "",
         rating: 0,
         win: false,
         nonce: 0,
-        aura: "",
+        aura: "none",
         totalManaPoints: 0,
         cardBackgroundId: 0,
-        profileMons: "",
+        profileMons: null,
         completedProblemIds: ["p1"],
         isTutorialCompleted: false,
         mining: { lastRockDate: null, materials: { slime: 3 } },
@@ -262,11 +291,11 @@ mounted(
     );
     await call(page, "render", { show: true });
     await call(page, "complete", await latestRequest(page), []);
-    const own = (await snapshot(page)).data[0];
+    const own = required(required((await snapshot(page)).data)[0]);
     assert.equal(own.username, "");
     assert.equal(own.rating, 0);
     assert.equal(own.win, false);
-    assert.equal(own.aura, "");
+    assert.equal(own.aura, "none");
     assert.equal(own.mp, 0);
     assert.equal(own.profile.nonce, 0);
     assert.equal(own.profile.cardBackgroundId, 0);
@@ -280,8 +309,8 @@ mounted(
     const serverOwn = profile("own", { username: "Server own", rating: 1999 });
     await call(page, "complete", await latestRequest(page), [serverOwn]);
     const result = await snapshot(page);
-    assert.equal(result.data.length, 1);
-    assert.deepEqual(result.data[0].profile, serverOwn);
+    assert.equal(required(result.data).length, 1);
+    assert.deepEqual(required(required(result.data)[0]).profile, serverOwn);
     assert.equal(result.cosmeticWrites, 1);
   },
 );
@@ -307,7 +336,7 @@ mounted(
     await call(page, "resolveEns", 2, null);
     let result = await snapshot(page);
     assert.deepEqual(
-      result.data.map((row) => row.ensName),
+      required(result.data).map((row) => row.ensName),
       ["a.eth", "b.eth", null, null, null],
     );
     assert.deepEqual(result.cache.rating, result.data);
@@ -321,12 +350,15 @@ mounted(
       profile("new", { username: null, eth: "0xnew" }),
     ]);
     await call(page, "resolveEns", 3, "late-type.eth");
-    assert.equal((await snapshot(page)).cache.rating[0].ensName, null);
+    assert.equal(
+      required(required((await snapshot(page)).cache.rating)[0]).ensName,
+      null,
+    );
     await call(page, "render", { show: false });
     await call(page, "resolveEns", 4, "late-hidden.eth");
     result = await snapshot(page);
-    assert.equal(result.data[0].ensName, null);
-    assert.equal(result.cache.mp[0].ensName, null);
+    assert.equal(required(required(result.data)[0]).ensName, null);
+    assert.equal(required(required(result.cache.mp)[0]).ensName, null);
 
     await call(page, "render", { show: true });
     await call(page, "complete", await latestRequest(page), [
@@ -340,9 +372,9 @@ mounted(
     await call(page, "resolveEns", 5, "late-identity.eth");
     result = await snapshot(page);
     assert.deepEqual(ids(result.data), ["last", "own"]);
-    assert.equal(result.data[0].ensName, null);
-    assert.equal(result.cache.mp[0].ensName, null);
-    assert.equal(result.cache.rating[0].ensName, null);
+    assert.equal(required(required(result.data)[0]).ensName, null);
+    assert.equal(required(required(result.cache.mp)[0]).ensName, null);
+    assert.equal(required(required(result.cache.rating)[0]).ensName, null);
     await call(page, "dispose");
     const disposed = await snapshot(page);
     await call(page, "resolveEns", 6, "late-unmounted.eth");
@@ -359,9 +391,13 @@ mounted(
     });
     await call(page, "seedCache", "ice", [profile("cached-ice")]);
     await call(page, "render", { show: true, leaderboardType: "dust" });
-    await call(page, "complete", await latestRequest(page), [
-      profile("dust-first", { mining: { materials: { dust: 9, slime: 1 } } }),
-      profile("slime-first", { mining: { materials: { dust: 2, slime: 20 } } }),
+    await call(page, "completeRaw", await latestRequest(page), [
+      rawProfile("dust-first", {
+        mining: { materials: { dust: 9, slime: 1 } },
+      }),
+      rawProfile("slime-first", {
+        mining: { materials: { dust: 2, slime: 20 } },
+      }),
     ]);
     const result = await snapshot(page);
     assert.deepEqual(ids(result.data), ["dust-first", "slime-first", "own"]);
@@ -378,6 +414,7 @@ mounted(
 mounted(
   "failures preserve rows or null and resetting the cache retains its existing nonreactive behavior",
   async (page) => {
+    /** @type {string[]} */
     const logs = [];
     page.on("console", (message) => {
       if (message.type() === "error") logs.push(message.text());
@@ -405,7 +442,10 @@ mounted(
     assert.deepEqual(ids((await snapshot(page)).cache.mp), ["still-active"]);
     await call(page, "resetCache");
     await call(page, "resolveEns", 0, "active.eth");
-    assert.equal((await snapshot(page)).cache.mp[0].ensName, "active.eth");
+    assert.equal(
+      required(required((await snapshot(page)).cache.mp)[0]).ensName,
+      "active.eth",
+    );
   },
 );
 
@@ -422,7 +462,7 @@ mounted(
     await call(page, "render", { mode: "view", show: true });
     const ownRow = page.locator('tr[data-current="true"]');
     assert.equal(await ownRow.locator("td").first().textContent(), "∅");
-    assert.match(await ownRow.textContent(), /Own Player/);
+    assert.match(required(await ownRow.textContent()), /Own Player/);
     await ownRow.dispatchEvent("click");
     assert.deepEqual((await snapshot(page)).cards, [[own, "Own Player", true]]);
     await call(page, "flushScrollResets");
@@ -442,14 +482,14 @@ mounted(
       profile("own", { username: "Own MP", totalManaPoints: 321 }),
     ]);
     await call(page, "render", { show: true, leaderboardType: "mp" });
-    assert.match(await ownRow.textContent(), /Own MP/);
+    assert.match(required(await ownRow.textContent()), /Own MP/);
     assert.equal(await ownRow.locator("td").last().textContent(), "321");
     assert.equal((await snapshot(page)).scrollTop, 0);
     await call(page, "flushScrollResets");
     await call(page, "scrollTo", 500);
     await call(page, "writeStorage", { profileId: "ranked-0" });
     await call(page, "render");
-    assert.match(await ownRow.textContent(), /ranked-0/);
+    assert.match(required(await ownRow.textContent()), /ranked-0/);
     assert.equal((await snapshot(page)).scrollResets, 1);
     await call(page, "flushScrollResets");
     assert.equal((await snapshot(page)).scrollTop, 0);

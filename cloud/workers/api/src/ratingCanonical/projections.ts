@@ -38,7 +38,7 @@ async function claimProjection(
     return false;
   const stored = await readCanonicalRatingProjectionSnapshot(db, operationId);
   if (!stored || stored.snapshot.revision !== expectedRevision) return false;
-  const { snapshot, payloadJson } = stored;
+  const { snapshot } = stored;
   const fields = canonicalRatingProjectionFields(projection);
   try {
     await commitCanonicalPlan(db, {
@@ -54,7 +54,6 @@ async function claimProjection(
           snapshot,
           claimedRatingProjectionValue(snapshot, fields, claimedAtMs),
           projection,
-          payloadJson,
         ),
       ],
     });
@@ -83,7 +82,7 @@ async function markProjection(
         operationId,
       );
       if (!stored) throw new TypeError("rating-operation-missing");
-      const { snapshot, payloadJson } = stored;
+      const { snapshot } = stored;
       try {
         await commitCanonicalPlan(db, {
           expectations: [
@@ -104,7 +103,6 @@ async function markProjection(
                 reason,
               ),
               projection,
-              payloadJson,
             ),
           ],
         });

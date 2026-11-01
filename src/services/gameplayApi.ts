@@ -1,3 +1,4 @@
+import { fetchApplicationData } from "./applicationTransport.ts";
 import type {
   ApiQuery,
   ApiHttpUrl,
@@ -177,28 +178,31 @@ const gameplayErrorPolicy: ApiErrorPolicy = {
   timeoutMessage: "Gameplay request timed out.",
 };
 
-type GameplayMutationPath = GameplayPath | EventParticipationPath;
+type GameplayMutationPath =
+  GameplayPath | EventParticipationPath | EventControlPath;
 async function gameplayMutation<const Path extends GameplayMutationPath>(
   path: Path | `${Path}?${string}`,
   body: ApiPathRequest<"POST", NoInfer<Path>>,
   tokenProvider: AuthTokenProvider,
   validate: (value: unknown) => value is ApiPathResponse<"POST", NoInfer<Path>>,
   timeoutMs?: number,
-  options?: { signal?: AbortSignal; maxResponseBytes?: number },
+  options?: {
+    signal?: AbortSignal;
+    maxResponseBytes?: number;
+    decodeResponse?: (value: unknown) => unknown;
+  },
 ): Promise<ApiPathResponse<"POST", Path>>;
-async function gameplayMutation<const Path extends EventControlPath>(
-  path: `${Path}?eventSnapshot=v1`,
-  body: ApiPathRequest<"POST", NoInfer<Path>>,
-  tokenProvider: AuthTokenProvider,
-  validate: typeof isRecord,
-): Promise<Record<string, unknown>>;
 async function gameplayMutation<T>(
   path: string,
   body: unknown,
   tokenProvider: AuthTokenProvider,
   validate: (value: unknown) => value is T,
   timeoutMs = GAMEPLAY_API_TIMEOUT_MS,
-  options: { signal?: AbortSignal; maxResponseBytes?: number } = {},
+  options: {
+    signal?: AbortSignal;
+    maxResponseBytes?: number;
+    decodeResponse?: (value: unknown) => unknown;
+  } = {},
 ): Promise<T> {
   return authenticatedJsonRequest({
     url: `${GAMEPLAY_API_ROOT}${path}`,
@@ -217,8 +221,11 @@ async function gameplayMutation<T>(
     timeoutMs,
     maxResponseBytes:
       options.maxResponseBytes ?? GAMEPLAY_API_MAX_RESPONSE_BYTES,
-    signal: options.signal,
-    readJson: (response, maxBytes) => readBoundedJson(response, maxBytes),
+    ...(options.signal ? { signal: options.signal } : {}),
+    readJson: async (response, maxBytes) => {
+      const value = await readBoundedJson(response, maxBytes);
+      return options.decodeResponse ? options.decodeResponse(value) : value;
+    },
     assertCurrentUser: () => tokenProvider.assertCurrentUser?.(),
     errors: gameplayErrorPolicy,
   });
@@ -293,7 +300,7 @@ export async function readMatchSnapshotViaApi(
         "matchId" satisfies keyof ApiQuery<"GET /matches/snapshot">,
         request.matchId,
       );
-      const response = await fetch(url, {
+      const response = await fetchApplicationData(url, {
         method: "GET",
         headers: { Accept: "application/json" },
         cache: "no-store",
@@ -358,7 +365,7 @@ export async function readHistoricalMatchPairViaApi(
       "matchId" satisfies keyof ApiQuery<"GET /matches/history">,
       request.matchId,
     );
-    const response = await fetch(url, {
+    const response = await fetchApplicationData(url, {
       method: "GET",
       headers: { Accept: "application/json" },
       cache: "no-store",
@@ -408,7 +415,7 @@ async function retryGameSessionMutation<const Path extends GameplayPath>(
         tokenProvider,
         validate,
         remainingMs,
-        { maxResponseBytes },
+        maxResponseBytes === undefined ? {} : { maxResponseBytes },
       );
     } catch (error) {
       const busy =
@@ -677,23 +684,32 @@ async function eventMutation<const Path extends EventControlPath>(
   tokenProvider: AuthTokenProvider,
   validate: (value: unknown) => value is ApiPathResponse<"POST", NoInfer<Path>>,
 ): Promise<ApiPathResponse<"POST", Path>> {
-  const payload = await gameplayMutation(
+  return gameplayMutation(
     `${path}?eventSnapshot=v1`,
     request,
     tokenProvider,
-    isRecord,
+    (value): value is ApiPathResponse<"POST", Path> => {
+      if (!isRecord(value)) return false;
+      const { eventSnapshot, ...response } = value;
+      return (
+        validate(response) &&
+        (eventSnapshot === undefined ||
+          (isEventSnapshotSeed(eventSnapshot) &&
+            eventSnapshot.snapshot.eventId === response.eventId))
+      );
+    },
+    GAMEPLAY_API_TIMEOUT_MS,
+    {
+      decodeResponse(value) {
+        if (!isRecord(value)) return value;
+        const { eventSnapshot, ...response } = value;
+        return isEventSnapshotSeed(eventSnapshot) &&
+          eventSnapshot.snapshot.eventId === response.eventId
+          ? { ...response, eventSnapshot }
+          : response;
+      },
+    },
   );
-  const { eventSnapshot, ...response } = payload;
-  if (!validate(response)) {
-    throw new GameplayApiError(
-      "unavailable",
-      "Gameplay service is unavailable.",
-    );
-  }
-  return isEventSnapshotSeed(eventSnapshot) &&
-    eventSnapshot.snapshot.eventId === response.eventId
-    ? Object.assign(response, { eventSnapshot })
-    : response;
 }
 
 export function createEventViaApi(

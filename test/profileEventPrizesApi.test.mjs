@@ -1,3 +1,5 @@
+import { createTimerHandle } from "./fixtures/timerHandle.mjs";
+import { required } from "./fixtures/canonicalData.mjs";
 import assert from "node:assert/strict";
 import { registerHooks } from "node:module";
 import test from "node:test";
@@ -30,6 +32,13 @@ const { EventPollingRegistry } =
 const { createUserBoundAuthTokenProvider } =
   await import("../src/services/authApi.ts");
 
+/**
+ * @typedef {import("@mons/shared/event-prizes").ProfileEventPrizesResponse} PrizeSnapshot
+ * @typedef {import("@mons/shared/event-prizes").ProfileEventPrizesPageResponse} PrizePage
+ * @typedef {import("@mons/shared/event-prizes").EventPrizeAssignmentWireRecord} PrizeAssignment
+ * @typedef {import("../src/services/gameplayTransport.ts").ConditionalReadOptions} ReadOptions
+ * @typedef {RequestInit & { url: URL, headers: Headers }} CapturedRequest
+ */
 const originalFetch = globalThis.fetch;
 const epoch = "12345678-1234-1234-1234-123456789abc";
 const nextEpoch = "87654321-1234-1234-1234-123456789abc";
@@ -38,6 +47,7 @@ const etag = (revision = 1, valueEpoch = epoch) =>
   profileEventPrizesPageEtag(valueEpoch, profileId, revision);
 const bookmark = (sequence = 1, valueEpoch = epoch) =>
   `mons-d1-v1:${valueEpoch}:bookmark-${sequence}`;
+/** @param {string} eventId @param {Partial<PrizeAssignment>} [extra] @returns {PrizeAssignment} */
 const assignment = (eventId, extra = {}) => ({
   eventId,
   profileId,
@@ -46,16 +56,19 @@ const assignment = (eventId, extra = {}) => ({
   assignedAtMs: 10,
   ...extra,
 });
+/** @param {PrizeSnapshot["prizes"]} [prizes] @returns {PrizeSnapshot} */
 const snapshot = (prizes = {}, revision = 1) => ({
   ok: true,
   profileId,
   revision,
   prizes,
 });
+/** @param {PrizeSnapshot["prizes"]} [prizes] @param {string | null} [nextCursor] @returns {PrizePage} */
 const page = (prizes = {}, nextCursor = null, revision = 1) => ({
   ...snapshot(prizes, revision),
   nextCursor,
 });
+/** @template {{ revision: number }} T @param {T} value @param {Record<string, string>} [headers] */
 const response = (value, headers = {}) =>
   new Response(JSON.stringify(value), {
     headers: {
@@ -65,12 +78,17 @@ const response = (value, headers = {}) =>
       ...headers,
     },
   });
+/** @param {Record<string, string>} [headers] */
 const unchanged = (headers = {}) =>
   new Response(null, {
     status: 304,
     headers: { ETag: etag(), "X-D1-Bookmark": bookmark(), ...headers },
   });
-const failure = (status, code, message) =>
+const failure = (
+  /** @type {number} */ status,
+  /** @type {string} */ code,
+  /** @type {string} */ message,
+) =>
   new Response(JSON.stringify({ ok: false, error: code, message }), {
     status,
     headers: { "Content-Type": "application/json" },
@@ -78,28 +96,28 @@ const failure = (status, code, message) =>
 const changed = () => failure(409, "aborted", "event-prizes-snapshot-changed");
 const unauthorized = () =>
   failure(401, "unauthenticated", "authentication-required");
+/** @param {unknown} error @returns {error is import("../src/services/gameplayTransport.ts").GameplayApiError} */
 const unavailable = (error) =>
   error instanceof GameplayApiError && error.code === "unavailable";
 const flush = () => new Promise((resolve) => setImmediate(resolve));
 
+/** @template [T=Response] @returns {PromiseWithResolvers<T>} */
 function deferred() {
-  let resolve;
-  const promise = new Promise((resolvePromise) => {
-    resolve = resolvePromise;
-  });
-  return { promise, resolve };
+  return Promise.withResolvers();
 }
 
+/** @param {(Response | (() => Response | Promise<Response>))[]} responses */
 function serve(responses) {
+  /** @type {CapturedRequest[]} */
   const calls = [];
   globalThis.fetch = async (url, init) => {
     calls.push({
-      url: new URL(url),
+      url: new URL(String(url)),
       ...init,
-      headers: new Headers(init.headers),
+      headers: new Headers(required(init).headers),
     });
     assert.ok(responses.length > 0, "unexpected request");
-    const next = responses.shift();
+    const next = required(responses.shift());
     return typeof next === "function" ? next() : next;
   };
   return calls;
@@ -109,8 +127,8 @@ test.afterEach(() => {
   globalThis.fetch = originalFetch;
 });
 
-test("assembles all pages once with unknown assignment fields and final transport metadata", async () => {
-  const first = assignment("event-A", { futureMetadata: { edition: 2 } });
+test("assembles canonical historical assignments once with final transport metadata", async () => {
+  const first = assignment("event-A");
   const second = assignment("event-a");
   const pending = deferred();
   const calls = serve([
@@ -134,14 +152,14 @@ test("assembles all pages once with unknown assignment fields and final transpor
   await flush();
   assert.equal(settled, false);
   assert.equal(calls.length, 2);
-  assert.equal(calls[0].url.search, "?pagination=1");
-  assert.equal(calls[0].headers.get("If-None-Match"), etag(0));
-  assert.equal(calls[0].headers.get("X-D1-Bookmark"), bookmark(1));
-  assert.equal(calls[1].url.searchParams.get("cursor"), "cursor-1");
-  assert.equal(calls[1].headers.has("If-None-Match"), false);
-  assert.equal(calls[1].headers.get("X-D1-Bookmark"), bookmark(2));
-  assert.equal(calls[1].headers.get("Authorization"), "Bearer token");
-  pending.resolve(
+  assert.equal(required(calls[0]).url.search, "?pagination=1");
+  assert.equal(required(calls[0]).headers.get("If-None-Match"), etag(0));
+  assert.equal(required(calls[0]).headers.get("X-D1-Bookmark"), bookmark(1));
+  assert.equal(required(calls[1]).url.searchParams.get("cursor"), "cursor-1");
+  assert.equal(required(calls[1]).headers.has("If-None-Match"), false);
+  assert.equal(required(calls[1]).headers.get("X-D1-Bookmark"), bookmark(2));
+  assert.equal(required(calls[1]).headers.get("Authorization"), "Bearer token");
+  required(pending.resolve)(
     response(page({ "event-a": second }), { "X-D1-Bookmark": bookmark(3) }),
   );
   const result = await read;
@@ -151,6 +169,8 @@ test("assembles all pages once with unknown assignment fields and final transpor
     etag: etag(),
     bookmark: bookmark(3),
   });
+  assert.equal(result.kind, "modified");
+  assert.ok(result.kind === "modified");
   assert.equal(isProfileEventPrizesResponse(result.value), true);
 });
 
@@ -180,11 +200,14 @@ test("accepts only a matching first-page conditional response", async () => {
     { kind: "not-modified", etag: etag(), bookmark: bookmark(2) },
   );
   assert.equal(calls.length, 1);
-  for (const [options, headers] of [
+  for (const [
+    options,
+    headers,
+  ] of /** @type {[ReadOptions, Record<string, string>][]} */ ([
     [{}, {}],
     [{ etag: etag(0) }, {}],
     [{ etag: etag() }, { "X-D1-Bookmark": bookmark(2, nextEpoch) }],
-  ]) {
+  ])) {
     serve([unchanged(headers)]);
     await assert.rejects(
       readProfileEventPrizesViaApi(profileId, async () => "token", options),
@@ -263,14 +286,27 @@ test("retains response byte limits for every page and cancels oversized bodies",
 });
 
 test("assembles histories larger than one response without truncation", async () => {
-  const first = assignment("first", { metadata: "a".repeat(350_000) });
-  const last = assignment("last", { metadata: "b".repeat(350_000) });
-  serve([response(page({ first }, "cursor-1")), response(page({ last }))]);
+  const pages = Array.from({ length: 5 }, (_, pageIndex) =>
+    Object.fromEntries(
+      Array.from({ length: 100 }, (_, index) => {
+        const eventId = `event-${pageIndex * 100 + index}-${"x".repeat(650)}`;
+        return [eventId, assignment(eventId)];
+      }),
+    ),
+  );
+  serve(
+    pages.map((prizes, index) =>
+      response(
+        page(prizes, index < pages.length - 1 ? `cursor-${index + 1}` : null),
+      ),
+    ),
+  );
   const result = await readProfileEventPrizesViaApi(
     profileId,
     async () => "token",
   );
-  assert.deepEqual(result.value, snapshot({ first, last }));
+  assert.ok(result.kind === "modified");
+  assert.deepEqual(result.value, snapshot(Object.assign({}, ...pages)));
   assert.ok(
     JSON.stringify(result.value).length > MAX_EVENT_READ_RESPONSE_BYTES,
   );
@@ -290,14 +326,15 @@ test("restarts changed snapshots once from primary without retaining earlier pri
       bookmark: bookmark(),
     },
   );
+  assert.ok(result.kind === "modified");
   assert.deepEqual(
     result.value,
     snapshot({ current: assignment("current") }, 2),
   );
   assert.equal(calls.length, 3);
-  assert.equal(calls[2].url.search, "?pagination=1");
-  assert.equal(calls[2].headers.has("If-None-Match"), false);
-  assert.equal(calls[2].headers.has("X-D1-Bookmark"), false);
+  assert.equal(required(calls[2]).url.search, "?pagination=1");
+  assert.equal(required(calls[2]).headers.has("If-None-Match"), false);
+  assert.equal(required(calls[2]).headers.has("X-D1-Bookmark"), false);
 
   const repeated = serve([changed(), changed()]);
   await assert.rejects(
@@ -310,8 +347,9 @@ test("restarts changed snapshots once from primary without retaining earlier pri
 });
 
 test("allows one authentication refresh across all pages and snapshot restarts", async () => {
+  /** @type {(boolean | undefined)[]} */
   const forceRefresh = [];
-  const token = async (force) => {
+  const token = async (/** @type {boolean | undefined} */ force) => {
     forceRefresh.push(force);
     return "token";
   };
@@ -378,11 +416,12 @@ test("aborts stalled later-page bodies without returning partial history", async
     (error) => error instanceof GameplayApiError && error.code === "aborted",
   );
   assert.equal(bodyCancelled, true);
-  assert.equal(calls[1].signal.aborted, true);
+  assert.equal(required(required(calls[1]).signal).aborted, true);
 });
 
 test("uses one deadline across pages, restart, and token acquisition", async (t) => {
   t.mock.timers.enable({ apis: ["setTimeout"] });
+  /** @type {PromiseWithResolvers<string>} */
   const laterToken = deferred();
   let tokenCalls = 0;
   const calls = serve([
@@ -406,14 +445,14 @@ test("uses one deadline across pages, restart, and token acquisition", async (t)
   );
   t.mock.timers.tick(GAMEPLAY_API_TIMEOUT_MS - 20_000);
   await rejection;
-  laterToken.resolve("token");
+  required(laterToken.resolve)("token");
   await flush();
   assert.equal(calls.length, 2);
 });
 
 test("keeps the previous complete polling snapshot until every replacement page succeeds", async () => {
+  /** @type {Map<ReturnType<typeof createTimerHandle>, { callback: () => void, delay: number }>} */
   const timers = new Map();
-  let timerId = 0;
   const pending = deferred();
   const calls = serve([
     response(page({ old: assignment("old") })),
@@ -432,12 +471,14 @@ test("keeps the previous complete polling snapshot until every replacement page 
     loadProfilePrizes: (id, options) =>
       readProfileEventPrizesViaApi(id, async () => "token", options),
     setTimer(callback, delay) {
-      const id = ++timerId;
+      const id = createTimerHandle();
       timers.set(id, { callback, delay });
       return id;
     },
   });
+  /** @type {PrizeSnapshot[]} */
   const updates = [];
+  /** @type {unknown[]} */
   const errors = [];
   const unsubscribe = registry.subscribeToProfileEventPrizes(
     profileId,
@@ -445,7 +486,7 @@ test("keeps the previous complete polling snapshot until every replacement page 
     (error) => errors.push(error),
   );
   const runNext = async () => {
-    const [id, timer] = timers.entries().next().value;
+    const [id, timer] = required(timers.entries().next().value);
     timers.delete(id);
     timer.callback();
     await flush();
@@ -456,9 +497,9 @@ test("keeps the previous complete polling snapshot until every replacement page 
   assert.equal(errors.length, 1);
   await runNext();
   assert.equal(updates.length, 1);
-  assert.equal(calls[3].headers.get("If-None-Match"), etag(1));
-  assert.equal(calls[3].headers.get("X-D1-Bookmark"), bookmark(1));
-  pending.resolve(
+  assert.equal(required(calls[3]).headers.get("If-None-Match"), etag(1));
+  assert.equal(required(calls[3]).headers.get("X-D1-Bookmark"), bookmark(1));
+  required(pending.resolve)(
     response(page({ last: assignment("last") }, null, 3), {
       "X-D1-Bookmark": bookmark(5),
     }),
@@ -474,8 +515,8 @@ test("keeps the previous complete polling snapshot until every replacement page 
 
 test("drops an in-flight paginated read after polling invalidation, hiding, reset, or unsubscribe", async () => {
   for (const action of ["invalidate", "hide", "reset", "unsubscribe"]) {
+    /** @type {Map<ReturnType<typeof createTimerHandle>, () => void>} */
     const timers = new Map();
-    let timerId = 0;
     let visible = true;
     let onVisibility = () => {};
     const pending = deferred();
@@ -496,19 +537,21 @@ test("drops an in-flight paginated read after polling invalidation, hiding, rese
       loadProfilePrizes: (id, options) =>
         readProfileEventPrizesViaApi(id, async () => "token", options),
       setTimer(callback) {
-        const id = ++timerId;
+        const id = createTimerHandle();
         timers.set(id, callback);
         return id;
       },
     });
+    /** @type {PrizeSnapshot[]} */
     const updates = [];
+    /** @type {unknown[]} */
     const errors = [];
     const unsubscribe = registry.subscribeToProfileEventPrizes(
       profileId,
       (value) => updates.push(value),
       (error) => errors.push(error),
     );
-    const [id, callback] = timers.entries().next().value;
+    const [id, callback] = required(timers.entries().next().value);
     timers.delete(id);
     callback();
     await flush();
@@ -520,8 +563,8 @@ test("drops an in-flight paginated read after polling invalidation, hiding, rese
       visible = false;
       onVisibility();
     }
-    assert.equal(calls[1].signal.aborted, true);
-    pending.resolve(response(page({ last: assignment("last") })));
+    assert.equal(required(required(calls[1]).signal).aborted, true);
+    required(pending.resolve)(response(page({ last: assignment("last") })));
     await flush();
     assert.deepEqual(updates, action === "reset" ? [snapshot({}, 0)] : []);
     assert.deepEqual(errors, []);

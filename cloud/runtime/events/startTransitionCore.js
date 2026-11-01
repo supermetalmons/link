@@ -21,6 +21,7 @@ exports.setMatchSlotParticipant =
   exports.applyMatchResolution =
     void 0;
 const documents_js_1 = require("./documents.js");
+const appearance_js_1 = require("../shared/appearance.js");
 const eventCommands_js_1 = require("../eventCommands.js");
 const ids_1 = require("@mons/shared/ids");
 const match_protocol_1 = require("@mons/shared/match-protocol");
@@ -203,8 +204,6 @@ const assignWinnerToNextRound = ({
     nextMatchKey,
   );
   if (targetKind === "missing") return false;
-  if (targetKind === "invalid")
-    throw new TypeError("Cannot assign an event match slot to a scalar.");
   const nextMatch = (0, documents_js_1.eventMatchAt)(nextMatches, nextMatchKey);
   const slot = matchIndex % 2 === 0 ? "host" : "guest";
   if (winnerDisqualified) {
@@ -296,13 +295,19 @@ const createInviteForMatch = async ({
       useStoredMatchKey,
     ),
   });
-  const createMatchRecord = (color, emojiId, aura) =>
-    (0, match_protocol_1.buildFreshMatchRecord)({
+  const createMatchRecord = (color, emojiId, aura) => {
+    if (
+      !(0, appearance_js_1.isEmojiId)(emojiId) ||
+      !(0, appearance_js_1.isAura)(aura)
+    )
+      throw new TypeError("invalid-event-match-appearance");
+    return (0, match_protocol_1.buildFreshMatchRecord)({
       color,
-      emojiId: typeof emojiId === "number" ? Math.floor(emojiId) : 0,
-      aura: normalizeString(aura) || null,
+      emojiId,
+      aura,
       seed: gameSeed,
     });
+  };
   inviteUpdates.push({
     kind: "match-creation",
     playerId: hostLoginUid,
@@ -358,16 +363,15 @@ const reconcileThirdPlaceMatchReadiness = async ({
   const semifinalMatchKeys = getSortedMatchKeys(
     (0, documents_js_1.eventRoundMatches)(semifinalRound),
   );
-  const semifinalMatches = [
-    (0, documents_js_1.eventMatchAt)(
-      (0, documents_js_1.eventRoundMatches)(semifinalRound),
-      semifinalMatchKeys[0],
-    ),
-    (0, documents_js_1.eventMatchAt)(
-      (0, documents_js_1.eventRoundMatches)(semifinalRound),
-      semifinalMatchKeys[1],
-    ),
-  ];
+  const semifinalMatches = [0, 1].map((index) => {
+    const matchKey = semifinalMatchKeys[index];
+    return matchKey === undefined
+      ? null
+      : (0, documents_js_1.eventMatchAt)(
+          (0, documents_js_1.eventRoundMatches)(semifinalRound),
+          matchKey,
+        );
+  });
   let didChange = false;
   for (const [index, semifinalMatch] of semifinalMatches.entries()) {
     let participant = null;
@@ -433,9 +437,9 @@ const reconcileThirdPlaceMatchReadiness = async ({
         useStoredMatchKey: true,
         match: thirdPlaceMatch,
         inviteUpdates,
-        random,
+        ...(random === undefined ? {} : { random }),
         buildRandomGameSeed,
-        ownershipSnapshot,
+        ...(ownershipSnapshot === undefined ? {} : { ownershipSnapshot }),
       })) || didChange;
     return { didChange, thirdPlaceMatch };
   }
@@ -567,7 +571,7 @@ const reconcileBracketMatchReadiness = async ({
               matchKey,
               match,
               inviteUpdates,
-              random,
+              ...(random === undefined ? {} : { random }),
               buildRandomGameSeed,
               ownershipSnapshot,
             })
@@ -756,7 +760,10 @@ const buildFixedBracketState = async ({
   const inviteUpdates = [];
   const rounds = (0, documents_js_1.createEventRoundsDocument)();
   let thirdPlaceMatch = null;
-  const seedToProfileId = buildSeedToProfileId({ participantIds, random });
+  const seedToProfileId = buildSeedToProfileId({
+    participantIds,
+    ...(random === undefined ? {} : { random }),
+  });
   for (let roundIndex = 0; roundIndex < roundCount; roundIndex += 1) {
     const matches = (0, documents_js_1.createEventMatchesDocument)();
     const round = (0, documents_js_1.createEventRoundDocument)({
@@ -798,7 +805,7 @@ const buildFixedBracketState = async ({
             matchKey,
             match,
             inviteUpdates,
-            random,
+            ...(random === undefined ? {} : { random }),
             buildRandomGameSeed,
             ownershipSnapshot,
           });
@@ -824,7 +831,7 @@ const buildFixedBracketState = async ({
     nowMs,
     participantsById,
     inviteUpdates,
-    random,
+    ...(random === undefined ? {} : { random }),
     buildRandomGameSeed,
     ownershipSnapshot,
   });
@@ -837,7 +844,7 @@ const buildFixedBracketState = async ({
       participantsById,
       inviteUpdates,
       thirdPlaceMatch,
-      random,
+      ...(random === undefined ? {} : { random }),
       buildRandomGameSeed,
       ownershipSnapshot,
     });
@@ -952,11 +959,9 @@ const buildScheduledEventDueUpdatesCore = async ({
   const canonicalParticipants = (0,
   ownership_js_1.canonicalizeEventParticipants)(event, ownershipSnapshot);
   const participantsById = canonicalParticipants.participantsById;
-  const participantIds = (0, participants_js_1.getEventParticipantIds)(
-    (0, documents_js_1.readEventDocument)({
-      participants: participantsById,
-    }),
-  );
+  const participantIds = (0, participants_js_1.getEventParticipantIds)({
+    participants: participantsById,
+  });
   (0, documents_js_1.patchEventDocument)(event, {
     participants: participantsById,
   });
@@ -979,6 +984,7 @@ const buildScheduledEventDueUpdatesCore = async ({
       currentRoundIndex: bracket.currentRoundIndex,
       bracketSize: bracket.bracketSize,
       roundCount: bracket.roundCount,
+      rounds: bracket.rounds,
     });
     if (supportsThirdPlaceMatch) {
       (0, documents_js_1.patchEventDocument)(event, {

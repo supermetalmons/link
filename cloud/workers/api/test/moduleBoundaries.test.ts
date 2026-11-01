@@ -502,7 +502,6 @@ const runtimeExtensions = [".ts", ".tsx", ".js", ".mjs", ".cjs"];
 
 test("Worker database execution uses domain methods and isolated compatibility codecs", () => {
   const codecPaths = new Set([
-    "cloud/workers/api/src/eventCompatibilityCodec.ts",
     "cloud/workers/api/src/eventTransitionCodec.ts",
     "cloud/workers/api/src/gameSessionCodec.ts",
   ]);
@@ -688,7 +687,10 @@ test("profile-link job coordination cannot use the retired Firebase outbox", () 
 test("event runtimes install the shared ownership snapshot through an independent factory", () => {
   const factory = resolve(import.meta.dirname, "../src/workerEventRuntime.ts");
   const source = readFileSync(factory, "utf8");
-  assert.match(source, /readProfileOwnershipSnapshot:\s*\(query\)\s*=>/);
+  assert.match(
+    source,
+    /readProfileOwnershipSnapshot:\s*(?:async\s*)?\(query\)\s*=>/,
+  );
   assert.match(source, /requireProfileOwnershipSnapshot\(repository, query\)/);
   for (const filename of [
     "eventOperations.ts",
@@ -806,7 +808,7 @@ function runtimeSpecifiers(path: string): string[] {
         (typescript.isIdentifier(node.expression) &&
           node.expression.text === "require")) &&
       node.arguments.length === 1 &&
-      typescript.isStringLiteralLike(node.arguments[0])
+      typescript.isStringLiteralLike(node.arguments[0]!)
     ) {
       specifiers.push(node.arguments[0].text);
     }

@@ -34,15 +34,8 @@ export type EventRuntimeRequest = {
   } | null;
   data: unknown;
 };
-export type EventProgressOutboxRecord = {
-  schemaVersion: 1;
-  eventId: string;
-  sourceKey: string;
-  reason: string;
-  runAtMs: number | null;
-  firstQueuedAtMs: number;
-  lastQueuedAtMs: number;
-};
+export type EventProgressOutboxRecord =
+  import("./eventProgressRecords.js").EventProgressPendingRecord;
 export type EventRuntimeCreateResult = {
   ok: true;
   eventId: string;

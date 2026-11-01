@@ -1,3 +1,4 @@
+import { required } from "./fixtures/canonicalData.mjs";
 import assert from "node:assert/strict";
 import { registerHooks } from "node:module";
 import test from "node:test";
@@ -44,6 +45,10 @@ const processing = {
   prizeId,
 };
 
+/**
+ * @param {unknown} body
+ * @param {number} [status]
+ */
 const jsonResponse = (body, status = 200) =>
   new Response(JSON.stringify(body), {
     status,
@@ -51,7 +56,9 @@ const jsonResponse = (body, status = 200) =>
   });
 
 test("returns an immediately completed Worker withdrawal", async () => {
+  /** @type {Array<boolean>} */
   const calls = [];
+  /** @type {Array<{ input: RequestInfo | URL; init: RequestInit | undefined; }>} */
   const requests = [];
   const result = await withdrawEventPrizeViaApi(
     eventId,
@@ -72,14 +79,14 @@ test("returns an immediately completed Worker withdrawal", async () => {
   assert.deepEqual(calls, [false]);
   assert.equal(requests.length, 1);
   assert.equal(
-    requests[0].input,
+    required(requests[0]).input,
     "https://api.mons.link/events/prizes/withdrawals",
   );
-  const { init } = requests[0];
+  const init = required(required(requests[0]).init);
   assert.equal(init.method, "POST");
   assert.equal(init.cache, "no-store");
   assert.ok(init.signal instanceof AbortSignal);
-  assert.deepEqual(JSON.parse(init.body), {
+  assert.deepEqual(parseRequestJson(init.body), {
     eventId,
     prizeId,
     solanaAddress: recipientAddress,
@@ -99,7 +106,9 @@ test("polls processing operations and tolerates transient status failures", asyn
     ),
     jsonResponse(completed),
   ];
+  /** @type {Array<string>} */
   const paths = [];
+  /** @type {Array<number>} */
   const sleeps = [];
   let now = 0;
   const result = await withdrawEventPrizeViaApi(
@@ -110,8 +119,8 @@ test("polls processing operations and tolerates transient status failures", asyn
     {
       deadlineMs: 10_000,
       fetcher: async (input) => {
-        paths.push(new URL(input).pathname);
-        return responses.shift();
+        paths.push(new URL(String(input)).pathname);
+        return required(responses.shift());
       },
       now: () => now,
       pollIntervalMs: 2_000,
@@ -171,6 +180,7 @@ test("stops polling after a terminal Workflow failure", async () => {
 });
 
 test("refreshes an expired token once", async () => {
+  /** @type {Array<boolean>} */
   const refreshes = [];
   let requestCount = 0;
   const result = await withdrawEventPrizeViaApi(
@@ -246,12 +256,14 @@ test("bounds stalled session token acquisition", async (t) => {
 test("clips polling request timeouts to the remaining overall deadline", async (t) => {
   t.mock.timers.enable({ apis: ["setTimeout"] });
   let now = 0;
+  /** @type {AbortSignal | null | undefined} */
   let signal;
-  let pollingStarted;
-  const started = new Promise((resolve) => {
-    pollingStarted = resolve;
-  });
+
+  /** @type {PromiseWithResolvers<void>} */
+  const { promise: started, resolve: pollingStarted } = Promise.withResolvers();
+  /** @type {Array<string>} */
   const paths = [];
+  /** @type {Array<number>} */
   const sleeps = [];
   const withdrawal = withdrawEventPrizeViaApi(
     eventId,
@@ -268,14 +280,14 @@ test("clips polling request timeouts to the remaining overall deadline", async (
         now += milliseconds;
       },
       fetcher: async (input, init) => {
-        paths.push(new URL(input).pathname);
+        paths.push(new URL(String(input)).pathname);
         if (paths.length === 1) return jsonResponse(processing, 202);
-        assert.deepEqual(JSON.parse(init.body), {
+        assert.deepEqual(parseRequestJson(required(init).body), {
           eventId,
           operationId,
           prizeId,
         });
-        signal = init.signal;
+        signal = required(init).signal;
         pollingStarted();
         return new Promise(() => undefined);
       },
@@ -290,10 +302,10 @@ test("clips polling request timeouts to the remaining overall deadline", async (
   );
   await started;
   t.mock.timers.tick(199);
-  assert.equal(signal.aborted, false);
+  assert.equal(required(signal).aborted, false);
   t.mock.timers.tick(1);
   await rejection;
-  assert.equal(signal.aborted, true);
+  assert.equal(required(signal).aborted, true);
   assert.deepEqual(sleeps, [700]);
   assert.deepEqual(paths, [
     "/events/prizes/withdrawals",
@@ -304,7 +316,9 @@ test("clips polling request timeouts to the remaining overall deadline", async (
 test("keeps the default overall withdrawal deadline at 135 seconds", async () => {
   assert.equal(EVENT_PRIZE_API_DEADLINE_MS, 135_000);
   let now = 0;
+  /** @type {Array<number>} */
   const sleeps = [];
+  /** @type {Array<string>} */
   const paths = [];
   await assert.rejects(
     withdrawEventPrizeViaApi(
@@ -320,7 +334,7 @@ test("keeps the default overall withdrawal deadline at 135 seconds", async () =>
           now += milliseconds;
         },
         fetcher: async (input) => {
-          paths.push(new URL(input).pathname);
+          paths.push(new URL(String(input)).pathname);
           return jsonResponse(processing, 202);
         },
       },
@@ -341,7 +355,6 @@ test("converts auth token errors and masks unrelated token failures", async () =
   const authError = new AuthApiError(
     "unauthenticated",
     "authentication-changed",
-    { reason: "session-replaced" },
   );
   let fetches = 0;
   for (const failure of [authError, new Error("private-token-detail")]) {
@@ -384,17 +397,17 @@ test("converts auth token errors and masks unrelated token failures", async () =
 
 test("preserves withdrawal stream errors but masks auth stream failures", async () => {
   const withdrawalError = new EventPrizeWithdrawalApiError(
-    "failed-precondition",
+    "unavailable",
     "withdrawal-interrupted",
     { terminal: true },
   );
   const authError = new AuthApiError(
     "unauthenticated",
     "authentication-changed",
-    { reason: "private-session-detail" },
   );
   for (const failure of [withdrawalError, authError]) {
     let fetches = 0;
+    /** @type {Array<number>} */
     const sleeps = [];
     await assert.rejects(
       withdrawEventPrizeViaApi(
@@ -503,3 +516,14 @@ test("rejects a response after the authenticated user changes", async () => {
       error.message === "authentication-changed",
   );
 });
+
+/** @param {unknown} body @returns {Record<string, unknown>} */
+function parseRequestJson(body) {
+  assert.ok(typeof body === "string");
+  /** @type {unknown} */
+  const value = JSON.parse(body);
+  assert.ok(
+    value !== null && typeof value === "object" && !Array.isArray(value),
+  );
+  return Object.fromEntries(Object.entries(value));
+}

@@ -1,3 +1,5 @@
+import { required } from "./fixtures/canonicalData.mjs";
+import { browserServerOrigin } from "./browserViteServer.mjs";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { createRequire } from "node:module";
@@ -6,6 +8,7 @@ import test from "node:test";
 import { createServer } from "vite";
 
 const require = createRequire(import.meta.url);
+/** @type {typeof import("playwright")} */
 const { chromium } = require(process.env.MONS_PLAYWRIGHT_PATH || "playwright");
 const repository = fileURLToPath(new URL("../", import.meta.url));
 const sharedManifest = JSON.parse(
@@ -109,7 +112,8 @@ function Probe({ profileId, isOpen }) {
       src: picker.stickerUrls[id] || 'https://cdn.lil.org/mons/emojipack/swagpack/64/' + id + '.webp',
     }))) : null);
 }
-window.harness = {
+window.reactionPickerHarness = {
+  required(value) { if (value === null || value === undefined) throw new Error("picker-fixture-value-missing"); return value; },
   environment,
   fixed: [...FIXED_STICKER_IDS],
   extra: VALID_REACTION_IDS.filter(id => !FIXED_STICKER_IDS.includes(id)),
@@ -143,6 +147,7 @@ window.harness = {
 };
 `;
 
+/** @param {(page: import("playwright").Page) => Promise<void>} run */
 async function fixture(run) {
   const virtualModules = new Map([
     ["reaction-environment", environmentSource],
@@ -192,10 +197,11 @@ async function fixture(run) {
       },
     ],
   });
+  /** @type {import("playwright").Browser | undefined} */
   let browser;
   try {
     await server.listen();
-    const origin = `http://127.0.0.1:${server.httpServer.address().port}`;
+    const origin = browserServerOrigin(server);
     browser = await chromium.launch({
       headless: true,
       ...(process.env.MONS_BROWSER_EXECUTABLE
@@ -215,10 +221,11 @@ async function fixture(run) {
       return route.abort();
     });
     const page = await context.newPage();
+    /** @type {string[]} */
     const errors = [];
     page.on("pageerror", (error) => errors.push(error.message));
     await page.goto(`${origin}/__reaction`);
-    await page.waitForFunction(() => !!window.harness);
+    await page.waitForFunction(() => !!window.reactionPickerHarness);
     await run(page);
     assert.deepEqual(errors, []);
   } finally {
@@ -233,15 +240,16 @@ test(
   async () => {
     await fixture(async (page) => {
       const fixedId = await page.evaluate(() => {
-        const h = window.harness;
+        const h = window.reactionPickerHarness;
         h.environment.rejectIdentityReads = true;
         h.render("", true);
-        return h.fixed[0];
+        return h.required(h.fixed[0]);
       });
       await page.locator(`#sticker-${fixedId}`).click();
-      assert.deepEqual(await page.evaluate(() => window.harness.clicks), [
-        { id: fixedId, allowed: true },
-      ]);
+      assert.deepEqual(
+        await page.evaluate(() => window.reactionPickerHarness.clicks),
+        [{ id: fixedId, allowed: true }],
+      );
     });
   },
 );
@@ -252,22 +260,25 @@ test(
   async () => {
     await fixture(async (page) => {
       const extraId = await page.evaluate(() => {
-        const h = window.harness;
-        h.seed("a", [h.extra[0]], h.environment.now + 100);
+        const h = window.reactionPickerHarness;
+        h.seed("a", [h.required(h.extra[0])], h.environment.now + 100);
         h.render();
-        return h.extra[0];
+        return h.required(h.extra[0]);
       });
       await page.locator(`#sticker-${extraId}`).click();
       await page.evaluate(() => {
-        const h = window.harness;
+        const h = window.reactionPickerHarness;
         h.environment.now += 100;
         h.environment.rejectIdentityReads = true;
       });
       await page.locator(`#sticker-${extraId}`).click();
-      assert.deepEqual(await page.evaluate(() => window.harness.clicks), [
-        { id: extraId, allowed: true },
-        { id: extraId, allowed: false },
-      ]);
+      assert.deepEqual(
+        await page.evaluate(() => window.reactionPickerHarness.clicks),
+        [
+          { id: extraId, allowed: true },
+          { id: extraId, allowed: false },
+        ],
+      );
     });
   },
 );
@@ -278,32 +289,36 @@ test(
   async () => {
     await fixture(async (page) => {
       const result = await page.evaluate(async () => {
-        const h = window.harness;
+        const h = window.reactionPickerHarness;
         h.render();
         const mountRequests = h.environment.requests.length;
         h.render("a", false);
         for (let index = 0; index < mountRequests; index += 1)
-          await h.resolve(index, [h.extra[0]]);
+          await h.resolve(index, [h.required(h.extra[0])]);
         const writesAfterClose = h.environment.writes.length;
         h.render();
-        await h.resolve(h.environment.requests.length - 1, [h.extra[0]]);
+        await h.resolve(h.environment.requests.length - 1, [
+          h.required(h.extra[0]),
+        ]);
         const reopened = h.snapshot();
-        const ownedAllowed = h.canSend(h.extra[0]);
+        const ownedAllowed = h.canSend(h.required(h.extra[0]));
         h.render("a", false);
         h.render();
         const oldOwnerRequest = h.environment.requests.length - 1;
         h.setOwner("b");
         h.render("b");
-        await h.resolve(oldOwnerRequest, [h.extra[0]]);
+        await h.resolve(oldOwnerRequest, [h.required(h.extra[0])]);
         const switched = h.snapshot();
         const writesAfterOldOwner = h.environment.writes.length;
-        await h.resolve(h.environment.requests.length - 1, [h.extra[1]]);
+        await h.resolve(h.environment.requests.length - 1, [
+          h.required(h.extra[1]),
+        ]);
         const currentOwner = h.snapshot();
         h.render("b", false);
         h.render("b");
         const unmountRequest = h.environment.requests.length - 1;
         h.dispose();
-        await h.resolve(unmountRequest, [h.extra[2]]);
+        await h.resolve(unmountRequest, [h.required(h.extra[2])]);
         return {
           fixed: h.fixed,
           extra: h.extra,
@@ -318,7 +333,7 @@ test(
           leakingCommits: h.commits.filter(
             (state) =>
               state.profileId === "b" &&
-              state.visibleStickerIds.includes(h.extra[0]),
+              state.visibleStickerIds.includes(h.required(h.extra[0])),
           ),
         };
       });
@@ -348,22 +363,26 @@ test(
   async () => {
     await fixture(async (page) => {
       await page.evaluate(() => {
-        const h = window.harness;
-        h.seed("a", [h.extra[0]], h.environment.now + 100);
+        const h = window.reactionPickerHarness;
+        h.seed("a", [h.required(h.extra[0])], h.environment.now + 100);
         h.render();
       });
       const ids = await page.evaluate(() => ({
-        fixed: window.harness.fixed[0],
-        extra: window.harness.extra[0],
+        fixed: window.reactionPickerHarness.required(
+          window.reactionPickerHarness.fixed[0],
+        ),
+        extra: window.reactionPickerHarness.required(
+          window.reactionPickerHarness.extra[0],
+        ),
       }));
       await page.locator(`#sticker-${ids.fixed}`).click();
       await page.locator(`#sticker-${ids.extra}`).click();
       await page.evaluate(() => {
-        window.harness.environment.now += 100;
+        window.reactionPickerHarness.environment.now += 100;
       });
       await page.locator(`#sticker-${ids.extra}`).click();
       const stale = await page.evaluate(async () => {
-        const h = window.harness;
+        const h = window.reactionPickerHarness;
         h.render("a", false);
         h.render();
         for (let index = 0; index < h.environment.requests.length; index += 1)
@@ -383,17 +402,19 @@ test(
       assert.equal(stale.snapshot.hasFreshStickerEntitlement, false);
       assert.equal(stale.writes, 0);
       await page.evaluate(() => {
-        const h = window.harness;
-        h.seed("a", [h.extra[0]], h.environment.now + 1000);
+        const h = window.reactionPickerHarness;
+        h.seed("a", [h.required(h.extra[0])], h.environment.now + 1000);
         h.render("a", false);
         h.render();
       });
       await page.locator(`#sticker-${ids.extra}`).click();
-      await page.evaluate(() => window.harness.setOwner("b"));
+      await page.evaluate(() => window.reactionPickerHarness.setOwner("b"));
       await page.locator(`#sticker-${ids.extra}`).click();
       await page.locator(`#sticker-${ids.fixed}`).click();
       assert.deepEqual(
-        await page.evaluate(() => window.harness.clicks.slice(-3)),
+        await page.evaluate(() =>
+          window.reactionPickerHarness.clicks.slice(-3),
+        ),
         [
           { id: ids.extra, allowed: true },
           { id: ids.extra, allowed: false },
@@ -410,30 +431,32 @@ test(
   async () => {
     await fixture(async (page) => {
       const ids = await page.evaluate(() => {
-        const h = window.harness;
-        h.environment.failingImages.add(h.fixed[0]);
-        h.seed("a", [h.extra[0]], h.environment.now + 100);
+        const h = window.reactionPickerHarness;
+        h.environment.failingImages.add(h.required(h.fixed[0]));
+        h.seed("a", [h.required(h.extra[0])], h.environment.now + 100);
         h.render();
-        return { fixed: h.fixed[0], extra: h.extra };
+        return { fixed: h.required(h.fixed[0]), extra: h.extra };
       });
       await page.waitForFunction(
-        (id) => window.harness.snapshot().stickerUrls[id] === null,
+        (id) =>
+          window.reactionPickerHarness.snapshot().stickerUrls[id] === null,
         ids.fixed,
       );
       await page.waitForFunction((id) => {
         const image = document.querySelector(`#sticker-${id} img`);
+        if (!(image instanceof HTMLImageElement)) return false;
         return image.complete && image.naturalWidth === 1;
       }, ids.fixed);
       const beforeReopen = await page.evaluate(async () => {
-        const h = window.harness;
-        h.seed("a", [h.extra[1]], h.environment.now + 200);
+        const h = window.reactionPickerHarness;
+        h.seed("a", [h.required(h.extra[1])], h.environment.now + 200);
         await h.resolve(
           h.environment.requests.length - 1,
-          [h.extra[2]],
+          [h.required(h.extra[2])],
           h.environment.now + 150,
         );
         const snapshot = h.snapshot();
-        await h.resolve(0, [h.extra[2]], h.environment.now + 250);
+        await h.resolve(0, [h.required(h.extra[2])], h.environment.now + 250);
         return {
           snapshot,
           afterStrictModeResponse: h.snapshot(),
@@ -441,11 +464,15 @@ test(
         };
       });
       assert.equal(
-        beforeReopen.snapshot.visibleStickerIds.includes(ids.extra[1]),
+        beforeReopen.snapshot.visibleStickerIds.includes(
+          required(ids.extra[1]),
+        ),
         true,
       );
       assert.equal(
-        beforeReopen.snapshot.visibleStickerIds.includes(ids.extra[2]),
+        beforeReopen.snapshot.visibleStickerIds.includes(
+          required(ids.extra[2]),
+        ),
         false,
       );
       assert.deepEqual(
@@ -454,7 +481,7 @@ test(
       );
       assert.equal(beforeReopen.writes, 0);
       const attemptsBeforeReopen = await page.evaluate((id) => {
-        const h = window.harness;
+        const h = window.reactionPickerHarness;
         const attempts = h.environment.imageRequests.filter(
           (requested) => requested === id,
         ).length;
@@ -464,11 +491,15 @@ test(
         return attempts;
       }, ids.fixed);
       await page.waitForFunction(
-        (id) => window.harness.snapshot().stickerUrls[id]?.startsWith("blob:"),
+        (id) =>
+          window.reactionPickerHarness
+            .snapshot()
+            .stickerUrls[id]?.startsWith("blob:"),
         ids.fixed,
       );
       await page.waitForFunction((id) => {
         const image = document.querySelector(`#sticker-${id} img`);
+        if (!(image instanceof HTMLImageElement)) return false;
         return (
           image.src.startsWith("blob:") &&
           image.complete &&
@@ -478,7 +509,7 @@ test(
       assert.equal(
         await page.evaluate(
           (id) =>
-            window.harness.environment.imageRequests.filter(
+            window.reactionPickerHarness.environment.imageRequests.filter(
               (requested) => requested === id,
             ).length,
           ids.fixed,

@@ -1,3 +1,4 @@
+import { required } from "./fixtures/canonicalData.mjs";
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
@@ -9,22 +10,42 @@ import {
 
 const flush = () => new Promise((resolve) => setImmediate(resolve));
 
+/**
+ * @typedef {{result?: unknown; onsuccess?: () => void}} TestReadRequest
+ * @typedef {{aborted: boolean; oncomplete?: () => void; onabort?: () => void; onerror?: () => void;
+ * objectStore(name: string): {get(key: string): TestReadRequest; put(value: unknown, key: string): void};
+ * read(): void; complete(): void; abort(): void}} TestTransaction
+ * @typedef {{closed: boolean; close(): void; transaction(name: string, mode: string): TestTransaction;
+ * onversionchange?: () => void; onclose?: () => void}} TestDatabase
+ * @typedef {{result?: TestDatabase; onsuccess?: () => void; onerror?: () => void;
+ * onblocked?: () => void; onupgradeneeded?: () => void; transaction?: {abort(): void}}} TestOpenRequest
+ */
+/** @param {unknown} [initial] */
 function harness(initial = createEmptySessionState()) {
   let stored = structuredClone(initial);
+  /** @type {TestOpenRequest[]} */
   const opens = [];
+  /** @type {TestTransaction[]} */
   const transactions = [];
+  /** @type {unknown[]} */
   const writes = [];
+  /** @type {{open(name: string, version: number): TestOpenRequest}} */
   const factory = {
     open(name, version) {
       assert.equal(name, SESSION_DATABASE_NAME);
       assert.equal(version, 1);
+      /** @type {TestOpenRequest} */
       const request = {};
       opens.push(request);
       return request;
     },
   };
-  const store = createIndexedDbSessionStore(() => factory);
+  /** @type {ReturnType<typeof createIndexedDbSessionStore>} */
+  const store = Reflect.apply(createIndexedDbSessionStore, undefined, [
+    () => factory,
+  ]);
   const open = (index = opens.length - 1) => {
+    /** @type {TestDatabase} */
     const database = {
       closed: false,
       close() {
@@ -34,8 +55,11 @@ function harness(initial = createEmptySessionState()) {
         assert.equal(name, "state");
         assert.equal(mode, "readwrite");
         assert.equal(this.closed, false);
+        /** @type {TestReadRequest} */
         const request = {};
+        /** @type {unknown} */
         let pending;
+        /** @type {TestTransaction} */
         const transaction = {
           aborted: false,
           objectStore(name) {
@@ -54,11 +78,11 @@ function harness(initial = createEmptySessionState()) {
           },
           read() {
             request.result = structuredClone(stored);
-            request.onsuccess();
+            required(request.onsuccess).call(request);
           },
           complete() {
             if (!this.aborted && pending) stored = pending;
-            this.oncomplete();
+            required(this.oncomplete).call(this);
           },
           abort() {
             this.aborted = true;
@@ -69,13 +93,15 @@ function harness(initial = createEmptySessionState()) {
         return transaction;
       },
     };
-    opens[index].result = database;
-    opens[index].onsuccess();
+    required(opens[index]).result = database;
+    const request = required(opens[index]);
+    required(request.onsuccess).call(request);
     return database;
   };
+  /** @template T @param {Promise<T>} promise @param {number} [index] @returns {Promise<T>} */
   const complete = async (promise, index = transactions.length - 1) => {
-    transactions[index].read();
-    transactions[index].complete();
+    required(transactions[index]).read();
+    required(transactions[index]).complete();
     return promise;
   };
   return {
@@ -131,10 +157,10 @@ test("in-place changes to scalar and nested session state are persisted", async 
   const h = harness(state);
   const first = h.store.update((current) => {
     current.revision++;
-    current.session.uid = "m".repeat(28);
+    required(current.session).uid = "m".repeat(28);
     current.revocations.push({
-      sessionId: current.session.sessionId,
-      revokeSecret: current.session.revokeSecret,
+      sessionId: required(current.session).sessionId,
+      revokeSecret: required(current.session).revokeSecret,
     });
     return current;
   });
@@ -144,22 +170,22 @@ test("in-place changes to scalar and nested session state are persisted", async 
   assert.deepEqual(h.stored(), changed);
   assert.equal(h.writes.length, 1);
   assert.equal(changed.revision, 1);
-  assert.equal(changed.session.uid, "m".repeat(28));
+  assert.equal(required(changed.session).uid, "m".repeat(28));
 });
 
-for (const event of ["onversionchange", "onclose"]) {
+for (const event of /** @type {const} */ (["onversionchange", "onclose"])) {
   test(`${event} closes an idle connection and the next update reopens`, async () => {
     const h = harness();
     const first = h.store.update((state) => state);
     const old = h.open();
     await flush();
     await h.complete(first);
-    old[event]();
+    required(old[event]).call(old);
     assert.equal(old.closed, true);
     const next = h.store.update((state) => state);
     assert.equal(h.opens.length, 2);
     const current = h.open();
-    old[event]();
+    required(old[event]).call(old);
     await flush();
     await h.complete(next);
     assert.equal(current.closed, false);
@@ -175,17 +201,17 @@ for (const event of ["onversionchange", "onclose"]) {
     const rejected = assert.rejects(first, SessionStorageError);
     const old = h.open();
     await flush();
-    old[event]();
+    required(old[event]).call(old);
     await rejected;
-    h.transactions[0].read();
-    h.transactions[0].complete();
+    required(h.transactions[0]).read();
+    required(h.transactions[0]).complete();
     assert.equal(calls, 0);
-    assert.equal(h.transactions[0].aborted, true);
+    assert.equal(required(h.transactions[0]).aborted, true);
     assert.equal(h.writes.length, 0);
   });
 }
 
-for (const event of ["onerror", "onblocked"]) {
+for (const event of /** @type {const} */ (["onerror", "onblocked"])) {
   test(`${event} rejects shared opening and closes late success without replacing a new connection`, async () => {
     const h = harness();
     const first = h.store.update((state) => state);
@@ -194,7 +220,8 @@ for (const event of ["onerror", "onblocked"]) {
       assert.rejects(first, SessionStorageError),
       assert.rejects(second, SessionStorageError),
     ]);
-    h.opens[0][event]();
+    const request = required(h.opens[0]);
+    required(request[event]).call(request);
     await rejected;
     const next = h.store.update((state) => state);
     const current = h.open(1);
@@ -211,11 +238,12 @@ test("an abandoned open aborts late schema creation", async () => {
   const h = harness();
   const pending = h.store.update((state) => state);
   const rejected = assert.rejects(pending, SessionStorageError);
-  h.opens[0].onblocked();
+  const request = required(h.opens[0]);
+  required(request.onblocked).call(request);
   await rejected;
   let aborts = 0;
-  h.opens[0].transaction = { abort: () => aborts++ };
-  h.opens[0].onupgradeneeded();
+  required(h.opens[0]).transaction = { abort: () => aborts++ };
+  required(request.onupgradeneeded).call(request);
   assert.equal(aborts, 1);
 });
 
@@ -267,12 +295,16 @@ test("transaction abort never replays a mutation and a later update opens fresh"
   const rejected = assert.rejects(first, SessionStorageError);
   const old = h.open();
   await flush();
-  h.transactions[0].read();
-  h.transactions[0].abort();
+  required(h.transactions[0]).read();
+  required(h.transactions[0]).abort();
   await rejected;
   assert.equal(calls, 1);
   assert.equal(old.closed, true);
-  assert.equal(h.stored().revision, 0);
+  const stored = h.stored();
+  assert.ok(
+    stored !== null && typeof stored === "object" && "revision" in stored,
+  );
+  assert.equal(stored.revision, 0);
   const next = h.store.update((state) => state);
   h.open();
   await flush();
@@ -310,9 +342,9 @@ test("the transaction shares the opening operation's 10-second deadline", async 
   await flush();
   t.mock.timers.tick(2_000);
   await rejected;
-  h.transactions[0].read();
+  required(h.transactions[0]).read();
   assert.equal(database.closed, true);
-  assert.equal(h.transactions[0].aborted, true);
+  assert.equal(required(h.transactions[0]).aborted, true);
   assert.equal(calls, 0);
 });
 
@@ -341,8 +373,8 @@ test("malformed present session rows fail closed before callbacks or writes", as
     const rejected = assert.rejects(pending, SessionStorageError);
     h.open();
     await flush();
-    h.transactions[0].read();
-    h.transactions[0].complete();
+    required(h.transactions[0]).read();
+    required(h.transactions[0]).complete();
     await rejected;
     assert.equal(changes, 0);
     assert.deepEqual(h.writes, []);
@@ -356,6 +388,7 @@ test("validated session rows retain extension evidence and do not write unchange
     retained: { nested: [null, false] },
   };
   const h = harness(state);
+  /** @type {import("../src/session/sessionStore.ts").SessionState | undefined} */
   let observed;
   const pending = h.store.update((value) => {
     observed = value;

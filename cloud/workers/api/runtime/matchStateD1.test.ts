@@ -1,9 +1,10 @@
+import { matchDocumentFixture } from "../test/matchRecordFixture.ts";
 import type { D1Migration } from "cloudflare:test";
 import { env } from "cloudflare:workers";
 import { beforeEach, describe, expect, it } from "vitest";
 import {
   buildMatchStateRouteStatements,
-  readLegacyMatchStates,
+  readArchivedMatchStates,
   readMatchStateControl,
   readMatchStateRoutes,
   readMatchStateRouteSnapshot,
@@ -20,11 +21,14 @@ beforeEach(async () => {
     .all<{ name: string }>();
   for (const { name } of tables.results)
     await db.prepare(`DROP TABLE ${name}`).run();
-  const migration = runtime.TEST_D1_MIGRATIONS.find((item) =>
-    item.name.startsWith("0024_"),
-  );
-  if (!migration) throw new Error("match-state-test-migration-missing");
-  await db.batch(migration.queries.map((query) => db.prepare(query)));
+  await db.prepare("DROP TABLE IF EXISTS match_timer_starts_canonical").run();
+  for (const prefix of ["0024_", "0029_"]) {
+    const migration = runtime.TEST_D1_MIGRATIONS.find((item) =>
+      item.name.startsWith(prefix),
+    );
+    if (!migration) throw new Error("match-state-test-migration-missing");
+    await db.batch(migration.queries.map((query) => db.prepare(query)));
+  }
 });
 
 describe("match state D1 authority and admissions", () => {
@@ -38,12 +42,12 @@ describe("match state D1 authority and admissions", () => {
     expect(
       await readMatchStateRoutes(db, [
         { playerId: "host", matchId: "game" },
-      ]).then((rows) => rows[0]),
+      ]).then((rows) => rows[0]!),
     ).toBeNull();
     expect(
-      await readLegacyMatchStates(db, [
+      await readArchivedMatchStates(db, [
         { playerId: "host", matchId: "game" },
-      ]).then((rows) => rows[0]),
+      ]).then((rows) => rows[0]!),
     ).toBeNull();
   });
 
@@ -58,7 +62,7 @@ describe("match state D1 authority and admissions", () => {
     const legacy = {
       actorUid: "guest",
       matchId: "old-game",
-      kind: "legacy" as const,
+      kind: "archive" as const,
       inviteId: null,
       epoch: 1,
     };
@@ -78,11 +82,11 @@ describe("match state D1 authority and admissions", () => {
     });
   });
 
-  it("preserves immutable exact routes and raw legacy values", async () => {
+  it("preserves immutable exact routes and complete archived values", async () => {
     const route = {
       actorUid: "old",
       matchId: "old-game",
-      kind: "legacy" as const,
+      kind: "archive" as const,
       inviteId: null,
       epoch: 2,
     };
@@ -91,13 +95,13 @@ describe("match state D1 authority and admissions", () => {
     expect(
       await readMatchStateRoutes(db, [
         { playerId: "old", matchId: "old-game" },
-      ]).then((rows) => rows[0]),
+      ]).then((rows) => rows[0]!),
     ).toEqual(route);
     await expect(
-      readLegacyMatchStates(db, [
+      readArchivedMatchStates(db, [
         { playerId: "old", matchId: "old-game" },
-      ]).then((rows) => rows[0]),
-    ).rejects.toThrow("legacy-record-unavailable");
+      ]).then((rows) => rows[0]!),
+    ).rejects.toThrow("archive-record-unavailable");
     await expect(
       db.batch(
         buildMatchStateRouteStatements(db, [
@@ -107,36 +111,48 @@ describe("match state D1 authority and admissions", () => {
     ).rejects.toThrow("route-conflict");
     await db
       .prepare(
-        "INSERT INTO match_state_legacy_records VALUES (?, ?, ?, ?, ?, ?)",
+        "INSERT INTO match_state_records_canonical VALUES (?, ?, ?, ?, ?, ?)",
       )
       .bind(
         "old",
         "old-game",
-        '[1,{"legacy":true}]',
+        JSON.stringify(matchDocumentFixture({ fen: "archived-position" })),
         "a".repeat(64),
         "import",
         "malformed",
       )
       .run();
     expect(
-      await readLegacyMatchStates(db, [
+      await readArchivedMatchStates(db, [
         { playerId: "old", matchId: "old-game" },
-      ]).then((rows) => rows[0]),
-    ).toEqual([1, { legacy: true }]);
+      ]).then((rows) => rows[0]!),
+    ).toEqual(matchDocumentFixture({ fen: "archived-position" }));
     await expect(
       db
         .prepare(
-          "UPDATE match_state_legacy_records SET record_json = '{}' WHERE actor_uid = 'old'",
+          "UPDATE match_state_records_canonical SET record_json = '{}' WHERE actor_uid = 'old'",
         )
         .run(),
     ).rejects.toThrow("immutable");
   });
 
-  it("batches raw legacy records in order and distinguishes absent routes from missing records", async () => {
+  it("batches archived records in order and distinguishes absent routes from missing records", async () => {
     const records = [
-      { playerId: "host", matchId: "game", value: [1, { legacy: true }] },
-      { playerId: "host", matchId: "rematch", value: null },
-      { playerId: "guest", matchId: "game", value: false },
+      {
+        playerId: "host",
+        matchId: "game",
+        value: matchDocumentFixture({ fen: "host-game" }),
+      },
+      {
+        playerId: "host",
+        matchId: "rematch",
+        value: matchDocumentFixture({ fen: "host-rematch" }),
+      },
+      {
+        playerId: "guest",
+        matchId: "game",
+        value: matchDocumentFixture({ fen: "guest-game", color: "black" }),
+      },
     ];
     const missing = { playerId: "missing", matchId: "game" };
     await db.batch([
@@ -145,7 +161,7 @@ describe("match state D1 authority and admissions", () => {
         records.map(({ playerId, matchId }) => ({
           actorUid: playerId,
           matchId,
-          kind: "legacy",
+          kind: "archive",
           inviteId: null,
           epoch: 2,
         })),
@@ -153,7 +169,7 @@ describe("match state D1 authority and admissions", () => {
       ...records.map(({ playerId, matchId, value }) =>
         db
           .prepare(
-            "INSERT INTO match_state_legacy_records VALUES (?, ?, ?, ?, ?, ?)",
+            "INSERT INTO match_state_records_canonical VALUES (?, ?, ?, ?, ?, ?)",
           )
           .bind(
             playerId,
@@ -166,29 +182,36 @@ describe("match state D1 authority and admissions", () => {
       ),
     ]);
     expect(
-      await readLegacyMatchStates(db, [
-        records[2],
-        records[0],
+      await readArchivedMatchStates(db, [
+        records[2]!,
+        records[0]!,
         missing,
-        records[1],
-        records[2],
-        records[0],
+        records[1]!,
+        records[2]!,
+        records[0]!,
       ]),
-    ).toEqual([false, records[0].value, null, null, false, records[0].value]);
+    ).toEqual([
+      records[2]!.value,
+      records[0]!.value,
+      null,
+      records[1]!.value,
+      records[2]!.value,
+      records[0]!.value,
+    ]);
     await db.batch(
       buildMatchStateRouteStatements(db, [
         {
           actorUid: missing.playerId,
           matchId: missing.matchId,
-          kind: "legacy",
+          kind: "archive",
           inviteId: null,
           epoch: 2,
         },
       ]),
     );
     await expect(
-      readLegacyMatchStates(db, [records[1], missing, records[2]]),
-    ).rejects.toThrow("legacy-record-unavailable");
+      readArchivedMatchStates(db, [records[1]!, missing, records[2]!]),
+    ).rejects.toThrow("archive-record-unavailable");
   });
 
   it("requires verified evidence before authority changes and rejects rollback", async () => {

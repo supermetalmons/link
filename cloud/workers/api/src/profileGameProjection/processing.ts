@@ -322,7 +322,7 @@ export async function processRatingProfileGameProjection(
     return "dead";
   }
   if (
-    update.historicalMatchArchiveVersion !== undefined &&
+    update.historicalMatchArchiveVersion !== null &&
     update.historicalMatchArchiveVersion !== HISTORICAL_MATCH_ARCHIVE_VERSION
   ) {
     throw new Error("historical-match-archive-version-unsupported");

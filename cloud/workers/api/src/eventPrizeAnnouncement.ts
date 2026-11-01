@@ -1,7 +1,6 @@
 import {
   parseTelegramAnnouncementPayload,
   isTelegramAlbumPayload,
-  retainTelegramAnnouncementAttempt,
   type RetainedTelegramAnnouncementAttempt,
   type TelegramAnnouncementPayload,
   type TelegramAnnouncementOutcomeStatus,
@@ -17,7 +16,6 @@ import {
 import {
   sendTelegramMediaGroup,
   sendTelegramMessage,
-  retainTelegramMediaGroupInput,
   TELEGRAM_HTTP_TIMEOUT_MS,
   type TelegramResult,
 } from "../../../runtime/telegram/client.js";
@@ -54,7 +52,7 @@ function announcementAttempt(
   if (input.kind === "reminder" && !isTelegramAlbumPayload(input.payload)) {
     return { ...input, kind: input.kind, payload: input.payload };
   }
-  return retainTelegramAnnouncementAttempt(input);
+  throw new TypeError("telegram-announcement-kind-payload-mismatch");
 }
 
 function hasPrizeImages(
@@ -354,19 +352,13 @@ export async function deliverEventPrizeAnnouncement(
       sendStarted = true;
       if (kind === "prizes") {
         const send = dependencies.send || sendTelegramMediaGroup;
-        result = isTelegramAlbumPayload(payload)
-          ? await send({
-              ...payload,
-              token: env.TELEGRAM_BOT_TOKEN.trim(),
-              timeoutMs: Math.min(TELEGRAM_HTTP_TIMEOUT_MS, remainingMs),
-            })
-          : await send(
-              retainTelegramMediaGroupInput({
-                ...payload,
-                token: env.TELEGRAM_BOT_TOKEN.trim(),
-                timeoutMs: Math.min(TELEGRAM_HTTP_TIMEOUT_MS, remainingMs),
-              }),
-            );
+        if (!isTelegramAlbumPayload(payload))
+          throw new TypeError("telegram-announcement-kind-payload-mismatch");
+        result = await send({
+          ...payload,
+          token: env.TELEGRAM_BOT_TOKEN.trim(),
+          timeoutMs: Math.min(TELEGRAM_HTTP_TIMEOUT_MS, remainingMs),
+        });
       } else {
         const send = dependencies.sendMessage || sendTelegramMessage;
         result = await send({

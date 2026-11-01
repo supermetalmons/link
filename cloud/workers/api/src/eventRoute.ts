@@ -111,8 +111,12 @@ async function handleEventRequest(
     {
       failureMessage: "event-service-unavailable",
       failureEvent: "event_service_failure",
-      logFailure: dependencies.logFailure,
-      verifyIdentity: dependencies.verifyIdentity,
+      ...(dependencies.logFailure
+        ? { logFailure: dependencies.logFailure }
+        : {}),
+      ...(dependencies.verifyIdentity
+        ? { verifyIdentity: dependencies.verifyIdentity }
+        : {}),
       errorResponse: (error, corsHeaders) =>
         error instanceof EventWritesDisabled
           ? authJsonResponse(
@@ -147,7 +151,9 @@ async function handleEventRequest(
       const prepared = await prepareEventRoute(request, route);
       const schedule = (work: Promise<void>) => ctx.waitUntil(work);
       const repository = createEventMutationRepository(env, {
-        eventRepository: dependencies.repository,
+        ...(dependencies.repository
+          ? { eventRepository: dependencies.repository }
+          : {}),
         schedule,
       });
       const response = await prepared.execute({
@@ -157,8 +163,7 @@ async function handleEventRequest(
         participation: { ...dependencies.participation, signal },
         control: { ...dependencies.control, repository, signal },
       });
-      const value = toRecord(response) as
-        (typeof response & Record<string, unknown>) | null;
+      const value = response;
       const params = new URL(request.url).searchParams;
       if (
         !isParticipationPath &&
@@ -171,8 +176,8 @@ async function handleEventRequest(
           ("v1" satisfies NonNullable<
             ApiQuery<"POST /events/create">["eventSnapshot"]
           >) &&
-        value?.ok === true &&
-        value.skipped !== true &&
+        value.ok === true &&
+        (!("skipped" in value) || value.skipped !== true) &&
         typeof value.eventId === "string"
       ) {
         const enrichmentStartedAt = Date.now();

@@ -7,14 +7,6 @@ import {
   type TelegramSendEvidence,
 } from "./records.js";
 
-type SourceRecord = Record<string, unknown>;
-const fields = (value: unknown): SourceRecord =>
-  value && typeof value === "object" && !Array.isArray(value)
-    ? (value as SourceRecord)
-    : {};
-const normalizedString = (value: unknown): string =>
-  typeof value === "string" && value.trim() !== "" ? value.trim() : "";
-
 type DesiredIdentity = {
   readonly revision: string;
   readonly destinationDescription: string;
@@ -70,72 +62,84 @@ class AcquiredDesired {
   constructor(private readonly document: TelegramDesiredDocument) {}
 
   get revision(): string {
-    return fields(this.document).revision as string;
+    return this.document.revision as string;
   }
 
-  get operation(): unknown {
-    return fields(this.document).operation;
+  get operation(): TelegramDesiredDocument["operation"] {
+    return this.document.operation;
   }
 
-  get ifMissing(): unknown {
-    return fields(this.document).ifMissing;
+  get ifMissing(): "send" | "skip" | undefined {
+    return this.document.operation === "edit"
+      ? this.document.ifMissing
+      : undefined;
   }
 
   get instanceKey(): string {
-    return fields(this.document).instanceKey as string;
+    if (this.document.operation === "delete")
+      throw new TypeError("telegram-desired-text-required");
+    return this.document.instanceKey;
   }
 
   get text(): string {
-    return fields(this.document).text as string;
+    if (this.document.operation === "delete")
+      throw new TypeError("telegram-desired-text-required");
+    return this.document.text;
   }
 
   get destinationDescription(): string {
-    return `${fields(this.document).destination}`;
+    return `${this.document.destination}`;
   }
 
   resolveDestination(resolve: (destination: string) => string): string {
-    return Reflect.apply(resolve, undefined, [
-      fields(this.document).destination,
-    ]);
+    return resolve(this.document.destination);
   }
 
   matchesAppliedContent(applied: TelegramAppliedDocument): boolean {
-    return fields(applied).contentHash === fields(this.document).contentHash;
+    return (
+      this.document.operation !== "delete" &&
+      applied.contentHash === this.document.contentHash
+    );
   }
 
   appliedTargetMismatch(
     applied: TelegramAppliedDocument,
     chatId: string,
   ): string | boolean {
-    const current = fields(applied);
-    const desired = fields(this.document);
+    const current = applied;
+    const desired = this.document;
+    if (desired.operation === "delete")
+      throw new TypeError("telegram-desired-text-required");
     return (
-      normalizedString(current.instanceKey) !== desired.instanceKey ||
-      normalizedString(current.destination) !== desired.destination ||
-      (normalizedString(current.chatId) &&
-        normalizedString(current.chatId) !== chatId)
+      current.instanceKey !== desired.instanceKey ||
+      current.destination !== desired.destination ||
+      (current.chatId && current.chatId !== chatId)
     );
   }
 
   sendInput(chatId: string): TelegramSendInput {
-    const desired = fields(this.document);
+    const desired = this.document;
+    if (desired.operation === "delete")
+      throw new TypeError("telegram-desired-text-required");
     return {
       chatId,
       text: desired.text as string,
       parseMode: (desired.parseMode as "HTML" | undefined) || null,
       silent: desired.silent === true,
-      disableWebPagePreview: desired.disableWebPagePreview !== false,
+      disableWebPagePreview: desired.disableWebPagePreview,
     };
   }
 
   editInput(chatId: string, messageId: number): TelegramEditInput {
-    const desired = fields(this.document);
+    const desired = this.document;
+    if (desired.operation === "delete")
+      throw new TypeError("telegram-desired-text-required");
     return {
       chatId,
       messageId,
       text: desired.text as string,
       parseMode: (desired.parseMode as "HTML" | undefined) || null,
-      disableWebPagePreview: desired.disableWebPagePreview !== false,
+      disableWebPagePreview: desired.disableWebPagePreview,
     };
   }
 
@@ -144,8 +148,10 @@ class AcquiredDesired {
     chatId: string,
     nowMs: number,
   ): TelegramSendAttemptDocument {
-    const desired = fields(this.document);
-    const marker: unknown = {
+    const desired = this.document;
+    if (desired.operation === "delete")
+      throw new TypeError("telegram-desired-text-required");
+    const marker: TelegramSendAttemptDocument = {
       attemptId,
       revision: desired.revision,
       destination: desired.destination,
@@ -155,7 +161,7 @@ class AcquiredDesired {
       startedAtMs: nowMs,
       apiGateOwner: `send:${attemptId}`,
     };
-    return marker as TelegramSendAttemptDocument;
+    return marker;
   }
 
   createAppliedReceipt(
@@ -163,8 +169,10 @@ class AcquiredDesired {
     messageId: number,
     nowMs: number,
   ): TelegramAppliedDocument {
-    const desired = fields(this.document);
-    const receipt: unknown = {
+    const desired = this.document;
+    if (desired.operation === "delete")
+      throw new TypeError("telegram-desired-text-required");
+    const receipt: TelegramAppliedDocument = {
       destination: desired.destination,
       chatId,
       messageId,
@@ -173,7 +181,7 @@ class AcquiredDesired {
       contentHash: desired.contentHash,
       appliedAtMs: nowMs,
     };
-    return receipt as TelegramAppliedDocument;
+    return receipt;
   }
 
   refreshAppliedReceipt(
@@ -181,9 +189,11 @@ class AcquiredDesired {
     chatId: string,
     nowMs: number,
   ): TelegramAppliedDocument {
-    const desired = fields(this.document);
-    const receipt: unknown = {
-      ...fields(applied),
+    const desired = this.document;
+    if (desired.operation === "delete")
+      throw new TypeError("telegram-desired-text-required");
+    const receipt: TelegramAppliedDocument = {
+      ...applied,
       destination: desired.destination,
       chatId,
       instanceKey: desired.instanceKey,
@@ -191,13 +201,14 @@ class AcquiredDesired {
       contentHash: desired.contentHash,
       appliedAtMs: nowMs,
     };
-    return receipt as TelegramAppliedDocument;
+    return receipt;
   }
 }
 
 export function acquiredDesiredView(
   message: TelegramMessageDocument,
 ): RetainedDesiredView {
-  const value: unknown = new AcquiredDesired(messageDesiredDocument(message));
-  return value as RetainedDesiredView;
+  const desired = messageDesiredDocument(message);
+  if (!desired) throw new TypeError("telegram-desired-missing");
+  return new AcquiredDesired(desired) as RetainedDesiredView;
 }

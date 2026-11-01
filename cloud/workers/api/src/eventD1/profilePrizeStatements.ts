@@ -27,7 +27,7 @@ export function buildProfilePrizeStatements(
         mutations.push(
           db
             .prepare(
-              "DELETE FROM profile_event_prizes WHERE profile_id = ? AND event_id = ?",
+              "DELETE FROM profile_event_prizes_canonical WHERE profile_id = ? AND event_id = ?",
             )
             .bind(profileId, eventId),
         );
@@ -43,7 +43,7 @@ export function buildProfilePrizeStatements(
       mutations.push(
         db
           .prepare(
-            `INSERT INTO profile_event_prizes (
+            `INSERT INTO profile_event_prizes_canonical (
                profile_id, event_id, assignment_json, updated_at_ms
              ) VALUES (?, ?, ?, ?)
              ON CONFLICT (profile_id, event_id) DO UPDATE SET
@@ -56,11 +56,11 @@ export function buildProfilePrizeStatements(
     mutations.push(
       db
         .prepare(
-          `INSERT INTO profile_event_prize_revisions (
+          `INSERT INTO profile_event_prize_revisions_canonical (
              profile_id, revision, updated_at_ms
            ) VALUES (?, 1, ?)
            ON CONFLICT (profile_id) DO UPDATE SET
-             revision = profile_event_prize_revisions.revision + 1,
+             revision = profile_event_prize_revisions_canonical.revision + 1,
              updated_at_ms = excluded.updated_at_ms`,
         )
         .bind(profileId, nowMs),

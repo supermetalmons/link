@@ -89,33 +89,16 @@ const getListSortAtMs = (eventData, status) => {
   return Math.min(MAX_TIMESTAMP_MS, Math.max(1, MAX_TIMESTAMP_MS - startAtMs));
 };
 exports.getListSortAtMs = getListSortAtMs;
-const buildPreviewParticipants = (participants) => {
-  return (0, documents_js_1.eventParticipantEntries)(participants)
-    .map(([, value]) => value)
-    .filter((participant) => participant && typeof participant === "object")
-    .sort((left, right) => {
-      const leftJoined =
-        (0, documents_js_1.eventParticipantState)(left).joinedAtMs ?? 0;
-      const rightJoined =
-        (0, documents_js_1.eventParticipantState)(right).joinedAtMs ?? 0;
-      return leftJoined - rightJoined;
-    })
+const buildPreviewParticipants = (participants) =>
+  (0, documents_js_1.eventParticipantEntries)(participants)
+    .map(([, participant]) => participant)
+    .sort((left, right) => left.joinedAtMs - right.joinedAtMs)
     .map((participant) => ({
-      profileId: normalizeString(
-        (0, documents_js_1.eventParticipantState)(participant).profileId,
-      ),
-      displayName: normalizeString(
-        (0, documents_js_1.eventParticipantState)(participant).displayName,
-      ),
-      emojiId: normalizeFiniteNumberOrNull(
-        (0, documents_js_1.eventParticipantProjectionState)(participant)
-          .emojiId,
-      ),
-      aura: normalizeString(
-        (0, documents_js_1.eventParticipantState)(participant).aura,
-      ),
+      profileId: participant.profileId,
+      displayName: participant.displayName,
+      emojiId: participant.emojiId,
+      aura: participant.aura,
     }));
-};
 exports.buildPreviewParticipants = buildPreviewParticipants;
 const getOwnerProfileIds = (participants) => {
   return Array.from(

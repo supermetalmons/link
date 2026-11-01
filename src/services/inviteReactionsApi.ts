@@ -1,3 +1,5 @@
+import { APPLICATION_DATA_SOCKET_PROTOCOL } from "@mons/shared/data-contract";
+import { fetchApplicationData } from "./applicationTransport.ts";
 import type {
   ApiSocketUrl,
   ApiRoutePath,
@@ -46,7 +48,11 @@ export function createInviteReactionSocketProtocols(token: string): string[] {
   if (!isReactionSocketToken(token)) {
     throw new InviteReactionApiError("invalid-reaction-socket-token");
   }
-  return [REACTION_SOCKET_PROTOCOL, `${REACTION_AUTH_PROTOCOL_PREFIX}${token}`];
+  return [
+    REACTION_SOCKET_PROTOCOL,
+    `${REACTION_AUTH_PROTOCOL_PREFIX}${token}`,
+    APPLICATION_DATA_SOCKET_PROTOCOL,
+  ];
 }
 
 async function readResponse(response: Response): Promise<unknown> {
@@ -114,7 +120,7 @@ export async function sendInviteReactionViaApi(
       assertCurrent();
       const token = await tokenProvider(attempt === 1);
       assertCurrent();
-      const response = await fetch(
+      const response = await fetchApplicationData(
         `${REACTIONS_API_ROOT}${reactionPath(inviteId)}`,
         {
           method: "POST",

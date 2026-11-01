@@ -1,5 +1,10 @@
-interface Sticker {
-  name: string;
+import {
+  isStickerSlot,
+  type StickerSlot,
+  type StickerName,
+} from "@mons/shared/appearance";
+interface Sticker<Slot extends StickerSlot> {
+  name: StickerName<Slot>;
   x: number;
   y: number;
   w: number;
@@ -118,17 +123,16 @@ const stickerPaths = {
     { name: "mystic", x: 0.509053, y: 0.591198, w: 0.053909, h: 0.093319 },
     { name: "spirit", x: 0.505761, y: 0.612407, w: 0.057201, h: 0.085896 },
   ],
-} satisfies Record<string, Sticker[]>;
+} satisfies { [Slot in StickerSlot]: Sticker<Slot>[] };
 
-export type StickerType = keyof typeof stickerPaths;
+export type StickerType = StickerSlot;
 
-export const STICKER_PATHS: Record<string, Sticker[]> = stickerPaths;
+export const STICKER_PATHS = stickerPaths;
 
-export const isStickerType = (type: string): type is StickerType =>
-  Object.hasOwn(STICKER_PATHS, type);
+export const isStickerType = isStickerSlot;
 
 export const STICKER_ADD_PROMPTS_FRAMES: Record<
-  string,
+  StickerSlot,
   { x: number; y: number; w: number }
 > = {
   "big-mon-top-right": { x: 0.8, y: 0.4, w: 0.1 },

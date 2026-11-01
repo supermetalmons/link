@@ -1,3 +1,5 @@
+import { requireValue } from "./browserAssertions";
+import { createDefaultProfileAppearance } from "@mons/shared/appearance";
 import React from "react";
 import { createRoot } from "react-dom/client";
 import { flushSync } from "react-dom";
@@ -25,24 +27,54 @@ if (params.has("pendingTransientCleanup")) {
   registerMainMenuTransientUiHandler(noop);
   closeTransientUi();
 }
-const root = createRoot(document.getElementById("root")!);
+const root = createRoot(requireValue(document.getElementById("root")));
 const dispose = () => flushSync(() => root.unmount());
-const harness = {
+export const walletAuthHarness = {
+  requireValue,
   environment,
   dispose,
   publishXAuthUiFeedback,
   setEventModalState,
   setPendingXRedirectResult,
   resolveXIntent(index: number) {
-    environment.xIntentCalls[index].resolve({ intentId: `x-intent-${index}` });
+    requireValue(environment.xIntentCalls[index]).resolve({
+      ok: true,
+      intentId: `x-intent-${index}`,
+      nonce: "nonce",
+      state: "state",
+      expiresAtMs: Date.now() + 60_000,
+    });
   },
-  rejectXIntent(index: number, message: string, details?: object) {
-    environment.xIntentCalls[index].reject(
-      Object.assign(new Error(message), { details }),
+  rejectXIntent(
+    index: number,
+    message: string,
+    details?: Pick<
+      Extract<
+        import("@mons/shared/api-errors").AuthCooldownDetails,
+        { scope: "method" }
+      >,
+      "method" | "reason"
+    >,
+  ) {
+    requireValue(environment.xIntentCalls[index]).reject(
+      Object.assign(
+        new Error(message),
+        details
+          ? {
+              code: "failed-precondition",
+              details: {
+                scope: "method",
+                retryAtMs: 0,
+                cooldownMs: 86_400_000,
+                ...details,
+              },
+            }
+          : {},
+      ),
     );
   },
   rejectXRedirect(index: number, message: string) {
-    environment.xRedirectCalls[index].reject(new Error(message));
+    requireValue(environment.xRedirectCalls[index]).reject(new Error(message));
   },
   setVisibilityState(state: "hidden" | "visible") {
     Object.defineProperty(document, "visibilityState", {
@@ -52,24 +84,38 @@ const harness = {
     document.dispatchEvent(new Event("visibilitychange"));
   },
   resolveConnection(index: number) {
-    const call = environment.connectCalls[index];
+    const call = requireValue(environment.connectCalls[index]);
     call.resolve({
       message: "signed-message",
+      address: "address",
       publicKey: "public-key",
       signature: "signature",
       intentId: `${call.method}-intent`,
     });
   },
   rejectConnection(index: number, message: string) {
-    environment.connectCalls[index].reject(new Error(message));
+    requireValue(environment.connectCalls[index]).reject(new Error(message));
   },
   resolveVerification(index: number, ok = true) {
-    const call = environment.verificationCalls[index];
-    if (ok) environment.linkedMethods[call.method as "eth" | "sol"] = true;
-    call.resolve({ ok, profileId: "profile", username: "Player" });
+    const call = requireValue(environment.verificationCalls[index]);
+    if (ok) environment.linkedMethods[call.method] = true;
+    call.resolve(
+      ok
+        ? {
+            ...createDefaultProfileAppearance(),
+            ok: true,
+            uid: "viewer",
+            profileId: "profile",
+            username: "Player",
+            linkedMethods: { ...environment.linkedMethods },
+            appleLinked: environment.linkedMethods.apple,
+            opId: "verification",
+          }
+        : { ok: false },
+    );
   },
   rejectVerification(index: number) {
-    environment.verificationCalls[index].reject(
+    requireValue(environment.verificationCalls[index]).reject(
       new Error("verification failed"),
     );
   },
@@ -83,7 +129,13 @@ const harness = {
     });
   },
 };
-(window as any).harness = harness;
+window.walletAuthHarness = walletAuthHarness;
+
+declare global {
+  interface Window {
+    walletAuthHarness: typeof walletAuthHarness;
+  }
+}
 flushSync(() =>
   root.render(
     <React.StrictMode>

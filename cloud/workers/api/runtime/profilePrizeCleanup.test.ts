@@ -1,4 +1,5 @@
 import type { D1Migration } from "cloudflare:test";
+import { eventDocumentFixture } from "../test/eventCompatibilityFixture.ts";
 import { env } from "cloudflare:workers";
 import {
   afterEach,
@@ -38,16 +39,13 @@ const input = { profileId, eventId, prizeId };
 
 function assignment(
   overrides: Partial<EventPrizeAssignmentRecord> = {},
-): EventPrizeAssignmentRecord & {
-  futureMetadata: { edition: number; labels: string[] };
-} {
+): EventPrizeAssignmentRecord {
   return {
     eventId,
     profileId,
     prizeId,
     place: 1,
     assignedAtMs: 100,
-    futureMetadata: { edition: 2, labels: ["keep", "exact"] },
     ...overrides,
   };
 }
@@ -58,7 +56,7 @@ async function seedAssignment(
 ) {
   await testEnv.EVENT_DB.batch([
     testEnv.EVENT_DB.prepare(
-      `INSERT INTO profile_event_prizes
+      `INSERT INTO profile_event_prizes_canonical
          (profile_id, event_id, assignment_json, updated_at_ms)
        VALUES (?, ?, ?, 100)
        ON CONFLICT (profile_id, event_id) DO UPDATE SET
@@ -66,7 +64,7 @@ async function seedAssignment(
          updated_at_ms = excluded.updated_at_ms`,
     ).bind(value.profileId, value.eventId, json),
     testEnv.EVENT_DB.prepare(
-      `INSERT INTO profile_event_prize_revisions
+      `INSERT INTO profile_event_prize_revisions_canonical
          (profile_id, revision, updated_at_ms)
        VALUES (?, ?, 100)
        ON CONFLICT (profile_id) DO UPDATE SET
@@ -78,17 +76,19 @@ async function seedAssignment(
 async function readStorage() {
   const results = await testEnv.EVENT_DB.batch<Record<string, unknown>>([
     testEnv.EVENT_DB.prepare(
-      "SELECT * FROM profile_event_prizes ORDER BY profile_id, event_id",
+      "SELECT * FROM profile_event_prizes_canonical ORDER BY profile_id, event_id",
     ),
     testEnv.EVENT_DB.prepare(
-      "SELECT * FROM profile_event_prize_revisions ORDER BY profile_id",
+      "SELECT * FROM profile_event_prize_revisions_canonical ORDER BY profile_id",
     ),
-    testEnv.EVENT_DB.prepare("SELECT * FROM event_records ORDER BY event_id"),
+    testEnv.EVENT_DB.prepare(
+      "SELECT * FROM event_records_canonical ORDER BY event_id",
+    ),
   ]);
   return {
-    prizes: results[0].results,
-    revisions: results[1].results,
-    events: results[2].results,
+    prizes: results[0]!.results,
+    revisions: results[1]!.results,
+    events: results[2]!.results,
   };
 }
 
@@ -138,10 +138,12 @@ describe("conditional profile prize cleanup", () => {
   beforeEach(async () => {
     await testEnv.EVENT_DB.batch([
       testEnv.EVENT_DB.prepare("DELETE FROM event_write_admissions"),
-      testEnv.EVENT_DB.prepare("DELETE FROM profile_event_prizes"),
-      testEnv.EVENT_DB.prepare("DELETE FROM profile_event_prize_revisions"),
+      testEnv.EVENT_DB.prepare("DELETE FROM profile_event_prizes_canonical"),
+      testEnv.EVENT_DB.prepare(
+        "DELETE FROM profile_event_prize_revisions_canonical",
+      ),
       testEnv.EVENT_DB.prepare("DELETE FROM event_leases"),
-      testEnv.EVENT_DB.prepare("DELETE FROM event_records"),
+      testEnv.EVENT_DB.prepare("DELETE FROM event_records_canonical"),
     ]);
     const control = await testEnv.EVENT_DB.prepare(
       "SELECT storage_mode FROM event_runtime_control WHERE singleton = 1",
@@ -155,17 +157,21 @@ describe("conditional profile prize cleanup", () => {
     }
     for (const id of [eventId, siblingEventId]) {
       await testEnv.EVENT_DB.prepare(
-        `INSERT INTO event_records
+        `INSERT INTO event_records_canonical
            (event_id, status, start_at_ms, updated_at_ms, revision, record_json)
          VALUES (?, 'ended', 10, 100, 1, ?)`,
       )
         .bind(
           id,
-          JSON.stringify({
-            eventId: id,
-            status: "ended",
-            prizeAssignments: { "1": assignment({ eventId: id }) },
-          }),
+          JSON.stringify(
+            eventDocumentFixture({
+              eventId: id,
+              status: "ended",
+              startAtMs: 10,
+              updatedAtMs: 100,
+              prizeAssignments: { "1": assignment({ eventId: id }) },
+            }),
+          ),
         )
         .run();
     }
@@ -231,40 +237,46 @@ describe("conditional profile prize cleanup", () => {
     "wrong-profile",
     "wrong-event",
     "unsafe-revision",
-  ])("rejects %s without changing target state", async (malformation) => {
-    await seedAssignment(assignment());
-    if (malformation === "unsafe-revision") {
-      await testEnv.EVENT_DB.prepare(
-        "UPDATE profile_event_prize_revisions SET revision = 9007199254740992 WHERE profile_id = ?",
-      )
-        .bind(profileId)
-        .run();
-    } else {
-      const value =
-        malformation === "missing-fields"
-          ? {}
-          : assignment(
-              malformation === "wrong-profile"
-                ? { profileId: "other-owner" }
-                : { eventId: "wrong-event" },
-            );
-      await testEnv.EVENT_DB.prepare(
-        "UPDATE profile_event_prizes SET assignment_json = ? WHERE profile_id = ? AND event_id = ?",
-      )
-        .bind(JSON.stringify(value), profileId, eventId)
-        .run();
-    }
-    const before = await readStorage();
-    await expect(cleanup()).rejects.toThrow();
-    expect(await readStorage()).toEqual(before);
-    expect(await admissionCount()).toBe(0);
-  });
+  ])(
+    "rejects %s at storage without changing target state",
+    async (malformation) => {
+      await seedAssignment(assignment());
+      const before = await readStorage();
+      if (malformation === "unsafe-revision") {
+        await expect(
+          testEnv.EVENT_DB.prepare(
+            "UPDATE profile_event_prize_revisions_canonical SET revision = 9007199254740992 WHERE profile_id = ?",
+          )
+            .bind(profileId)
+            .run(),
+        ).rejects.toThrow();
+      } else {
+        const value =
+          malformation === "missing-fields"
+            ? {}
+            : assignment(
+                malformation === "wrong-profile"
+                  ? { profileId: "other-owner" }
+                  : { eventId: "wrong-event" },
+              );
+        await expect(
+          testEnv.EVENT_DB.prepare(
+            "UPDATE profile_event_prizes_canonical SET assignment_json = ? WHERE profile_id = ? AND event_id = ?",
+          )
+            .bind(JSON.stringify(value), profileId, eventId)
+            .run(),
+        ).rejects.toThrow();
+      }
+      expect(await readStorage()).toEqual(before);
+      expect(await admissionCount()).toBe(0);
+    },
+  );
 
-  it("does not inspect malformed sibling assignments during no-op cleanup", async () => {
+  it("does not inspect retired sibling prizes during no-op cleanup", async () => {
     await seedAssignment(assignment({ prizeId: otherPrizeId }));
-    await seedAssignment(assignment({ eventId: siblingEventId }), {
-      json: "{}",
-    });
+    await seedAssignment(
+      assignment({ eventId: siblingEventId, prizeId: "retired-prize" }),
+    );
     const before = await readStorage();
     expect(await cleanup()).toBe(false);
     expect(
@@ -343,7 +355,7 @@ describe("conditional profile prize cleanup", () => {
       async batch(statements) {
         attempts++;
         await testEnv.EVENT_DB.prepare(
-          "UPDATE profile_event_prize_revisions SET revision = revision + 1 WHERE profile_id = ?",
+          "UPDATE profile_event_prize_revisions_canonical SET revision = revision + 1 WHERE profile_id = ?",
         )
           .bind(profileId)
           .run();
@@ -495,7 +507,7 @@ describe("conditional profile prize cleanup", () => {
       async batch(statements) {
         batches++;
         await testEnv.EVENT_DB.prepare(
-          "UPDATE profile_event_prize_revisions SET revision = revision + 1 WHERE profile_id = ?",
+          "UPDATE profile_event_prize_revisions_canonical SET revision = revision + 1 WHERE profile_id = ?",
         )
           .bind(profileId)
           .run();

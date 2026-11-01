@@ -1,3 +1,4 @@
+import { required } from "./fixtures/canonicalData.mjs";
 import assert from "node:assert/strict";
 import test from "node:test";
 
@@ -7,15 +8,21 @@ const offsetProperty = "--bottom-controls-offset";
 const viewportHeightProperty = "--bottom-controls-viewport-height";
 
 function eventTarget() {
+  /** @type {Map<string, Set<() => void>>} */
   const listeners = new Map();
   return {
+    /** @param {string} type @param {() => void} listener */
     addEventListener(type, listener) {
       if (!listeners.has(type)) listeners.set(type, new Set());
-      listeners.get(type).add(listener);
+      required(listeners.get(type)).add(listener);
     },
+    /** @param {string} type @param {() => void} listener */
     removeEventListener(type, listener) {
       listeners.get(type)?.delete(listener);
     },
+    /**
+     * @param {string} type
+     */
     dispatch(type) {
       for (const listener of listeners.get(type) ?? []) listener();
     },
@@ -28,6 +35,9 @@ function eventTarget() {
   };
 }
 
+/**
+ * @param {test.TestContext} t
+ */
 function harness(
   t,
   {
@@ -44,9 +54,13 @@ function harness(
     globalThis,
     "document",
   );
+  /** @type {Map<string, string>} */
   const properties = new Map();
+  /** @type {{ name: string, value: string | null }[]} */
   const writes = [];
+  /** @type {Map<number, () => void>} */
   const frames = new Map();
+  /** @type {number[]} */
   const canceledFrames = [];
   const layout = { fixedBottomEdge, spacing };
   let nextFrame = 1;
@@ -68,10 +82,12 @@ function harness(
   const document = eventTarget();
   const container = {
     style: {
+      /** @param {string} name @param {string} value */
       setProperty(name, value) {
         writes.push({ name, value });
         properties.set(name, value);
       },
+      /** @param {string} name */
       removeProperty(name) {
         writes.push({ name, value: null });
         properties.delete(name);
@@ -80,15 +96,18 @@ function harness(
   };
   const window = Object.assign(eventTarget(), {
     visualViewport: hasVisualViewport ? viewport : undefined,
+    /** @param {typeof controls} element */
     getComputedStyle(element) {
       assert.equal(element, controls);
       return { bottom: `${layout.spacing + currentOffset()}px` };
     },
+    /** @param {() => void} callback */
     requestAnimationFrame(callback) {
       const id = nextFrame++;
       frames.set(id, callback);
       return id;
     },
+    /** @param {number} id */
     cancelAnimationFrame(id) {
       canceledFrames.push(id);
       frames.delete(id);
@@ -102,7 +121,11 @@ function harness(
     configurable: true,
     value: document,
   });
-  let cleanup = observeBottomControlsViewport(container, controls);
+  /** @type {ReturnType<typeof observeBottomControlsViewport> | null} */
+  let cleanup = Reflect.apply(observeBottomControlsViewport, undefined, [
+    container,
+    controls,
+  ]);
   const dispose = () => {
     cleanup?.();
     cleanup = null;
@@ -112,12 +135,12 @@ function harness(
     if (previousWindow) {
       Object.defineProperty(globalThis, "window", previousWindow);
     } else {
-      delete globalThis.window;
+      Reflect.deleteProperty(globalThis, "window");
     }
     if (previousDocument) {
       Object.defineProperty(globalThis, "document", previousDocument);
     } else {
-      delete globalThis.document;
+      Reflect.deleteProperty(globalThis, "document");
     }
   });
   return {

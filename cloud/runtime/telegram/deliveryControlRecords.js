@@ -7,6 +7,7 @@ exports.settleApiGateRecord = settleApiGateRecord;
 const deliveryState_js_1 = require("./deliveryState.js");
 const deliveryPolicy_js_1 = require("./deliveryPolicy.js");
 const values_js_1 = require("./values.js");
+const recordCodec_js_1 = require("./recordCodec.js");
 function clearRateLimitProofRecord(current, input) {
   const { owner } = input;
   const apply = (record) => {
@@ -49,8 +50,7 @@ function clearRateLimitProofRecord(current, input) {
       decision: "rate-limit-proof-marker-cleared",
     };
   };
-  const output = apply(asObject(current));
-  return output;
+  return (0, recordCodec_js_1.requireTelegramTransaction)(apply(current));
 }
 function prepareDesiredGateRecord(current, delivery, input) {
   const { generation, messageKey, preparedAtMs, revision } = input;
@@ -80,8 +80,7 @@ function prepareDesiredGateRecord(current, delivery, input) {
       },
     };
   };
-  const output = apply(asObject(current));
-  return output;
+  return (0, recordCodec_js_1.requireTelegramMessageDocument)(apply(current));
 }
 function settleApiGateRecord(current, input) {
   const { field, settleOwner } = input;
@@ -98,17 +97,5 @@ function settleApiGateRecord(current, input) {
       decision: "api-gate-settled",
     };
   };
-  const output = apply(asObject(current));
-  return output;
+  return (0, recordCodec_js_1.requireTelegramTransaction)(apply(current));
 }
-const asObject = (value) => {
-  const retained =
-    value instanceof deliveryState_js_1.DeliverySnapshot
-      ? (0, deliveryState_js_1.deliveryDocument)(value)
-      : value instanceof deliveryState_js_1.PendingDeleteSnapshot
-        ? (0, deliveryState_js_1.pendingDeleteDocument)(value)
-        : value;
-  return retained && typeof retained === "object" && !Array.isArray(retained)
-    ? retained
-    : {};
-};

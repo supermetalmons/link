@@ -1,3 +1,4 @@
+import { required } from "./fixtures/canonicalData.mjs";
 import assert from "node:assert/strict";
 import { registerHooks } from "node:module";
 import test from "node:test";
@@ -34,13 +35,17 @@ const IDENTITY = {
   ethAddress: "0x0000000000000000000000000000000000000001",
   solAddress: "11111111111111111111111111111111",
 };
+/** @type {import("../src/connection/authModels.ts").AuthState} */
 const AUTH_STATE = { ...IDENTITY, authStatus: "authenticated" };
-const OWNER_KEY = getNftIdentityKey(IDENTITY);
-const OTHER_OWNER_KEY = getNftIdentityKey({
-  ...IDENTITY,
-  profileId: "profile-b",
-});
+const OWNER_KEY = required(getNftIdentityKey(IDENTITY));
+const OTHER_OWNER_KEY = required(
+  getNftIdentityKey({
+    ...IDENTITY,
+    profileId: "profile-b",
+  }),
+);
 
+/** @param {Partial<import("../src/utils/storage.ts").ReactionExtraStickerCache>} [overrides] @returns {import("../src/utils/storage.ts").ReactionExtraStickerCache} */
 const cache = (overrides = {}) => ({
   ...IDENTITY,
   extraIds: [9, 17],
@@ -48,6 +53,7 @@ const cache = (overrides = {}) => ({
   ...overrides,
 });
 
+/** @param {number[]} [extraIds] @returns {{data: import("@mons/shared/nfts").NftApiResponse; expiresAtMs: number}} */
 const snapshot = (
   extraIds = [9, 17],
   expiresAtMs = NOW + NFT_CACHE_TTL_MS,
@@ -61,6 +67,7 @@ const snapshot = (
   expiresAtMs,
 });
 
+/** @param {Partial<Parameters<typeof getStickerRefreshResult>[0]>} [overrides] */
 const refresh = (overrides = {}) =>
   getStickerRefreshResult({
     snapshot: snapshot(),
@@ -72,11 +79,15 @@ const refresh = (overrides = {}) =>
   });
 
 test("hydrates only supported extras after fixed stickers, preserving order without duplicates", () => {
-  const entitlement = toUsableStickerEntitlement(
-    cache({ extraIds: [17, 9, 17, 0, 1.5, "9", NaN, FIXED_STICKER_IDS[0]] }),
+  /** @type {unknown} */
+  const entitlement = Reflect.apply(toUsableStickerEntitlement, undefined, [
+    {
+      ...cache(),
+      extraIds: [17, 9, 17, 0, 1.5, "9", NaN, FIXED_STICKER_IDS[0]],
+    },
     OWNER_KEY,
     NOW,
-  );
+  ]);
   assert.deepEqual(entitlement, {
     stickerIds: [...FIXED_STICKER_IDS, 17, 9],
     ownerKey: OWNER_KEY,
@@ -122,15 +133,21 @@ test("rejects expired and excessively future cache timestamps at exact TTL bound
 });
 
 test("retains same-owner extras through expiry and replaces them immediately for another owner", () => {
-  const entitlement = toUsableStickerEntitlement(cache(), OWNER_KEY, NOW);
+  const entitlement = required(
+    toUsableStickerEntitlement(cache(), OWNER_KEY, NOW),
+  );
   assert.equal(
     retainStickerEntitlementForOwner(entitlement, OWNER_KEY),
     entitlement,
   );
   assert.deepEqual(
-    getStickerPickerState(entitlement, OWNER_KEY, entitlement.expiresAtMs),
+    getStickerPickerState(
+      entitlement,
+      OWNER_KEY,
+      required(entitlement).expiresAtMs,
+    ),
     {
-      visibleStickerIds: entitlement.stickerIds,
+      visibleStickerIds: required(entitlement).stickerIds,
       hasFreshStickerEntitlement: false,
     },
   );
@@ -151,7 +168,7 @@ test("retains same-owner extras through expiry and replaces them immediately for
 });
 
 test("never downgrades newer in-memory entitlement for the same owner", () => {
-  const current = toUsableStickerEntitlement(cache(), OWNER_KEY, NOW);
+  const current = required(toUsableStickerEntitlement(cache(), OWNER_KEY, NOW));
   const older = {
     ...current,
     stickerIds: FIXED_STICKER_IDS,
@@ -168,7 +185,8 @@ test("never downgrades newer in-memory entitlement for the same owner", () => {
 });
 
 test("rejects failed, expired, reset, and stale-owner refresh results", () => {
-  for (const overrides of [
+  /** @type {Array<Partial<Parameters<typeof getStickerRefreshResult>[0]>>} */
+  const cases = [
     { snapshot: { data: { ok: false }, expiresAtMs: NOW + 1 } },
     { snapshot: snapshot([9], NOW) },
     { snapshot: snapshot([9], 0) },
@@ -177,7 +195,8 @@ test("rejects failed, expired, reset, and stale-owner refresh results", () => {
     { authState: { ...AUTH_STATE, authStatus: "loading" } },
     { authState: { ...AUTH_STATE, authStatus: "unauthenticated" } },
     { authState: { ...AUTH_STATE, profileId: "" } },
-  ]) {
+  ];
+  for (const overrides of cases) {
     assert.equal(refresh(overrides), null);
   }
 });
@@ -209,18 +228,28 @@ test("persists refreshed inventory with its original expiry and full owner ident
 
 test("treats a missing or non-array reaction list as empty inventory", () => {
   for (const reactions of [undefined, null, {}]) {
-    const incoming = snapshot();
-    incoming.data.swagpack_reactions = reactions;
-    const result = refresh({ snapshot: incoming });
-    assert.deepEqual(result.entitlement.stickerIds, FIXED_STICKER_IDS);
-    assert.deepEqual(result.cacheToWrite.extraIds, []);
+    const current = snapshot();
+    const incoming = {
+      ...current,
+      data: { ...current.data, swagpack_reactions: reactions },
+    };
+    /** @type {unknown} */
+    const result = Reflect.apply(refresh, undefined, [{ snapshot: incoming }]);
+    assert.deepEqual(
+      fixtureField(fixtureField(result, "entitlement"), "stickerIds"),
+      FIXED_STICKER_IDS,
+    );
+    assert.deepEqual(
+      fixtureField(fixtureField(result, "cacheToWrite"), "extraIds"),
+      [],
+    );
   }
 });
 
 test("avoids redundant writes but persists changed IDs, order, expiry, or owner", () => {
-  assert.equal(refresh({ cache: cache() }).cacheToWrite, null);
+  assert.equal(required(refresh({ cache: cache() })).cacheToWrite, null);
   assert.equal(
-    refresh({ cache: cache({ extraIds: [9, -1, 17] }) }).cacheToWrite,
+    required(refresh({ cache: cache({ extraIds: [9, -1, 17] }) })).cacheToWrite,
     null,
   );
   for (const currentCache of [
@@ -229,7 +258,10 @@ test("avoids redundant writes but persists changed IDs, order, expiry, or owner"
     cache({ expiresAtMs: NOW + 1 }),
     cache({ profileId: "profile-b" }),
   ]) {
-    assert.deepEqual(refresh({ cache: currentCache }).cacheToWrite, cache());
+    assert.deepEqual(
+      required(refresh({ cache: currentCache })).cacheToWrite,
+      cache(),
+    );
   }
 });
 
@@ -249,7 +281,9 @@ test("fixed stickers remain eligible without owner, inventory, or fresh entitlem
 });
 
 test("checks extra ownership, current storage identity, and expiry at send time", () => {
-  const entitlement = toUsableStickerEntitlement(cache(), OWNER_KEY, NOW);
+  const entitlement = required(
+    toUsableStickerEntitlement(cache(), OWNER_KEY, NOW),
+  );
   assert.equal(
     canSendSticker(9, entitlement, OWNER_KEY, () => OWNER_KEY, NOW),
     true,
@@ -260,18 +294,20 @@ test("checks extra ownership, current storage identity, and expiry at send time"
       entitlement,
       OWNER_KEY,
       () => OWNER_KEY,
-      entitlement.expiresAtMs,
+      required(entitlement).expiresAtMs,
     ),
     false,
   );
-  for (const [id, currentOwner, storedOwner] of [
+  /** @type {Array<[number, string | null, string | null]>} */
+  const cases = [
     [20, OWNER_KEY, OWNER_KEY],
     [-1, OWNER_KEY, OWNER_KEY],
     [9, OTHER_OWNER_KEY, OTHER_OWNER_KEY],
     [9, OWNER_KEY, OTHER_OWNER_KEY],
     [9, OWNER_KEY, null],
     [9, null, OWNER_KEY],
-  ]) {
+  ];
+  for (const [id, currentOwner, storedOwner] of cases) {
     assert.equal(
       canSendSticker(id, entitlement, currentOwner, () => storedOwner, NOW),
       false,
@@ -280,17 +316,21 @@ test("checks extra ownership, current storage identity, and expiry at send time"
 });
 
 test("rejects invalid local entitlement before reading stored identity", () => {
-  const entitlement = toUsableStickerEntitlement(cache(), OWNER_KEY, NOW);
+  const entitlement = required(
+    toUsableStickerEntitlement(cache(), OWNER_KEY, NOW),
+  );
   const unreadableIdentity = () => {
     throw new Error("storage unavailable");
   };
-  for (const [current, owner, now] of [
+  /** @type {Array<[import("../src/ui/controls/reactionPickerModel.ts").StickerEntitlementState, string | null, number]>} */
+  const cases = [
     [entitlement, null, NOW],
     [entitlement, OTHER_OWNER_KEY, NOW],
     [EMPTY_STICKER_ENTITLEMENT, OWNER_KEY, NOW],
     [{ ...entitlement, stickerIds: FIXED_STICKER_IDS }, OWNER_KEY, NOW],
-    [entitlement, OWNER_KEY, entitlement.expiresAtMs],
-  ]) {
+    [entitlement, OWNER_KEY, required(entitlement).expiresAtMs],
+  ];
+  for (const [current, owner, now] of cases) {
     assert.equal(
       canSendSticker(9, current, owner, unreadableIdentity, now),
       false,
@@ -298,7 +338,7 @@ test("rejects invalid local entitlement before reading stored identity", () => {
   }
   assert.equal(
     canSendSticker(
-      FIXED_STICKER_IDS[0],
+      required(FIXED_STICKER_IDS[0]),
       entitlement,
       OWNER_KEY,
       unreadableIdentity,
@@ -307,3 +347,9 @@ test("rejects invalid local entitlement before reading stored identity", () => {
     true,
   );
 });
+
+/** @param {unknown} value @param {string} key @returns {unknown} */
+function fixtureField(value, key) {
+  assert.ok(value !== null && typeof value === "object" && key in value);
+  return Reflect.get(value, key);
+}

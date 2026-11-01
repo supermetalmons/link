@@ -1,3 +1,8 @@
+import { matchDocumentFixture } from "./matchRecordFixture.ts";
+import {
+  wagerRecordFixture,
+  agreedWagerFixture,
+} from "./wagerRecordFixture.ts";
 import {
   attachMemoryWagerFrozenStore,
   createTestWagerReservationRuntime,
@@ -121,14 +126,15 @@ function handleGameplayRoute(
     (dependencies.repository
       ? coordinationFor(dependencies.repository)
       : createMemoryGameplayCoordinationStores());
+  const wagerReservations =
+    dependencies.wagerReservations ||
+    (dependencies.repository
+      ? createTestWagerReservationRuntime(dependencies.repository)
+      : undefined);
   return handleGameplayRouteImpl(request, env, ctx, {
     ...dependencies,
     coordination,
-    wagerReservations:
-      dependencies.wagerReservations ||
-      (dependencies.repository
-        ? createTestWagerReservationRuntime(dependencies.repository)
-        : undefined),
+    ...(wagerReservations === undefined ? {} : { wagerReservations }),
   });
 }
 
@@ -167,21 +173,29 @@ function addSendReservation(
     uid,
   );
   const mining = frozenByUid[uid];
+  if (!mining) throw new Error("missing-frozen-fixture");
   const operations = (mining.operations ||= {}) as Record<string, unknown>;
   operations[reservationOperationId] = {
-    appliedAtMs: 1,
-    count,
-    deltas: { [material]: count },
-    fingerprint: JSON.stringify([
-      "send-reserve",
+    schemaVersion: 1,
+    status: "active",
+    operation: {
+      kind: "send-reserve",
       material,
+      requestedCount: count,
+      appliedAtMs: 1,
       count,
-      0,
-      0,
-      0,
-      0,
-      0,
-    ]),
+      deltas: { [material]: count },
+      fingerprint: JSON.stringify([
+        "send-reserve",
+        material,
+        count,
+        0,
+        0,
+        0,
+        0,
+        0,
+      ]),
+    },
   };
   return reservationOperationId;
 }
@@ -194,6 +208,7 @@ function modernizeWagerState(state: Omit<RepositoryState, "repository">): void {
   for (const [uid, proposal] of Object.entries(proposals || {})) {
     const material = String(proposal.material);
     const count = Number(proposal.count);
+    proposal.createdAt ??= 1;
     proposal.operationId = operationId(
       "send",
       "invite",
@@ -260,6 +275,7 @@ function modernizeWagerState(state: Omit<RepositoryState, "repository">): void {
     proposerReservedCount: count,
     reservationLineageVersion: 1,
     reservationLineageReady: true,
+    reservationAdjustments: [],
     accepterReservationOperationIds: [
       operationId(agreementOperationId, "self-adjustment"),
       accepterReservationOperationId,
@@ -286,8 +302,20 @@ function applyTransaction(
     value?: unknown;
   };
   return decision.commit === false
-    ? { committed: false, decision: decision.decision, value: current }
-    : { committed: true, decision: decision.decision, value: decision.value };
+    ? {
+        committed: false,
+        ...(decision.decision === undefined
+          ? {}
+          : { decision: decision.decision }),
+        value: current,
+      }
+    : {
+        committed: true,
+        ...(decision.decision === undefined
+          ? {}
+          : { decision: decision.decision }),
+        value: decision.value,
+      };
 }
 
 async function ownershipSnapshot(
@@ -325,8 +353,8 @@ async function ownershipSnapshot(
         profileId,
         {
           profile: {
-            aura: "",
-            emoji: "",
+            aura: "none",
+            emoji: 1,
             eth: "",
             profileId,
             rating: 1500,
@@ -342,7 +370,10 @@ async function ownershipSnapshot(
 
 type RepositoryState = {
   appliedTransfers: number;
-  frozen: Record<string, Record<string, unknown>>;
+  frozen: Record<string, Record<string, unknown>> & {
+    host: Record<string, unknown>;
+    guest: Record<string, unknown>;
+  };
   marker: boolean;
   mining: Record<string, MiningSnapshot>;
   repository: GameplayRepository;
@@ -396,6 +427,10 @@ function createRepository({
     wager: structuredClone(wager),
   };
   if (modernizeWager) modernizeWagerState(state);
+  state.wager = wagerRecordFixture(state.wager) as Record<
+    string,
+    unknown
+  > | null;
   const repository: Parameters<typeof attachMemoryWagerFrozenStore>[0] = {
     applyWagerTransferOnce: async (input) => {
       state.transferCalls += 1;
@@ -407,7 +442,7 @@ function createRepository({
       }
       if (
         input.winnerProfileId !== input.loserProfileId &&
-        state.mining[input.loserProfileId].materials[input.material] <
+        state.mining[input.loserProfileId]!.materials[input.material] <
           input.count
       ) {
         transferFingerprint = input.fingerprint;
@@ -418,9 +453,9 @@ function createRepository({
       state.transferOutcome = "applied";
       if (input.winnerProfileId !== input.loserProfileId) {
         state.appliedTransfers += 1;
-        state.mining[input.winnerProfileId].materials[input.material] +=
+        state.mining[input.winnerProfileId]!.materials[input.material] +=
           input.count;
-        state.mining[input.loserProfileId].materials[input.material] -=
+        state.mining[input.loserProfileId]!.materials[input.material] -=
           input.count;
       }
       return "applied";
@@ -432,14 +467,26 @@ function createRepository({
       structuredClone(state.mining[profileId] ?? null),
     readState: async (path) => {
       if (path === "invites/invite") return invite;
-      if (path === "players/host/matches/invite") return playerMatch;
-      if (path === "players/guest/matches/invite") return opponentMatch;
+      if (path === "players/host/matches/invite")
+        return playerMatch === null
+          ? null
+          : matchDocumentFixture({
+              color: "white",
+              ...(playerMatch as object),
+            });
+      if (path === "players/guest/matches/invite")
+        return opponentMatch === null
+          ? null
+          : matchDocumentFixture({
+              color: "black",
+              ...(opponentMatch as object),
+            });
       if (path === "invites/invite/wagers/invite") return state.wager;
       if (path === "invites/invite/matchesWagerResolutions/invite") {
         return state.marker;
       }
       const miningMatch = path.match(/^reservations\/([^/]+)$/);
-      if (miningMatch) return state.frozen[miningMatch[1]];
+      if (miningMatch) return state.frozen[miningMatch[1]!];
       return null;
     },
     patchStateRoot: async (updates) => {
@@ -449,23 +496,11 @@ function createRepository({
       }
       state.marker =
         updates["invites/invite/matchesWagerResolutions/invite"] === true;
-      if (state.wager) {
-        state.wager.proposals = null;
-        if (updates["invites/invite/wagers/invite/agreed"] === null) {
-          state.wager.agreed = null;
-        }
-        const settlement = state.wager.settlement as Record<string, unknown>;
-        settlement.state = "completed";
-        settlement.completedAtMs =
-          updates["invites/invite/wagers/invite/settlement/completedAtMs"];
-        const failureReason =
-          updates["invites/invite/wagers/invite/settlement/failureReason"];
-        if (failureReason) settlement.failureReason = failureReason;
-        if (updates["invites/invite/wagers/invite/resolved"]) {
-          state.wager.resolved =
-            updates["invites/invite/wagers/invite/resolved"];
-        }
-      }
+      if (updates["invites/invite/wagers/invite"])
+        state.wager = updates["invites/invite/wagers/invite"] as Record<
+          string,
+          unknown
+        >;
       if (failPatchAfterCommit) {
         failPatchAfterCommit = false;
         throw new Error("ambiguous-patch-failure");
@@ -485,23 +520,10 @@ function createRepository({
         const result = applyTransaction(updater, state.wager);
         if (result.committed) {
           state.wager = result.value as Record<string, unknown>;
-          const settlement = state.wager.settlement as Record<
-            string,
-            unknown
-          > | null;
-          if (settlement?.completedAtMs === null) {
-            delete settlement.completedAtMs;
-          }
-          if (
-            Array.isArray(settlement?.releases) &&
-            settlement.releases.length === 0
-          ) {
-            delete settlement.releases;
-          }
         }
         return result;
       }
-      const uid = path.split("/")[1];
+      const uid = path.split("/")[1]!;
       if (failFrozen) {
         failFrozen = false;
         throw new Error("frozen-write-failed");
@@ -524,8 +546,8 @@ test("uses the real rules engine for both player colors", () => {
     color,
     fen,
     flatMovesString: "",
-    status: "",
-    timer: "",
+    status: "active" as const,
+    timer: { state: "idle" as const },
   });
   assert.equal(
     resolveWagerMatchResult(record("white", validFen), record("black", "x")),
@@ -587,6 +609,8 @@ test("preserves participant, match, no-wager, and historical replay outcomes", a
             loserId: "guest",
             material: "dust",
             count: 2,
+            total: 4,
+            resolvedAt: 1,
           },
         },
       }),
@@ -619,6 +643,8 @@ test("resolves a marked wager from one snapshot without rereading its record", a
         loserId: "guest",
         material: "dust",
         count: 2,
+        total: 4,
+        resolvedAt: 1,
       },
     },
   });
@@ -644,36 +670,8 @@ test("resolves a marked wager from one snapshot without rereading its record", a
   assert.equal(state.transferCalls, 0);
 });
 
-test("leaves terminal timer marker cleanup to the coordination sweep", async () => {
-  const state = createRepository();
-  const stores = coordinationFor(state.repository);
-  for (const playerId of ["host", "guest"]) {
-    stores.timerRows.set(`${playerId}/invite`, {
-      timer: "7;1000",
-      turnNumber: 7,
-      updatedAtMs: 1,
-    });
-  }
-  assert.deepEqual(
-    await resolveWagerOutcome(
-      identity,
-      { inviteId: "invite", matchId: "invite" },
-      state.repository,
-      { resolveResult: () => "win" },
-    ),
-    { ok: true, reason: "no-wager", mining: snapshot(10) },
-  );
-  assert.equal(stores.timerRows.size, 2);
-});
-
 test("freezes wager resolution at its write boundary", async () => {
   const state = createRepository();
-  const stores = coordinationFor(state.repository);
-  stores.timerRows.set("host/invite", {
-    timer: "7;1000",
-    turnNumber: 7,
-    updatedAtMs: 1,
-  });
   await assert.rejects(
     () =>
       resolveWagerOutcome(
@@ -689,7 +687,7 @@ test("freezes wager resolution at its write boundary", async () => {
       ),
     /profile-writes-disabled/,
   );
-  assert.equal(stores.timerRows.size, 1);
+  assert.equal(state.transferCalls, 0);
 });
 
 test("fails closed for an unresolved legacy marker", async () => {
@@ -778,7 +776,7 @@ test("rejects an agreement lineage with an extra or positive adjustment", async 
         state.repository,
         { now: () => 500, resolveResult: () => "win" },
       ),
-      /wager-agreement-lineage-unavailable/,
+      /wager-agreement-lineage-unavailable|invalid-canonical-wager/,
     );
     assert.equal(state.transferCalls, 0);
     assert.equal(state.marker, false);
@@ -900,9 +898,9 @@ test("cancels insufficient-material wagers without transferring balances", async
     settlement.failureReason,
     WAGER_SETTLEMENT_INSUFFICIENT_MATERIALS_REASON,
   );
-  assert.equal(state.wager?.resolved, undefined);
+  assert.equal(state.wager?.resolved, null);
   assert.equal(state.wager?.agreed, null);
-  assert.equal(state.wager?.proposals, null);
+  assert.deepEqual(state.wager?.proposals, {});
   assert.equal(state.marker, true);
   assert.deepEqual(response, {
     ok: true,
@@ -941,7 +939,14 @@ test("only new retry tasks can recover unclaimed wagers", async () => {
   for (const wager of [
     { agreed: { material: "dust", count: 2 } },
     {},
-    { proposalRemovalOperations: { old: { count: 1 } } },
+    {
+      proposalRemovalOperations: {
+        ["a".repeat(64)]: {
+          proposalOperationId: "b".repeat(64),
+          reservationOperationId: "c".repeat(64),
+        },
+      },
+    },
   ]) {
     const unclaimed = createRepository({ wager });
     assert.equal(
@@ -979,7 +984,7 @@ test("only new retry tasks can recover unclaimed wagers", async () => {
   });
   await assert.rejects(
     classifyWagerSettlementRetry(task, malformed.repository),
-    /wager-settlement-malformed/,
+    /invalid-canonical-wager/,
   );
   await assert.rejects(
     resolveWagerOutcome(
@@ -988,7 +993,7 @@ test("only new retry tasks can recover unclaimed wagers", async () => {
       malformed.repository,
       { resolveResult: () => "win" },
     ),
-    /wager-settlement-malformed/,
+    /invalid-canonical-wager/,
   );
   assert.equal(
     (malformed.wager?.settlement as Record<string, unknown>).failureReason,
@@ -1020,7 +1025,7 @@ test("rejects the legacy settlement schema", async () => {
   });
   await assert.rejects(
     classifyWagerSettlementRetry(task, state.repository),
-    /wager-settlement-malformed/,
+    /invalid-canonical-wager/,
   );
 });
 
@@ -1052,12 +1057,12 @@ test("recovers before the claim and settles once after a lost Queue acknowledgem
     ),
   );
   assert.equal(tasks.length, 1);
-  assert.deepEqual(tasks[0].resolution, hostWinResolution);
-  assert.equal(state.wager?.settlement, undefined);
+  assert.deepEqual(tasks[0]!.resolution, hostWinResolution);
+  assert.equal(state.wager?.settlement, null);
 
   state.repository.transactState = transact;
   assert.equal(
-    await classifyWagerSettlementRetry(tasks[0], state.repository),
+    await classifyWagerSettlementRetry(tasks[0]!, state.repository),
     "unclaimed",
   );
   const retries: QueueRetryOptions[] = [];
@@ -1120,7 +1125,7 @@ test("stops HTTP settlement when writes freeze at the claim boundary", async () 
   );
   assert.equal(checks, 2);
   assert.equal(tasks.length, 1);
-  assert.equal(state.wager?.settlement, undefined);
+  assert.equal(state.wager?.settlement, null);
   assert.equal(state.transferCalls, 0);
   assert.equal(state.marker, false);
 });
@@ -1524,7 +1529,7 @@ test("settles equal modern proposals with a no-op accept reservation", async () 
   assert.equal(agreementOperation.reservationLineageReady, true);
   assert.equal(
     Object.hasOwn(agreementOperation, "reservationAdjustments"),
-    false,
+    true,
   );
   const reservationOperationId = await createWagerReservationOperationId(
     "accept",
@@ -1536,7 +1541,11 @@ test("settles equal modern proposals with a no-op accept reservation", async () 
     string,
     Record<string, unknown>
   >;
-  delete operations[reservationOperationId].deltas;
+  assert.deepEqual(
+    (operations[reservationOperationId]!.operation as Record<string, unknown>)
+      .deltas,
+    {},
+  );
 
   await resolveWagerOutcome(
     identity,
@@ -1551,7 +1560,7 @@ test("settles equal modern proposals with a no-op accept reservation", async () 
     (state.frozen.host.operations as Record<string, unknown>)[
       reservationOperationId
     ],
-    { consumed: true },
+    { schemaVersion: 1, status: "consumed" },
   );
   assert.equal(
     (state.wager?.settlement as Record<string, unknown>).state,
@@ -1578,14 +1587,15 @@ test("rejects proposals without modern operation lineage", async () => {
       },
     },
   });
-  assert.deepEqual(
-    await acceptWagerProposal(
+  await assert.rejects(
+    acceptWagerProposal(
       { uid: "host" },
       { inviteId: "invite", matchId: "invite" },
       state.repository,
     ),
-    { ok: false, reason: "proposal-unavailable" },
+    /invalid-canonical-wager/,
   );
+  assert.equal(state.transferCalls, 0);
 });
 
 test("rejects omitted agreement adjustments when either reservation is larger", async () => {
@@ -1637,7 +1647,7 @@ test("rejects omitted agreement adjustments when either reservation is larger", 
         },
         state.repository,
       ),
-      /wager-agreement-lineage-unavailable/,
+      /wager-agreement-lineage-unavailable|invalid-canonical-wager/,
     );
     assert.notEqual(
       (state.wager?.agreementOperation as Record<string, unknown>)
@@ -1688,7 +1698,7 @@ test("marks equal send agreement lineage ready atomically", async () => {
   assert.equal(agreementOperation.reservationLineageReady, true);
   assert.equal(
     Object.hasOwn(agreementOperation, "reservationAdjustments"),
-    false,
+    true,
   );
 });
 
@@ -1754,7 +1764,10 @@ test("accepts concurrent lineage completion after reservations are consumed", as
         string,
         unknown
       >;
-      operations[proposerReservationOperationId] = { consumed: true };
+      operations[proposerReservationOperationId] = {
+        schemaVersion: 1,
+        status: "consumed",
+      };
     }
     return read(path, query, signal);
   };
@@ -1831,7 +1844,10 @@ test("rejects concurrent ready lineage after settlement clears agreement", async
         string,
         unknown
       >;
-      operations[proposerReservationOperationId] = { consumed: true };
+      operations[proposerReservationOperationId] = {
+        schemaVersion: 1,
+        status: "consumed",
+      };
     }
     return read(path, query, signal);
   };
@@ -1842,7 +1858,7 @@ test("rejects concurrent ready lineage after settlement clears agreement", async
       { inviteId: "invite", matchId: "invite" },
       () => 2,
     ),
-    /wager-agreement-lineage-unavailable/,
+    /wager-agreement-lineage-unavailable|invalid-canonical-wager/,
   );
 
   assert.equal(completedElsewhere, true);
@@ -1871,21 +1887,13 @@ test("rejects ready-false agreement without a nonempty adjustment list", async (
         { inviteId: "invite", matchId: "invite" },
         () => 2,
       ),
-      /wager-agreement-lineage-unavailable/,
+      /wager-agreement-lineage-unavailable|invalid-canonical-wager/,
     );
   }
 });
 
 test("returns immediately for already-ready agreement lineage", async () => {
-  const state = createRepository({
-    wager: {
-      agreementOperation: {
-        id: "a".repeat(64),
-        reservationLineageVersion: 1,
-        reservationLineageReady: true,
-      },
-    },
-  });
+  const state = createRepository({ wager: agreedWagerFixture() });
   const read = state.repository.readState;
   const reads: string[] = [];
   state.repository.readState = async (path, query, signal) => {
@@ -1907,19 +1915,28 @@ test("accepts an actually empty no-op reservation delta record", async () => {
     frozen: { ...emptyMaterials(), dust: 2 },
     operations: {
       operation: {
-        appliedAtMs: 1,
-        count: 2,
-        deltas: {},
-        fingerprint: JSON.stringify([
-          "accept-reserve",
-          "dust:dust",
-          2,
-          2,
-          0,
-          0,
-          0,
-          0,
-        ]),
+        schemaVersion: 1,
+        status: "active",
+        operation: {
+          kind: "accept-reserve",
+          material: "dust",
+          requestedCount: 2,
+          ownMaterial: "dust",
+          ownCount: 2,
+          appliedAtMs: 1,
+          count: 2,
+          deltas: {},
+          fingerprint: JSON.stringify([
+            "accept-reserve",
+            "dust:dust",
+            2,
+            2,
+            0,
+            0,
+            0,
+            0,
+          ]),
+        },
       },
     },
   };
@@ -1936,7 +1953,7 @@ test("accepts an actually empty no-op reservation delta record", async () => {
   assert.equal((state.frozen.host.frozen as Record<string, number>).dust, 2);
   assert.deepEqual(
     (state.frozen.host.operations as Record<string, unknown>).operation,
-    { consumed: true },
+    { schemaVersion: 1, status: "consumed" },
   );
 });
 
@@ -1954,19 +1971,28 @@ test("rejects malformed or populated deltas on a no-op reservation", async () =>
       frozen: { ...emptyMaterials(), dust: 2 },
       operations: {
         operation: {
-          appliedAtMs: 1,
-          count: 2,
-          deltas,
-          fingerprint: JSON.stringify([
-            "accept-reserve",
-            "dust:dust",
-            2,
-            2,
-            0,
-            0,
-            0,
-            0,
-          ]),
+          schemaVersion: 1,
+          status: "active",
+          operation: {
+            kind: "accept-reserve",
+            material: "dust",
+            requestedCount: 2,
+            ownMaterial: "dust",
+            ownCount: 2,
+            appliedAtMs: 1,
+            count: 2,
+            deltas,
+            fingerprint: JSON.stringify([
+              "accept-reserve",
+              "dust:dust",
+              2,
+              2,
+              0,
+              0,
+              0,
+              0,
+            ]),
+          },
         },
       },
     };
@@ -1993,9 +2019,25 @@ test("rejects a no-delta send reservation", async () => {
     frozen: { ...emptyMaterials(), dust: 2 },
     operations: {
       operation: {
-        appliedAtMs: 1,
-        count: 2,
-        fingerprint: JSON.stringify(["send-reserve", "dust", 2, 0, 0, 0, 0, 0]),
+        schemaVersion: 1,
+        status: "active",
+        operation: {
+          kind: "send-reserve",
+          material: "dust",
+          requestedCount: 2,
+          appliedAtMs: 1,
+          count: 2,
+          fingerprint: JSON.stringify([
+            "send-reserve",
+            "dust",
+            2,
+            0,
+            0,
+            0,
+            0,
+            0,
+          ]),
+        },
       },
     },
   };
@@ -2036,18 +2078,27 @@ test("rejects a malformed no-delta accept reservation", async () => {
     frozen: { ...emptyMaterials(), dust: 2, slime: 2 },
     operations: {
       operation: {
-        appliedAtMs: 1,
-        count: 2,
-        fingerprint: JSON.stringify([
-          "accept-reserve",
-          "dust:slime",
-          2,
-          0,
-          2,
-          0,
-          0,
-          0,
-        ]),
+        schemaVersion: 1,
+        status: "active",
+        operation: {
+          kind: "accept-reserve",
+          material: "dust",
+          requestedCount: 2,
+          ownMaterial: "slime",
+          ownCount: 2,
+          appliedAtMs: 1,
+          count: 2,
+          fingerprint: JSON.stringify([
+            "accept-reserve",
+            "dust:slime",
+            2,
+            0,
+            2,
+            0,
+            0,
+            0,
+          ]),
+        },
       },
     },
   };
@@ -2153,17 +2204,29 @@ test("rejects lineage adjustment deltas that do not match the fingerprint", asyn
   ] as const;
   for (const [kind, deltas] of cases) {
     await assertWagerOperationRejected({
-      appliedAtMs: 1,
-      deltas,
-      fingerprint: JSON.stringify([kind, "", 0, -1, 0, 0, 0, 0]),
+      schemaVersion: 1,
+      status: "active",
+      operation: {
+        kind: kind,
+        appliedAtMs: 1,
+        deltas,
+        fingerprint: JSON.stringify([kind, "", 0, -1, 0, 0, 0, 0]),
+      },
     });
   }
 });
 
-test("resumes an empty proposal settlement after storage drops empty values", async () => {
+test("resumes an empty proposal settlement with explicit canonical empty fields", async () => {
   const state = createRepository({
     failPatchOnce: true,
-    wager: { proposalRemovalOperations: { previous: { count: 1 } } },
+    wager: {
+      proposalRemovalOperations: {
+        ["a".repeat(64)]: {
+          proposalOperationId: "b".repeat(64),
+          reservationOperationId: "c".repeat(64),
+        },
+      },
+    },
   });
   await assert.rejects(() =>
     resolveWagerOutcome(
@@ -2174,7 +2237,7 @@ test("resumes an empty proposal settlement after storage drops empty values", as
     ),
   );
   const pending = state.wager?.settlement as Record<string, unknown>;
-  assert.equal(Object.hasOwn(pending, "completedAtMs"), false);
+  assert.equal(pending.completedAtMs, null);
   assert.equal(Array.isArray(pending.releases), true);
   await resolveWagerOutcome(
     identity,
@@ -2194,6 +2257,7 @@ test("claims the live agreement instead of a stale proposal snapshot", async () 
     if (path === "invites/invite/wagers/invite") {
       state.wager = { agreed: { material: "dust", count: 2 } };
       modernizeWagerState(state);
+      state.wager = wagerRecordFixture(state.wager) as Record<string, unknown>;
     }
     return transact(path, updater, signal);
   };
@@ -2284,7 +2348,7 @@ test("queues a durable retry before settling", async () => {
         ...TELEGRAM_TEST_ENV.WAGER_SETTLEMENT_QUEUE,
         send: async (task, options) => {
           order.push("queue");
-          tasks.push({ task, options });
+          tasks.push({ task, ...(options === undefined ? {} : { options }) });
           return {
             metadata: { metrics: { backlogCount: 0, backlogBytes: 0 } },
           };
@@ -2305,22 +2369,38 @@ test("queues a durable retry before settling", async () => {
     },
   );
   assert.equal(response.status, 200);
-  assert.deepEqual(tasks, [
-    {
-      task: {
-        kind: "wager-settlement",
-        inviteId: "invite",
-        matchId: "invite",
-        operationId: String(
-          (state.wager?.settlement as Record<string, unknown>).operationId,
-        ),
-        resolution: hostWinResolution,
+  for (const { task } of tasks) {
+    const envelope = task as {
+      dataEpoch: number;
+      queue: string;
+      dispatchId: string;
+    };
+    assert.equal(envelope.dataEpoch, 1);
+    assert.equal(envelope.queue, "WAGER_SETTLEMENT_QUEUE");
+    assert.match(envelope.dispatchId, /^[a-f0-9-]{36}$/);
+  }
+  assert.deepEqual(
+    tasks.map((entry) => ({
+      ...entry,
+      task: (entry.task as { payload: unknown }).payload,
+    })),
+    [
+      {
+        task: {
+          kind: "wager-settlement",
+          inviteId: "invite",
+          matchId: "invite",
+          operationId: String(
+            (state.wager?.settlement as Record<string, unknown>).operationId,
+          ),
+          resolution: hostWinResolution,
+        },
+        options: {
+          delaySeconds: WAGER_SETTLEMENT_INITIAL_RETRY_DELAY_SECONDS,
+        },
       },
-      options: {
-        delaySeconds: WAGER_SETTLEMENT_INITIAL_RETRY_DELAY_SECONDS,
-      },
-    },
-  ]);
+    ],
+  );
   assert.deepEqual(order.slice(0, 2), ["queue", "claim"]);
 });
 

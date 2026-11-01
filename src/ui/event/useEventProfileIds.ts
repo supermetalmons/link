@@ -10,6 +10,17 @@ import {
 
 const EMPTY_PROFILE_IDS: EventProfileIds = {};
 
+function readProfileLookupIds(serialized: string): string[] {
+  const value: unknown = JSON.parse(serialized);
+  if (
+    !Array.isArray(value) ||
+    !value.every((id: unknown): id is string => typeof id === "string")
+  ) {
+    throw new TypeError("invalid-event-profile-ids");
+  }
+  return value;
+}
+
 export function useEventProfileIds(
   event: EventRecord | null,
   profileId: string,
@@ -44,7 +55,7 @@ export function useEventProfileIds(
     if (!cache.key || !lookupKey) return;
     let canceled = false;
     const retryTimers = new Set<ReturnType<typeof setTimeout>>();
-    const ids: string[] = JSON.parse(lookupKey);
+    const ids = readProfileLookupIds(lookupKey);
     const resolve = async (id: string, retryDelayMs = 2_000) => {
       if (canceled) return;
       let request = cache.requests.get(id);
@@ -78,7 +89,7 @@ export function useEventProfileIds(
     };
   }, [cache, lookupKey]);
 
-  const ids: string[] = lookupKey ? JSON.parse(lookupKey) : [];
+  const ids = lookupKey ? readProfileLookupIds(lookupKey) : [];
   const profileIds: EventProfileIds = key
     ? Object.fromEntries(
         [...cache.profileIds].filter(([id]) => ids.includes(id)),

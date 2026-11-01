@@ -1,8 +1,8 @@
+import { applyPreCleanupTestMigrations } from "./canonicalTestMigrations.ts";
 import { env } from "cloudflare:workers";
-import { applyD1Migrations, type D1Migration } from "cloudflare:test";
+import type { D1Migration } from "cloudflare:test";
 import { beforeAll, describe, expect, it } from "vitest";
-import { createAutomatchD1Store } from "../src/automatchD1.ts";
-import { createLegacyAutomatchD1Store } from "../test/legacyAutomatchStoreFixture.ts";
+import { querySql } from "../test/legacyAutomatchStoreFixture.ts";
 
 const db = env.PROFILE_GAMES_DB;
 const migrations = (env as Env & { TEST_D1_MIGRATIONS: D1Migration[] })
@@ -10,35 +10,51 @@ const migrations = (env as Env & { TEST_D1_MIGRATIONS: D1Migration[] })
 const migrationIndex = migrations.findIndex(
   ({ name }) => name === "0027_outbox_recovery_sort_columns.sql",
 );
-const store = createAutomatchD1Store(db);
-const legacy = createLegacyAutomatchD1Store(db);
+async function readOutbox(table: string, field: string, generated = false) {
+  const query = querySql("payload_json", {
+    orderBy: field,
+    startAt: 0,
+    endAt: 10,
+    limitToFirst: 1,
+  });
+  const where = generated
+    ? "payload_json IS NOT NULL AND recovery_sort_rank = 3 AND recovery_sort_value >= 0 AND recovery_sort_value <= 10"
+    : query.where;
+  const order = generated
+    ? "recovery_sort_rank, recovery_sort_value, recovery_key_rank, recovery_key_integer, recovery_key_length, record_key COLLATE BINARY"
+    : query.order;
+  const values = await db
+    .prepare(
+      `SELECT record_key, payload_json FROM ${table} WHERE ${where} ORDER BY ${order} LIMIT 1`,
+    )
+    .bind(...(generated ? [] : query.values))
+    .all<{ record_key: string; payload_json: string }>();
+  return Object.fromEntries(
+    values.results.map((row) => [row.record_key, JSON.parse(row.payload_json)]),
+  );
+}
 const outboxes = [
   {
     table: "automatch_telegram_projection_outbox",
     oldIndex: "idx_automatch_telegram_projection_due",
     newIndex: "idx_automatch_telegram_projection_recovery",
+    index: "idx_automatch_telegram_projection_due",
     field: "updatedAtMs",
-    read: () => store.listDueAutomatchTelegramOutboxes(10, 1),
+    read: () =>
+      readOutbox("automatch_telegram_projection_outbox", "updatedAtMs", true),
     legacyRead: () =>
-      legacy.getPath("telegramProjectionOutbox/automatch", {
-        orderBy: "updatedAtMs",
-        startAt: 0,
-        endAt: 10,
-        limitToFirst: 1,
-      }),
+      readOutbox("automatch_telegram_projection_outbox", "updatedAtMs"),
   },
   {
     table: "game_session_projection_outbox",
     oldIndex: "idx_game_session_projection_due",
     newIndex: "idx_game_session_projection_recovery",
+    index: "idx_game_session_projection_due",
     field: "lastQueuedAtMs",
-    read: () => store.listDueAutomatchProfileOutboxes(10, 1),
+    read: () =>
+      readOutbox("game_session_projection_outbox", "lastQueuedAtMs", true),
     legacyRead: () =>
-      legacy.getPath("profileGameProjectionOutbox/automatch", {
-        orderBy: "lastQueuedAtMs",
-        endAt: 10,
-        limitToFirst: 1,
-      }),
+      readOutbox("game_session_projection_outbox", "lastQueuedAtMs"),
   },
 ] as const;
 
@@ -65,7 +81,10 @@ async function indexSql(name: string) {
 describe("generated recovery ordering migration", () => {
   beforeAll(async () => {
     expect(migrationIndex).toBeGreaterThan(0);
-    await applyD1Migrations(db, migrations.slice(0, migrationIndex));
+    await applyPreCleanupTestMigrations(
+      db,
+      migrations.slice(0, migrationIndex),
+    );
   });
 
   it("preserves canonical bytes and legacy indexes while indexing existing and old-writer rows", async () => {
@@ -107,7 +126,7 @@ describe("generated recovery ordering migration", () => {
       outboxes.map(({ legacyRead }) => legacyRead()),
     );
 
-    await applyD1Migrations(db, [migrations[migrationIndex]]);
+    await applyPreCleanupTestMigrations(db, [migrations[migrationIndex]!]);
 
     expect(await Promise.all(outboxes.map(({ table }) => rows(table)))).toEqual(
       beforeRows,

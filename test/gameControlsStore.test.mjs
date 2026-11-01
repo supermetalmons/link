@@ -1,3 +1,4 @@
+import { required } from "./fixtures/canonicalData.mjs";
 import assert from "node:assert/strict";
 import { registerHooks } from "node:module";
 import test from "node:test";
@@ -50,6 +51,7 @@ test("snapshots retain identity until state changes and unsubscribe does not res
 
 test("synchronous presentation updates expose current context and preserve unrelated retained controls", () => {
   const store = createGameControlsStore(config);
+  /** @type {Array<import("../src/game/gameControlsModel.ts").GameControlsSnapshot>} */
   const observed = [];
   store.updatePresentation({ endMatchConfirmed: true, homeVisible: true });
   store.subscribe(() => observed.push(store.getSnapshot()));
@@ -57,11 +59,11 @@ test("synchronous presentation updates expose current context and preserve unrel
   store.updatePresentation({ watchOnlyVisible: true });
   store.updateContext({ isWatchOnly: false, isGameWithBot: true });
   store.updatePresentation({ voiceReactionVisible: true });
-  const context = observed.at(-1).context;
+  const context = required(observed.at(-1)).context;
   assert.equal(context.isWatchOnly, false);
   assert.equal(context.isGameWithBot, true);
-  assert.equal(observed.at(-1).presentation.endMatchConfirmed, true);
-  assert.equal(observed.at(-1).presentation.homeVisible, true);
+  assert.equal(required(observed.at(-1)).presentation.endMatchConfirmed, true);
+  assert.equal(required(observed.at(-1)).presentation.homeVisible, true);
 });
 
 test("sequential control dispatches read the latest state and preserve unrelated presentation", () => {
@@ -69,6 +71,7 @@ test("sequential control dispatches read the latest state and preserve unrelated
   store.updateContext({ sessionId: 4, isOnlineGame: true });
   store.updatePresentation({ endMatchConfirmed: true, waitingText: "waiting" });
   const before = store.getSnapshot();
+  /** @type {Array<import("../src/game/gameControlsModel.ts").GameControlsSnapshot>} */
   const observed = [];
   store.subscribe(() => observed.push(store.getSnapshot()));
 
@@ -97,7 +100,10 @@ test("sequential control dispatches read the latest state and preserve unrelated
     visible: false,
     enabled: false,
   });
-  assert.equal(observed[0].presentation.gameControls.undo.enabled, false);
+  assert.equal(
+    required(observed[0]).presentation.gameControls.undo.enabled,
+    false,
+  );
 });
 
 test("no-op control dispatches retain the snapshot and do not notify subscribers", () => {
@@ -143,7 +149,9 @@ test("waiting and historical policy retain explicit confirmation and local live 
     endMatchConfirmed: true,
     voiceReactionVisible: true,
   });
-  const applyPolicy = (context) => {
+  const applyPolicy = (
+    /** @type {Partial<Parameters<typeof deriveBoardViewControls>[0]>} */ context,
+  ) => {
     const controls = deriveBoardViewControls({
       mode: "activeLive",
       isOnlineGame: false,
@@ -154,13 +162,18 @@ test("waiting and historical policy retain explicit confirmation and local live 
       isSeriesEnded: false,
       ...context,
     });
-    store.updatePresentation(
-      Object.fromEntries(
-        ["endMatchVisible", "endMatchConfirmed", "voiceReactionVisible"]
-          .map((key) => [key, controls[key]])
-          .filter(([, value]) => value !== null),
-      ),
-    );
+    const keys = /** @type {const} */ ([
+      "endMatchVisible",
+      "endMatchConfirmed",
+      "voiceReactionVisible",
+    ]);
+    /** @type {Partial<Pick<import("../src/game/gameControlsModel.ts").GameControlsPresentation, typeof keys[number]>>} */
+    const changes = {};
+    for (const key of keys) {
+      const value = controls[key];
+      if (value !== null) changes[key] = value;
+    }
+    store.updatePresentation(changes);
   };
   applyPolicy({});
   assert.equal(store.getSnapshot().presentation.voiceReactionVisible, true);
@@ -227,8 +240,10 @@ test("explicit presentation reset keeps the current context and caller's timer t
 test("batches expose immutable current snapshots immediately and notify once with the final state", () => {
   const store = createGameControlsStore(config);
   const initial = store.getSnapshot();
+  /** @type {Array<import("../src/game/gameControlsModel.ts").GameControlsSnapshot>} */
   const observed = [];
   store.subscribe(() => observed.push(store.getSnapshot()));
+  /** @type {import("../src/game/gameControlsModel.ts").GameControlsSnapshot | undefined} */
   let beforeEnablingUndo;
 
   store.batchUpdates(() => {
@@ -259,7 +274,7 @@ test("batches expose immutable current snapshots immediately and notify once wit
     enabled: false,
   });
   assert.equal(
-    beforeEnablingUndo.presentation.gameControls.undo.enabled,
+    required(beforeEnablingUndo).presentation.gameControls.undo.enabled,
     false,
   );
 });
@@ -267,6 +282,7 @@ test("batches expose immutable current snapshots immediately and notify once wit
 test("empty and no-op batches retain identity while reverted changes still publish once", () => {
   const store = createGameControlsStore(config);
   const initial = store.getSnapshot();
+  /** @type {Array<import("../src/game/gameControlsModel.ts").GameControlsSnapshot>} */
   const observed = [];
   store.subscribe(() => observed.push(store.getSnapshot()));
 
@@ -297,6 +313,7 @@ test("empty and no-op batches retain identity while reverted changes still publi
 test("nested batches and presentation resets publish only at the outer exit", () => {
   const store = createGameControlsStore(config);
   const resetConfig = { ...config, requestDate: 9000 };
+  /** @type {Array<import("../src/game/gameControlsModel.ts").GameControlsSnapshot>} */
   const observed = [];
   store.subscribe(() => observed.push(store.getSnapshot()));
 
@@ -325,6 +342,7 @@ test("nested batches and presentation resets publish only at the outer exit", ()
 test("batches return callback values without changing notification boundaries", () => {
   const store = createGameControlsStore(config);
   const result = { selectedMatchId: "match-2" };
+  /** @type {Array<import("../src/game/gameControlsModel.ts").GameControlsSnapshot>} */
   const observed = [];
   store.subscribe(() => observed.push(store.getSnapshot()));
 
@@ -351,9 +369,10 @@ test("batches return callback values without changing notification boundaries", 
 
 test("early returns publish completed writes and leave later batches usable", () => {
   const store = createGameControlsStore(config);
+  /** @type {Array<import("../src/game/gameControlsModel.ts").GameControlsSnapshot>} */
   const observed = [];
   store.subscribe(() => observed.push(store.getSnapshot()));
-  const initialize = (sessionId) =>
+  const initialize = (/** @type {number} */ sessionId) =>
     store.batchUpdates(() => {
       if (sessionId === store.getSnapshot().context.sessionId) return false;
       store.updateContext({ sessionId });
@@ -376,6 +395,7 @@ test("early returns publish completed writes and leave later batches usable", ()
 test("a caught nested batch error keeps completed writes in the outer publication", () => {
   const store = createGameControlsStore(config);
   const failure = new Error("nested callback failed");
+  /** @type {Array<import("../src/game/gameControlsModel.ts").GameControlsSnapshot>} */
   const observed = [];
   store.subscribe(() => observed.push(store.getSnapshot()));
 
@@ -395,14 +415,15 @@ test("a caught nested batch error keeps completed writes in the outer publicatio
   });
 
   assert.deepEqual(observed, [store.getSnapshot()]);
-  assert.equal(observed[0].context.sessionId, 2);
-  assert.equal(observed[0].presentation.homeVisible, true);
-  assert.equal(observed[0].presentation.waitingText, "continued");
+  assert.equal(required(observed[0]).context.sessionId, 2);
+  assert.equal(required(observed[0]).presentation.homeVisible, true);
+  assert.equal(required(observed[0]).presentation.waitingText, "continued");
 });
 
 test("an uncaught nested batch error publishes completed writes and leaves later updates usable", () => {
   const store = createGameControlsStore(config);
   const failure = new Error("callback failed");
+  /** @type {Array<import("../src/game/gameControlsModel.ts").GameControlsSnapshot>} */
   const observed = [];
   store.subscribe(() => observed.push(store.getSnapshot()));
 
@@ -419,9 +440,9 @@ test("an uncaught nested batch error publishes completed writes and leaves later
     (error) => error === failure,
   );
   assert.deepEqual(observed, [store.getSnapshot()]);
-  assert.equal(observed[0].context.sessionId, 2);
-  assert.equal(observed[0].presentation.homeVisible, true);
-  assert.equal(observed[0].presentation.waitingText, "");
+  assert.equal(required(observed[0]).context.sessionId, 2);
+  assert.equal(required(observed[0]).presentation.homeVisible, true);
+  assert.equal(required(observed[0]).presentation.waitingText, "");
 
   store.updateContext({ sessionId: 3 });
   assert.equal(observed.length, 2);
@@ -435,6 +456,7 @@ test("an uncaught nested batch error publishes completed writes and leaves later
 for (const nestedBatch of [false, true]) {
   test(`subscriber updates remain reentrant when ${nestedBatch ? "batched" : "direct"}`, () => {
     const store = createGameControlsStore(config);
+    /** @type {Array<(string | number)[]>} */
     const calls = [];
     store.subscribe(() => {
       const sessionId = store.getSnapshot().context.sessionId;
@@ -477,6 +499,7 @@ test("a throwing subscriber does not leave a batch pending or suppress later not
   assert.equal(store.getSnapshot().presentation.homeVisible, true);
   stopThrowing();
 
+  /** @type {Array<import("../src/game/gameControlsModel.ts").GameControlsSnapshot>} */
   const observed = [];
   const unsubscribe = store.subscribe(() => observed.push(store.getSnapshot()));
   store.batchUpdates(() => {});

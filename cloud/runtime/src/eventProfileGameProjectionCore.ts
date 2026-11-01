@@ -187,7 +187,7 @@ const createEventProfileGameProjectionCore: Signature_createEventProfileGameProj
       );
       const canonicalParticipants: Record<string, EventParticipant> = {};
       entries.forEach((entry, index) => {
-        const ownerProfileId = ownerProfileIds[index];
+        const ownerProfileId = ownerProfileIds[index]!;
         canonicalParticipants[ownerProfileId] = copyEventParticipant(
           entry.participant,
           {
@@ -276,7 +276,7 @@ const createEventProfileGameProjectionCore: Signature_createEventProfileGameProj
               profileId: ownerProfileId,
               eventId,
               data: createEventProjection({
-                schemaVersion: 1,
+                schemaVersion: 2,
                 source: "event-projector",
                 entityType: "event",
                 id: `event_${eventId}`,

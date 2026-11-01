@@ -1,3 +1,4 @@
+import { canonicalAppearance } from "./fixtures/canonicalData.mjs";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
@@ -7,9 +8,29 @@ import {
   resolvePlayerProfileWithRetry,
 } from "../src/connection/playerProfileLookup.ts";
 
-const profile = (id, username) => ({ id, username });
+/**
+ * @param {string} id
+ * @param {string} username
+ * @returns {import("../src/connection/connectionModels.ts").PlayerProfile}
+ */
+const profile = (id, username) => ({
+  ...canonicalAppearance(),
+  id,
+  username,
+  nonce: 0,
+  rating: 1500,
+  totalManaPoints: 0,
+  win: false,
+  eth: null,
+  sol: null,
+  mining: {
+    lastRockDate: null,
+    materials: { dust: 0, slime: 0, gum: 0, metal: 0, ice: 0 },
+  },
+});
 
 test("resolves a player's profile directly through the login lookup", async () => {
+  /** @type {string[]} */
   const calls = [];
   const expected = profile("profile-1", "named-player");
 
@@ -129,6 +150,7 @@ test("browser match snapshots and live subscriptions use Cloudflare", () => {
     new URL("../src/connection/connection.ts", import.meta.url),
     "utf8",
   );
+  /** @param {string} name @param {string} nextName */
   const methodSource = (name, nextName) => {
     const start = source.indexOf(name);
     const end = source.indexOf(nextName, start);

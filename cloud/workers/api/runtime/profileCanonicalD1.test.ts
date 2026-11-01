@@ -1,14 +1,18 @@
+import { createDefaultProfileAppearance } from "@mons/shared/appearance";
+import {
+  createEmptyRatingPayload,
+  parseStoredPlayerProfile,
+  createStoredPlayerProfile,
+  type StoredPlayerProfile,
+} from "../src/profileCanonical/contracts.ts";
 import {
   authMetadataFixture,
   authResultFixture,
   legacyAuthStartFixture,
   legacyAuthUpdateFixture,
 } from "../test/profileDataBoundaryFixture.ts";
-import { materializeProfileCompatibility as materializeCanonicalProfile } from "../test/profileDataBoundaryFixture.ts";
-import {
-  ratingPayloadFixture,
-  profileLegacyFixture,
-} from "../test/profileDataBoundaryFixture.ts";
+import { materializeProfileFixture as materializeCanonicalProfile } from "../test/profileDataBoundaryFixture.ts";
+import { ratingPayloadFixture } from "../test/profileDataBoundaryFixture.ts";
 import { env } from "cloudflare:workers";
 import type { D1Migration } from "cloudflare:test";
 import { beforeAll, beforeEach, describe, expect, it } from "vitest";
@@ -69,8 +73,9 @@ const testEnv = env as Env & { TEST_PROFILE_D1_MIGRATIONS: D1Migration[] };
 function profile(
   id: string,
   overrides: Partial<CompletePlayerProfile> = {},
-): CompletePlayerProfile {
-  return {
+): StoredPlayerProfile {
+  return parseStoredPlayerProfile({
+    ...createStoredPlayerProfile(id, createDefaultProfileAppearance(2)),
     id,
     nonce: 1,
     rating: 1500,
@@ -87,7 +92,7 @@ function profile(
       materials: { dust: 1, slime: 2, gum: 3, metal: 4, ice: 5 },
     },
     ...overrides,
-  };
+  });
 }
 
 function profileValue(
@@ -108,10 +113,9 @@ function ratingValue(
 ): CanonicalRatingUpdateValue {
   return {
     operationId,
-    payload: ratingPayloadFixture({ operationId, status: "processing" }),
-    status: "processing",
-    inviteId: "invite-1",
-    matchId: "match-1",
+    payload: createEmptyRatingPayload(),
+    inviteId: operationId.split("__")[0]!,
+    matchId: operationId.split("__")[1]!,
     playerId: "login-player",
     opponentId: "login-opponent",
     playerProfileId: null,
@@ -121,7 +125,6 @@ function ratingValue(
     startedAtMs: 1_000,
     updatedAtMs: 1_000,
     leaseExpiresAtMs: 31_000,
-    completedAtMs: null,
     telegramProjectionState: null,
     telegramProjectionUpdatedAtMs: null,
     telegramProjectionVersion: null,
@@ -132,6 +135,26 @@ function ratingValue(
     eventProgressUpdatedAtMs: null,
     eventProgressVersion: null,
     ...overrides,
+    ...(overrides.status === "done"
+      ? {
+          status: "done" as const,
+          completedAtMs: overrides.completedAtMs ?? 2_000,
+          blockedAtMs: null,
+          blockReason: null,
+        }
+      : overrides.status === "blocked"
+        ? {
+            status: "blocked" as const,
+            completedAtMs: null,
+            blockedAtMs: overrides.blockedAtMs ?? 2_000,
+            blockReason: "canonical-data-cutover" as const,
+          }
+        : {
+            status: "processing" as const,
+            completedAtMs: null,
+            blockedAtMs: null,
+            blockReason: null,
+          }),
   };
 }
 
@@ -258,37 +281,35 @@ function observeRecoveryDatabase(failure?: Error) {
 
 async function resetCanonicalRows(db: D1Database): Promise<void> {
   await db.batch([
-    db.prepare("DELETE FROM rating_updates"),
-    db.prepare("DELETE FROM profile_auth_operations"),
+    db.prepare("DELETE FROM rating_updates_canonical"),
+    db.prepare("DELETE FROM profile_auth_operations_canonical"),
     db.prepare("DELETE FROM profile_auth_method_revocations"),
     db.prepare("DELETE FROM profile_auth_method_cooldowns"),
-    db.prepare("DROP TRIGGER profile_merge_targets_reject_delete"),
-    db.prepare("DROP TRIGGER wager_settlements_reject_delete"),
-    db.prepare("DROP TRIGGER profile_records_reject_active_delete"),
-    db.prepare("DELETE FROM profile_merge_targets"),
-    db.prepare("DELETE FROM wager_settlements"),
-    db.prepare("DELETE FROM profile_records"),
+    db.prepare("DROP TRIGGER profile_merge_targets_reject_delete_canonical"),
+    db.prepare("DROP TRIGGER wager_settlements_reject_delete_canonical"),
+    db.prepare("DROP TRIGGER profile_records_reject_active_delete_canonical"),
+    db.prepare("DELETE FROM profile_merge_targets_canonical"),
+    db.prepare("DELETE FROM wager_settlements_canonical"),
+    db.prepare("DELETE FROM profile_records_canonical"),
     db.prepare(
-      `CREATE TRIGGER profile_merge_targets_reject_delete
-       BEFORE DELETE ON profile_merge_targets
+      `CREATE TRIGGER profile_merge_targets_reject_delete_canonical
+       BEFORE DELETE ON profile_merge_targets_canonical
        BEGIN
          SELECT RAISE(ABORT, 'profile merge mappings are permanent');
        END`,
     ),
     db.prepare(
-      `CREATE TRIGGER wager_settlements_reject_delete
-       BEFORE DELETE ON wager_settlements
+      `CREATE TRIGGER wager_settlements_reject_delete_canonical
+       BEFORE DELETE ON wager_settlements_canonical
        BEGIN
          SELECT RAISE(ABORT, 'wager settlements are permanent');
        END`,
     ),
     db.prepare(
-      `CREATE TRIGGER profile_records_reject_active_delete
-       BEFORE DELETE ON profile_records
+      `CREATE TRIGGER profile_records_reject_active_delete_canonical
+       BEFORE DELETE ON profile_records_canonical
        WHEN OLD.state = 'active'
-       AND (
-         SELECT state FROM profile_canonical_control WHERE singleton = 1
-       ) != 'importing'
+
        BEGIN
          SELECT RAISE(ABORT, 'active profiles cannot be deleted');
        END`,
@@ -303,6 +324,11 @@ describe("canonical profile D1 store", () => {
       testEnv.TEST_PROFILE_D1_MIGRATIONS,
       "a".repeat(64),
     );
+    expect(
+      await testEnv.PROFILE_DB.prepare(
+        "SELECT name FROM sqlite_schema WHERE name = 'profile_records'",
+      ).first(),
+    ).toBeNull();
   });
 
   beforeEach(async () => {
@@ -423,21 +449,20 @@ describe("canonical profile D1 store", () => {
           ],
         });
         const observed = observeD1FailureDatabase(testEnv.PROFILE_DB, {
-          diagnosticFailure:
-            mode === "diagnostic unavailable"
-              ? new Error("diagnostic-failed")
-              : undefined,
+          ...(mode === "diagnostic unavailable"
+            ? { diagnosticFailure: new Error("diagnostic-failed") }
+            : {}),
           async beforeBatch(attempt) {
             if (attempt !== 1) return;
             if (mode === "revision") {
               await testEnv.PROFILE_DB.prepare(
-                "UPDATE profile_records SET revision = revision + 1 WHERE profile_id = ?",
+                "UPDATE profile_records_canonical SET revision = revision + 1 WHERE profile_id = ?",
               )
                 .bind(value.profile.id)
                 .run();
             } else if (mode === "integrity") {
               await testEnv.PROFILE_DB.prepare(
-                `CREATE TRIGGER guard_test_profile_update BEFORE UPDATE ON profile_records
+                `CREATE TRIGGER guard_test_profile_update BEFORE UPDATE ON profile_records_canonical
                  BEGIN SELECT RAISE(ABORT, 'profile merge mappings are immutable'); END`,
               ).run();
             } else {
@@ -543,7 +568,7 @@ describe("canonical profile D1 store", () => {
       expect(observed.reads).toEqual([
         {
           query:
-            "SELECT * FROM profile_auth_recovery_jobs WHERE profile_id = ?",
+            "SELECT * FROM profile_auth_recovery_jobs_canonical WHERE profile_id = ?",
           values: [recovery.profileId],
         },
       ]);
@@ -560,7 +585,7 @@ describe("canonical profile D1 store", () => {
       expect(observed.reads).toEqual([
         {
           query:
-            "SELECT * FROM profile_auth_recovery_jobs WHERE profile_id = ?",
+            "SELECT * FROM profile_auth_recovery_jobs_canonical WHERE profile_id = ?",
           values: [profileId],
         },
       ]);
@@ -571,7 +596,7 @@ describe("canonical profile D1 store", () => {
       async (column) => {
         const recovery = await seedRecovery();
         await testEnv.PROFILE_DB.prepare(
-          `UPDATE profile_auth_recovery_jobs SET ${column} = ? WHERE profile_id = ?`,
+          `UPDATE profile_auth_recovery_jobs_canonical SET ${column} = ? WHERE profile_id = ?`,
         )
           .bind('["valid", false]', recovery.profileId)
           .run();
@@ -601,9 +626,7 @@ describe("canonical profile D1 store", () => {
     ] as const;
 
     async function seedLookup() {
-      const value = profileValue("public-reader-profile", {
-        legacyFields: { retained: "original" },
-      });
+      const value = profileValue("public-reader-profile", {});
       await commitCanonicalPlan(testEnv.PROFILE_DB, {
         expectations: [
           { kind: "profile-absent", profileId: value.profile.id },
@@ -721,8 +744,8 @@ describe("canonical profile D1 store", () => {
         state: "active",
       });
       expect(observed.reads).toHaveLength(1);
-      expect(observed.reads[0].values).toEqual([loginUid]);
-      expect(observed.reads[0].query).not.toContain("legacy_fields_json");
+      expect(observed.reads[0]!.values).toEqual([loginUid]);
+      expect(observed.reads[0]!.query).not.toContain("legacy_fields_json");
     });
 
     it.each(resolvers)(
@@ -775,7 +798,7 @@ describe("canonical profile D1 store", () => {
             expect(observed.batches).toHaveLength(1);
             expect(observed.allQueries).toHaveLength(0);
             if (kind === "public") {
-              for (const query of observed.batches[0]) {
+              for (const query of observed.batches[0]!) {
                 expect(query).not.toContain("legacy_fields_json");
                 expect(query).not.toContain("SELECT *");
               }
@@ -838,7 +861,7 @@ describe("canonical profile D1 store", () => {
 
     it.each([
       ["revision", 0],
-      ["legacy_fields_json", "invalid-json"],
+      ["gameplay_emoji", "invalid-emoji"],
       ["created_at_ms", -1],
       ["updated_at_ms", -1],
       ["merged_at_ms", -1],
@@ -886,13 +909,19 @@ describe("canonical profile D1 store", () => {
         ).rejects.toBeInstanceOf(CanonicalProfileCorruption);
         expect(observed.allQueries).toHaveLength(1);
         expect(observed.batches).toHaveLength(0);
-        await expect(
-          resolveCanonicalPublicProfile(
-            observed.database,
-            source.profile.id,
-            4,
-          ),
-        ).resolves.toMatchObject({ profileId: target.profile.id });
+        const publicRead = resolveCanonicalPublicProfile(
+          observed.database,
+          source.profile.id,
+          4,
+        );
+        if (column === "gameplay_emoji")
+          await expect(publicRead).rejects.toBeInstanceOf(
+            CanonicalProfileCorruption,
+          );
+        else
+          await expect(publicRead).resolves.toMatchObject({
+            profileId: target.profile.id,
+          });
         const batched = observeAggregateDatabase({
           mapResults: (_queries, results) =>
             results.map((result, index) =>
@@ -928,19 +957,19 @@ describe("canonical profile D1 store", () => {
 
     it("keeps stored profile timestamps separate from absent redirect timestamps", async () => {
       const value = await seedLookup();
-      await testEnv.PROFILE_DB.prepare(
-        "UPDATE profile_records SET merged_at_ms = 1.5 WHERE profile_id = ?",
-      )
-        .bind(value.profile.id)
-        .run();
       await expect(
-        resolveCanonicalProfile(
-          testEnv.PROFILE_DB,
-          value.profile.id,
-          4,
-          "null",
-        ),
-      ).rejects.toBeInstanceOf(CanonicalProfileCorruption);
+        testEnv.PROFILE_DB.prepare(
+          "UPDATE profile_records_canonical SET merged_at_ms = 1.5 WHERE profile_id = ?",
+        )
+          .bind(value.profile.id)
+          .run(),
+      ).rejects.toThrow("INTEGER column");
+      await expect(
+        resolveCanonicalProfile(testEnv.PROFILE_DB, value.profile.id),
+      ).resolves.toMatchObject({
+        profileId: value.profile.id,
+        mergedAtMs: null,
+      });
       await expect(
         resolveCanonicalPublicProfile(testEnv.PROFILE_DB, value.profile.id),
       ).resolves.toMatchObject({ profileId: value.profile.id });
@@ -1010,7 +1039,7 @@ describe("canonical profile D1 store", () => {
         readCanonicalPublicProfileByLogin(observed.database, missingLogin),
       ).resolves.toBeNull();
       expect(observed.reads).toHaveLength(1);
-      expect(observed.reads[0].values).toEqual([missingLogin]);
+      expect(observed.reads[0]!.values).toEqual([missingLogin]);
     });
 
     it.each([
@@ -1070,7 +1099,7 @@ describe("canonical profile D1 store", () => {
           mutations: [{ kind: "insert-active-profile", value: target }],
         });
         const targetRow = await testEnv.PROFILE_DB.prepare(
-          "SELECT * FROM profile_records WHERE profile_id = ?",
+          "SELECT * FROM profile_records_canonical WHERE profile_id = ?",
         )
           .bind(target.profile.id)
           .first<Record<string, unknown>>();
@@ -1080,7 +1109,7 @@ describe("canonical profile D1 store", () => {
             lookup_merge_source_profile_id: value.profile.id,
           }),
           mapAll: (rows) => {
-            const source = rows[0];
+            const source = rows[0]!;
             return [
               {
                 ...source,
@@ -1172,7 +1201,7 @@ describe("canonical profile D1 store", () => {
   it("commits a revisioned profile aggregate atomically", async () => {
     const value = profileValue("canonical-success", {
       emojiPresent: false,
-      gameplayEmoji: "gameplay-only",
+      gameplayEmoji: 13,
     });
     await commitCanonicalPlan(testEnv.PROFILE_DB, {
       expectations: [
@@ -1293,7 +1322,7 @@ describe("canonical profile D1 store", () => {
       value.profile.id,
     );
     expect(aggregate.profile?.revision).toBe(1);
-    expect(aggregate.profile?.gameplayEmoji).toBe("gameplay-only");
+    expect(aggregate.profile?.gameplayEmoji).toBe(13);
     expect(aggregate.loginOwners.map((owner) => owner.loginUid)).toEqual([
       "login-a-success",
       "login-success",
@@ -1328,10 +1357,8 @@ describe("canonical profile D1 store", () => {
     expect(byLogin.batches.map((queries) => queries.length)).toEqual([7]);
   });
 
-  it("keeps opaque archives out of public profile reads", async () => {
-    const value = profileValue("canonical-public-lightweight", {
-      legacyFields: { opaque: "x".repeat(700_000) },
-    });
+  it("reads public profiles after retiring the opaque source table", async () => {
+    const value = profileValue("canonical-public-lightweight", {});
     await commitCanonicalPlan(testEnv.PROFILE_DB, {
       expectations: [
         { kind: "profile-absent", profileId: value.profile.id },
@@ -1350,7 +1377,6 @@ describe("canonical profile D1 store", () => {
         },
       ],
     });
-
     await expect(
       resolveCanonicalPublicProfile(testEnv.PROFILE_DB, value.profile.id),
     ).resolves.toMatchObject({ profileId: value.profile.id });
@@ -1373,10 +1399,6 @@ describe("canonical profile D1 store", () => {
         readCanonicalLeaderboard(testEnv.PROFILE_DB, type),
       ).resolves.toMatchObject([{ id: value.profile.id }]);
     }
-    expect(
-      (await readCanonicalProfile(testEnv.PROFILE_DB, value.profile.id))
-        ?.legacyFields,
-    ).toEqual(value.legacyFields);
 
     const sql: string[] = [];
     const fakeDb = {
@@ -1404,7 +1426,7 @@ describe("canonical profile D1 store", () => {
     await resolveCanonicalPublicProfile(fakeDb, "missing");
     await readCanonicalLeaderboard(fakeDb, "rating");
     const publicProfileQueries = sql.filter((statement) =>
-      statement.includes("profile_records"),
+      statement.includes("profile_records_canonical"),
     );
     expect(publicProfileQueries).toHaveLength(2);
     for (const statement of publicProfileQueries) {
@@ -1441,7 +1463,7 @@ describe("canonical profile D1 store", () => {
     await expect(
       testEnv.PROFILE_DB.batch([
         testEnv.PROFILE_DB.prepare(
-          `UPDATE profile_records
+          `UPDATE profile_records_canonical
            SET legacy_fields_json = '{"transient":true}'
            WHERE profile_id = ?`,
         ).bind(initial.profile.id),
@@ -1461,7 +1483,7 @@ describe("canonical profile D1 store", () => {
     );
     expect(stored?.revision).toBe(2);
     expect(stored?.profile.rating).toBe(1600);
-    expect(stored?.legacyFields).toEqual({});
+    expect(stored).not.toHaveProperty("legacyFields");
     await expect(
       commitCanonicalPlan(testEnv.PROFILE_DB, {
         expectations: [
@@ -1617,7 +1639,7 @@ describe("canonical profile D1 store", () => {
             mutations: [
               ...plan.mutations,
               mode === "patch"
-                ? plan.mutations[0]
+                ? plan.mutations[0]!
                 : { kind: "update-active-profile", value: current },
             ],
           }),
@@ -1692,7 +1714,7 @@ describe("canonical profile D1 store", () => {
           ).run();
         } else {
           await testEnv.PROFILE_DB.prepare(
-            `UPDATE profile_records SET state = 'retiring',
+            `UPDATE profile_records_canonical SET state = 'retiring',
              merged_into_profile_id = 'patch-other', merged_at_ms = 2_000
              WHERE profile_id = ?`,
           )
@@ -1736,9 +1758,9 @@ describe("canonical profile D1 store", () => {
       const plan = patchPlan(current);
       await testEnv.PROFILE_DB.prepare(
         `CREATE TRIGGER patch_test_profile_topology
-         AFTER UPDATE OF payload_json ON profile_records
+         AFTER UPDATE OF payload_json ON profile_records_canonical
          BEGIN
-           UPDATE profile_records SET state = 'retiring',
+           UPDATE profile_records_canonical SET state = 'retiring',
              merged_into_profile_id = 'patch-other', merged_at_ms = 2_000
            WHERE profile_id = NEW.profile_id;
          END`,
@@ -1895,19 +1917,25 @@ describe("canonical profile D1 store", () => {
       },
     );
 
-    it("roundtrips auth operations while preserving JSON bytes and SQL nulls", async () => {
+    it("roundtrips canonical auth operations while preserving identity and SQL nulls", async () => {
       const initial: CanonicalAuthOperationValue = {
         operationId: "auth-row-operation",
         kind: "verify",
         method: "apple",
         loginUid: "initial-login",
         status: "started",
-        meta: authMetadataFixture({ z: 0, a: { second: false, first: null } }),
+        meta: authMetadataFixture({
+          methodValue: "apple-subject",
+          methodValueHash: "a".repeat(64),
+          intentId: "intent",
+        }),
         result: null,
         errorCode: null,
         errorMessage: null,
         startedAtMs: 101,
         updatedAtMs: 102,
+        cancelledAtMs: null,
+        cancellationReason: null,
       };
       await commitCanonicalPlan(testEnv.PROFILE_DB, {
         expectations: [
@@ -1923,31 +1951,11 @@ describe("canonical profile D1 store", () => {
       await expect(
         readCanonicalAuthOperation(testEnv.PROFILE_DB, initial.operationId),
       ).resolves.toEqual({ ...initial, revision: 1 });
-      const storedJson = () =>
-        testEnv.PROFILE_DB.prepare(
-          "SELECT meta_json, result_json FROM profile_auth_operations WHERE operation_id = ?",
-        )
-          .bind(initial.operationId)
-          .first();
-      await expect(storedJson()).resolves.toEqual({
-        meta_json: '{"z":0,"a":{"second":false,"first":null}}',
-        result_json: null,
-      });
-
       const updated: CanonicalAuthOperationValue = {
-        operationId: initial.operationId,
-        kind: "unlink",
-        method: "sol",
-        loginUid: "changed-login",
+        ...initial,
         status: "failed",
-        meta: null,
-        result: authResultFixture({
-          z: ["second", "first"],
-          a: ' line\n"quoted" ',
-        }),
-        errorCode: "changed-code",
-        errorMessage: " changed message ",
-        startedAtMs: 201,
+        errorCode: "permission-denied",
+        errorMessage: "permission-denied",
         updatedAtMs: 202,
       };
       for (const revision of [1, 2]) {
@@ -1969,11 +1977,22 @@ describe("canonical profile D1 store", () => {
         await expect(
           readCanonicalAuthOperation(testEnv.PROFILE_DB, initial.operationId),
         ).resolves.toEqual({ ...updated, revision: revision + 1 });
-        await expect(storedJson()).resolves.toEqual({
-          meta_json: null,
-          result_json: '{"z":["second","first"],"a":" line\\n\\"quoted\\" "}',
-        });
       }
+      const stored = await testEnv.PROFILE_DB.prepare(
+        "SELECT meta_json, result_json FROM profile_auth_operations_canonical WHERE operation_id = ?",
+      )
+        .bind(initial.operationId)
+        .first();
+      expect(stored).toEqual({
+        meta_json: JSON.stringify(initial.meta),
+        result_json: null,
+      });
+      expect(() => authMetadataFixture({ z: 0 })).toThrow(
+        CanonicalProfileCorruption,
+      );
+      expect(() => authResultFixture({ z: [] })).toThrow(
+        CanonicalProfileCorruption,
+      );
     });
 
     it("roundtrips recovery fields without reordering stored identifiers", async () => {
@@ -1999,7 +2018,7 @@ describe("canonical profile D1 store", () => {
       ).resolves.toEqual({ ...initial, revision: 1 });
       const storedJson = () =>
         testEnv.PROFILE_DB.prepare(
-          "SELECT login_uids_json, source_profile_ids_json FROM profile_auth_recovery_jobs WHERE profile_id = ?",
+          "SELECT login_uids_json, source_profile_ids_json FROM profile_auth_recovery_jobs_canonical WHERE profile_id = ?",
         )
           .bind(primaryProfileId)
           .first();
@@ -2046,7 +2065,7 @@ describe("canonical profile D1 store", () => {
           method: "eth",
           normalizedValue: "shared-value",
           profileId: primaryProfileId,
-          scope: "initial-scope",
+          scope: "profile-method",
           unlinkedByUid: "initial-login",
           cooldownMs: 100,
           startedAtMs: 101,
@@ -2122,7 +2141,7 @@ describe("canonical profile D1 store", () => {
             ? { normalized_value: "shared-value" }
             : {}),
           profile_id: primaryProfileId,
-          scope: "initial-scope",
+          scope: "profile-method",
           unlinked_by_uid: "initial-login",
           cooldown_ms: 100,
           started_at_ms: 101,
@@ -2135,7 +2154,7 @@ describe("canonical profile D1 store", () => {
           ...initial,
           profileId:
             kind === "revocation" ? reassignedProfileId : primaryProfileId,
-          scope: "changed-scope",
+          scope: "method",
           unlinkedByUid: "changed-login",
           cooldownMs: 300,
           startedAtMs: 301,
@@ -2161,7 +2180,7 @@ describe("canonical profile D1 store", () => {
               ? { normalized_value: "shared-value" }
               : {}),
             profile_id: updated.profileId,
-            scope: "changed-scope",
+            scope: "method",
             unlinked_by_uid: "changed-login",
             cooldown_ms: 300,
             started_at_ms: 301,
@@ -2215,7 +2234,7 @@ describe("canonical profile D1 store", () => {
         ],
       };
       await commitCanonicalPlan(testEnv.PROFILE_DB, {
-        expectations: [stalePlan.expectations[1]],
+        expectations: [stalePlan.expectations[1]!],
         mutations: [{ kind: "update-auth-method", value }],
       });
       await expect(
@@ -2258,7 +2277,7 @@ describe("canonical profile D1 store", () => {
         expect(observed.batches).toHaveLength(0);
         expect(
           await testEnv.PROFILE_DB.prepare(
-            "SELECT COUNT(*) AS count FROM profile_auth_methods",
+            "SELECT COUNT(*) AS count FROM profile_auth_methods_canonical",
           ).first("count"),
         ).toBe(0);
       },
@@ -2271,7 +2290,6 @@ describe("canonical profile D1 store", () => {
       profile: profile(profileId, { username: "InitialFields", emoji: 3 }),
       createdAtMs: 101,
       updatedAtMs: 202,
-      legacyFields: { opaque: ["initial", null, { preserved: true }] },
       sortPresence: {
         rating: true,
         mp: true,
@@ -2315,7 +2333,6 @@ describe("canonical profile D1 store", () => {
       }),
       createdAtMs: 303,
       updatedAtMs: 404,
-      legacyFields: { opaque: ["updated", { values: [0, false, null] }] },
       sortPresence: {
         rating: false,
         mp: true,
@@ -2338,7 +2355,7 @@ describe("canonical profile D1 store", () => {
       },
       winPresent: true,
       emojiPresent: false,
-      gameplayEmoji: "legacy-emoji",
+      gameplayEmoji: 0,
     });
     await commitCanonicalPlan(testEnv.PROFILE_DB, {
       expectations: [{ kind: "profile-revision", profileId, revision: 1 }],
@@ -2393,7 +2410,7 @@ describe("canonical profile D1 store", () => {
     });
     await expect(
       testEnv.PROFILE_DB.prepare(
-        "DELETE FROM profile_records WHERE profile_id = ?",
+        "DELETE FROM profile_records_canonical WHERE profile_id = ?",
       )
         .bind(source.profile.id)
         .run(),
@@ -2439,7 +2456,6 @@ describe("canonical profile D1 store", () => {
             targetProfileId: targetSnapshot.profileId,
             mergedAtMs: 2_000,
             opId: "canonical-lifecycle-merge",
-            sourceLegacyFields: sourceSnapshot.legacyFields,
           },
         },
       ],
@@ -2578,8 +2594,8 @@ describe("canonical profile D1 store", () => {
     });
 
     for (let index = 0; index < profileIds.length - 1; index += 1) {
-      const sourceProfileId = profileIds[index];
-      const targetProfileId = profileIds[index + 1];
+      const sourceProfileId = profileIds[index]!;
+      const targetProfileId = profileIds[index + 1]!;
       const source = await readCanonicalProfile(
         testEnv.PROFILE_DB,
         sourceProfileId,
@@ -2616,7 +2632,6 @@ describe("canonical profile D1 store", () => {
             redirect: {
               mergedAtMs: 2_000 + index,
               opId: `deleted-chain-${index}`,
-              sourceLegacyFields: source.legacyFields,
               sourceProfileId,
               targetProfileId,
             },
@@ -2668,18 +2683,18 @@ describe("canonical profile D1 store", () => {
     ]) {
       const observed = observeAggregateDatabase({ mapAll: (rows) => rows });
       await expect(
-        resolve(observed.database, profileIds[0], 2),
+        resolve(observed.database, profileIds[0]!, 2),
       ).resolves.toMatchObject({ profileId: profileIds[2] });
       expect(observed.allQueries).toHaveLength(1);
       expect(observed.batches).toHaveLength(0);
       await expect(
-        resolve(testEnv.PROFILE_DB, profileIds[0], 2.5),
+        resolve(testEnv.PROFILE_DB, profileIds[0]!, 2.5),
       ).resolves.toMatchObject({ profileId: profileIds[2] });
       await expect(
-        resolve(testEnv.PROFILE_DB, profileIds[0], 1),
+        resolve(testEnv.PROFILE_DB, profileIds[0]!, 1),
       ).rejects.toBeInstanceOf(CanonicalProfileCorruption);
       await expect(
-        resolve(testEnv.PROFILE_DB, profileIds[0], 1, "null"),
+        resolve(testEnv.PROFILE_DB, profileIds[0]!, 1, "null"),
       ).resolves.toBeNull();
     }
   });
@@ -2781,7 +2796,7 @@ describe("canonical profile D1 store", () => {
       ],
     });
     await testEnv.PROFILE_DB.prepare(
-      `UPDATE profile_records
+      `UPDATE profile_records_canonical
        SET payload_json = json_set(payload_json, '$.rating', 0)
        WHERE profile_id = ?`,
     )
@@ -2790,15 +2805,16 @@ describe("canonical profile D1 store", () => {
     await expect(
       readCanonicalProfile(testEnv.PROFILE_DB, value.profile.id),
     ).rejects.toBeInstanceOf(CanonicalProfileCorruption);
-    await testEnv.PROFILE_DB.prepare(
-      `UPDATE profile_records SET gameplay_emoji_json = '3'
-       WHERE profile_id = ?`,
-    )
-      .bind(emojiValue.profile.id)
-      .run();
+    await expect(
+      testEnv.PROFILE_DB.prepare(
+        "UPDATE profile_records_canonical SET gameplay_emoji = 3 WHERE profile_id = ?",
+      )
+        .bind(emojiValue.profile.id)
+        .run(),
+    ).rejects.toThrow("CHECK constraint failed");
     await expect(
       readCanonicalProfile(testEnv.PROFILE_DB, emojiValue.profile.id),
-    ).rejects.toBeInstanceOf(CanonicalProfileCorruption);
+    ).resolves.toMatchObject({ gameplayEmoji: 2 });
   });
 
   it("rejects duplicate login, method, and username ownership", async () => {
@@ -2986,16 +3002,16 @@ describe("canonical profile D1 store", () => {
           ...plan.expectations,
           {
             kind: "login-owner-revision",
-            loginUid: sourceAggregate.loginOwners[0].loginUid,
+            loginUid: sourceAggregate.loginOwners[0]!.loginUid,
             profileId: source.profile.id,
-            revision: sourceAggregate.loginOwners[0].revision,
+            revision: sourceAggregate.loginOwners[0]!.revision,
           },
         ],
         mutations: [
           ...plan.mutations,
           {
             kind: "delete-login-owner",
-            loginUid: sourceAggregate.loginOwners[0].loginUid,
+            loginUid: sourceAggregate.loginOwners[0]!.loginUid,
           },
         ],
       }),
@@ -3050,7 +3066,7 @@ describe("canonical profile D1 store", () => {
     });
     const ownerStatements = initialLoginUids.map((loginUid) =>
       testEnv.PROFILE_DB.prepare(
-        `INSERT INTO profile_login_owners (
+        `INSERT INTO profile_login_owners_canonical (
              login_uid, profile_id, revision, created_at_ms, updated_at_ms
            ) VALUES (?, ?, 1, 1, 1)`,
       ).bind(loginUid, profileId),
@@ -3083,7 +3099,7 @@ describe("canonical profile D1 store", () => {
       }),
     ).resolves.toBeUndefined();
     const ownerCount = await testEnv.PROFILE_DB.prepare(
-      "SELECT COUNT(*) AS count FROM profile_login_owners WHERE profile_id = ?",
+      "SELECT COUNT(*) AS count FROM profile_login_owners_canonical WHERE profile_id = ?",
     )
       .bind(profileId)
       .first<{ count: number }>();
@@ -3110,7 +3126,6 @@ describe("canonical profile D1 store", () => {
       winPresent: false,
       sortPresence: { rating: false, nonce: false, mp: true },
       sortValues: { mp: null },
-      legacyFields: { imported: { emoji: "" }, opaque: [1, null] },
     });
     await commitCanonicalPlan(testEnv.PROFILE_DB, {
       expectations: [{ kind: "profile-absent", profileId: value.profile.id }],
@@ -3194,14 +3209,14 @@ describe("canonical profile D1 store", () => {
       children.flatMap(({ profileId, loginUids, methods, opponents }) => [
         ...loginUids.map((loginUid) =>
           testEnv.PROFILE_DB.prepare(
-            `INSERT INTO profile_login_owners
+            `INSERT INTO profile_login_owners_canonical
              (login_uid, profile_id, revision, created_at_ms, updated_at_ms)
              VALUES (?, ?, 1, 1000, 1000)`,
           ).bind(loginUid, profileId),
         ),
         ...methods.map((method) =>
           testEnv.PROFILE_DB.prepare(
-            `INSERT INTO profile_auth_methods
+            `INSERT INTO profile_auth_methods_canonical
              (method, normalized_value, raw_value, profile_id, revision, created_at_ms, updated_at_ms)
              VALUES (?, ?, ?, ?, 1, 1000, 1000)`,
           ).bind(
@@ -3213,7 +3228,7 @@ describe("canonical profile D1 store", () => {
         ),
         ...opponents.map((opponent) =>
           testEnv.PROFILE_DB.prepare(
-            `INSERT INTO profile_february_opponents
+            `INSERT INTO profile_february_opponents_canonical
              (profile_id, opponent_profile_id, recorded_at_ms)
              VALUES (?, ?, 1000)`,
           ).bind(profileId, opponent),
@@ -3236,14 +3251,14 @@ describe("canonical profile D1 store", () => {
     ).toEqual([second.profile.id, null, first.profile.id, second.profile.id]);
     expect(aggregates[0]).toEqual(aggregates[3]);
     expect(aggregates[0]).not.toBe(aggregates[3]);
-    expect(aggregates[0].loginOwners).not.toBe(aggregates[3].loginOwners);
-    expect(aggregates[0].authMethods).not.toBe(aggregates[3].authMethods);
-    expect(aggregates[0].februaryOpponentProfileIds).not.toBe(
-      aggregates[3].februaryOpponentProfileIds,
+    expect(aggregates[0]!.loginOwners).not.toBe(aggregates[3]!.loginOwners);
+    expect(aggregates[0]!.authMethods).not.toBe(aggregates[3]!.authMethods);
+    expect(aggregates[0]!.februaryOpponentProfileIds).not.toBe(
+      aggregates[3]!.februaryOpponentProfileIds,
     );
     for (const [index, profileId] of profileIds.entries()) {
       const expected = children.find((child) => child.profileId === profileId);
-      const aggregate = aggregates[index];
+      const aggregate = aggregates[index]!;
       expect(
         aggregate.loginOwners.map((owner) => [owner.loginUid, owner.profileId]),
       ).toEqual(
@@ -3491,7 +3506,6 @@ describe("canonical profile D1 store", () => {
                 targetProfileId: target.profile.id,
                 mergedAtMs: 2_000,
                 opId: "snapshot-merge",
-                sourceLegacyFields: source.legacyFields,
               },
             },
           ],
@@ -3525,11 +3539,11 @@ describe("canonical profile D1 store", () => {
   );
 
   it.each([
-    ["orphaned owner", "profile_records", "missing"],
-    ["invalid profile", "profile_records", "revision"],
-    ["invalid owner", "profile_login_owners", "revision"],
-    ["inactive owner", "profile_records", "retiring"],
-    ["active redirect", "profile_merge_targets", "redirect"],
+    ["orphaned owner", "profile_records_canonical", "missing"],
+    ["invalid profile", "profile_records_canonical", "revision"],
+    ["invalid owner", "profile_login_owners_canonical", "revision"],
+    ["inactive owner", "profile_records_canonical", "retiring"],
+    ["active redirect", "profile_merge_targets_canonical", "redirect"],
   ] as const)(
     "rejects %s in a transactional login snapshot",
     async (_name, table, corruption) => {
@@ -3556,7 +3570,7 @@ describe("canonical profile D1 store", () => {
       const observed = observeAggregateDatabase({
         mapResults: (queries, results) =>
           results.map((result, index) => {
-            if (/\bFROM\s+([a-z_]+)/i.exec(queries[index])?.[1] !== table)
+            if (/\bFROM\s+([a-z_]+)/i.exec(queries[index]!)?.[1]! !== table)
               return result;
             if (corruption === "missing") return { ...result, results: [] };
             if (corruption === "redirect")
@@ -3647,7 +3661,7 @@ describe("canonical profile D1 store", () => {
         [JSON.stringify(keys), CANONICAL_PROFILE_INTERNAL_REDIRECT_LIMIT + 1],
       ]);
       expect(observed.allQueries[0]).not.toMatch(
-        /payload_json|legacy_fields_json|profile_login_owners|profile_auth_methods|profile\.\*/,
+        /payload_json|legacy_fields_json|profile_login_owners_canonical|profile_auth_methods_canonical|profile\.\*/,
       );
     });
 
@@ -3743,13 +3757,32 @@ describe("canonical profile D1 store", () => {
             },
           ],
         });
-        await testEnv.PROFILE_DB.prepare(
-          kind === "public-profile"
-            ? "UPDATE profile_records SET payload_json = '{}' WHERE profile_id = ?"
-            : "UPDATE profile_login_owners SET revision = 1.5 WHERE profile_id = ?",
-        )
-          .bind(value.profile.id)
-          .run();
+        await expect(
+          testEnv.PROFILE_DB.prepare(
+            kind === "public-profile"
+              ? "UPDATE profile_records_canonical SET payload_json = '{}' WHERE profile_id = ?"
+              : "UPDATE profile_login_owners_canonical SET revision = 1.5 WHERE profile_id = ?",
+          )
+            .bind(value.profile.id)
+            .run(),
+        ).rejects.toThrow();
+        const observed = observeAggregateDatabase({
+          mapResults: (queries, results) =>
+            results.map((result, index) => ({
+              ...result,
+              results: result.results.map((row) =>
+                kind === "public-profile" &&
+                queries[index]!.includes("profile.payload_json")
+                  ? { ...row, payload_json: "{}" }
+                  : kind === "login-owner" &&
+                      queries[index]!.includes(
+                        "owner.login_uid AS owner_login_uid",
+                      )
+                    ? { ...row, owner_revision: 1.5 }
+                    : row,
+              ),
+            })),
+        });
         await expect(
           readCanonicalProfileIdMap(testEnv.PROFILE_DB, [value.profile.id]),
         ).resolves.toEqual(new Map([[value.profile.id, value.profile.id]]));
@@ -3758,7 +3791,7 @@ describe("canonical profile D1 store", () => {
           { loginUids: [loginUid], profileIds: [] },
         ]) {
           await expect(
-            readCanonicalProfileOwnershipSnapshot(testEnv.PROFILE_DB, query),
+            readCanonicalProfileOwnershipSnapshot(observed.database, query),
           ).rejects.toBeInstanceOf(CanonicalProfileCorruption);
         }
       },
@@ -3857,7 +3890,7 @@ describe("canonical profile D1 store", () => {
           loginUids:
             kind === "profile-only"
               ? []
-              : [...loginUids, "canonical-bulk-missing-login", loginUids[0]],
+              : [...loginUids, "canonical-bulk-missing-login", loginUids[0]!],
           profileIds:
             kind === "login-only"
               ? []
@@ -3906,12 +3939,8 @@ describe("canonical profile D1 store", () => {
 
   it("resolves redirects and rejects unsafe merge topology", async () => {
     const target = profileValue("canonical-redirect-target");
-    const sourceLegacyFields = {
-      authMetadata: { rawWallet: " 0xSourceWallet " },
-    };
     const source = profileValue("canonical-redirect-source", {
       profile: profile("canonical-redirect-source", { username: null }),
-      legacyFields: profileLegacyFixture(sourceLegacyFields),
     });
     await commitCanonicalPlan(testEnv.PROFILE_DB, {
       expectations: [
@@ -3964,7 +3993,6 @@ describe("canonical profile D1 store", () => {
             targetProfileId: targetSnapshot.profileId,
             mergedAtMs: 2_000,
             opId: "merge-redirect",
-            sourceLegacyFields: sourceSnapshot.legacyFields,
           },
         },
       ],
@@ -3992,38 +4020,21 @@ describe("canonical profile D1 store", () => {
       mergedAtMs: 2_000,
       opId: "merge-redirect",
     });
-    const archive = await testEnv.PROFILE_DB.prepare(
-      `SELECT source_legacy_fields_json
-       FROM profile_merge_targets WHERE source_profile_id = ?`,
-    )
-      .bind(source.profile.id)
-      .first<{ source_legacy_fields_json: string }>();
-    expect(JSON.parse(archive?.source_legacy_fields_json || "null")).toEqual(
-      sourceLegacyFields,
-    );
     await expect(
       testEnv.PROFILE_DB.prepare(
-        `INSERT INTO profile_merge_targets (
-           source_profile_id, target_profile_id, merged_at_ms, op_id,
-           source_legacy_fields_json
-         ) VALUES (?, ?, ?, ?, ?)
+        `INSERT INTO profile_merge_targets_canonical (
+           source_profile_id, target_profile_id, merged_at_ms, op_id
+         ) VALUES (?, ?, ?, ?)
          ON CONFLICT (source_profile_id) DO NOTHING`,
       )
-        .bind(
-          source.profile.id,
-          target.profile.id,
-          2_000,
-          "merge-redirect",
-          JSON.stringify(sourceSnapshot.legacyFields),
-        )
+        .bind(source.profile.id, target.profile.id, 2_000, "merge-redirect")
         .run(),
     ).resolves.toBeDefined();
     await expect(
       testEnv.PROFILE_DB.prepare(
-        `INSERT OR REPLACE INTO profile_merge_targets (
-           source_profile_id, target_profile_id, merged_at_ms,
-           source_legacy_fields_json
-         ) VALUES (?, ?, ?, '{}')`,
+        `INSERT OR REPLACE INTO profile_merge_targets_canonical (
+           source_profile_id, target_profile_id, merged_at_ms
+         ) VALUES (?, ?, ?)`,
       )
         .bind(source.profile.id, "replacement-target", 3_000)
         .run(),
@@ -4038,10 +4049,9 @@ describe("canonical profile D1 store", () => {
     });
     await expect(
       testEnv.PROFILE_DB.prepare(
-        `INSERT INTO profile_merge_targets (
-           source_profile_id, target_profile_id, merged_at_ms,
-           source_legacy_fields_json
-         ) VALUES (?, ?, ?, '{}')`,
+        `INSERT INTO profile_merge_targets_canonical (
+           source_profile_id, target_profile_id, merged_at_ms
+         ) VALUES (?, ?, ?)`,
       )
         .bind(activeSource.profile.id, target.profile.id, 2_500)
         .run(),
@@ -4074,7 +4084,6 @@ describe("canonical profile D1 store", () => {
               targetProfileId: target.profile.id,
               mergedAtMs: 2_500,
               opId: null,
-              sourceLegacyFields: activeSource.legacyFields,
             },
           },
         ],
@@ -4131,7 +4140,6 @@ describe("canonical profile D1 store", () => {
               targetProfileId: "canonical-missing-target",
               mergedAtMs: 3_000,
               opId: null,
-              sourceLegacyFields: missingSourceSnapshot.legacyFields,
             },
           },
         ],
@@ -4201,7 +4209,6 @@ describe("canonical profile D1 store", () => {
               targetProfileId,
               mergedAtMs: index + 1,
               opId: null,
-              sourceLegacyFields: chainSource.legacyFields,
             },
           },
         ],
@@ -4306,7 +4313,6 @@ describe("canonical profile D1 store", () => {
               targetProfileId: depthTarget.profileId,
               mergedAtMs: 33,
               opId: null,
-              sourceLegacyFields: depthSource.legacyFields,
             },
           },
         ],
@@ -4357,7 +4363,7 @@ describe("canonical profile D1 store", () => {
           kind: "insert-active-profile",
           value: profileValue("canonical-sort-null-a", {
             emojiPresent: false,
-            gameplayEmoji: "raw-gameplay-emoji",
+            gameplayEmoji: 13,
             sortPresence: present,
             sortValues: nulls,
           }),
@@ -4395,11 +4401,10 @@ describe("canonical profile D1 store", () => {
         {
           kind: "update-active-profile",
           value: materializeCanonicalProfile({
-            profile: { ...nullSnapshot.profile, aura: "updated" },
+            profile: { ...nullSnapshot.profile, aura: "rainbow" },
             gameplayEmoji: nullSnapshot.gameplayEmoji,
             state: nullSnapshot.state,
             mergedIntoProfileId: nullSnapshot.mergedIntoProfileId,
-            legacyFields: nullSnapshot.legacyFields,
             createdAtMs: nullSnapshot.createdAtMs,
             updatedAtMs: 2_000,
             mergedAtMs: nullSnapshot.mergedAtMs,
@@ -4418,7 +4423,7 @@ describe("canonical profile D1 store", () => {
     expect(
       (await readCanonicalProfile(testEnv.PROFILE_DB, nullSnapshot.profileId))
         ?.gameplayEmoji,
-    ).toBe("raw-gameplay-emoji");
+    ).toBe(13);
     expect(
       (await readCanonicalProfile(testEnv.PROFILE_DB, "canonical-sort-number"))
         ?.gameplayEmoji,
@@ -4433,13 +4438,13 @@ describe("canonical profile D1 store", () => {
         "canonical-sort-null-z",
         "canonical-sort-null-a",
       ]);
-      expect(leaderboard[0].completedProblemIds).toBeUndefined();
-      expect(leaderboard[0].isTutorialCompleted).toBeUndefined();
+      expect(leaderboard[0]!.completedProblemIds).toBeUndefined();
+      expect(leaderboard[0]!.isTutorialCompleted).toBeUndefined();
     }
   });
 
   it("revision-fences rating finalization", async () => {
-    const operationId = "canonical-rating-guard";
+    const operationId = "canonical-rating-guard__match";
     await commitCanonicalPlan(testEnv.PROFILE_DB, {
       expectations: [{ kind: "rating-update-absent", operationId }],
       mutations: [
@@ -4457,7 +4462,7 @@ describe("canonical profile D1 store", () => {
         {
           kind: "update-rating-update",
           value: ratingValue(operationId, {
-            payload: ratingPayloadFixture({ operationId, status: "done" }),
+            payload: createEmptyRatingPayload(),
             status: "done",
             updatedAtMs: 2_000,
             completedAtMs: 2_000,
@@ -4489,8 +4494,15 @@ describe("canonical profile D1 store", () => {
   it.each(["missing", "different operation"] as const)(
     "rejects a narrow rating projection mutation with %s revision coverage",
     async (coverage) => {
-      const operationId = "projection-guard-coverage";
-      const initial = ratingValue(operationId);
+      const operationId = "projection-guard-coverage__match";
+      const initial = ratingValue(operationId, {
+        status: "done",
+        updatedAtMs: 2_000,
+        completedAtMs: 2_000,
+        eventProgressState: "pending",
+        eventProgressUpdatedAtMs: 2_000,
+        eventProgressVersion: 1,
+      });
       await commitCanonicalPlan(testEnv.PROFILE_DB, {
         expectations: [{ kind: "rating-update-absent", operationId }],
         mutations: [{ kind: "insert-rating-update", value: initial }],
@@ -4523,17 +4535,15 @@ describe("canonical profile D1 store", () => {
   );
 
   it("requires the patch source revision before committing rating JSON metadata", async () => {
-    const operationId = "projection-json-guard-coverage";
+    const operationId = "projection-json-guard-coverage__match";
     const initial = ratingValue(operationId, {
+      status: "done",
+      updatedAtMs: 2_000,
+      completedAtMs: 2_000,
       eventProgressState: "pending",
       eventProgressUpdatedAtMs: 1_000,
       eventProgressVersion: 1,
-      payload: ratingPayloadFixture({
-        eventProgressState: "pending",
-        eventProgressUpdatedAtMs: 1_000,
-        eventProgressReason: null,
-        retained: [null, { nested: true }],
-      }),
+      payload: createEmptyRatingPayload(),
     });
     await commitCanonicalPlan(testEnv.PROFILE_DB, {
       expectations: [{ kind: "rating-update-absent", operationId }],
@@ -4552,24 +4562,21 @@ describe("canonical profile D1 store", () => {
       eventProgressUpdatedAtMs: 2_000,
       payload: ratingPayloadFixture({
         ...stored!.snapshot.payload,
-        eventProgressUpdatedAtMs: 2_000,
+        eventProgressReason: "checked",
       }),
     };
     const mutation = buildCanonicalRatingProjectionMutation(
       stored!.snapshot,
       next,
       "event-progress",
-      stored!.payloadJson,
     );
     expect(mutation).toMatchObject({
-      kind: "patch-rating-projection",
-      currentRevision: 1,
+      kind: "update-rating-projection",
     });
     const observed = observeD1FailureDatabase(testEnv.PROFILE_DB);
     const invalidExpectations: CanonicalExpectation[][] = [
       [],
       [{ kind: "rating-update-revision", operationId: "other", revision: 1 }],
-      [{ kind: "rating-update-revision", operationId, revision: 2 }],
     ];
     for (const expectations of invalidExpectations) {
       await expect(
@@ -4595,56 +4602,32 @@ describe("canonical profile D1 store", () => {
     ).toEqual({ ...next, revision: 2 });
   });
 
-  it("serializes a narrow rating payload only when compiling its commit", async () => {
-    const operationId = "projection-payload-serialization";
-    const initial = ratingValue(operationId);
-    await commitCanonicalPlan(testEnv.PROFILE_DB, {
-      expectations: [{ kind: "rating-update-absent", operationId }],
-      mutations: [{ kind: "insert-rating-update", value: initial }],
-    });
+  it("rejects noncanonical rating payload serialization hooks before persistence", () => {
     let serializations = 0;
-    const payload = {
-      ...initial.payload,
-      retained: [null, { nested: true }],
-      eventProgressUpdatedAtMs: 2_000,
-    };
-    const mutation = buildCanonicalRatingProjectionMutation(
-      { ...initial, revision: 1 },
-      {
-        ...initial,
-        eventProgressUpdatedAtMs: 2_000,
-        payload: ratingPayloadFixture({
-          toJSON() {
-            serializations++;
-            return payload;
-          },
-        }),
-      },
-      "event-progress",
-    );
+    expect(() =>
+      ratingPayloadFixture({
+        ...createEmptyRatingPayload(),
+        toJSON() {
+          serializations++;
+          return createEmptyRatingPayload();
+        },
+      }),
+    ).toThrow(CanonicalProfileCorruption);
     expect(serializations).toBe(0);
-    await commitCanonicalPlan(testEnv.PROFILE_DB, {
-      expectations: [
-        { kind: "rating-update-revision", operationId, revision: 1 },
-      ],
-      mutations: [mutation],
-    });
-    expect(serializations).toBe(1);
-    expect(
-      await readCanonicalRatingUpdate(testEnv.PROFILE_DB, operationId),
-    ).toEqual({
-      ...initial,
-      eventProgressUpdatedAtMs: 2_000,
-      payload,
-      revision: 2,
-    });
   });
 
   it.each(["integrity", "unknown"] as const)(
     "preserves %s failure classification for narrow rating projection writes",
     async (failure) => {
-      const operationId = `projection-${failure}-failure`;
-      const initial = ratingValue(operationId);
+      const operationId = `projection-${failure}-failure__match`;
+      const initial = ratingValue(operationId, {
+        status: "done",
+        updatedAtMs: 2_000,
+        completedAtMs: 2_000,
+        eventProgressState: "pending",
+        eventProgressUpdatedAtMs: 2_000,
+        eventProgressVersion: 1,
+      });
       await commitCanonicalPlan(testEnv.PROFILE_DB, {
         expectations: [{ kind: "rating-update-absent", operationId }],
         mutations: [{ kind: "insert-rating-update", value: initial }],
@@ -4679,27 +4662,14 @@ describe("canonical profile D1 store", () => {
     },
   );
 
-  it("roundtrips every rating write field on insert and update", async () => {
-    const operationId = "canonical-rating-fields";
+  it("roundtrips canonical rating fields while preserving immutable outcome identity", async () => {
+    const operationId = "canonical-rating-fields__match";
     const initial = ratingValue(operationId, {
-      payload: ratingPayloadFixture({
-        operationId,
-        nested: ["initial", null, { retained: true }],
-      }),
       playerProfileId: "player-profile",
       opponentProfileId: "opponent-profile",
       startedAtMs: 101,
       updatedAtMs: 202,
       leaseExpiresAtMs: 303,
-      telegramProjectionState: "pending",
-      telegramProjectionUpdatedAtMs: 404,
-      telegramProjectionVersion: 5,
-      profileGameProjectionState: "done",
-      profileGameProjectionUpdatedAtMs: 606,
-      profileGameProjectionVersion: 7,
-      eventProgressState: "dead",
-      eventProgressUpdatedAtMs: 808,
-      eventProgressVersion: 9,
     });
     await commitCanonicalPlan(testEnv.PROFILE_DB, {
       expectations: [{ kind: "rating-update-absent", operationId }],
@@ -4709,32 +4679,28 @@ describe("canonical profile D1 store", () => {
       readCanonicalRatingUpdate(testEnv.PROFILE_DB, operationId),
     ).resolves.toEqual({ ...initial, revision: 1 });
     const updated = ratingValue(operationId, {
-      payload: ratingPayloadFixture({
-        operationId,
-        nested: ["updated", false, { retained: null }],
-      }),
+      playerProfileId: initial.playerProfileId,
+      opponentProfileId: initial.opponentProfileId,
+      startedAtMs: initial.startedAtMs,
       status: "done",
-      inviteId: "updated-invite",
-      matchId: "updated-match",
-      playerId: "updated-player",
-      opponentId: "updated-opponent",
-      playerProfileId: null,
-      opponentProfileId: null,
-      ownerUid: "updated-owner",
-      ownerToken: "updated-token",
-      startedAtMs: 1_101,
       updatedAtMs: 1_202,
+      completedAtMs: 1_202,
       leaseExpiresAtMs: 1_303,
-      completedAtMs: 1_204,
+      payload: ratingPayloadFixture({
+        ...createEmptyRatingPayload(),
+        result: "win",
+        didApplyRatingDelta: true,
+        winnerNewRating: 1_515,
+        loserNewRating: 1_485,
+        playerManaPoints: 9,
+        opponentManaPoints: 0,
+      }),
       telegramProjectionState: "dead",
       telegramProjectionUpdatedAtMs: 1_405,
-      telegramProjectionVersion: 16,
+      telegramProjectionVersion: 1,
       profileGameProjectionState: "pending",
       profileGameProjectionUpdatedAtMs: 1_607,
-      profileGameProjectionVersion: 18,
-      eventProgressState: null,
-      eventProgressUpdatedAtMs: null,
-      eventProgressVersion: null,
+      profileGameProjectionVersion: 1,
     });
     await commitCanonicalPlan(testEnv.PROFILE_DB, {
       expectations: [
@@ -4745,6 +4711,13 @@ describe("canonical profile D1 store", () => {
     await expect(
       readCanonicalRatingUpdate(testEnv.PROFILE_DB, operationId),
     ).resolves.toEqual({ ...updated, revision: 2 });
+    await expect(
+      testEnv.PROFILE_DB.prepare(
+        "UPDATE rating_updates_canonical SET player_id = 'changed-player' WHERE operation_id = ?",
+      )
+        .bind(operationId)
+        .run(),
+    ).rejects.toThrow("immutable");
   });
 
   it("keeps wager fingerprints immutable and rejects mismatched replay", async () => {
@@ -4773,7 +4746,7 @@ describe("canonical profile D1 store", () => {
     ).toMatchObject(settlement);
     await expect(
       testEnv.PROFILE_DB.prepare(
-        `INSERT INTO wager_settlements (
+        `INSERT INTO wager_settlements_canonical (
            operation_id, fingerprint, winner_profile_id, loser_profile_id,
            material, count, applied_at_ms, revision
          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
@@ -4811,7 +4784,7 @@ describe("canonical profile D1 store", () => {
     ).rejects.toBeInstanceOf(CanonicalProfileConflict);
     await expect(
       testEnv.PROFILE_DB.prepare(
-        `INSERT OR REPLACE INTO wager_settlements (
+        `INSERT OR REPLACE INTO wager_settlements_canonical (
            operation_id, fingerprint, winner_profile_id, loser_profile_id,
            material, count, applied_at_ms
          ) VALUES (?, ?, ?, ?, ?, ?, ?)`,

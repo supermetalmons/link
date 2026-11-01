@@ -1,27 +1,33 @@
-const assert: typeof import("node:assert/strict") = require("node:assert/strict");
-const {
-  mkdtempSync,
-  readFileSync,
-  rmSync,
-  statSync,
-}: typeof import("node:fs") = require("node:fs");
-const { tmpdir }: typeof import("node:os") = require("node:os");
-const { join, resolve }: typeof import("node:path") = require("node:path");
-const { DatabaseSync }: typeof import("node:sqlite") = require("node:sqlite");
-const test: typeof import("node:test") = require("node:test");
+import assert from "node:assert/strict";
+import { mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
+import { DatabaseSync } from "node:sqlite";
+import test from "node:test";
+import {
+  cloudflareToken,
+  createD1Query,
+  createProfileD1Reader,
+  isReadOnlySql,
+  parseD1Rows,
+  type D1Value,
+} from "../cloud/admin/_d1.ts";
+import { logTopGpWithEmojis } from "../cloud/admin/topGpWithEmojis.ts";
+import { logTopMpWithEmojis } from "../cloud/admin/topMpWithEmojis.ts";
 
-const repositoryRoot = resolve(__dirname, "..");
-const {
+import {
   DEFAULT_LEADERBOARD_LIMIT,
   MAX_LEADERBOARD_LIMIT,
   createLeaderboardHeading,
   parseLeaderboardLimit,
-} = require("../cloud/admin/leaderboardCli.js");
-const {
+} from "../cloud/admin/leaderboardCli.ts";
+import {
   listUniqueAddresses,
-  parseArgs: parseAddressArgs,
+  parseArgs as parseAddressArgs,
   writeProtectedFile,
-} = require("../cloud/admin/listAddresses.js");
+} from "../cloud/admin/listAddresses.ts";
+
+const repositoryRoot = resolve(import.meta.dirname, "..");
 
 test("leaderboard CLIs retain 15 as the default and accept a bounded limit", () => {
   assert.equal(DEFAULT_LEADERBOARD_LIMIT, 15);
@@ -44,16 +50,16 @@ test("leaderboard CLIs reject unsafe or ambiguous limits", () => {
     ["100"],
     ["Infinity"],
     ["15", "16"],
-  ]) {
+  ] as const) {
     assert.throws(() => parseLeaderboardLimit(argv), /limit/i, argv.join(" "));
   }
 });
 
 test("both leaderboard entrypoints parse arguments and preserve delivery keys", () => {
   for (const [filename, key, metric] of [
-    ["topGpWithEmojis.js", "admin:top-gp:", "gp"],
-    ["topMpWithEmojis.js", "admin:top-mp:", "mp"],
-  ]) {
+    ["topGpWithEmojis.ts", "admin:top-gp:", "gp"],
+    ["topMpWithEmojis.ts", "admin:top-mp:", "mp"],
+  ] as const) {
     const source = readFileSync(
       resolve(repositoryRoot, "cloud/admin", filename),
       "utf8",
@@ -71,22 +77,19 @@ test("both leaderboard entrypoints parse arguments and preserve delivery keys", 
     assert.match(source, new RegExp(key));
     assert.match(source, /parseMode: "HTML"/);
     assert.equal(source.includes('ref("telegramMessages")'), false);
-    assert.match(source, /if \(require\.main === module\)/);
+    assert.match(
+      source,
+      /resolve\(process\.argv\[1\]\) === fileURLToPath\(import\.meta\.url\)/,
+    );
     assert.equal(source.includes("admin.firestore"), false);
   }
 });
 
 test("D1 leaderboard entrypoints log counts only", async () => {
-  for (const [filename, exportName, metric] of [
-    ["topGpWithEmojis.js", "logTopGpWithEmojis", "gp"],
-    ["topMpWithEmojis.js", "logTopMpWithEmojis", "mp"],
-  ]) {
-    const entrypoint = require(
-      resolve(repositoryRoot, "cloud/admin", filename),
-    )[exportName] as (
-      limit: number,
-      dependencies: Record<string, unknown>,
-    ) => Promise<void>;
+  for (const [entrypoint, metric] of [
+    [logTopGpWithEmojis, "gp"],
+    [logTopMpWithEmojis, "mp"],
+  ] as const) {
     const logs: string[] = [];
     let delivered = "";
     await entrypoint(1, {
@@ -103,8 +106,16 @@ test("D1 leaderboard entrypoints log counts only", async () => {
           },
         ],
       },
-      sendCommand: async (command: { text: string }) => {
+      sendCommand: async (command) => {
+        assert.equal(command.kind, "send");
+        if (command.kind !== "send")
+          throw new Error("Expected a send command.");
         delivered = command.text;
+        return {
+          ok: true,
+          messageKey: command.messageKey,
+          revision: "revision",
+        };
       },
       log: (message: string) => logs.push(message),
     });
@@ -117,11 +128,6 @@ test("D1 leaderboard entrypoints log counts only", async () => {
 });
 
 test("canonical profile admin adapter rejects mutating SQL", async () => {
-  const {
-    cloudflareToken,
-    createD1Query,
-    isReadOnlySql,
-  } = require("../cloud/admin/_d1.js");
   assert.throws(() => cloudflareToken({}), /CLOUDFLARE_API_TOKEN.*D1 Read/);
   assert.equal(
     cloudflareToken({ CLOUDFLARE_API_TOKEN: " read-token " }),
@@ -153,6 +159,57 @@ test("canonical profile admin adapter rejects mutating SQL", async () => {
   assert.equal(isReadOnlySql("SELECT 1;"), true);
   assert.equal(isReadOnlySql("EXPLAIN QUERY PLAN SELECT 1"), true);
   assert.equal(isReadOnlySql("WITH selected AS (SELECT 1) SELECT 1"), false);
+});
+
+test("admin D1 responses reject malformed rows instead of dropping data", async () => {
+  const coordinates = {
+    accountId: "a".repeat(32),
+    databaseId: "15a77eea-19da-45a7-8433-9b4a22d371da",
+  };
+  const expected = [
+    { profile_id: "profile-1", metric_sort: 4, username: null },
+  ];
+  const query = createD1Query({
+    coordinates,
+    token: "test-token",
+    fetcher: async () =>
+      Response.json({
+        success: true,
+        result: [{ success: true, results: expected }],
+      }),
+  });
+  assert.deepEqual(await query("SELECT 1"), expected);
+
+  for (const results of [
+    null,
+    [null],
+    [[]],
+    [{ nonce: true }],
+    [{ nonce: {} }],
+    [{ nonce: [4] }],
+  ]) {
+    const malformed = createD1Query({
+      coordinates,
+      token: "test-token",
+      fetcher: async () =>
+        Response.json({
+          success: true,
+          result: [{ success: true, results }],
+        }),
+    });
+    await assert.rejects(
+      malformed("SELECT 1"),
+      /Invalid Cloudflare D1 response/,
+    );
+  }
+  assert.throws(
+    () => parseD1Rows([{ nonce: Number.NaN }]),
+    /Invalid Cloudflare D1 response/,
+  );
+  assert.throws(
+    () => parseD1Rows([{ nonce: Number.POSITIVE_INFINITY }]),
+    /Invalid Cloudflare D1 response/,
+  );
 });
 
 test("address export requires protected destinations and logs counts only", async () => {
@@ -230,10 +287,9 @@ test("address export requires protected destinations and logs counts only", asyn
 });
 
 test("canonical profile admin reader parses bounded profiles", async () => {
-  const { createProfileD1Reader } = require("../cloud/admin/_d1.js");
-  const calls: Array<{ params: unknown[]; sql: string }> = [];
+  const calls: Array<{ params: readonly D1Value[]; sql: string }> = [];
   const reader = createProfileD1Reader({
-    query: async (sql: string, params: unknown[] = []) => {
+    query: async (sql, params = []) => {
       calls.push({ sql, params });
       if (sql.includes("profile_canonical_control")) {
         return [{ state: "active" }];
@@ -254,19 +310,25 @@ test("canonical profile admin reader parses bounded profiles", async () => {
     },
   });
   const profiles = await reader.readLeaderboard("gp", 15);
-  assert.equal(profiles[0].id, "profile-1");
-  assert.equal(profiles[0].emoji, 7);
-  assert.deepEqual(calls[1].params, [15]);
-  assert.match(calls[1].sql, /nonce_sort_present/);
-  assert.match(calls[1].sql, /nonce_sort DESC/);
-  assert.match(calls[1].sql, /nonce_sort AS metric_sort/);
-  assert.match(calls[1].sql, /json_extract\(payload_json, '\$\.username'\)/);
-  assert.doesNotMatch(calls[1].sql, /SELECT\s+payload_json/);
-  assert.doesNotMatch(calls[1].sql, /legacy_fields_json/);
+  const profile = profiles[0];
+  const leaderboardCall = calls[1];
+  assert.ok(profile);
+  assert.ok(leaderboardCall);
+  assert.equal(profile.id, "profile-1");
+  assert.equal(profile.emoji, 7);
+  assert.deepEqual(leaderboardCall.params, [15]);
+  assert.match(leaderboardCall.sql, /nonce_sort_present/);
+  assert.match(leaderboardCall.sql, /nonce_sort DESC/);
+  assert.match(leaderboardCall.sql, /nonce_sort AS metric_sort/);
+  assert.match(
+    leaderboardCall.sql,
+    /json_extract\(payload_json, '\$\.username'\)/,
+  );
+  assert.doesNotMatch(leaderboardCall.sql, /SELECT\s+payload_json/);
+  assert.doesNotMatch(leaderboardCall.sql, /legacy_fields_json/);
 });
 
 test("canonical MP admin reader returns only projected scalars", async () => {
-  const { createProfileD1Reader } = require("../cloud/admin/_d1.js");
   const database = new DatabaseSync(":memory:");
   database.exec(`
     CREATE TABLE profile_canonical_control (
@@ -274,11 +336,11 @@ test("canonical MP admin reader returns only projected scalars", async () => {
       state TEXT NOT NULL
     );
     INSERT INTO profile_canonical_control VALUES (1, 'active');
-    CREATE TABLE profile_records (
+    CREATE TABLE profile_records_canonical (
       profile_id TEXT PRIMARY KEY,
       state TEXT NOT NULL,
       payload_json TEXT NOT NULL,
-      gameplay_emoji_json TEXT NOT NULL,
+      gameplay_emoji INTEGER NOT NULL,
       nonce_sort REAL,
       nonce_sort_present INTEGER NOT NULL,
       mana_points_sort REAL,
@@ -287,7 +349,7 @@ test("canonical MP admin reader returns only projected scalars", async () => {
   `);
   database
     .prepare(
-      `INSERT INTO profile_records VALUES (?, 'active', ?, ?, 4, 1, 8, 1)`,
+      `INSERT INTO profile_records_canonical VALUES (?, 'active', ?, ?, 4, 1, 8, 1)`,
     )
     .run(
       "profile-1",
@@ -298,22 +360,20 @@ test("canonical MP admin reader returns only projected scalars", async () => {
         totalManaPoints: 8,
         username: "name",
       }),
-      JSON.stringify("7"),
+      7,
     );
   let leaderboardSql = "";
   const reader = createProfileD1Reader({
-    query: async (sql: string, params: unknown[] = []) => {
+    query: async (sql, params = []) => {
       if (!sql.includes("profile_canonical_control")) leaderboardSql = sql;
-      return database
-        .prepare(sql)
-        .all(...(params as Array<null | number | string>));
+      return parseD1Rows(database.prepare(sql).all(...params));
     },
   });
   try {
     assert.deepEqual(await reader.readLeaderboard("mp", 90), [
       {
         id: "profile-1",
-        emoji: "7",
+        emoji: 7,
         username: "name",
         eth: "0xabc",
         sol: null,
@@ -321,7 +381,8 @@ test("canonical MP admin reader returns only projected scalars", async () => {
       },
     ]);
     assert.match(leaderboardSql, /json_extract\(payload_json/);
-    assert.match(leaderboardSql, /json_extract\(gameplay_emoji_json/);
+    assert.match(leaderboardSql, /gameplay_emoji,/);
+    assert.doesNotMatch(leaderboardSql, /gameplay_emoji_json/);
     assert.doesNotMatch(leaderboardSql, /SELECT\s+payload_json/);
     assert.doesNotMatch(leaderboardSql, /legacy_fields_json/);
   } finally {
@@ -330,26 +391,26 @@ test("canonical MP admin reader returns only projected scalars", async () => {
 });
 
 test("canonical GP admin reader preserves an explicitly null nonce", async () => {
-  const { createProfileD1Reader } = require("../cloud/admin/_d1.js");
   const reader = createProfileD1Reader({
     query: async (sql: string) =>
       sql.includes("profile_canonical_control")
         ? [{ state: "frozen" }]
         : [
             {
-              gameplay_emoji: "",
+              gameplay_emoji: 0,
               metric_sort: null,
               profile_id: "profile-1",
             },
           ],
   });
   const profiles = await reader.readLeaderboard("gp", 1);
-  assert.equal(profiles[0].nonce, null);
-  assert.equal(profiles[0].emoji, "");
+  const profile = profiles[0];
+  assert.ok(profile);
+  assert.equal(profile.nonce, null);
+  assert.equal(profile.emoji, 0);
 });
 
 test("canonical profile admin reader requires an operational state and paginates addresses", async () => {
-  const { createProfileD1Reader } = require("../cloud/admin/_d1.js");
   for (const state of ["unknown", "retired", ""] as const) {
     const inactive = createProfileD1Reader({
       query: async () => [{ state }],
@@ -358,9 +419,9 @@ test("canonical profile admin reader requires an operational state and paginates
   }
 
   let addressPage = 0;
-  const calls: Array<{ params: unknown[]; sql: string }> = [];
+  const calls: Array<{ params: readonly D1Value[]; sql: string }> = [];
   const reader = createProfileD1Reader({
-    query: async (sql: string, params: unknown[] = []) => {
+    query: async (sql, params = []) => {
       calls.push({ sql, params });
       if (sql.includes("profile_canonical_control")) {
         return [{ state: "active" }];
@@ -384,6 +445,10 @@ test("canonical profile admin reader requires an operational state and paginates
   });
   const addresses = await reader.listAddresses();
   assert.equal(addresses.length, 501);
-  assert.deepEqual(calls[2].params.slice(0, 3), ["eth", "eth", "0499"]);
-  assert.match(calls[1].sql, /LIMIT \?/);
+  const firstPage = calls[1];
+  const secondPage = calls[2];
+  assert.ok(firstPage);
+  assert.ok(secondPage);
+  assert.deepEqual(secondPage.params.slice(0, 3), ["eth", "eth", "0499"]);
+  assert.match(firstPage.sql, /LIMIT \?/);
 });

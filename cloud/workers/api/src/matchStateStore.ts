@@ -1,4 +1,10 @@
 import {
+  isRetiredOrphanTimer,
+  type OrphanTimerIdentity,
+} from "./retiredOrphanTimers.ts";
+import { parseMatchStateEventEffects } from "./matchStateRequestCodec.ts";
+import { sha256Hex } from "./canonicalJson.ts";
+import {
   readStoredMatchJson,
   storedMatchValue,
   readMatchDocument,
@@ -38,23 +44,17 @@ import { parseInviteMatchIndex } from "@mons/shared/rematches";
 import {
   MATCH_TIMER_DURATION_MS,
   MATCH_TIMER_TERMINAL,
+  matchTimersEqual,
   isStartMatchTimerRequest,
+  parseStrictMatchTimer,
   type ClaimMatchVictoryByTimerResponse,
   type StartMatchTimerResponse,
 } from "@mons/shared/timers";
 import { AuthApiFailure } from "./authErrors.ts";
 import { MatchEffectsOutbox } from "./matchEffectsOutbox.ts";
 import { isCanonicalLoginUid, isSafeRecordKey } from "./recordKeys.ts";
-import type {
-  MatchTimerStartCandidate,
-  MatchTimerStartStore,
-  RetainedTimerCleanupInput,
-} from "./gameplayCoordinationD1.ts";
-import {
-  LocalMatchTimerStore,
-  parseNewMatchTimerStorage,
-  type MatchTimerStorageMode,
-} from "./localMatchTimerStore.ts";
+import type { MatchTimerStartCandidate } from "./matchTimerRecords.ts";
+import { LocalMatchTimerStore } from "./localMatchTimerStore.ts";
 import {
   parseMatchTimerRecord,
   rawMatchTimerIsTerminal,
@@ -73,7 +73,6 @@ import {
   decideMatchStateTimerClaim,
   decideMatchStateTimerStartCommit,
   prepareMatchStateTimerStart,
-  timerTerminal,
   type TimerPair,
 } from "./matchStateTimerPolicy.ts";
 import { MAX_MATCH_STATE_RECORD_READS } from "./matchStateTypes.ts";
@@ -102,11 +101,9 @@ type SourceRow = {
 };
 
 export type MatchStateStoreOptions = {
-  timerStarts: Pick<
-    MatchTimerStartStore,
-    "getOrAdvance" | "deletePair" | "deleteRetainedPair"
-  >;
-  newMatchTimerStorage?: MatchTimerStorageMode;
+  retiredTimer?: (identity: OrphanTimerIdentity) => boolean;
+  assertTimerWriter?: () => void;
+  recordTimerWriterOutcome?: (result: unknown) => void;
   now?: () => number;
   scheduleAlarm?: (
     atMs: number,
@@ -152,7 +149,6 @@ export class MatchStateStore {
   readonly effects: MatchEffectsOutbox;
   private readonly now: () => number;
   private readonly localTimers: LocalMatchTimerStore;
-  private readonly newMatchTimerStorage: MatchTimerStorageMode;
   private readonly resolveGame: NonNullable<
     MatchStateStoreOptions["resolveGame"]
   >;
@@ -162,9 +158,6 @@ export class MatchStateStore {
     private readonly options: MatchStateStoreOptions,
   ) {
     this.now = options.now || Date.now;
-    this.newMatchTimerStorage = parseNewMatchTimerStorage(
-      options.newMatchTimerStorage,
-    );
     this.resolveGame = options.resolveGame || resolveMatchTimerGame;
     this.localTimers = new LocalMatchTimerStore(storage.sql);
     this.effects = new MatchEffectsOutbox(storage, {
@@ -175,8 +168,25 @@ export class MatchStateStore {
 
   readSource(): MatchStateSource {
     const [row] = this.storage.sql
-      .exec<SourceRow>("SELECT * FROM match_state_source WHERE singleton = 1")
+      .exec<SourceRow>(
+        "SELECT * FROM match_state_source_canonical WHERE singleton = 1",
+      )
       .toArray();
+    if (row) {
+      validKey(row.invite_id);
+      if (row.active_epoch !== null) validEpoch(row.active_epoch);
+      if (row.staged_epoch !== null) validEpoch(row.staged_epoch);
+      if (row.import_id !== null) validKey(row.import_id);
+      if (
+        (row.active_epoch === null && row.staged_epoch === null) ||
+        (row.import_id === null) !== (row.digest === null) ||
+        (row.digest !== null && !/^[a-f0-9]{64}$/.test(row.digest)) ||
+        (row.staged_epoch !== null &&
+          (row.import_id === null ||
+            (row.active_epoch !== null && row.staged_epoch < row.active_epoch)))
+      )
+        throw new TypeError("match-state-invalid-source");
+    }
     return {
       inviteId: row?.invite_id ?? null,
       epoch: row?.active_epoch ?? 0,
@@ -221,7 +231,7 @@ export class MatchStateStore {
   private record(matchId: string, playerId: string): RetainedMatchValue {
     const [row] = this.storage.sql
       .exec<{ value_json: string }>(
-        "SELECT value_json FROM match_state_records WHERE match_id = ? AND player_id = ?",
+        "SELECT value_json FROM match_state_records_canonical WHERE match_id = ? AND player_id = ?",
         matchId,
         playerId,
       )
@@ -232,7 +242,7 @@ export class MatchStateStore {
   private claim(matchId: string): RetainedTimerClaim {
     const [row] = this.storage.sql
       .exec<{ value_json: string }>(
-        "SELECT value_json FROM match_state_claims WHERE match_id = ?",
+        "SELECT value_json FROM match_state_claims_canonical WHERE match_id = ?",
         matchId,
       )
       .toArray();
@@ -242,7 +252,7 @@ export class MatchStateStore {
   private revision(matchId: string): number {
     const [row] = this.storage.sql
       .exec<{ revision: number }>(
-        "SELECT revision FROM match_state_revisions WHERE match_id = ?",
+        "SELECT revision FROM match_state_revisions_canonical WHERE match_id = ?",
         matchId,
       )
       .toArray();
@@ -254,7 +264,7 @@ export class MatchStateStore {
       fail("match-state-revision-exhausted");
     }
     this.storage.sql.exec(
-      "INSERT INTO match_state_revisions(match_id, revision) VALUES (?, 1) ON CONFLICT(match_id) DO UPDATE SET revision = revision + 1",
+      "INSERT INTO match_state_revisions_canonical(match_id, revision) VALUES (?, 1) ON CONFLICT(match_id) DO UPDATE SET revision = revision + 1",
       matchId,
     );
   }
@@ -265,7 +275,7 @@ export class MatchStateStore {
     value: MatchDocument,
   ): void {
     this.storage.sql.exec(
-      "INSERT INTO match_state_records(match_id, player_id, value_json) VALUES (?, ?, ?) ON CONFLICT(match_id, player_id) DO UPDATE SET value_json = excluded.value_json",
+      "INSERT INTO match_state_records_canonical(match_id, player_id, value_json) VALUES (?, ?, ?) ON CONFLICT(match_id, player_id) DO UPDATE SET value_json = excluded.value_json",
       matchId,
       playerId,
       canonicalMatchStateJson(value),
@@ -274,7 +284,7 @@ export class MatchStateStore {
 
   private putClaim(matchId: string, value: TimerClaimDocument): void {
     this.storage.sql.exec(
-      "INSERT INTO match_state_claims(match_id, value_json) VALUES (?, ?) ON CONFLICT(match_id) DO UPDATE SET value_json = excluded.value_json",
+      "INSERT INTO match_state_claims_canonical(match_id, value_json) VALUES (?, ?) ON CONFLICT(match_id) DO UPDATE SET value_json = excluded.value_json",
       matchId,
       canonicalMatchStateJson(value),
     );
@@ -299,7 +309,7 @@ export class MatchStateStore {
       this.target({ ...request, inviteId: input.inviteId, epoch: input.epoch });
     const rows = this.storage.sql
       .exec<{ match_id: string; player_id: string; value_json: string }>(
-        `SELECT match_id, player_id, value_json FROM match_state_records WHERE ${input.requests.map(() => "(match_id = ? AND player_id = ?)").join(" OR ")}`,
+        `SELECT match_id, player_id, value_json FROM match_state_records_canonical WHERE ${input.requests.map(() => "(match_id = ? AND player_id = ?)").join(" OR ")}`,
         ...input.requests.flatMap(({ matchId, playerId }) => [
           matchId,
           playerId,
@@ -377,7 +387,7 @@ export class MatchStateStore {
     const source = this.identity(input);
     if (source.status === "empty") {
       this.storage.sql.exec(
-        "INSERT INTO match_state_source(singleton, invite_id, active_epoch) VALUES (1, ?, ?)",
+        "INSERT INTO match_state_source_canonical(singleton, invite_id, active_epoch) VALUES (1, ?, ?)",
         input.inviteId,
         input.epoch,
       );
@@ -397,10 +407,7 @@ export class MatchStateStore {
       if (!creationDocument)
         throw new TypeError("match-state-invalid-creation");
       if (!timerCohorts.has(creation.matchId)) {
-        this.localTimers.initializeFresh(
-          creation.matchId,
-          this.newMatchTimerStorage,
-        );
+        this.localTimers.initializeFresh(creation.matchId);
         timerCohorts.add(creation.matchId);
       }
       const current = this.record(creation.matchId, creation.playerId);
@@ -432,10 +439,18 @@ export class MatchStateStore {
   }
 
   createRecords(input: MatchStateCreateWireRequest): MatchStateCreateResult {
+    this.options.assertTimerWriter?.();
     if (!Array.isArray(input.records) || input.records.length === 0) {
       throw new TypeError("match-state-empty-creation");
     }
-    return this.storage.transactionSync(() => this.create(input));
+    return this.storage.transactionSync(() =>
+      this.committed(this.create(input)),
+    );
+  }
+
+  private committed<T>(result: T): T {
+    this.options.recordTimerWriterOutcome?.(result);
+    return result;
   }
 
   private assertUnfenced(
@@ -453,6 +468,7 @@ export class MatchStateStore {
   }
 
   move(input: MatchStateMoveRequest): SubmitMoveResponse {
+    this.options.assertTimerWriter?.();
     const { epoch, ...request } = input;
     validEpoch(epoch);
     if (!isSubmitMoveRequest(request)) {
@@ -476,17 +492,20 @@ export class MatchStateStore {
         matchId: input.matchId,
         actorUid: input.playerId,
       };
-      return decision.outcome === "superseded"
-        ? {
-            ...base,
-            outcome: "superseded",
-            ...supersededMatchPosition(decision.value),
-          }
-        : { ...base, outcome: decision.outcome };
+      return this.committed<SubmitMoveResponse>(
+        decision.outcome === "superseded"
+          ? {
+              ...base,
+              outcome: "superseded",
+              ...supersededMatchPosition(decision.value),
+            }
+          : { ...base, outcome: decision.outcome },
+      );
     });
   }
 
   surrender(input: MatchStateSurrenderRequest): SurrenderMatchResponse {
+    this.options.assertTimerWriter?.();
     const { epoch, ...request } = input;
     validEpoch(epoch);
     if (!isSurrenderMatchRequest(request)) {
@@ -509,12 +528,12 @@ export class MatchStateStore {
         );
         this.bump(input.matchId);
       }
-      return {
+      return this.committed<SurrenderMatchResponse>({
         ok: true,
         inviteId: input.inviteId,
         matchId: input.matchId,
         actorUid: input.playerId,
-      };
+      });
     });
   }
 
@@ -549,70 +568,46 @@ export class MatchStateStore {
     return this.resolveTimerPair(this.timerSnapshot(input));
   }
 
+  private retiredTimer(
+    input: MatchStateStartTimerRequest,
+    timer: MatchTimerRecord["timer"],
+  ): boolean {
+    const parsed = parseStrictMatchTimer(timer);
+    return (
+      parsed !== null &&
+      (this.options.retiredTimer ?? isRetiredOrphanTimer)({
+        inviteId: input.inviteId,
+        matchId: input.matchId,
+        playerId: input.playerId,
+        opponentId: input.opponentId,
+        turnNumber: parsed.turnNumber,
+        deadlineAtMs: parsed.deadlineAtMs,
+      })
+    );
+  }
+
+  private assertTimerNotRetired(
+    input: MatchStateStartTimerRequest,
+    timer: MatchTimerRecord["timer"],
+  ): void {
+    if (this.retiredTimer(input, timer)) fail("match-timer-retired");
+  }
+
   async startTimer(
     input: MatchStateStartTimerRequest,
   ): Promise<StartMatchTimerResponse> {
-    const snapshot = this.timerSnapshot(input);
-    if (this.localTimers.mode(input.matchId) === "local")
-      return this.storage.transactionSync(() => this.startLocalTimer(input));
-    if (
-      rawMatchTimerIsTerminal(snapshot.playerMatch) ||
-      rawMatchTimerIsTerminal(snapshot.opponentMatch)
-    ) {
-      await this.options.timerStarts.deletePair(
-        input.playerId,
-        input.opponentId,
-        input.matchId,
-      );
-      fail("game is already over.");
-    }
-    const initial = this.resolveTimerPair(snapshot);
-    if (timerTerminal(initial)) {
-      await this.options.timerStarts.deletePair(
-        input.playerId,
-        input.opponentId,
-        input.matchId,
-      );
-      fail("game is already over.");
-    }
-    const prepared = prepareMatchStateTimerStart(initial);
-    const nowMs = this.now();
-    validTimestamp(nowMs);
-    const marker = await this.options.timerStarts.getOrAdvance(
-      input.playerId,
-      input.opponentId,
-      input.matchId,
-      buildMatchStateTimerStartCandidate(prepared, nowMs),
-      nowMs,
-    );
-    let terminal = false;
-    try {
-      return this.storage.transactionSync(() => {
-        const freshSnapshot = this.timerSnapshot(input);
-        terminal =
-          rawMatchTimerIsTerminal(freshSnapshot.playerMatch) ||
-          rawMatchTimerIsTerminal(freshSnapshot.opponentMatch);
-        if (terminal) fail("game is already over.");
-        const fresh = this.resolveTimerPair(freshSnapshot);
-        terminal = timerTerminal(fresh);
-        return this.commitTimerStart(input, initial, fresh, marker);
-      });
-    } catch (error) {
-      if (terminal) {
-        await this.options.timerStarts.deletePair(
-          input.playerId,
-          input.opponentId,
-          input.matchId,
-        );
-      }
-      throw error;
-    }
+    this.options.assertTimerWriter?.();
+    return this.storage.transactionSync(() => this.startLocalTimer(input));
   }
 
   private startLocalTimer(
     input: MatchStateStartTimerRequest,
   ): StartMatchTimerResponse {
     const snapshot = this.timerSnapshot(input);
+    if (this.localTimers.mode(input.matchId) !== "local")
+      unavailable("match-timer-cohort-missing");
+    const currentTimer = parseMatchTimerRecord(snapshot.playerMatch);
+    if (currentTimer) this.assertTimerNotRetired(input, currentTimer.timer);
     if (
       rawMatchTimerIsTerminal(snapshot.playerMatch) ||
       rawMatchTimerIsTerminal(snapshot.opponentMatch)
@@ -622,17 +617,20 @@ export class MatchStateStore {
     const prepared = prepareMatchStateTimerStart(current);
     const nowMs = this.now();
     validTimestamp(nowMs);
+    const candidate = buildMatchStateTimerStartCandidate(prepared, nowMs);
+    this.assertTimerNotRetired(input, candidate.timer);
     const marker = this.localTimers.getOrAdvance(
       input.matchId,
       input.playerId,
       input.opponentId,
-      buildMatchStateTimerStartCandidate(prepared, nowMs),
+      candidate,
       nowMs,
     );
+    this.assertTimerNotRetired(input, marker.timer);
     if (
       prepared.existingTimer !== null &&
       marker.turnNumber === prepared.turnNumber &&
-      marker.timer !== prepared.existingTimer
+      !matchTimersEqual(marker.timer, prepared.existingTimer)
     )
       unavailable("match-timer-storage-conflict");
     return this.commitTimerStart(input, current, current, marker);
@@ -644,65 +642,61 @@ export class MatchStateStore {
     fresh: TimerPair,
     marker: MatchTimerStartCandidate,
   ): StartMatchTimerResponse {
+    this.assertTimerNotRetired(input, marker.timer);
+    if (
+      canonicalMatchStateJson(fresh.player.timer) !==
+        canonicalMatchStateJson(marker.timer) &&
+      (fresh.pair.revision !== initial.pair.revision ||
+        canonicalMatchStateJson(fresh.player.timer) !==
+          canonicalMatchStateJson(initial.player.timer))
+    )
+      fail("game state changed.");
     const decision = decideMatchStateTimerStartCommit(initial, fresh, marker);
     if (decision.changed) {
       this.putRecord(input.matchId, input.playerId, decision.playerMatch);
       this.bump(input.matchId);
     }
-    return {
+    return this.committed<StartMatchTimerResponse>({
       ok: true,
       timer: decision.timer,
       duration: MATCH_TIMER_DURATION_MS,
-    };
+    });
   }
 
   private async ensureAlarm(
     atMs: number,
     transaction: DurableObjectTransaction,
   ): Promise<void> {
-    if (this.options.scheduleAlarm)
-      return this.options.scheduleAlarm(atMs, transaction);
+    this.options.assertTimerWriter?.();
+    if (this.options.scheduleAlarm) {
+      await this.options.scheduleAlarm(atMs, transaction);
+      this.options.assertTimerWriter?.();
+      return;
+    }
     const alarm = await transaction.getAlarm();
-    if (alarm === null || alarm > atMs) await transaction.setAlarm(atMs);
-  }
-
-  async cleanupLegacyTimerStarts(
-    input: Pick<
-      MatchStateStartTimerRequest,
-      "matchId" | "playerId" | "opponentId"
-    >,
-  ): Promise<void> {
-    if (this.localTimers.mode(input.matchId) === "local") return;
-    await this.options.timerStarts.deletePair(
-      input.playerId,
-      input.opponentId,
-      input.matchId,
-    );
-  }
-
-  async cleanupRetainedTimerStarts(
-    input: RetainedTimerCleanupInput,
-  ): Promise<void> {
-    if (this.localTimers.modeForRetainedCleanup(input) === "local") return;
-    await this.options.timerStarts.deleteRetainedPair(input);
+    this.options.assertTimerWriter?.();
+    if (alarm === null || alarm > atMs) {
+      await transaction.setAlarm(atMs);
+      this.options.assertTimerWriter?.();
+    }
   }
 
   async claimTimer(
     input: MatchStateClaimTimerRequest,
   ): Promise<ClaimMatchVictoryByTimerResponse> {
+    this.options.assertTimerWriter?.();
     if (input.eventId !== undefined && input.eventId !== null)
       validKey(input.eventId);
     const { eventId, ...timerRequest } = input;
     if (eventId !== undefined && eventId !== null) validKey(eventId);
     const snapshot = this.timerSnapshot(timerRequest);
-    if (
-      rawMatchTimerIsTerminal(snapshot.playerMatch) ||
-      rawMatchTimerIsTerminal(snapshot.opponentMatch)
-    ) {
-      await this.cleanupLegacyTimerStarts(input);
-    }
+    const currentTimer = parseMatchTimerRecord(snapshot.playerMatch);
+    if (currentTimer)
+      this.assertTimerNotRetired(timerRequest, currentTimer.timer);
     return this.storage.transaction(async (transaction) => {
+      this.options.assertTimerWriter?.();
       const current = this.timerPair(timerRequest);
+      this.assertTimerNotRetired(timerRequest, current.player.timer);
       const nowMs = this.now();
       validTimestamp(nowMs);
       const decision = decideMatchStateTimerClaim(current, input, nowMs);
@@ -713,19 +707,22 @@ export class MatchStateStore {
       }
       const due = this.effects.insertTimerClaim(input, decision.claimedAtMs);
       if (due !== null) await this.ensureAlarm(due, transaction);
-      return { ok: true };
+      return this.committed<ClaimMatchVictoryByTimerResponse>({ ok: true });
     });
   }
 
-  applyEventEffects(
-    input: MatchStateEventEffectsWireRequest,
-  ): MatchStateCreateResult {
-    validKey(input.operationId);
+  async applyEventEffects(
+    value: MatchStateEventEffectsWireRequest,
+  ): Promise<MatchStateCreateResult> {
+    this.options.assertTimerWriter?.();
+    const input = parseMatchStateEventEffects(value);
     const payloadJson = canonicalMatchStateJson(input);
+    const operationDigest = await sha256Hex(payloadJson);
+    this.options.assertTimerWriter?.();
     return this.storage.transactionSync(() => {
       const [receipt] = this.storage.sql
         .exec<{ payload_json: string }>(
-          "SELECT payload_json FROM match_state_event_receipts WHERE operation_id = ?",
+          "SELECT payload_json FROM match_state_event_receipts_canonical WHERE operation_id = ?",
           input.operationId,
         )
         .toArray();
@@ -733,7 +730,10 @@ export class MatchStateStore {
         this.authority(input);
         if (receipt.payload_json !== payloadJson)
           fail("match-state-event-effect-conflict");
-        return { records: [], changedMatchIds: [] };
+        return this.committed<MatchStateCreateResult>({
+          records: [],
+          changedMatchIds: [],
+        });
       }
       const created = input.creations?.length
         ? this.create({ ...input, records: input.creations })
@@ -790,11 +790,15 @@ export class MatchStateStore {
         changed.add(effect.matchId);
       }
       this.storage.sql.exec(
-        "INSERT INTO match_state_event_receipts(operation_id, payload_json) VALUES (?, ?)",
+        "INSERT INTO match_state_event_receipts_canonical(operation_id, payload_json, operation_digest) VALUES (?, ?, ?)",
         input.operationId,
         payloadJson,
+        operationDigest,
       );
-      return { records: created.records, changedMatchIds: [...changed] };
+      return this.committed<MatchStateCreateResult>({
+        records: created.records,
+        changedMatchIds: [...changed],
+      });
     });
   }
 }

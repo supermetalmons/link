@@ -27,15 +27,23 @@ const identity = { profileId: "profile", displayName: "Verified name" };
 function harness({ hidden = false } = {}) {
   let nextId = 0;
   let current = true;
+  /** @type {Map<number, () => void>} */
   const frames = new Map();
+  /** @type {Map<number, () => void>} */
   const tasks = new Map();
+  /** @type {Set<() => void>} */
   const listeners = new Set();
+  /** @type {unknown[]} */
   const errors = [];
+  /**
+   * @type {string[]}
+   */
   const writes = [];
   const values = new Map([
     ["background", "cached-background"],
     ["subtitle", "cached-subtitle"],
   ]);
+  /** @param {Map<number, () => void>} callbacks */
   const run = (callbacks) => {
     const pending = [...callbacks.values()];
     callbacks.clear();
@@ -75,6 +83,7 @@ function harness({ hidden = false } = {}) {
     writes,
     values,
     fields,
+    /** @param {Parameters<typeof scheduler.queue>[3]} [nextFields] */
     queue: (nextFields = fields) =>
       scheduler.queue(
         scheduler.beginApplication(),
@@ -87,7 +96,7 @@ function harness({ hidden = false } = {}) {
     invalidate: () => {
       current = false;
     },
-    setHidden: (value) => {
+    setHidden: (/** @type {boolean} */ value) => {
       hidden = value;
       [...listeners].forEach((listener) => listener());
     },
@@ -293,15 +302,32 @@ test("reports read and write failures independently while tolerating browser quo
 test("opening an own profile card flushes pending fields before the card reads them", async () => {
   const originalDocument = globalThis.document;
   const originalWindow = globalThis.window;
-  globalThis.document = {
-    visibilityState: "visible",
-    addEventListener: () => {},
-    removeEventListener: () => {},
-  };
-  globalThis.window = {};
+  Object.defineProperty(globalThis, "document", {
+    configurable: true,
+    writable: true,
+    value: {
+      visibilityState: "visible",
+      addEventListener: () => {},
+      removeEventListener: () => {},
+    },
+  });
+  Object.defineProperty(globalThis, "window", {
+    configurable: true,
+    writable: true,
+    value: {},
+  });
   let value = "cached";
+  /** @type {[boolean, string][]} */
   const shown = [];
   const unbind = bindShinyCardUi({
+    hide() {},
+    updateDisplayName() {},
+    getActiveInventoryItemSelection: () => ({
+      avatarId: null,
+      specialIds: new Set(),
+    }),
+    setOwnershipVerifiedSpecialItem() {},
+    setOwnershipVerifiedIdCardEmoji() {},
     show: async (_profile, _name, isOtherPlayer) => {
       shown.push([isOtherPlayer, value]);
     },
@@ -329,9 +355,11 @@ test("opening an own profile card flushes pending fields before the card reads t
   } finally {
     beginVerifiedProfileApplication();
     unbind();
-    if (originalDocument === undefined) delete globalThis.document;
+    if (originalDocument === undefined)
+      Reflect.deleteProperty(globalThis, "document");
     else globalThis.document = originalDocument;
-    if (originalWindow === undefined) delete globalThis.window;
+    if (originalWindow === undefined)
+      Reflect.deleteProperty(globalThis, "window");
     else globalThis.window = originalWindow;
   }
 });

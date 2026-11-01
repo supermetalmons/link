@@ -3,6 +3,10 @@
 const assert = require("node:assert/strict");
 const test = require("node:test");
 const {
+  event: eventFixture,
+  participant: participantFixture,
+} = require("./fixtures/canonicalEvents");
+const {
   createEventBracketRuntime,
   createEmptyEventMatch,
   setMatchSlotParticipant,
@@ -17,15 +21,15 @@ const nowMs = 1_000;
 const participants = Object.fromEntries(
   ["p1", "p2", "p3", "p4"].map((profileId, index) => [
     profileId,
-    {
+    participantFixture(profileId, {
       profileId,
       loginUid: `${profileId}-login`,
       displayName: profileId.toUpperCase(),
       emojiId: index,
-      aura: null,
+      aura: "none",
       joinedAtMs: index,
       state: "active",
-    },
+    }),
   ]),
 );
 const ownershipSnapshot = {
@@ -44,8 +48,10 @@ const ownershipSnapshot = {
   profileById: new Map(),
 };
 
+/** @param {string} key @param {string} host @param {string} guest @returns {import("../runtime/shared/events").EventMatchRecord} */
 function completedMatch(key, host, guest) {
   const match = createEmptyEventMatch(key);
+  assert.ok(participants[host] && participants[guest]);
   setMatchSlotParticipant(match, "host", participants[host]);
   setMatchSlotParticipant(match, "guest", participants[guest]);
   return {
@@ -58,8 +64,9 @@ function completedMatch(key, host, guest) {
   };
 }
 
+/** @param {"active" | "ended"} status */
 function semifinalEvent(status) {
-  return {
+  return eventFixture({
     eventId: "event-sync",
     status,
     currentRoundIndex: 0,
@@ -71,22 +78,28 @@ function semifinalEvent(status) {
     thirdPlaceMatch: createEmptyEventMatch("third_place"),
     rounds: {
       0: {
-        status: "active",
-        completedAtMs: null,
+        status: "completed",
+        completedAtMs: 500,
         matches: {
           "0_0": completedMatch("0_0", "p1", "p2"),
           "0_1": completedMatch("0_1", "p3", "p4"),
         },
       },
       1: {
-        status: "upcoming",
-        completedAtMs: null,
-        matches: { "1_0": createEmptyEventMatch("1_0") },
+        status: status === "ended" ? "completed" : "upcoming",
+        completedAtMs: status === "ended" ? 500 : null,
+        matches: {
+          "1_0":
+            status === "ended"
+              ? completedMatch("1_0", "p1", "p3")
+              : createEmptyEventMatch("1_0"),
+        },
       },
     },
-  };
+  });
 }
 
+/** @param {import("../runtime/events/bracket").EventBracketDependencies} [overrides] */
 function runtime(overrides = {}) {
   return createEventBracketRuntime({
     state: {
@@ -100,6 +113,7 @@ function runtime(overrides = {}) {
   });
 }
 
+/** @param {import("../runtime/shared/events").EventRecord} event */
 function input(event) {
   return {
     eventId: event.eventId,
@@ -127,7 +141,10 @@ test("active plans prepare final and third-place invites without replacing proje
   assert.equal(seeds, 2);
   assert.equal(plan.didChange, true);
   assert.deepEqual(
-    commands.map((command) => command.field ?? command.kind),
+    commands.map(
+      (command) =>
+        ("field" in command ? command.field : undefined) ?? command.kind,
+    ),
     [
       "currentRoundIndex",
       "thirdPlaceMatch",
@@ -144,8 +161,11 @@ test("active plans prepare final and third-place invites without replacing proje
   );
   const rounds = getEventField(commands, event.eventId, "rounds");
   const thirdPlace = getEventField(commands, event.eventId, "thirdPlaceMatch");
+  assert.ok(rounds?.[1]?.matches["1_0"]);
+  assert.ok(thirdPlace);
   assert.equal(rounds[1].matches["1_0"].status, "pending");
   assert.equal(thirdPlace.status, "pending");
+  assert.ok(thirdPlace);
   assert.equal(thirdPlace.hostProfileId, "p2");
   assert.equal(thirdPlace.guestProfileId, "p4");
   assert.equal(plan.eventForProjection, event);
@@ -162,7 +182,9 @@ test("ended repair fills third-place slots without creating invites or changing 
   const plan = await buildEndedEventSyncPlan(input(event), runtime());
   assert.equal(plan.didChange, true);
   assert.deepEqual(
-    plan.updates.map((command) => command.field),
+    plan.updates.map((command) =>
+      "field" in command ? command.field : undefined,
+    ),
     ["rounds", "thirdPlaceMatch", "updatedAtMs"],
   );
   const thirdPlace = getEventField(
@@ -170,6 +192,7 @@ test("ended repair fills third-place slots without creating invites or changing 
     event.eventId,
     "thirdPlaceMatch",
   );
+  assert.ok(thirdPlace);
   assert.equal(thirdPlace.hostProfileId, "p2");
   assert.equal(thirdPlace.guestProfileId, "p4");
   assert.equal(thirdPlace.inviteId, null);
@@ -182,9 +205,10 @@ test("ended repair fills third-place slots without creating invites or changing 
   assert.deepEqual(event, original);
 });
 
+/** @param {string} inviteId @returns {Partial<import("../runtime/shared/events").EventMatchFields>} */
 function pendingMatch(inviteId) {
   return {
-    status: "active",
+    status: "pending",
     inviteId,
     hostLoginUid: "p1-login",
     guestLoginUid: "p2-login",
@@ -193,13 +217,17 @@ function pendingMatch(inviteId) {
   };
 }
 
-for (const [status, buildPlan] of [
+for (const [
+  status,
+  buildPlan,
+] of /** @type {["active" | "ended", typeof buildActiveEventSyncPlan][]} */ ([
   ["active", buildActiveEventSyncPlan],
   ["ended", buildEndedEventSyncPlan],
-]) {
+])) {
   test(`${status} plans read rounds in order before the separate third-place match`, async () => {
+    /** @type {string[][]} */
     const calls = [];
-    const event = {
+    const event = eventFixture({
       eventId: "event-sync",
       status,
       participants: {},
@@ -214,7 +242,7 @@ for (const [status, buildPlan] of [
         },
       },
       thirdPlaceMatch: pendingMatch("third"),
-    };
+    });
     await buildPlan(
       input(event),
       runtime({
@@ -237,12 +265,12 @@ for (const [status, buildPlan] of [
 
   test(`${status} planner stops on a failed round read before third-place work`, async () => {
     const failure = new Error("match-state-source-changed");
-    const event = {
+    const event = eventFixture({
       eventId: "event-sync",
       status,
       rounds: { 0: { matches: { "0_0": pendingMatch("final") } } },
       thirdPlaceMatch: pendingMatch("third"),
-    };
+    });
     const original = structuredClone(event);
     await assert.rejects(
       buildPlan(
@@ -259,8 +287,10 @@ for (const [status, buildPlan] of [
   });
 }
 
+/** @param {"active" | "ended"} status @param {string} [eventId] */
 function finalEvent(status, eventId = "NN3eRzoZo80") {
-  return {
+  assert.ok(participants.p1 && participants.p2);
+  return eventFixture({
     eventId,
     status,
     currentRoundIndex: 0,
@@ -277,7 +307,7 @@ function finalEvent(status, eventId = "NN3eRzoZo80") {
         matches: { "0_0": completedMatch("0_0", "p1", "p2") },
       },
     },
-  };
+  });
 }
 
 test("active completion keeps the projection event mutations distinct from its planned nested records", async () => {
@@ -296,9 +326,11 @@ test("active completion keeps the projection event mutations distinct from its p
     getEventField(plan.updates, event.eventId, "participants"),
     event.participants,
   );
-  assert.equal(Object.hasOwn(event, "thirdPlaceMatch"), false);
+  assert.equal(event.thirdPlaceMatch, null);
   assert.equal(
-    plan.updates.some((command) => command.field === "thirdPlaceMatch"),
+    plan.updates.some(
+      (command) => "field" in command && command.field === "thirdPlaceMatch",
+    ),
     false,
   );
 });
@@ -308,9 +340,12 @@ test("ended prize repair plans assignments without mutating its projection event
   const original = structuredClone(event);
   const plan = await buildEndedEventSyncPlan(input(event), runtime());
   assert.deepEqual(
-    plan.updates.map((command) => command.field),
+    plan.updates.map((command) =>
+      "field" in command ? command.field : undefined,
+    ),
     ["prizeSelectionsLockedAtMs", "prizeAssignments", "updatedAtMs"],
   );
+  assert.ok(plan.prizeAssignmentsForProjection?.[1]);
   assert.equal(plan.prizeAssignmentsForProjection[1].assignedAtMs, 500);
   assert.equal(plan.prizeAssignmentsForProjection[1].prizeId, "1514");
   assert.equal(plan.eventForProjection, event);
@@ -320,6 +355,7 @@ test("ended prize repair plans assignments without mutating its projection event
 test("ended plans return stored assignments for projection without a canonical write", async () => {
   const event = finalEvent("ended");
   const initial = await buildEndedEventSyncPlan(input(event), runtime());
+  assert.ok(initial.prizeAssignmentsForProjection);
   event.prizeAssignments = initial.prizeAssignmentsForProjection;
   event.prizeSelectionsLockedAtMs = 500;
   const plan = await buildEndedEventSyncPlan(input(event), runtime());

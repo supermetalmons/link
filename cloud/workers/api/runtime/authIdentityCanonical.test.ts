@@ -1,5 +1,5 @@
-import { materializeProfileCompatibility as materializeCanonicalProfile } from "../test/profileDataBoundaryFixture.ts";
-import { profileLegacyFixture } from "../test/profileDataBoundaryFixture.ts";
+import { getProfileFallbackEmojiId } from "@mons/shared/profiles";
+import { materializeProfileFixture as materializeCanonicalProfile } from "../test/profileDataBoundaryFixture.ts";
 import { env } from "cloudflare:workers";
 import type { D1Migration } from "cloudflare:test";
 import { USERNAME_MAX_LENGTH } from "@mons/shared/usernames";
@@ -54,22 +54,6 @@ const d1Env = new Proxy(testBindings, {
     return Reflect.get(target, property, receiver);
   },
 });
-
-async function readMergeSourceArchive(
-  sourceProfileId: string,
-): Promise<Record<string, unknown> | null> {
-  const row = await testBindings.PROFILE_DB.prepare(
-    `SELECT source_legacy_fields_json
-     FROM profile_merge_targets WHERE source_profile_id = ?`,
-  )
-    .bind(sourceProfileId)
-    .first<{ source_legacy_fields_json: string }>();
-  if (!row) return null;
-  const value = JSON.parse(row.source_legacy_fields_json) as unknown;
-  return value && typeof value === "object" && !Array.isArray(value)
-    ? (value as Record<string, unknown>)
-    : null;
-}
 
 function aroundMatchingBatch(
   database: D1Database,
@@ -215,37 +199,35 @@ function observeBatchSizes(database: D1Database, sizes: number[]): D1Database {
 
 async function resetCanonicalRows(db: D1Database): Promise<void> {
   await db.batch([
-    db.prepare("DELETE FROM rating_updates"),
-    db.prepare("DELETE FROM profile_auth_operations"),
+    db.prepare("DELETE FROM rating_updates_canonical"),
+    db.prepare("DELETE FROM profile_auth_operations_canonical"),
     db.prepare("DELETE FROM profile_auth_method_revocations"),
     db.prepare("DELETE FROM profile_auth_method_cooldowns"),
-    db.prepare("DROP TRIGGER profile_merge_targets_reject_delete"),
-    db.prepare("DROP TRIGGER wager_settlements_reject_delete"),
-    db.prepare("DROP TRIGGER profile_records_reject_active_delete"),
-    db.prepare("DELETE FROM profile_merge_targets"),
-    db.prepare("DELETE FROM wager_settlements"),
-    db.prepare("DELETE FROM profile_records"),
+    db.prepare("DROP TRIGGER profile_merge_targets_reject_delete_canonical"),
+    db.prepare("DROP TRIGGER wager_settlements_reject_delete_canonical"),
+    db.prepare("DROP TRIGGER profile_records_reject_active_delete_canonical"),
+    db.prepare("DELETE FROM profile_merge_targets_canonical"),
+    db.prepare("DELETE FROM wager_settlements_canonical"),
+    db.prepare("DELETE FROM profile_records_canonical"),
     db.prepare(
-      `CREATE TRIGGER profile_merge_targets_reject_delete
-       BEFORE DELETE ON profile_merge_targets
+      `CREATE TRIGGER profile_merge_targets_reject_delete_canonical
+       BEFORE DELETE ON profile_merge_targets_canonical
        BEGIN
          SELECT RAISE(ABORT, 'profile merge mappings are permanent');
        END`,
     ),
     db.prepare(
-      `CREATE TRIGGER wager_settlements_reject_delete
-       BEFORE DELETE ON wager_settlements
+      `CREATE TRIGGER wager_settlements_reject_delete_canonical
+       BEFORE DELETE ON wager_settlements_canonical
        BEGIN
          SELECT RAISE(ABORT, 'wager settlements are permanent');
        END`,
     ),
     db.prepare(
-      `CREATE TRIGGER profile_records_reject_active_delete
-       BEFORE DELETE ON profile_records
+      `CREATE TRIGGER profile_records_reject_active_delete_canonical
+       BEFORE DELETE ON profile_records_canonical
        WHEN OLD.state = 'active'
-       AND (
-         SELECT state FROM profile_canonical_control WHERE singleton = 1
-       ) != 'importing'
+
        BEGIN
          SELECT RAISE(ABORT, 'active profiles cannot be deleted');
        END`,
@@ -291,6 +273,11 @@ describe("canonical auth and profile runtime", () => {
       testBindings.TEST_PROFILE_D1_MIGRATIONS,
       "b".repeat(64),
     );
+    expect(
+      await testBindings.PROFILE_DB.prepare(
+        "SELECT name FROM sqlite_schema WHERE name = 'profile_records'",
+      ).first(),
+    ).toBeNull();
   });
 
   beforeEach(async () => {
@@ -319,7 +306,7 @@ describe("canonical auth and profile runtime", () => {
       normalizedMethodValue: "0x7777777777777777777777777777777777777777",
       intentId: "retired-profile-copy-intent",
       requestEmoji: 4,
-      requestAura: null,
+      requestAura: "none",
       opId: "retired-profile-copy-operation",
     });
     const store = createProfileLinkCatchupStore(testBindings.PROFILE_DB);
@@ -426,7 +413,6 @@ describe("canonical auth and profile runtime", () => {
             profile: sparseSnapshot.profile,
             state: sparseSnapshot.state,
             mergedIntoProfileId: sparseSnapshot.mergedIntoProfileId,
-            legacyFields: sparseSnapshot.legacyFields,
             createdAtMs: sparseSnapshot.createdAtMs,
             updatedAtMs: 1_500,
             mergedAtMs: sparseSnapshot.mergedAtMs,
@@ -442,7 +428,7 @@ describe("canonical auth and profile runtime", () => {
             },
             winPresent: false,
             emojiPresent: false,
-            gameplayEmoji: "",
+            gameplayEmoji: 0,
           }),
         },
       ],
@@ -456,7 +442,7 @@ describe("canonical auth and profile runtime", () => {
       rating: null,
       nonce: null,
       totalManaPoints: null,
-      emoji: 1,
+      emoji: getProfileFallbackEmojiId(first.profileId),
     });
     expect(
       await readCanonicalProfile(testBindings.PROFILE_DB, first.profileId),
@@ -469,7 +455,7 @@ describe("canonical auth and profile runtime", () => {
     await expect(
       createProfileCustomizationRepository(d1Env).updateCustomization(
         ethInput.uid,
-        { field: "emojiAndAura", value: { emoji: 9, aura: "" } },
+        { field: "emojiAndAura", value: { emoji: 9, aura: "none" } },
         async () => undefined,
       ),
     ).resolves.toBe("updated");
@@ -537,7 +523,7 @@ describe("canonical auth and profile runtime", () => {
       normalizedMethodValue: "provider-timestamp-apple",
       intentId: "provider-timestamp-intent-1",
       requestEmoji: 6,
-      requestAura: null,
+      requestAura: "none",
       opId: "provider-timestamp-operation-1",
     };
     const linked = await service.linkVerifiedMethod(input);
@@ -614,7 +600,7 @@ describe("canonical auth and profile runtime", () => {
       normalizedMethodValue: eth,
       intentId: "normalized-auth-response-eth-intent",
       requestEmoji: 4,
-      requestAura: null,
+      requestAura: "none",
       opId: "normalized-auth-response-eth-operation",
     });
     nowMs += 1;
@@ -625,7 +611,7 @@ describe("canonical auth and profile runtime", () => {
       normalizedMethodValue: sol,
       intentId: "normalized-auth-response-sol-intent",
       requestEmoji: 4,
-      requestAura: null,
+      requestAura: "none",
       opId: "normalized-auth-response-sol-operation",
     });
     const snapshot = await readCanonicalProfile(
@@ -647,15 +633,14 @@ describe("canonical auth and profile runtime", () => {
           value: materializeCanonicalProfile({
             profile: {
               ...snapshot.profile,
-              username: "  CanonicalName  ",
-              eth: `  0x${"A".repeat(40)}  `,
-              sol: `  ${sol}  `,
-              aura: "  rainbow  ",
-              profileCounter: "  gp  ",
+              username: "CanonicalName",
+              eth: `0x${"A".repeat(40)}`,
+              sol,
+              aura: "rainbow",
+              profileCounter: "gp",
             },
             state: snapshot.state,
             mergedIntoProfileId: snapshot.mergedIntoProfileId,
-            legacyFields: snapshot.legacyFields,
             createdAtMs: snapshot.createdAtMs,
             updatedAtMs: nowMs,
             mergedAtMs: snapshot.mergedAtMs,
@@ -699,7 +684,7 @@ describe("canonical auth and profile runtime", () => {
       normalizedMethodValue: xUserId,
       intentId: "successful-replay-source-intent",
       requestEmoji: 4,
-      requestAura: null,
+      requestAura: "none",
       opId: "successful-replay-source-operation",
       xUsername: "ReplaySource",
     });
@@ -711,7 +696,7 @@ describe("canonical auth and profile runtime", () => {
       normalizedMethodValue: "0x7777777777777777777777777777777777777777",
       intentId: "successful-replay-target-intent",
       requestEmoji: 4,
-      requestAura: null,
+      requestAura: "none",
       opId: "successful-replay-target-operation",
     });
     nowMs += 60_001;
@@ -729,7 +714,7 @@ describe("canonical auth and profile runtime", () => {
         normalizedMethodValue: xUserId,
         intentId: "successful-replay-merge-intent",
         requestEmoji: 4,
-        requestAura: null,
+        requestAura: "none",
         opId: "successful-replay-merge-operation",
         xUsername: "ReplaySource",
       }),
@@ -770,7 +755,7 @@ describe("canonical auth and profile runtime", () => {
       normalizedMethodValue: "successful-username-replay-x-user",
       intentId: "successful-username-replay-intent",
       requestEmoji: 4,
-      requestAura: null,
+      requestAura: "none",
       opId,
       xUsername: "ReplayHandle",
     });
@@ -812,7 +797,7 @@ describe("canonical auth and profile runtime", () => {
         normalizedMethodValue: xUserId,
         intentId: `${kind}-social-username-intent`,
         requestEmoji: 4,
-        requestAura: null,
+        requestAura: "none",
         opId,
         xUsername: "SocialReplay",
       });
@@ -849,7 +834,7 @@ describe("canonical auth and profile runtime", () => {
       normalizedMethodValue: "overlong-x-username-user",
       intentId: "overlong-x-username-intent",
       requestEmoji: 4,
-      requestAura: null,
+      requestAura: "none",
       opId: "overlong-x-username-operation",
       xUsername: preferred,
     });
@@ -881,14 +866,14 @@ describe("canonical auth and profile runtime", () => {
         normalizedMethodValue: "0x8888888888888888888888888888888888888888",
         intentId: "removed-during-replay-eth-intent",
         requestEmoji: 4,
-        requestAura: null,
+        requestAura: "none",
         opId: "removed-during-replay-eth-operation",
       });
       const racedDb = failAfterMatchingBatch(
         testBindings.PROFILE_DB,
         (queries) =>
           queries.some((query) =>
-            query.includes("INSERT INTO profile_auth_methods"),
+            query.includes("INSERT INTO profile_auth_methods_canonical"),
           ),
         () => undefined,
       );
@@ -911,7 +896,7 @@ describe("canonical auth and profile runtime", () => {
           normalizedMethodValue: xUserId,
           intentId: "removed-during-replay-x-intent",
           requestEmoji: 4,
-          requestAura: null,
+          requestAura: "none",
           opId,
           xUsername: "ReplayRemoval",
         }),
@@ -963,7 +948,7 @@ describe("canonical auth and profile runtime", () => {
             query.includes(
               timing === "during repair"
                 ? "AS owner_valid"
-                : "UPDATE profile_auth_operations SET",
+                : "UPDATE profile_auth_operations_canonical SET",
             ),
           ),
         timing === "profile change before success commit"
@@ -1022,7 +1007,7 @@ describe("canonical auth and profile runtime", () => {
       testBindings.PROFILE_DB,
       (queries) =>
         queries.some((query) =>
-          query.includes("INSERT INTO profile_auth_methods"),
+          query.includes("INSERT INTO profile_auth_methods_canonical"),
         ),
       () => {
         ambiguities++;
@@ -1046,7 +1031,7 @@ describe("canonical auth and profile runtime", () => {
       normalizedMethodValue: "incomplete-x-user",
       intentId: "incomplete-x-intent",
       requestEmoji: 4,
-      requestAura: null,
+      requestAura: "none",
       opId: "incomplete-x-operation",
       xUsername: "RecoverHandle",
     };
@@ -1073,7 +1058,7 @@ describe("canonical auth and profile runtime", () => {
       testBindings.PROFILE_DB,
       (queries) =>
         queries.some((query) =>
-          query.includes("INSERT INTO profile_auth_methods"),
+          query.includes("INSERT INTO profile_auth_methods_canonical"),
         ),
       () => undefined,
     );
@@ -1095,7 +1080,7 @@ describe("canonical auth and profile runtime", () => {
       normalizedMethodValue: "expired-incomplete-x-user",
       intentId: "expired-incomplete-x-intent",
       requestEmoji: 4,
-      requestAura: null,
+      requestAura: "none",
       opId: "expired-incomplete-x-operation",
       xUsername: "ExpiredHandle",
     };
@@ -1126,7 +1111,7 @@ describe("canonical auth and profile runtime", () => {
       normalizedMethodValue: "0x4444444444444444444444444444444444444444",
       intentId: "ambiguous-unlink-eth-intent",
       requestEmoji: 4,
-      requestAura: null,
+      requestAura: "none",
       opId: "ambiguous-unlink-eth-operation",
     });
     await baseService.linkVerifiedMethod({
@@ -1136,7 +1121,7 @@ describe("canonical auth and profile runtime", () => {
       normalizedMethodValue: "44444444444444444444444444444444",
       intentId: "ambiguous-unlink-sol-intent",
       requestEmoji: 4,
-      requestAura: null,
+      requestAura: "none",
       opId: "ambiguous-unlink-sol-operation",
     });
     let ambiguities = 0;
@@ -1144,7 +1129,7 @@ describe("canonical auth and profile runtime", () => {
       testBindings.PROFILE_DB,
       (queries) =>
         queries.some((query) =>
-          query.includes("DELETE FROM profile_auth_methods"),
+          query.includes("DELETE FROM profile_auth_methods_canonical"),
         ),
       () => {
         ambiguities++;
@@ -1188,14 +1173,16 @@ describe("canonical auth and profile runtime", () => {
       normalizedMethodValue: "33333333333333333333333333333333",
       intentId: "auth-revision-intent",
       requestEmoji: 3,
-      requestAura: null,
+      requestAura: "none",
       opId: "auth-revision-operation",
     });
     let interleavings = 0;
     const racedDb = aroundMatchingBatch(
       testBindings.PROFILE_DB,
       (queries) =>
-        queries.some((query) => query.includes("FROM profile_auth_methods")),
+        queries.some((query) =>
+          query.includes("FROM profile_auth_methods_canonical"),
+        ),
       async () => {
         interleavings++;
         const snapshot = await readCanonicalProfile(
@@ -1218,7 +1205,6 @@ describe("canonical auth and profile runtime", () => {
                 profile: { ...snapshot.profile, emoji: 12 },
                 createdAtMs: snapshot.createdAtMs,
                 updatedAtMs: 3_001,
-                legacyFields: snapshot.legacyFields,
                 state: snapshot.state,
                 mergedAtMs: snapshot.mergedAtMs,
                 mergedIntoProfileId: snapshot.mergedIntoProfileId,
@@ -1273,7 +1259,7 @@ describe("canonical auth and profile runtime", () => {
         normalizedMethodValue: solAddress,
         intentId: `${fixtureId}-source-intent`,
         requestEmoji: 5,
-        requestAura: null,
+        requestAura: "none",
         opId: `${fixtureId}-source-operation`,
       });
       const target = await service.linkVerifiedMethod({
@@ -1283,7 +1269,7 @@ describe("canonical auth and profile runtime", () => {
         normalizedMethodValue: ethAddress,
         intentId: `${fixtureId}-target-intent`,
         requestEmoji: 5,
-        requestAura: null,
+        requestAura: "none",
         opId: `${fixtureId}-target-operation`,
       });
       nowMs += 60_001;
@@ -1297,7 +1283,9 @@ describe("canonical auth and profile runtime", () => {
       const racedDb = aroundMatchingBatch(
         testBindings.PROFILE_DB,
         (queries) =>
-          queries.some((query) => query.includes("profile_auth_methods")),
+          queries.some((query) =>
+            query.includes("profile_auth_methods_canonical"),
+          ),
         async () => {
           merges++;
           await service.linkVerifiedMethod({
@@ -1307,7 +1295,7 @@ describe("canonical auth and profile runtime", () => {
             normalizedMethodValue: solAddress,
             intentId: `${fixtureId}-merge-intent`,
             requestEmoji: 5,
-            requestAura: null,
+            requestAura: "none",
             opId: `${fixtureId}-merge-operation`,
           });
         },
@@ -1342,7 +1330,7 @@ describe("canonical auth and profile runtime", () => {
       normalizedMethodValue: "11111111111111111111111111111111",
       intentId: "profile-intent",
       requestEmoji: 9,
-      requestAura: null,
+      requestAura: "none",
       opId: "profile-operation",
     });
     expect(
@@ -1420,21 +1408,6 @@ describe("canonical auth and profile runtime", () => {
     let nowMs = 5_000;
     const targetEthRaw = "0xABCDEFABCDEFABCDEFABCDEFABCDEFABCDEFABCD";
     const targetEthNormalized = targetEthRaw.toLowerCase();
-    const targetLegacyFields = {
-      authMetadata: {
-        provider: "legacy-target",
-        rawWallet: targetEthRaw,
-      },
-      retainedTarget: true,
-    };
-    const largeOpaqueArchive = "source-archive".repeat(16_384);
-    const sourceLegacyFields = {
-      authMetadata: {
-        provider: "legacy-source",
-        rawWallet: " 22222222222222222222222222222222 ",
-      },
-      largeOpaqueArchive,
-    };
     const dependencies = {
       now: () => nowMs,
       randomInteger: () => 0,
@@ -1447,7 +1420,7 @@ describe("canonical auth and profile runtime", () => {
       normalizedMethodValue: targetEthNormalized,
       intentId: "merge-target-intent",
       requestEmoji: 2,
-      requestAura: null,
+      requestAura: "none",
       opId: "merge-target-operation",
     });
     const source = await service.linkVerifiedMethod({
@@ -1457,7 +1430,7 @@ describe("canonical auth and profile runtime", () => {
       normalizedMethodValue: "22222222222222222222222222222222",
       intentId: "merge-source-intent",
       requestEmoji: 3,
-      requestAura: null,
+      requestAura: "none",
       opId: "merge-source-operation",
     });
     await createUsernameRepository(d1Env).editUsername(
@@ -1510,10 +1483,9 @@ describe("canonical auth and profile runtime", () => {
         {
           kind: "update-active-profile",
           value: materializeCanonicalProfile({
-            profile: { ...targetSnapshot.profile, aura: "   " },
+            profile: { ...targetSnapshot.profile, aura: "none" },
             state: targetSnapshot.state,
             mergedIntoProfileId: targetSnapshot.mergedIntoProfileId,
-            legacyFields: profileLegacyFixture(targetLegacyFields),
             createdAtMs: targetSnapshot.createdAtMs,
             updatedAtMs: nowMs,
             mergedAtMs: 4_000,
@@ -1529,7 +1501,7 @@ describe("canonical auth and profile runtime", () => {
             },
             winPresent: false,
             emojiPresent: false,
-            gameplayEmoji: "",
+            gameplayEmoji: 0,
           }),
         },
         {
@@ -1543,7 +1515,6 @@ describe("canonical auth and profile runtime", () => {
             },
             state: sourceSnapshot.state,
             mergedIntoProfileId: sourceSnapshot.mergedIntoProfileId,
-            legacyFields: profileLegacyFixture(sourceLegacyFields),
             createdAtMs: sourceSnapshot.createdAtMs,
             updatedAtMs: nowMs,
             mergedAtMs: sourceSnapshot.mergedAtMs,
@@ -1556,7 +1527,6 @@ describe("canonical auth and profile runtime", () => {
         },
       ],
     });
-
     nowMs += 1;
     const merged = await service.linkVerifiedMethod({
       uid: "merge-target-login",
@@ -1565,7 +1535,7 @@ describe("canonical auth and profile runtime", () => {
       normalizedMethodValue: "22222222222222222222222222222222",
       intentId: "merge-intent",
       requestEmoji: 2,
-      requestAura: null,
+      requestAura: "none",
       opId: "merge-operation",
     });
     expect(merged.profileId).toBe(target.profileId);
@@ -1581,13 +1551,12 @@ describe("canonical auth and profile runtime", () => {
       profile: {
         win: false,
         emoji: 11,
-        aura: "rainbow",
+        aura: "none",
         eth: targetEthNormalized,
         sol: "22222222222222222222222222222222",
         rating: 1500,
         nonce: 0,
       },
-      legacyFields: targetLegacyFields,
       winPresent: true,
       emojiPresent: true,
       gameplayEmoji: 11,
@@ -1613,18 +1582,12 @@ describe("canonical auth and profile runtime", () => {
       mergedAtMs: nowMs,
       opId: "merge-operation",
     });
-    expect(await readMergeSourceArchive(source.profileId)).toEqual(
-      sourceLegacyFields,
-    );
-    expect(
-      JSON.stringify(mergedSnapshot?.legacyFields).includes(largeOpaqueArchive),
-    ).toBe(false);
     const retiredSource = await readCanonicalProfile(
       testBindings.PROFILE_DB,
       source.profileId,
     );
     if (!retiredSource) throw new Error("missing retired source");
-    expect(retiredSource.legacyFields).toEqual(sourceLegacyFields);
+    expect(retiredSource).not.toHaveProperty("legacyFields");
     await commitCanonicalPlan(testBindings.PROFILE_DB, {
       expectations: [
         {
@@ -1650,13 +1613,6 @@ describe("canonical auth and profile runtime", () => {
       await readCanonicalProfile(testBindings.PROFILE_DB, source.profileId),
     ).toBeNull();
     expect(
-      (await readCanonicalProfile(testBindings.PROFILE_DB, target.profileId))
-        ?.legacyFields,
-    ).toEqual(targetLegacyFields);
-    expect(await readMergeSourceArchive(source.profileId)).toEqual(
-      sourceLegacyFields,
-    );
-    expect(
       (
         await readCanonicalProfileByLogin(
           testBindings.PROFILE_DB,
@@ -1666,7 +1622,7 @@ describe("canonical auth and profile runtime", () => {
     ).toBe(target.profileId);
   });
 
-  it("keeps chained merge archives separate from active profiles", async () => {
+  it("preserves chained canonical redirects when retired profiles are deleted", async () => {
     let nowMs = 20_000;
     const service = createAuthIdentityService(d1Env, {
       now: () => nowMs,
@@ -1681,7 +1637,7 @@ describe("canonical auth and profile runtime", () => {
       normalizedMethodValue: ethNormalized,
       intentId: "archive-chain-first-intent",
       requestEmoji: 2,
-      requestAura: null,
+      requestAura: "none",
       opId: "archive-chain-first-operation",
     });
     const second = await service.linkVerifiedMethod({
@@ -1691,7 +1647,7 @@ describe("canonical auth and profile runtime", () => {
       normalizedMethodValue: "33333333333333333333333333333333",
       intentId: "archive-chain-second-intent",
       requestEmoji: 3,
-      requestAura: null,
+      requestAura: "none",
       opId: "archive-chain-second-operation",
     });
     const final = await service.linkVerifiedMethod({
@@ -1701,18 +1657,15 @@ describe("canonical auth and profile runtime", () => {
       normalizedMethodValue: "archive-chain-x-user",
       intentId: "archive-chain-final-intent",
       requestEmoji: 4,
-      requestAura: null,
+      requestAura: "none",
       xUsername: "ArchiveChainFinal",
       opId: "archive-chain-final-operation",
     });
-    const firstLegacyFields = { first: "a".repeat(8_192) };
-    const secondLegacyFields = { second: "b".repeat(8_192) };
-    const finalLegacyFields = { final: "c".repeat(8_192) };
-    for (const [profileId, legacyFields] of [
-      [first.profileId, firstLegacyFields],
-      [second.profileId, secondLegacyFields],
-      [final.profileId, finalLegacyFields],
-    ] as const) {
+    for (const profileId of [
+      first.profileId,
+      second.profileId,
+      final.profileId,
+    ]) {
       const snapshot = await readCanonicalProfile(
         testBindings.PROFILE_DB,
         profileId,
@@ -1731,7 +1684,6 @@ describe("canonical auth and profile runtime", () => {
             kind: "update-active-profile",
             value: materializeCanonicalProfile({
               ...snapshot,
-              legacyFields,
               updatedAtMs: nowMs,
             }),
           },
@@ -1739,7 +1691,7 @@ describe("canonical auth and profile runtime", () => {
       });
     }
     await testBindings.PROFILE_DB.prepare(
-      "DELETE FROM profile_auth_recovery_jobs",
+      "DELETE FROM profile_auth_recovery_jobs_canonical",
     ).run();
 
     nowMs += 1;
@@ -1751,12 +1703,12 @@ describe("canonical auth and profile runtime", () => {
         normalizedMethodValue: "33333333333333333333333333333333",
         intentId: "archive-chain-first-merge-intent",
         requestEmoji: 2,
-        requestAura: null,
+        requestAura: "none",
         opId: "archive-chain-first-merge-operation",
       }),
     ).resolves.toMatchObject({ profileId: first.profileId });
     await testBindings.PROFILE_DB.prepare(
-      "DELETE FROM profile_auth_recovery_jobs",
+      "DELETE FROM profile_auth_recovery_jobs_canonical",
     ).run();
 
     nowMs += 1;
@@ -1767,7 +1719,7 @@ describe("canonical auth and profile runtime", () => {
       normalizedMethodValue: ethNormalized,
       intentId: "archive-chain-final-merge-intent",
       requestEmoji: 4,
-      requestAura: null,
+      requestAura: "none",
       opId: "archive-chain-final-merge-operation",
     });
     expect(chained).toMatchObject({
@@ -1775,19 +1727,6 @@ describe("canonical auth and profile runtime", () => {
       eth: ethNormalized,
       sol: "33333333333333333333333333333333",
     });
-    expect(await readMergeSourceArchive(second.profileId)).toEqual(
-      secondLegacyFields,
-    );
-    expect(await readMergeSourceArchive(first.profileId)).toEqual(
-      firstLegacyFields,
-    );
-    expect(
-      (await readCanonicalProfile(testBindings.PROFILE_DB, final.profileId))
-        ?.legacyFields,
-    ).toEqual(finalLegacyFields);
-    expect(
-      JSON.stringify(await readMergeSourceArchive(first.profileId)),
-    ).not.toContain(secondLegacyFields.second);
 
     for (const profileId of [second.profileId, first.profileId]) {
       const snapshot = await readCanonicalProfile(
@@ -1820,12 +1759,6 @@ describe("canonical auth and profile runtime", () => {
         ],
       });
     }
-    expect(await readMergeSourceArchive(second.profileId)).toEqual(
-      secondLegacyFields,
-    );
-    expect(await readMergeSourceArchive(first.profileId)).toEqual(
-      firstLegacyFields,
-    );
     expect(
       (
         await readCanonicalProfileByLogin(
@@ -1950,19 +1883,19 @@ describe("canonical auth and profile runtime", () => {
     });
     await expect(
       service.linkVerifiedMethod({
-        uid: targetOwners[0],
+        uid: targetOwners[0]!,
         method: "sol",
         methodValueRaw: sourceMethod,
         normalizedMethodValue: sourceMethod,
         intentId: "owner-budget-merge-intent",
         requestEmoji: 6,
-        requestAura: null,
+        requestAura: "none",
         opId: "owner-budget-merge-operation",
       }),
     ).resolves.toMatchObject({ profileId: targetProfileId });
     expect(Math.max(...batchSizes)).toBeLessThanOrEqual(21);
     const ownerCount = await testBindings.PROFILE_DB.prepare(
-      "SELECT COUNT(*) AS count FROM profile_login_owners WHERE profile_id = ?",
+      "SELECT COUNT(*) AS count FROM profile_login_owners_canonical WHERE profile_id = ?",
     )
       .bind(targetProfileId)
       .first<{ count: number }>();

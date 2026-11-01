@@ -1,153 +1,211 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  decodeSocketAttachment,
   nextSocketAttachmentExpiry,
   readOptionalSocketAttachment,
   readSocketAttachment,
   readSocketMatchGroupKey,
-  retainedSocketCanReceiveInvite,
+  socketCanReceiveInvite,
   socketAttachmentChannel,
   socketAttachmentInviteKey,
   socketAttachmentMatchKey,
   socketAttachmentRequiresSession,
   socketMatchKeyBinding,
-  unsupportedReactionAttachment,
   untrimmedSocketMatchKey,
 } from "../src/socketAttachmentRecords.ts";
 import {
   decodeStoredReaction,
   storedReactionUuid,
-  type StoredReactionDocument,
   type StoredReactionSnapshot,
 } from "../src/reactionRecords.ts";
+import { SOCKET_TEST_SESSION_ID } from "./socketTestSession.ts";
 
-test("resumed attachment observations preserve receiver, getters and raw keys", () => {
-  const reads: string[] = [];
-  const raw = {
-    get channel() {
-      reads.push("channel");
-      return reads.length === 1 ? "metadata" : "reaction";
-    },
-    get schemaVersion() {
-      reads.push("schema");
-      return 2;
-    },
-    get matchId() {
-      reads.push("match");
-      return undefined;
-    },
-  };
+const session = {
+  authenticated: true as const,
+  sid: SOCKET_TEST_SESSION_ID,
+  authExpiresAtMs: Date.now() + 60_000,
+};
+const reaction = {
+  channel: "reaction" as const,
+  schemaVersion: 2 as const,
+  matchId: "match",
+  ...session,
+};
+
+test("socket attachment reads return complete validated data and reject malformed retained values", () => {
   const socket = {
     deserializeAttachment() {
       assert.equal(this, socket);
-      return raw;
+      return reaction;
     },
   };
   const attachment = readSocketAttachment(socket);
-  assert.equal(attachment, raw);
-  assert.deepEqual(reads, []);
-  assert.equal(unsupportedReactionAttachment(attachment), false);
-  assert.deepEqual(reads, ["channel", "channel", "schema"]);
-  const key = socketAttachmentMatchKey(attachment);
-  assert.equal(key, undefined);
-  assert.equal(socketMatchKeyBinding(key), undefined);
-  assert.throws(() => untrimmedSocketMatchKey(key), TypeError);
-  const absent = readOptionalSocketAttachment(undefined);
-  assert.equal(socketAttachmentChannel(absent), undefined);
-  assert.equal(socketAttachmentInviteKey(absent), undefined);
-  for (const value of [null, undefined]) {
-    assert.throws(
-      () => readSocketMatchGroupKey({ deserializeAttachment: () => value }),
-      {
-        name: "TypeError",
-        message: `Cannot destructure property 'matchId' of 'socket.deserializeAttachment(...)' as it is ${String(value)}.`,
-      },
+  assert.deepEqual(attachment, reaction);
+  assert.notEqual(attachment, reaction);
+  assert.equal(socketAttachmentChannel(attachment), "reaction");
+  assert.equal(socketAttachmentMatchKey(attachment), "match");
+  assert.equal(
+    socketMatchKeyBinding(socketAttachmentMatchKey(attachment)),
+    "match",
+  );
+  assert.equal(
+    untrimmedSocketMatchKey(socketAttachmentMatchKey(attachment)),
+    false,
+  );
+  for (const value of [
+    null,
+    undefined,
+    [],
+    false,
+    1,
+    { ...reaction, extra: true },
+    { ...reaction, schemaVersion: 1 },
+    { ...reaction, matchId: "bad/key" },
+    { ...reaction, sid: "invalid" },
+    { ...reaction, authExpiresAtMs: "3" },
+    { ...reaction, authExpiresAtMs: NaN },
+    { ...reaction, authenticated: false },
+  ]) {
+    assert.equal(decodeSocketAttachment(value), null);
+    assert.equal(
+      readSocketMatchGroupKey({ deserializeAttachment: () => value }),
+      null,
     );
   }
+  assert.equal(
+    readSocketAttachment({
+      deserializeAttachment() {
+        throw new Error("invalid attachment");
+      },
+    }),
+    null,
+  );
+  assert.equal(readOptionalSocketAttachment(undefined), null);
+  assert.equal(socketAttachmentInviteKey(null), null);
+  assert.equal(untrimmedSocketMatchKey(null), true);
 });
 
-test("session observations keep lazy tags and native expiry coercion", () => {
-  const attachment = readSocketAttachment({
-    deserializeAttachment: () => ({
-      authenticated: true,
-      authExpiresAtMs: "3",
-    }),
-  });
+test("expiry and session policy use validated values while participant tags still require authentication", () => {
+  const attachment = decodeSocketAttachment(reaction);
   assert.equal(
     socketAttachmentRequiresSession(attachment, () => {
-      assert.fail("authenticated attachments do not read tags");
+      assert.fail("authenticated state need not read tags");
     }),
     true,
   );
-  assert.equal(nextSocketAttachmentExpiry(5, attachment), 3);
-  const read = (expiry: unknown) =>
-    readSocketAttachment({
-      deserializeAttachment: () => ({
-        authenticated: true,
-        authExpiresAtMs: expiry,
-      }),
-    });
   assert.equal(
-    Number.isNaN(nextSocketAttachmentExpiry(null, read(undefined))),
+    nextSocketAttachmentExpiry(null, attachment),
+    session.authExpiresAtMs,
+  );
+  assert.equal(
+    nextSocketAttachmentExpiry(session.authExpiresAtMs - 1, attachment),
+    session.authExpiresAtMs - 1,
+  );
+  assert.equal(nextSocketAttachmentExpiry(5, null), 5);
+  const spectator = decodeSocketAttachment({
+    channel: "reaction",
+    schemaVersion: 2,
+    matchId: "match",
+    authenticated: false,
+  });
+  assert.equal(
+    socketAttachmentRequiresSession(spectator, () => []),
+    false,
+  );
+  assert.equal(
+    socketAttachmentRequiresSession(spectator, () => ["role:host"]),
     true,
   );
-  assert.throws(() => nextSocketAttachmentExpiry(null, read(1n)), TypeError);
 });
 
-test("retained invite access keeps raw falsy results and short-circuit reads", () => {
-  for (const authenticated of [undefined, null, false, 0, ""]) {
-    const reads: string[] = [];
-    const attachment = readSocketAttachment({
-      deserializeAttachment: () => ({
-        role: "host",
-        get authenticated() {
-          reads.push("authenticated");
-          return authenticated;
-        },
-        get actorUid() {
-          return assert.fail(
-            "falsy authentication does not read actor identity",
-          );
-        },
-      }),
-    });
-    const result = retainedSocketCanReceiveInvite(attachment, {
-      get snapshot() {
-        return assert.fail(
-          "falsy host authentication does not read the invite",
-        );
-      },
+test("invite access rejects malformed identities and keeps host, guest and spectator privacy policy", () => {
+  const source = {
+    snapshot: { hostId: "host", guestId: "guest" },
+    passwordProtected: true,
+  };
+  const host = decodeSocketAttachment({
+    channel: "metadata",
+    schemaVersion: 1,
+    inviteId: "invite",
+    role: "host",
+    actorUid: "host",
+    ...session,
+  });
+  assert.equal(socketCanReceiveInvite(host, source), true);
+  assert.equal(
+    socketCanReceiveInvite(host, {
+      ...source,
+      snapshot: { hostId: "other", guestId: "guest" },
+    }),
+    false,
+  );
+  assert.equal(socketCanReceiveInvite(null, source), false);
+  assert.equal(
+    decodeSocketAttachment({
+      channel: "metadata",
+      schemaVersion: 1,
+      inviteId: "invite",
+      role: "host",
+      actorUid: "host",
+      authenticated: false,
+    }),
+    null,
+  );
+  const spectator = decodeSocketAttachment({
+    channel: "matches",
+    schemaVersion: 1,
+    inviteId: "invite",
+    matchId: "match",
+    role: "spectator",
+    actorUid: null,
+    ...session,
+  });
+  assert.equal(socketCanReceiveInvite(spectator, source), true);
+  assert.equal(
+    socketCanReceiveInvite(spectator, {
+      ...source,
+      snapshot: { hostId: "host", guestId: null },
+    }),
+    false,
+  );
+  assert.equal(
+    socketCanReceiveInvite(spectator, {
+      snapshot: { hostId: "host", guestId: null },
       passwordProtected: false,
-    });
-    assert.equal(result, authenticated);
-    assert.deepEqual(reads, ["authenticated"]);
-  }
+    }),
+    true,
+  );
 });
 
-test("stored reaction snapshots retain all parsed JSON values and UUID error behavior", () => {
-  const values = [
+test("stored reaction snapshots accept only canonical reaction records", () => {
+  const value = {
+    uuid: "a69f77f5-44d8-4d43-ae09-0da8ed3575d2",
+    kind: "yo",
+    variation: 1,
+    matchId: "match",
+  };
+  const decoded = decodeStoredReaction(JSON.stringify(value));
+  assert.deepEqual(decoded, value);
+  assert.equal(storedReactionUuid(decoded), value.uuid);
+  const snapshot: StoredReactionSnapshot = {
+    schemaVersion: 2,
+    type: "snapshot",
+    reactions: { host: decoded },
+    presentation: { matchId: "match", players: {} },
+  };
+  assert.deepEqual(JSON.parse(JSON.stringify(snapshot)).reactions.host, value);
+  for (const malformed of [
     "null",
     "false",
     "7",
     '"legacy"',
     "[]",
-    '{"extra":1,"uuid":"id"}',
-  ];
-  const reactions = Object.fromEntries<StoredReactionDocument>(
-    values.map((value, index) => [String(index), decodeStoredReaction(value)]),
-  );
-  const snapshot: StoredReactionSnapshot = {
-    schemaVersion: 2,
-    type: "snapshot",
-    reactions,
-    presentation: { matchId: "match", players: {} },
-  };
-  assert.equal(
-    JSON.stringify(snapshot),
-    '{"schemaVersion":2,"type":"snapshot","reactions":{"0":null,"1":false,"2":7,"3":"legacy","4":[],"5":{"extra":1,"uuid":"id"}},"presentation":{"matchId":"match","players":{}}}',
-  );
-  assert.equal(storedReactionUuid(reactions["5"]), "id");
-  assert.equal(storedReactionUuid(reactions["2"]), undefined);
-  assert.throws(() => storedReactionUuid(reactions["0"]), TypeError);
+    JSON.stringify({ ...value, extra: 1 }),
+  ])
+    assert.throws(
+      () => decodeStoredReaction(malformed),
+      /invalid-stored-reaction/,
+    );
   assert.throws(() => decodeStoredReaction("{"), SyntaxError);
 });

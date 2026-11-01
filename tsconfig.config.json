@@ -1,0 +1,12 @@
+{
+  "extends": "./scripts/tsconfig.json",
+  "compilerOptions": {
+    "allowJs": true,
+    "checkJs": true
+  },
+  "include": [
+    "vite.config.mts",
+    "eslint.config.mjs",
+    "types/config-modules.d.ts"
+  ]
+}

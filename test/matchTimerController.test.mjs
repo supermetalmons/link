@@ -1,3 +1,4 @@
+import { required } from "./fixtures/canonicalData.mjs";
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
@@ -51,7 +52,11 @@ for (const mode of ["isReconnect", "isWatchOnly"]) {
     assert.equal(h.controller.waitsForStashes(), true);
     assert.equal(h.controller.restore(), false);
     assert.deepEqual(h.events, []);
-    h.controller.update(true, { color: "black", timer: "" }, "match");
+    h.controller.update(
+      true,
+      { color: "black", timer: { state: "idle" } },
+      "match",
+    );
     assert.equal(h.controller.waitsForStashes(), false);
     assert.deepEqual(h.events[0], ["countdown", "white", 9]);
     assert.equal(h.timers.size, mode === "isWatchOnly" ? 0 : 1);
@@ -161,9 +166,9 @@ test("countdown rounds down, honors supplied duration, and enables a current vic
     ],
   ]);
   const pending = [...h.timers.values()][0];
-  assert.equal(pending.delay, 4_000);
+  assert.equal(required(pending).delay, 4_000);
   h.advance(4_000);
-  pending.run();
+  required(pending).run();
   assert.deepEqual(h.events.at(-1), ["claim"]);
   assert.equal(h.timers.size, 0);
   h.controller.showCountdown(false, timer(4, 1_000), "white");
@@ -171,8 +176,12 @@ test("countdown rounds down, honors supplied duration, and enables a current vic
 });
 
 test("claim controls use context updated synchronously by countdown presentation", () => {
-  for (const flag of ["isWatchOnly", "isPlayerSideTurn"]) {
+  for (const flag of /** @type {const} */ ([
+    "isWatchOnly",
+    "isPlayerSideTurn",
+  ])) {
     for (const initiallyBlocked of [false, true]) {
+      /** @type {ReturnType<typeof createMatchTimerHarness>} */
       let h;
       h = createMatchTimerHarness(
         { [flag]: initiallyBlocked },
@@ -193,7 +202,10 @@ test("claim controls use context updated synchronously by countdown presentation
   }
 });
 
-for (const [name, invalidate] of [
+for (const [
+  name,
+  invalidate,
+] of /** @type {[string, (h: ReturnType<typeof createMatchTimerHarness>) => void][]} */ ([
   ["match", (h) => (h.context.activeMatchId = "next")],
   ["session", (h) => h.invalidateSession()],
   ["turn", (h) => h.context.turnNumber++],
@@ -206,14 +218,14 @@ for (const [name, invalidate] of [
   ["game over", (h) => (h.context.isGameOver = true)],
   ["spectator", (h) => (h.context.isWatchOnly = true)],
   ["player turn", (h) => (h.context.isPlayerSideTurn = true)],
-]) {
+])) {
   test(`a pending claim cannot affect a changed ${name}`, () => {
     const h = createMatchTimerHarness();
     h.controller.showCountdown(false, timer(), "white");
     const pending = [...h.timers.values()][0];
     h.events.length = 0;
-    invalidate(h);
-    pending.run();
+    required(invalidate)(h);
+    required(pending).run();
     assert.deepEqual(h.events, []);
   });
 }
@@ -223,7 +235,11 @@ test("malformed and wrong-turn payloads hide controls instead of starting fallba
     const h = createMatchTimerHarness();
     h.controller.showCountdown(false, timer(), "white");
     h.events.length = 0;
-    h.controller.update(false, { color: "white", timer: payload }, "match");
+    Reflect.apply(h.controller.update, h.controller, [
+      false,
+      { color: "white", timer: payload },
+      "match",
+    ]);
     assert.deepEqual(h.events, [["hideButtons"], ["hideCountdown"]]);
     assert.equal(h.timers.size, 0);
   }
@@ -231,7 +247,11 @@ test("malformed and wrong-turn payloads hide controls instead of starting fallba
 
 test("empty stashes choose cooldown only for a live opponent turn without a terminal result", () => {
   const h = createMatchTimerHarness();
-  h.controller.update(false, { color: "white", timer: "" }, "match");
+  h.controller.update(
+    false,
+    { color: "white", timer: { state: "idle" } },
+    "match",
+  );
   assert.deepEqual(h.events, [
     ["progress", 0, MATCH_TIMER_DURATION_SECONDS, true],
   ]);
@@ -242,15 +262,23 @@ test("empty stashes choose cooldown only for a live opponent turn without a term
     "isPlayerSideTurn",
   ]) {
     const hidden = createMatchTimerHarness({ [flag]: true });
-    hidden.controller.update(false, { color: "white", timer: "" }, "match");
+    hidden.controller.update(
+      false,
+      { color: "white", timer: { state: "idle" } },
+      "match",
+    );
     assert.deepEqual(hidden.events, [["hideButtons"], ["hideCountdown"]]);
   }
   const spectator = createMatchTimerHarness({ isWatchOnly: true });
   spectator.controller.seed("match", [
-    { color: "white", timer: "" },
-    { color: "black", timer: "" },
+    { color: "white", timer: { state: "idle" } },
+    { color: "black", timer: { state: "idle" } },
   ]);
-  spectator.controller.update(false, { color: "white", timer: "" }, "match");
+  spectator.controller.update(
+    false,
+    { color: "white", timer: { state: "idle" } },
+    "match",
+  );
   assert.deepEqual(spectator.events, [["hideButtons"], ["hideCountdown"]]);
 });
 
@@ -289,7 +317,7 @@ test("reset clears stashes, deferred resolution, cooldown and claim work without
   h.controller.reset(null);
   assert.equal(h.timers.size, 0);
   h.events.length = 0;
-  pending.run();
+  required(pending).run();
   h.context.boardViewMode = "activeLive";
   assert.equal(h.controller.restore(), false);
   assert.deepEqual(h.events, []);
@@ -312,11 +340,11 @@ test("replaced and canceled claim callbacks cannot clear or enable a newer claim
   h.controller.showCountdown(false, timer(4, 15_000), "white");
   const current = [...h.timers.values()][0];
   h.events.length = 0;
-  old.run();
+  required(old).run();
   assert.deepEqual(h.events, []);
   assert.equal(h.timers.size, 1);
   h.controller.cancelVictoryClaim();
   assert.equal(h.timers.size, 0);
-  current.run();
+  required(current).run();
   assert.deepEqual(h.events, []);
 });

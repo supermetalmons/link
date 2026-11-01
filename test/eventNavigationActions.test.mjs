@@ -1,23 +1,29 @@
+import {
+  required,
+  canonicalEvent,
+  canonicalParticipant,
+} from "./fixtures/canonicalData.mjs";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 import ts from "typescript";
 import { isAutoInviteId } from "../cloud/runtime/shared/ids.js";
 
-const readSource = (path) =>
+const readSource = (/** @type {string | URL} */ path) =>
   ts.createSourceFile(
-    path,
+    path.toString(),
     readFileSync(new URL(path, import.meta.url), "utf8"),
     ts.ScriptTarget.Latest,
     true,
   );
 
 const connectionSource = readSource("../src/connection/connection.ts");
-const connectionClass = connectionSource.statements.find(
-  (node) => ts.isClassDeclaration(node) && node.name?.text === "Connection",
-);
-assert.ok(connectionClass);
+const connectionClass = connectionSource.statements
+  .filter(ts.isClassDeclaration)
+  .find((node) => node.name?.text === "Connection");
+assert.ok(connectionClass && ts.isClassDeclaration(connectionClass));
 
+/** @template T @param {string} source @param {string} result @param {Record<string, unknown>} dependencies @returns {T} */
 function evaluate(source, result, dependencies) {
   const { outputText } = ts.transpileModule(
     source.replaceAll("import.meta.env.DEV", "false"),
@@ -29,14 +35,24 @@ function evaluate(source, result, dependencies) {
   )(...Object.values(dependencies));
 }
 
+/**
+ * @typedef {Omit<typeof import("../src/connection/connection.ts").connection, never> & {writeLinkToClipboard: (link: string, warningLabel: string) => void}} ExtractedConnection
+ */
+/**
+ * @template {keyof ExtractedConnection} K
+ * @param {K[]} methodNames
+ * @param {Record<string, unknown>} dependencies
+ * @returns {Pick<ExtractedConnection, K> & {profileClient?: Pick<ExtractedConnection, "resolveProfileId">, writeInviteLinkWithLegacyClipboardApi?: (link: string) => boolean}}
+ */
 function createConnection(methodNames, dependencies) {
   const methods = methodNames.map((name) => {
-    const method = connectionClass.members.find(
+    const method = required(connectionClass).members.find(
       (node) => node.name?.getText() === name,
     );
     assert.ok(method, `missing Connection method ${name}`);
     return method.getText();
   });
+  /** @type {new () => Pick<ExtractedConnection, K> & {profileClient?: Pick<ExtractedConnection, "resolveProfileId">, writeInviteLinkWithLegacyClipboardApi?: (link: string) => boolean}} */
   const Connection = evaluate(
     `class Connection { ${methods.join("\n")} }`,
     "Connection",
@@ -46,6 +62,7 @@ function createConnection(methodNames, dependencies) {
 }
 
 test("canonical profile ID resolution delegates to the profile client", async () => {
+  /** @type {string[]} */
   const calls = [];
   const response = Promise.resolve("canonical-profile");
   const instance = createConnection(["resolveProfileId"], {});
@@ -69,59 +86,74 @@ function eventProfileIdsHarness() {
     .flatMap((statement) => [...statement.declarationList.declarations]);
   const helpers = ["getEventParticipant", "getEventProfileIdsToResolve"].map(
     (name) =>
-      `const ${declarations.find((node) => node.name.getText() === name).getText()};`,
+      `const ${required(declarations.find((node) => node.name.getText() === name)).getText()};`,
   );
   const hook = hookSource.statements
     .filter((node) => !ts.isImportDeclaration(node))
     .map((node) => node.getText().replace(/^export /, ""))
     .join("\n");
+  /** @type {number[]} */
   const states = [];
+  /** @type {{dependencies: readonly unknown[], value: unknown}[]} */
   const memos = [];
+  /** @typedef {() => void | (() => void)} Effect */
+  /** @type {{dependencies: readonly unknown[], scheduled: Effect | undefined, cleanup: (() => void) | undefined}[]} */
   const effects = [];
+  /** @type {Map<number, {callback: () => void, at: number}>} */
   const timers = new Map();
   let stateIndex = 0;
   let memoIndex = 0;
   let effectIndex = 0;
   let clock = 0;
   let nextTimerId = 0;
+  /** @param {readonly unknown[] | undefined} previous @param {readonly unknown[]} next */
   const changed = (previous, next) =>
     !previous || next.some((value, index) => value !== previous[index]);
+  /** @param {() => void} callback @param {number} delay */
   const setTimeout = (callback, delay) => {
     const id = ++nextTimerId;
     timers.set(id, { callback, at: clock + delay });
     return id;
   };
+  /** @param {number} id */
   const clearTimeout = (id) => timers.delete(id);
+  /** @type {{id: string, resolve: (value: string | null) => void, reject: (reason: unknown) => void}[]} */
   const calls = [];
+  /** @type {Pick<typeof import("../src/ui/event/useEventProfileIds.ts"), "useEventProfileIds"> & Pick<typeof import("../src/ui/event/eventState.ts"), "getEventParticipant">} */
   const { useEventProfileIds, getEventParticipant } = evaluate(
     [...helpers, hook].join("\n"),
     "({ useEventProfileIds, getEventParticipant })",
     {
+      /** @param {number | (() => number)} initial @returns {[number, (value: number | ((previous: number) => number)) => void]} */
       useState: (initial) => {
         const index = stateIndex++;
         if (!(index in states)) {
           states[index] = typeof initial === "function" ? initial() : initial;
         }
         return [
-          states[index],
+          required(states[index]),
           (value) => {
             states[index] =
-              typeof value === "function" ? value(states[index]) : value;
+              typeof value === "function"
+                ? value(required(states[index]))
+                : value;
           },
         ];
       },
+      /** @template T @param {() => T} factory @param {readonly unknown[]} dependencies @returns {T} */
       useMemo: (factory, dependencies) => {
         const index = memoIndex++;
         if (changed(memos[index]?.dependencies, dependencies)) {
           memos[index] = { dependencies, value: factory() };
         }
-        return memos[index].value;
+        return /** @type {T} */ (required(memos[index]).value);
       },
+      /** @param {Effect} effect @param {readonly unknown[]} nextDependencies */
       useEffect: (effect, nextDependencies) => {
         const index = effectIndex++;
         if (changed(effects[index]?.dependencies, nextDependencies)) {
           effects[index] = {
-            ...effects[index],
+            cleanup: effects[index]?.cleanup,
             dependencies: nextDependencies,
             scheduled: effect,
           };
@@ -131,7 +163,7 @@ function eventProfileIdsHarness() {
       clearTimeout,
       window: { setTimeout, clearTimeout },
       connection: {
-        resolveProfileId: (id) =>
+        resolveProfileId: (/** @type {string} */ id) =>
           new Promise((resolve, reject) => {
             calls.push({ id, resolve, reject });
           }),
@@ -142,6 +174,7 @@ function eventProfileIdsHarness() {
     calls,
     timers,
     getEventParticipant,
+    /** @param {Parameters<typeof useEventProfileIds>} args */
     render: (...args) => {
       stateIndex = 0;
       memoIndex = 0;
@@ -150,13 +183,13 @@ function eventProfileIdsHarness() {
       for (const effect of effects) {
         if (effect.scheduled) {
           effect.cleanup?.();
-          effect.cleanup = effect.scheduled();
+          effect.cleanup = effect.scheduled() || undefined;
           effect.scheduled = undefined;
         }
       }
       return value;
     },
-    advance: (ms) => {
+    advance: (/** @type {number} */ ms) => {
       clock += ms;
       for (const [id, timer] of timers) {
         if (timer.at <= clock) {
@@ -172,21 +205,36 @@ function eventProfileIdsHarness() {
   };
 }
 
-const mergedEvent = () => ({
-  eventId: "event-1",
-  createdByProfileId: "creator-profile",
-  participants: {
-    "retired-profile": {
-      profileId: "retired-profile",
-      loginUid: "original-login",
-    },
-  },
+/** @param {Parameters<typeof canonicalParticipant>[0]} fields */
+const activeParticipant = (fields) => ({
+  ...canonicalParticipant(fields),
+  state: /** @type {const} */ ("active"),
+  eliminatedRoundIndex: null,
+  eliminatedByProfileId: null,
 });
+
+const mergedEvent = () =>
+  canonicalEvent({
+    eventId: "event-1",
+    createdByProfileId: "creator-profile",
+    participants: {
+      "retired-profile": {
+        profileId: "retired-profile",
+        loginUid: "original-login",
+      },
+    },
+  });
 
 test("canonical membership survives creator lookup failures and unchanged event polling", async () => {
   const h = eventProfileIdsHarness();
   const event = mergedEvent();
-  const modal = { eventId: event.eventId, isOpen: true };
+  const modal = {
+    eventId: event.eventId,
+    isOpen: true,
+    lastCloseReason: null,
+    isPendingCreate: false,
+    pendingCreateError: null,
+  };
   const render = (value = event) =>
     h.render(value, "canonical-profile", "alternate-login", modal);
   assert.equal(render().pending, true);
@@ -194,8 +242,8 @@ test("canonical membership survives creator lookup failures and unchanged event 
     h.calls.map((call) => call.id),
     ["creator-profile", "retired-profile"],
   );
-  h.calls[0].reject(new Error("Temporary lookup failure"));
-  h.calls[1].resolve("canonical-profile");
+  required(h.calls[0]).reject(new Error("Temporary lookup failure"));
+  required(h.calls[1]).resolve("canonical-profile");
   await h.settle();
   const resolved = render({ ...structuredClone(event), updatedAtMs: 2 });
   assert.equal(resolved.pending, true);
@@ -212,7 +260,7 @@ test("canonical membership survives creator lookup failures and unchanged event 
     h.calls.map((call) => call.id),
     ["creator-profile", "retired-profile", "creator-profile"],
   );
-  h.calls[2].resolve("creator-profile");
+  required(h.calls[2]).resolve("creator-profile");
   await h.settle();
   assert.equal(render().pending, false);
   assert.equal(h.timers.size, 0);
@@ -221,12 +269,18 @@ test("canonical membership survives creator lookup failures and unchanged event 
 test("canonical membership recovers after a transient lookup failure", async () => {
   const h = eventProfileIdsHarness();
   const event = mergedEvent();
-  const modal = { eventId: event.eventId, isOpen: true };
+  const modal = {
+    eventId: event.eventId,
+    isOpen: true,
+    lastCloseReason: null,
+    isPendingCreate: false,
+    pendingCreateError: null,
+  };
   const render = () =>
     h.render(event, "canonical-profile", "alternate-login", modal);
   render();
-  h.calls[0].resolve("creator-profile");
-  h.calls[1].reject(new Error("Temporary lookup failure"));
+  required(h.calls[0]).resolve("creator-profile");
+  required(h.calls[1]).reject(new Error("Temporary lookup failure"));
   await h.settle();
   const incomplete = render();
   assert.equal(incomplete.pending, true);
@@ -248,7 +302,7 @@ test("canonical membership recovers after a transient lookup failure", async () 
     h.calls.map((call) => call.id),
     ["creator-profile", "retired-profile", "retired-profile"],
   );
-  h.calls[2].resolve("canonical-profile");
+  required(h.calls[2]).resolve("canonical-profile");
   await h.settle();
   const resolved = render();
   assert.equal(resolved.pending, false);
@@ -267,18 +321,24 @@ test("canonical membership recovers after a transient lookup failure", async () 
 test("unchanged creator lookups survive unrelated joins in flight and after resolution", async () => {
   const h = eventProfileIdsHarness();
   const event = mergedEvent();
-  const modal = { eventId: event.eventId, isOpen: true };
-  const render = (value) =>
+  const modal = {
+    eventId: event.eventId,
+    isOpen: true,
+    lastCloseReason: null,
+    isPendingCreate: false,
+    pendingCreateError: null,
+  };
+  const render = (/** @type {ReturnType<typeof mergedEvent>} */ value) =>
     h.render(value, "retired-profile", "original-login", modal);
   assert.equal(render(event).pending, true);
   const joined = {
     ...event,
     participants: {
       ...event.participants,
-      "unrelated-profile": {
+      "unrelated-profile": activeParticipant({
         profileId: "unrelated-profile",
         loginUid: "unrelated-login",
-      },
+      }),
     },
   };
   assert.equal(render(joined).pending, true);
@@ -286,7 +346,7 @@ test("unchanged creator lookups survive unrelated joins in flight and after reso
     h.calls.map((call) => call.id),
     ["creator-profile"],
   );
-  h.calls[0].resolve("creator-profile");
+  required(h.calls[0]).resolve("creator-profile");
   await h.settle();
   assert.deepEqual(render(joined), {
     pending: false,
@@ -299,22 +359,28 @@ test("unchanged creator lookups survive unrelated joins in flight and after reso
 test("resolved merged membership stays available while a new participant lookup is pending", async () => {
   const h = eventProfileIdsHarness();
   const event = mergedEvent();
-  const modal = { eventId: event.eventId, isOpen: true };
-  const render = (value) =>
+  const modal = {
+    eventId: event.eventId,
+    isOpen: true,
+    lastCloseReason: null,
+    isPendingCreate: false,
+    pendingCreateError: null,
+  };
+  const render = (/** @type {ReturnType<typeof mergedEvent>} */ value) =>
     h.render(value, "canonical-profile", "alternate-login", modal);
   render(event);
-  h.calls[0].resolve("creator-profile");
-  h.calls[1].resolve("canonical-profile");
+  required(h.calls[0]).resolve("creator-profile");
+  required(h.calls[1]).resolve("canonical-profile");
   await h.settle();
   assert.equal(render(event).pending, false);
   const joined = {
     ...event,
     participants: {
       ...event.participants,
-      "unrelated-profile": {
+      "unrelated-profile": activeParticipant({
         profileId: "unrelated-profile",
         loginUid: "unrelated-login",
-      },
+      }),
     },
   };
   const current = render(joined);
@@ -329,21 +395,27 @@ test("resolved merged membership stays available while a new participant lookup 
 test("canonical membership resolves independently of slow or failed unrelated lookups", async () => {
   const h = eventProfileIdsHarness();
   const event = mergedEvent();
-  event.participants["slow-profile"] = {
+  event.participants["slow-profile"] = activeParticipant({
     profileId: "slow-profile",
     loginUid: "slow-login",
+  });
+  const modal = {
+    eventId: event.eventId,
+    isOpen: true,
+    lastCloseReason: null,
+    isPendingCreate: false,
+    pendingCreateError: null,
   };
-  const modal = { eventId: event.eventId, isOpen: true };
   const render = (value = event) =>
     h.render(value, "canonical-profile", "alternate-login", modal);
   render();
-  h.calls[0].resolve("creator-profile");
+  required(h.calls[0]).resolve("creator-profile");
   await h.settle();
   assert.deepEqual(render(), {
     pending: true,
     profileIds: { "creator-profile": "creator-profile" },
   });
-  h.calls[1].resolve("canonical-profile");
+  required(h.calls[1]).resolve("canonical-profile");
   await h.settle();
   assert.equal(render().pending, false);
   let currentEvent = event;
@@ -352,7 +424,7 @@ test("canonical membership resolves independently of slow or failed unrelated lo
       ...currentEvent,
       participants: {
         ...currentEvent.participants,
-        [id]: { profileId: id, loginUid: `${id}-login` },
+        [id]: activeParticipant({ profileId: id, loginUid: `${id}-login` }),
       },
     };
     const current = render(currentEvent);
@@ -377,27 +449,33 @@ test("canonical membership resolves independently of slow or failed unrelated lo
       "new-profile-2",
     ],
   );
-  h.calls[3].reject(new Error("Temporary unrelated lookup failure"));
+  required(h.calls[3]).reject(new Error("Temporary unrelated lookup failure"));
   await h.settle();
   assert.equal(render(currentEvent).pending, false);
   h.advance(2000);
   assert.equal(render(currentEvent).pending, false);
   assert.equal(h.calls.length, 6);
-  assert.equal(h.calls[5].id, "new-profile-1");
+  assert.equal(required(h.calls[5]).id, "new-profile-1");
   h.unmount();
 });
 
 test("nonmembers wait for every canonical participant lookup", async () => {
   const h = eventProfileIdsHarness();
   const event = mergedEvent();
-  const modal = { eventId: event.eventId, isOpen: true };
+  const modal = {
+    eventId: event.eventId,
+    isOpen: true,
+    lastCloseReason: null,
+    isPendingCreate: false,
+    pendingCreateError: null,
+  };
   const render = () =>
     h.render(event, "nonparticipant-profile", "nonparticipant-login", modal);
   render();
-  h.calls[0].resolve("creator-profile");
+  required(h.calls[0]).resolve("creator-profile");
   await h.settle();
   assert.equal(render().pending, true);
-  h.calls[1].resolve(null);
+  required(h.calls[1]).resolve(null);
   await h.settle();
   const current = render();
   assert.equal(current.pending, false);
@@ -409,7 +487,13 @@ test("canonical profile lookup discards replies after auth or modal changes", as
   for (const changed of ["profile", "login", "modal"]) {
     const h = eventProfileIdsHarness();
     const event = mergedEvent();
-    const modal = { eventId: event.eventId, isOpen: true };
+    const modal = {
+      eventId: event.eventId,
+      isOpen: true,
+      lastCloseReason: null,
+      isPendingCreate: false,
+      pendingCreateError: null,
+    };
     h.render(event, "canonical-profile", "alternate-login", modal);
     const nextModal = changed === "modal" ? { ...modal } : modal;
     const nextProfile =
@@ -417,8 +501,8 @@ test("canonical profile lookup discards replies after auth or modal changes", as
     const nextLogin = changed === "login" ? "other-login" : "alternate-login";
     const render = () => h.render(event, nextProfile, nextLogin, nextModal);
     assert.equal(render().pending, true);
-    h.calls[0].resolve("creator-profile");
-    h.calls[1].resolve("canonical-profile");
+    required(h.calls[0]).resolve("creator-profile");
+    required(h.calls[1]).resolve("canonical-profile");
     await h.settle();
     assert.deepEqual(render(), { profileIds: {}, pending: true });
     for (const call of h.calls.slice(2)) call.resolve(call.id);
@@ -432,14 +516,20 @@ test("canonical profile lookup discards replies after auth or modal changes", as
 test("removed participants cannot reappear through stale lookup replies", async () => {
   const h = eventProfileIdsHarness();
   const event = mergedEvent();
-  const modal = { eventId: event.eventId, isOpen: true };
+  const modal = {
+    eventId: event.eventId,
+    isOpen: true,
+    lastCloseReason: null,
+    isPendingCreate: false,
+    pendingCreateError: null,
+  };
   h.render(event, "canonical-profile", "alternate-login", modal);
   const updated = { ...event, participants: {} };
   const render = () =>
     h.render(updated, "canonical-profile", "alternate-login", modal);
   render();
-  h.calls[0].resolve("creator-profile");
-  h.calls[1].resolve("canonical-profile");
+  required(h.calls[0]).resolve("creator-profile");
+  required(h.calls[1]).resolve("canonical-profile");
   await h.settle();
   const current = render();
   assert.equal(current.pending, false);
@@ -451,10 +541,16 @@ test("canonical lookup retries stop after auth changes, modal closure, or unmoun
   for (const changed of ["profile", "login", "modal", "unmount"]) {
     const h = eventProfileIdsHarness();
     const event = mergedEvent();
-    const modal = { eventId: event.eventId, isOpen: true };
+    const modal = {
+      eventId: event.eventId,
+      isOpen: true,
+      lastCloseReason: null,
+      isPendingCreate: false,
+      pendingCreateError: null,
+    };
     h.render(event, "canonical-profile", "alternate-login", modal);
-    h.calls[0].resolve("creator-profile");
-    h.calls[1].reject(new Error("Temporary lookup failure"));
+    required(h.calls[0]).resolve("creator-profile");
+    required(h.calls[1]).reject(new Error("Temporary lookup failure"));
     await h.settle();
     assert.equal(h.timers.size, 1);
     if (changed === "unmount") {
@@ -475,6 +571,7 @@ test("canonical lookup retries stop after auth changes, modal closure, or unmoun
   }
 });
 
+/** @param {string | null} [eventId] @param {string} [inviteId] @returns {import("../src/navigation/routeState.ts").RouteState} */
 const inviteRoute = (eventId = "event-first", inviteId = "auto_match") => ({
   mode: "invite",
   path: inviteId,
@@ -486,18 +583,19 @@ const inviteRoute = (eventId = "event-first", inviteId = "auto_match") => ({
 
 function authHarness() {
   let route = inviteRoute();
-  let resolveRole;
-  const roleRead = new Promise((resolve) => {
-    resolveRole = resolve;
-  });
+  /** @type {PromiseWithResolvers<{inviteId: string, role: "host" | "watch"}>} */
+  const roleRead = Promise.withResolvers();
+  /** @type {Parameters<typeof import("../src/session/sessionTransitionPort.ts").transition>[]} */
   const transitions = [];
   const instance = createConnection(
     ["seeIfFreshlySignedInProfileIsOneOfThePlayers"],
     {
       getRouteStateSnapshot: () => route,
-      readInviteRoleViaApi: () => roleRead,
+      readInviteRoleViaApi: () => roleRead.promise,
       isAutoInviteId,
-      transition: async (...args) => transitions.push(args),
+      transition: async (
+        /** @type {Parameters<typeof import("../src/session/sessionTransitionPort.ts").transition>} */ ...args
+      ) => transitions.push(args),
     },
   );
   Object.assign(instance, {
@@ -510,9 +608,10 @@ function authHarness() {
   return {
     transitions,
     run: () => instance.seeIfFreshlySignedInProfileIsOneOfThePlayers(),
-    setRoute: (next) => (route = next),
-    resolveRole: (role = "host") =>
-      resolveRole({ inviteId: "auto_match", role }),
+    setRoute: (/** @type {ReturnType<typeof inviteRoute>} */ next) =>
+      (route = next),
+    resolveRole: (/** @type {"host" | "watch"} */ role = "host") =>
+      roleRead.resolve({ inviteId: "auto_match", role }),
   };
 }
 
@@ -558,10 +657,14 @@ test("a signed-in spectator preserves the current session", async () => {
 
 function clipboardHarness() {
   const viewUrl = "https://mons.link/exact-match?event=event-first";
+  /** @type {string[]} */
   const copied = [];
+  /** @type {string[]} */
   const legacyCopied = [];
   const navigator = {
-    clipboard: { writeText: async (link) => copied.push(link) },
+    clipboard: {
+      writeText: async (/** @type {string} */ link) => copied.push(link),
+    },
   };
   let builderCalls = 0;
   const connection = createConnection(

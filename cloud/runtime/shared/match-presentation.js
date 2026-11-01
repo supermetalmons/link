@@ -10,6 +10,7 @@ exports.isMatchPresentationConflictResponse =
   exports.PRESENTATION_MAX_REQUEST_BYTES =
   exports.PRESENTATION_MAX_MESSAGE_BYTES =
     void 0;
+const appearance_js_1 = require("./appearance.js");
 const ids_js_1 = require("./ids.js");
 const profiles_js_1 = require("./profiles.js");
 const PRESENTATION_MAX_MESSAGE_BYTES = 16384;
@@ -33,9 +34,8 @@ const isMatchPresentation = (value) =>
   isExactKey(value.matchId) &&
   isExactKey(value.actorUid) &&
   value.actorUid.length <= 128 &&
-  Number.isSafeInteger(value.emojiId) &&
-  typeof value.aura === "string" &&
-  value.aura.length <= 32 &&
+  (0, appearance_js_1.isEmojiId)(value.emojiId) &&
+  (0, appearance_js_1.isAura)(value.aura) &&
   isRevision(value.revision);
 exports.isMatchPresentation = isMatchPresentation;
 const isMatchPresentationSnapshot = (value) =>

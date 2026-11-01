@@ -1,35 +1,39 @@
+import type { IdleMatchTimer, MatchTimer } from "./timers.js";
+import type { Aura, EmojiId } from "./appearance.js";
 export type MatchSeedRecord<TGameVariant extends string = string> = {
   gameVariant: TGameVariant;
   fen: string;
 };
 
 export type FreshMatchRecord<
-  TEmojiId = unknown,
-  TAura = unknown,
+  TEmojiId = EmojiId,
+  TAura = Aura,
   TGameVariant extends string = string,
-  TColor extends string = string,
+  TColor extends string = "white" | "black",
 > = {
+  schemaVersion: 1;
   version: typeof CONTROLLER_VERSION;
   color: TColor;
   emojiId: TEmojiId;
   aura: TAura;
   gameVariant: TGameVariant;
   fen: string;
-  status: "";
+  status: "active";
   flatMovesString: "";
-  timer: "";
+  timer: IdleMatchTimer;
 };
 
 export type MatchCreationRecord = {
+  schemaVersion: 1;
   version: number;
   color: "white" | "black";
-  emojiId: number | string;
-  aura: string | null;
+  emojiId: EmojiId;
+  aura: Aura;
   gameVariant: string;
   fen: string;
-  status: string;
+  status: "active" | "surrendered";
   flatMovesString: string;
-  timer: string;
+  timer: MatchTimer;
 };
 
 export type MatchHistoryRecord = {
@@ -83,15 +87,16 @@ function buildFreshMatchRecord<
   seed: MatchSeedRecord<TGameVariant>;
 }): FreshMatchRecord<TEmojiId, TAura, TGameVariant, TColor> {
   return {
+    schemaVersion: 1,
     version: CONTROLLER_VERSION,
     color,
     emojiId,
     aura,
     gameVariant: seed.gameVariant,
     fen: seed.fen,
-    status: "",
+    status: "active",
     flatMovesString: "",
-    timer: "",
+    timer: { state: "idle" },
   };
 }
 

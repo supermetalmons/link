@@ -2,10 +2,11 @@ import { isSafeRecordKey } from "./recordKeys.ts";
 import { isSafeOperationId } from "./operationIds.ts";
 
 export const PROFILE_GAME_PROJECTION_QUEUE_NAME =
-  "mons-link-profile-game-projection";
+  "mons-link-profile-game-projection-data1";
 export const EVENT_PROFILE_GAME_PROJECTION_QUEUE_NAME =
-  "mons-link-event-profile-game-projection";
+  "mons-link-event-profile-game-projection-data1";
 export const PROFILE_GAME_PROJECTION_SCHEMA_VERSION = 1;
+export const AUTOMATCH_PROFILE_GAME_PROJECTION_SCHEMA_VERSION = 2;
 
 export type RatingProfileGameProjectionTask = {
   kind: "rating-profile-game-projection";

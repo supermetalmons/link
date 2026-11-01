@@ -15,7 +15,7 @@ import { getEventModalState, type EventModalState } from "./modalState";
 
 type ParticipantLookupGroup = {
   profileId: string;
-  loginUid: string;
+  loginUid: string | null;
   modalState: EventModalState;
   displayName: string;
 };

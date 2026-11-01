@@ -1,6 +1,8 @@
+import { required } from "./fixtures/canonicalData.mjs";
 import assert from "node:assert/strict";
 import { registerHooks } from "node:module";
 import test from "node:test";
+import { canonicalProfile } from "./fixtures/canonicalData.mjs";
 
 registerHooks({
   resolve(specifier, context, nextResolve) {
@@ -42,6 +44,7 @@ const { bindMiningConnection, getMiningConnection } =
   await import("../src/island/miningConnectionPort.ts");
 const { getMonBoundsWidthFrac } = await import("../src/ui/island/layout.ts");
 
+/** @param {string | null} [lastRockDate] */
 const mining = (lastRockDate = null, dust = 0) => ({
   lastRockDate,
   materials: { dust, slime: 0, gum: 0, metal: 0, ice: 0 },
@@ -83,6 +86,7 @@ test("island overlap and safe-area geometry retain exact calculations", () => {
     right: 0.6,
     bottom: 0.3,
   });
+  assert.ok(safeArea);
   assert.equal(safeArea.cx, 0.5);
   assert.ok(Math.abs(safeArea.cy - 0.242) < Number.EPSILON);
   assert.equal(safeArea.rx, 0.63);
@@ -94,12 +98,15 @@ test("island overlap and safe-area geometry retain exact calculations", () => {
 });
 
 test("mining state keeps anonymous storage empty and rock visibility gated", () => {
-  const stored = loadStoredMiningState({
-    profileId: "profile",
-    lastRockDate: "2026-08-11",
-    materials: { dust: "3" },
-  });
-  assert.deepEqual(stored, mining("2026-08-11", 3));
+  /** @type {unknown} */
+  const stored = Reflect.apply(loadStoredMiningState, undefined, [
+    {
+      profileId: "profile",
+      lastRockDate: "2026-08-11",
+      materials: { dust: "3" },
+    },
+  ]);
+  assert.deepEqual(stored, mining("2026-08-11", 0));
   assert.deepEqual(
     loadStoredMiningState({
       profileId: "",
@@ -148,19 +155,26 @@ test("mining state keeps anonymous storage empty and rock visibility gated", () 
 });
 
 test("profile mining hydration preserves apply, cache, clear, and wait policies", () => {
-  const profile = { id: "profile", mining: mining("2026-08-12", 2) };
+  const profile = canonicalProfile({
+    id: "profile",
+    mining: mining("2026-08-12", 2),
+  });
   assert.deepEqual(decideProfileMiningHydration("profile", profile), {
     action: "apply",
-    mining: profile.mining,
+    mining: required(profile.mining),
   });
   const cached = decideProfileMiningHydration("", profile);
   assert.deepEqual(cached, {
     action: "cache",
     profileId: "profile",
-    mining: profile.mining,
+    mining: required(profile.mining),
   });
+  assert.ok(cached.action === "cache");
   assert.notStrictEqual(cached.mining, profile.mining);
-  assert.notStrictEqual(cached.mining.materials, profile.mining.materials);
+  assert.notStrictEqual(
+    cached.mining.materials,
+    required(profile.mining).materials,
+  );
   assert.deepEqual(decideProfileMiningHydration("other", profile), {
     action: "ignore",
   });
@@ -168,23 +182,24 @@ test("profile mining hydration preserves apply, cache, clear, and wait policies"
   assert.deepEqual(
     decidePendingMiningHydration("other", {
       profileId: "profile",
-      mining: profile.mining,
+      mining: required(profile.mining),
     }),
     { action: "clear" },
   );
   assert.deepEqual(
     decidePendingMiningHydration("profile", {
       profileId: "profile",
-      mining: profile.mining,
+      mining: required(profile.mining),
     }),
-    { action: "apply", mining: profile.mining },
+    { action: "apply", mining: required(profile.mining) },
   );
 });
 
 test("mining transport is provided through the typed local port", () => {
+  /** @type {Parameters<typeof bindMiningConnection>[0]} */
   const port = {
     createSessionGuard: () => () => true,
-    mineRock: async () => null,
+    mineRock: async () => ({ ok: true, mining: mining() }),
   };
   bindMiningConnection(port);
   assert.strictEqual(getMiningConnection(), port);

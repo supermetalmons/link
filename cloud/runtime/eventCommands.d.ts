@@ -49,16 +49,16 @@ export type EventFieldValues = {
     matches: boolean;
     results: boolean;
   };
-  announceOnTelegram: boolean;
 };
 export type EventField = keyof EventFieldValues;
+type EventFieldCommand<K extends EventField> = {
+  kind: "event-field";
+  eventId: string;
+  field: K;
+  value: EventFieldValues[K];
+};
 export type EventFieldMutation = {
-  [K in EventField]: {
-    kind: "event-field";
-    eventId: string;
-    field: K;
-    value: EventFieldValues[K];
-  };
+  [K in EventField]: EventFieldCommand<K>;
 }[EventField];
 export type EventProfileGameOutboxFieldValues = {
   schemaVersion: 1;
@@ -267,12 +267,7 @@ declare const eventField: <K extends EventField>(
   eventId: string,
   field: K,
   value: EventFieldValues[K],
-) => Extract<
-  EventFieldMutation,
-  {
-    field: K;
-  }
->;
+) => EventFieldCommand<K>;
 declare const eventCommandIdentity: (command: EventCommand) => string;
 declare const mergeEventPlans: (
   ...plans: readonly EventCommand[][]

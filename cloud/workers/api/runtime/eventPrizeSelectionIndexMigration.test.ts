@@ -1,5 +1,7 @@
+import { applyPreCleanupTestMigrations } from "./canonicalTestMigrations.ts";
 import { env } from "cloudflare:workers";
-import { applyD1Migrations, type D1Migration } from "cloudflare:test";
+import { eventDocumentFixture } from "../test/eventCompatibilityFixture.ts";
+import type { D1Migration } from "cloudflare:test";
 import { beforeAll, describe, expect, it } from "vitest";
 import {
   acquireEventWriteAdmission,
@@ -145,7 +147,7 @@ describe("unused prize selection profile index migration", () => {
       tbl_name: "event_prize_selections",
     });
 
-    await applyD1Migrations(db, [migrations[migrationIndex]]);
+    await applyPreCleanupTestMigrations(db, [migrations[migrationIndex]!]);
 
     expect(await retainedRows()).toEqual(beforeRows);
     expect(await schema()).toEqual(
@@ -174,6 +176,37 @@ describe("unused prize selection profile index migration", () => {
         .run(),
     ).rejects.toThrow(/FOREIGN KEY constraint failed/);
 
+    await applyPreCleanupTestMigrations(
+      db,
+      migrations.slice(migrationIndex + 1),
+    );
+    for (const id of [eventId, siblingEventId]) {
+      await db
+        .prepare(
+          `INSERT INTO event_records_canonical
+        (event_id, status, start_at_ms, updated_at_ms, revision, record_json)
+        VALUES (?, 'scheduled', 300, 200, 7, ?)`,
+        )
+        .bind(
+          id,
+          JSON.stringify(
+            eventDocumentFixture({
+              eventId: id,
+              status: "scheduled",
+              createdAtMs: 100,
+              updatedAtMs: 200,
+              startAtMs: 300,
+              isSundayMons: id === eventId,
+            }),
+          ),
+        )
+        .run();
+    }
+    await db
+      .prepare(
+        "INSERT INTO event_prize_selections_canonical SELECT * FROM event_prize_selections",
+      )
+      .run();
     const { connection, queries } = observeQueries();
     const selections = { "profile-a": "1092", "profile-😀": "1092" };
     await expect(
@@ -232,15 +265,15 @@ describe("unused prize selection profile index migration", () => {
         .all<{ detail: string }>();
       const details = plan.results.map(({ detail }) => detail).join("\n");
       expect(details).toMatch(
-        /SEARCH event_prize_selections USING PRIMARY KEY \(event_id=\?/,
+        /SEARCH event_prize_selections_canonical USING PRIMARY KEY \(event_id=\?/,
       );
       expect(details).not.toMatch(
-        /SCAN event_prize_selections|USE TEMP B-TREE/,
+        /SCAN event_prize_selections_canonical|USE TEMP B-TREE/,
       );
     }
 
     await db
-      .prepare("DELETE FROM event_records WHERE event_id = ?")
+      .prepare("DELETE FROM event_records_canonical WHERE event_id = ?")
       .bind(siblingEventId)
       .run();
     await expect(readEventPrizeSelections(db, siblingEventId)).resolves.toEqual(

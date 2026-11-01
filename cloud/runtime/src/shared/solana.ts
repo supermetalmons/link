@@ -8,7 +8,7 @@ const getBase58DecodedLength = (value: string) => {
     if (digit < 0) return 0;
     let carry = digit;
     for (let index = 0; index < bytes.length; index += 1) {
-      carry += bytes[index] * 58;
+      carry += bytes[index]! * 58;
       bytes[index] = carry & 0xff;
       carry >>= 8;
     }

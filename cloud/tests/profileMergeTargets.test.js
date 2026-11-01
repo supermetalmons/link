@@ -8,6 +8,11 @@ const {
   resolveProfileMergeTargetPath,
 } = require("../runtime/profileMergeTargets");
 
+/**
+ * @param {string} profileId
+ * @param {Record<string, unknown>} targets
+ * @param {Partial<Parameters<typeof resolveProfileMergeTargetPath>[0]>} [options]
+ */
 const resolvePathFrom = (profileId, targets, options = {}) =>
   resolveProfileMergeTargetPath({
     profileId,

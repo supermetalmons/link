@@ -1,5 +1,5 @@
 import { inviteSourceEventState } from "@mons/shared/invite-records";
-import { MAX_EVENT_PARTICIPANTS } from "@mons/shared/events";
+import { MAX_EVENT_PARTICIPANTS, type EventRecord } from "@mons/shared/events";
 import { isCanonicalLoginUid, isSafeRecordKey } from "./recordKeys.ts";
 import type { GameplayRepository } from "./gameplayRepository.ts";
 import { captureLoginMatchDiscovery } from "./loginMatchDiscoveryD1.ts";
@@ -47,44 +47,14 @@ function boundedInviteIds(input: readonly string[]): string[] {
   return inviteIds;
 }
 
-function record(value: unknown): Record<string, unknown> | null {
-  return value && typeof value === "object" && !Array.isArray(value)
-    ? (value as Record<string, unknown>)
-    : null;
-}
-
-function collectionValues(value: unknown): unknown[] {
-  if (value === null || value === undefined) return [];
-  if (typeof value !== "object") {
-    throw new Error("event-match-discovery-invalid-bracket");
-  }
-  const values = Object.values(value);
-  if (values.length > MAX_EVENT_PARTICIPANTS) {
-    throw new Error("event-match-discovery-invalid-bracket");
-  }
-  return values;
-}
-
-export function eventMatchInviteIds(event: Record<string, unknown>): string[] {
-  const matches = collectionValues(event.rounds).flatMap((value) => {
-    if (value === null || value === undefined) return [];
-    const round = record(value);
-    if (!round) throw new Error("event-match-discovery-invalid-bracket");
-    return collectionValues(round.matches);
-  });
-  matches.push(event.thirdPlaceMatch);
-  return matches.flatMap((value) => {
-    if (value === null || value === undefined) return [];
-    const match = record(value);
-    if (!match) throw new Error("event-match-discovery-invalid-bracket");
-    const inviteId = match.inviteId;
-    if (inviteId === null || inviteId === undefined || inviteId === "")
-      return [];
-    if (typeof inviteId !== "string" || !isSafeRecordKey(inviteId)) {
-      throw new Error("event-match-discovery-invalid-invite");
-    }
-    return [inviteId];
-  });
+export function eventMatchInviteIds(event: EventRecord): string[] {
+  const matches = Object.values(event.rounds).flatMap((round) =>
+    Object.values(round.matches),
+  );
+  if (event.thirdPlaceMatch !== null) matches.push(event.thirdPlaceMatch);
+  return matches.flatMap((match) =>
+    match.inviteId === null ? [] : [match.inviteId],
+  );
 }
 
 export async function captureEventMatchDiscovery(
@@ -111,7 +81,7 @@ export async function captureEventMatchDiscovery(
       throw new Error("event-match-discovery-invite-unavailable");
     }
     const inviteRows = chunk.map((inviteId, index) => {
-      const invite = inviteSourceEventState(invites[index]);
+      const invite = inviteSourceEventState(invites[index]!);
       const hostId = invite?.hostId;
       const guestId = invite?.guestId;
       if (
@@ -171,26 +141,26 @@ export async function ensureEventMatchDiscovery(
                 guest.resolution AS guest_resolution,
                 guest.provenance AS guest_provenance
          FROM requested
-         LEFT JOIN invite_sources AS source ON source.invite_id = requested.invite_id
-         LEFT JOIN game_session_transition_resources AS resource
+         LEFT JOIN invite_sources_canonical AS source ON source.invite_id = requested.invite_id
+         LEFT JOIN game_session_transition_resources_canonical AS resource
            ON resource.resource_key = requested.invite_id
-         LEFT JOIN game_session_transitions AS transition
+         LEFT JOIN game_session_transitions_canonical AS transition
            ON transition.transition_id = resource.transition_id
-         LEFT JOIN login_match_discovery AS host
+         LEFT JOIN login_match_discovery_canonical AS host
            ON host.login_uid = json_extract(source.source_json, '$.hostId')
           AND host.match_id = requested.invite_id
-         LEFT JOIN login_match_discovery AS guest
+         LEFT JOIN login_match_discovery_canonical AS guest
            ON guest.login_uid = json_extract(source.source_json, '$.guestId')
           AND guest.match_id = requested.invite_id`,
       )
       .bind(JSON.stringify(inviteIds)),
   ]);
   signal?.throwIfAborted();
-  assertAutomatchBackend(parseAutomatchRuntimeControlRow(modeRows.results[0]));
-  if (parseInviteSourceControlRow(controlRows.results[0]).backend !== "d1") {
+  assertAutomatchBackend(parseAutomatchRuntimeControlRow(modeRows!.results[0]));
+  if (parseInviteSourceControlRow(controlRows!.results[0]).backend !== "d1") {
     throw new InviteSourceFailure("invite-source-backend-retired");
   }
-  const rows = coverageRows.results as EventMatchDiscoveryCoverageRow[];
+  const rows = coverageRows!.results as EventMatchDiscoveryCoverageRow[];
   if (
     rows.length !== inviteIds.length ||
     new Set(rows.map((row) => row.invite_id)).size !== inviteIds.length ||

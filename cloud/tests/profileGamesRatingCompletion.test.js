@@ -7,19 +7,29 @@ const {
   createProfileGamesProjectionCore,
 } = require("../runtime/profileGamesProjectionCore");
 
+const { invite, profile } = require("./fixtures/canonicalProfileGames");
+const { readInviteDocument } = require("../runtime/shared/invite-records");
+
 const inviteId = "rating-event-invite";
 
+/**
+ * @typedef {import("../runtime/profileGamesProjectionCore").ProfileGamesProjectionRepository} Repository
+ */
+/** @param {{inviteFields?: Parameters<typeof invite>[0], readCompletion?: Repository["hasCompletedRatingUpdate"], readMetadata?: Repository["readInviteMetadata"]}} [input] */
 const fixture = ({
   inviteFields = {},
   readCompletion = async () => false,
   readMetadata,
 } = {}) => {
+  /** @type {import("../runtime/profileGamesProjectionCore").ProjectionWrite[]} */
   const writes = [];
+  /** @type {[string, string][]} */
   const completionReads = [];
+  /** @type {string[]} */
   const metadataReads = [];
   const profiles = new Map([
-    ["host-profile", { username: "host", emoji: 1 }],
-    ["guest-profile", { username: "guest", emoji: 2 }],
+    ["host-profile", profile({ username: "host", emoji: 1 })],
+    ["guest-profile", profile({ username: "guest", emoji: 2 })],
   ]);
   const core = createProfileGamesProjectionCore({
     repository: {
@@ -32,12 +42,16 @@ const fixture = ({
         assert.equal(readInviteId, inviteId);
         return readMetadata
           ? readMetadata(readInviteId)
-          : {
+          : invite({
+              kind: "event",
+              eventId: "event-1",
+              eventRoundIndex: 0,
+              eventMatchKey: "0_0",
               eventOwned: true,
               hostId: "host-login",
               guestId: "guest-login",
               ...inviteFields,
-            };
+            });
       },
       async readAutomatchEntry(inviteId) {
         const path = `automatch/${inviteId}`;
@@ -61,6 +75,7 @@ const fixture = ({
   return {
     completionReads,
     metadataReads,
+    /** @param {import("../runtime/profileGamesProjectionCore").RecomputeInviteProjectionOptions} [options] */
     recompute: (options = {}) =>
       core.recomputeInviteProjection(inviteId, "rating-completed", {
         eventTimestampMs: 100,
@@ -78,7 +93,11 @@ test("event games end from canonical rating completion without legacy markers", 
 
   assert.deepEqual(completionReads, [[inviteId, inviteId]]);
   assert.equal(writes.length, 2);
-  assert.ok(writes.every((write) => write.data.status === "ended"));
+  assert.ok(
+    writes.every(
+      (write) => write.type !== "delete" && write.data.status === "ended",
+    ),
+  );
 });
 
 test("invite metadata failures retry without falling back to an aggregate read", async () => {
@@ -87,35 +106,55 @@ test("invite metadata failures retry without falling back to an aggregate read",
     readMetadata: async () => {
       attempts += 1;
       if (attempts === 1) throw new Error("invite-metadata-unavailable");
-      return { hostId: "host-login", guestId: "guest-login" };
+      return invite({ hostId: "host-login", guestId: "guest-login" });
     },
   });
   await recompute();
 
   assert.deepEqual(metadataReads, [inviteId, inviteId]);
   assert.equal(writes.length, 2);
-  assert.ok(writes.every((write) => write.data.status === "active"));
+  assert.ok(
+    writes.every(
+      (write) => write.type !== "delete" && write.data.status === "active",
+    ),
+  );
 });
 
-test("legacy completion markers cannot end an event game", async () => {
-  const { recompute, writes } = fixture({
-    inviteFields: { matchesRatingUpdates: { [inviteId]: true } },
+test("legacy completion markers are rejected by the canonical invite boundary", () => {
+  const canonical = invite({
+    hostId: "host-login",
+    guestId: "guest-login",
+    kind: "event",
+    eventOwned: true,
+    eventId: "event-1",
+    eventRoundIndex: 0,
+    eventMatchKey: "0_0",
   });
-  await recompute();
-
-  assert.equal(writes.length, 2);
-  assert.ok(writes.every((write) => write.data.status === "active"));
+  assert.equal(
+    readInviteDocument({
+      ...canonical,
+      matchesRatingUpdates: { [inviteId]: true },
+    }),
+    null,
+  );
 });
 
 test("event projection reads completion only for the latest match", async () => {
   const { completionReads, recompute, writes } = fixture({
-    inviteFields: { hostRematches: "1", guestRematches: "1" },
+    inviteFields: {
+      hostRematches: { state: "open", indices: [1] },
+      guestRematches: { state: "open", indices: [1] },
+    },
     readCompletion: async (_inviteId, matchId) => matchId === inviteId,
   });
   await recompute({ latestMatchIdHint: inviteId });
 
   assert.deepEqual(completionReads, [[inviteId, `${inviteId}1`]]);
-  assert.ok(writes.every((write) => write.data.status === "active"));
+  assert.ok(
+    writes.every(
+      (write) => write.type !== "delete" && write.data.status === "active",
+    ),
+  );
 });
 
 test("event projection retries completion failures without changing projections", async () => {
@@ -132,7 +171,13 @@ test("event projection retries completion failures without changing projections"
 
 test("ordinary games do not read event rating completion", async () => {
   const { completionReads, recompute, writes } = fixture({
-    inviteFields: { eventOwned: false },
+    inviteFields: {
+      kind: "manual",
+      eventOwned: false,
+      eventId: null,
+      eventRoundIndex: null,
+      eventMatchKey: null,
+    },
     readCompletion: async () => {
       throw new Error("unexpected-rating-completion-read");
     },
@@ -140,5 +185,9 @@ test("ordinary games do not read event rating completion", async () => {
   await recompute();
 
   assert.deepEqual(completionReads, []);
-  assert.ok(writes.every((write) => write.data.status === "active"));
+  assert.ok(
+    writes.every(
+      (write) => write.type !== "delete" && write.data.status === "active",
+    ),
+  );
 });

@@ -1,3 +1,4 @@
+import type { EncodedSessionChangeValue } from "../src/gameSessionCodec.ts";
 import type {
   EventMutation,
   EventRuntimeStore,
@@ -41,6 +42,7 @@ import type {
   HistoricalMatchDescriptorWrite,
   MutationReceiptWrite,
   SessionTimestamp,
+  SessionCounter,
 } from "../../../runtime/automatchRecords.js";
 import type {
   ProfileProjectionRequest,
@@ -330,8 +332,8 @@ type HistoricalDescriptorMap = NonNullable<
     { kind: "profile-outbox-merge" }
   >["historicalMatches"]
 >;
-type StoredTimestampMarker = { readonly ".sv": "timestamp" };
-type IncrementMarker = { readonly ".sv": { increment: number } };
+type StoredTimestampMarker = { readonly kind: "timestamp" };
+type IncrementMarker = { readonly kind: "increment"; readonly delta: number };
 
 export type AutomatchEntryReadIsRequired = Assert<
   Awaited<
@@ -448,7 +450,7 @@ export type AutomatchChangesAcceptNamedProducers = Assert<
       kind: "mutation-receipt";
       operationId: string;
       value: MutationReceiptWrite;
-      expiration: { completedAtMs: StoredTimestampMarker };
+      expiration: { schemaVersion: 1; completedAtMs: SessionTimestamp };
     } extends GameSessionChange
       ? true
       : false)
@@ -474,6 +476,8 @@ export type AutomatchWritesAcceptServerTimestamps = Assert<
 export type AutomatchWritesRejectWrongServerMarkers = Assert<
   | Rejects<IncrementMarker, SessionTimestamp>
   | Rejects<{ ".sv": "invalid" }, SessionTimestamp>
+  | Rejects<{ readonly ".sv": "timestamp" }, SessionTimestamp>
+  | Rejects<{ readonly ".sv": { increment: number } }, SessionCounter>
   | Rejects<StoredTimestampMarker, TelegramSourceChanges["generation"]>
 >;
 export type AutomatchProjectionWritesRejectInvalidShapes = Assert<
@@ -597,4 +601,8 @@ export type PrizeExecutionRetainsItsSigner = Assert<
     >["createEventPrizeUmi"],
     WithdrawalRuntimeDependencies["createEventPrizeUmi"]
   >
+>;
+
+export type SessionEncodingRejectsUnknownBusinessBags = Assert<
+  Rejects<Record<string, unknown>, EncodedSessionChangeValue>
 >;

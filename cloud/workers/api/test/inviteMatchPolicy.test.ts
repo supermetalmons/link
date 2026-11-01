@@ -1,7 +1,20 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import type { RematchInviteData } from "@mons/shared/rematches";
+import {
+  isRematchSeries,
+  type RematchInviteData,
+  type RematchSeries,
+} from "@mons/shared/rematches";
 import { registeredInviteMatchIndex } from "../src/inviteMatchPolicy.ts";
+
+const series = (
+  indices: number[] = [],
+  state: RematchSeries["state"] = "open",
+): RematchSeries => ({ state, indices });
+const rematches = (host = series(), guest = series()): RematchInviteData => ({
+  hostRematches: host,
+  guestRematches: guest,
+});
 
 test("registration includes the base match and either player's historical or ended proposals", () => {
   const cases: Array<{
@@ -9,37 +22,33 @@ test("registration includes the base match and either player's historical or end
     matchId: string;
     expected: number | null;
   }> = [
-    { rematches: {}, matchId: "invite", expected: 0 },
+    { rematches: rematches(), matchId: "invite", expected: 0 },
     {
-      rematches: { hostRematches: "1;2x", guestRematches: "1" },
+      rematches: rematches(series([1, 2], "ended"), series([1])),
       matchId: "invite1",
       expected: 1,
     },
     {
-      rematches: { hostRematches: "1;2x", guestRematches: "1" },
+      rematches: rematches(series([1, 2], "ended"), series([1])),
       matchId: "invite2",
       expected: 2,
     },
     {
-      rematches: { hostRematches: "1", guestRematches: "1;2x" },
+      rematches: rematches(series([1]), series([1, 2], "ended")),
       matchId: "invite2",
       expected: 2,
     },
     {
-      rematches: { hostRematches: "1;3", guestRematches: "1" },
+      rematches: rematches(series([1, 3]), series([1])),
       matchId: "invite2",
       expected: null,
     },
     {
-      rematches: { hostRematches: "1;3", guestRematches: "1" },
+      rematches: rematches(series([1, 3]), series([1])),
       matchId: "invite3",
       expected: 3,
     },
-    {
-      rematches: { hostRematches: "3;1;3", guestRematches: "" },
-      matchId: "invite1",
-      expected: 1,
-    },
+    { rematches: rematches(series([1, 3])), matchId: "invite1", expected: 1 },
   ];
   for (const { rematches, matchId, expected } of cases) {
     const before = structuredClone(rematches);
@@ -64,21 +73,22 @@ test("registration requires exact canonical suffixes within the safe integer ran
     " 1",
     "1 ",
     String(Number.MAX_SAFE_INTEGER + 1),
-  ]) {
+  ])
     assert.equal(
-      registeredInviteMatchIndex("invite", `invite${suffix}`, {
-        hostRematches: suffix,
-        guestRematches: suffix,
-      }),
+      registeredInviteMatchIndex(
+        "invite",
+        `invite${suffix}`,
+        rematches(series([1])),
+      ),
       null,
       suffix,
     );
-  }
-  const maximum = String(Number.MAX_SAFE_INTEGER);
   assert.equal(
-    registeredInviteMatchIndex("invite", `invite${maximum}`, {
-      guestRematches: maximum,
-    }),
+    registeredInviteMatchIndex(
+      "invite",
+      `invite${Number.MAX_SAFE_INTEGER}`,
+      rematches(series(), series([Number.MAX_SAFE_INTEGER])),
+    ),
     Number.MAX_SAFE_INTEGER,
   );
 });
@@ -89,43 +99,40 @@ test("registration rejects empty or foreign IDs without reinterpreting numeric i
     ["", "invite1"],
     ["invite", ""],
     ["invite", "other1"],
-  ]) {
+  ] as const)
     assert.equal(
-      registeredInviteMatchIndex(inviteId, matchId, {
-        hostRematches: "1",
-      }),
+      registeredInviteMatchIndex(inviteId, matchId, rematches(series([1]))),
       null,
     );
-  }
-  assert.equal(registeredInviteMatchIndex("invite-10", "invite-10", {}), 0);
   assert.equal(
-    registeredInviteMatchIndex("invite-10", "invite-101", {
-      hostRematches: "1",
-    }),
+    registeredInviteMatchIndex("invite-10", "invite-10", rematches()),
+    0,
+  );
+  assert.equal(
+    registeredInviteMatchIndex(
+      "invite-10",
+      "invite-101",
+      rematches(series([1])),
+    ),
     1,
   );
 });
 
-test("registration tolerates malformed rematch tokens without trimming them", () => {
-  const rematches = Object.freeze({
-    hostRematches: " 1;2;;bad;03;4x",
-    guestRematches: false,
-  });
-  for (const [index, expected] of [
-    [1, null],
-    [2, 2],
-    [3, null],
-    [4, 4],
-  ]) {
-    assert.equal(
-      registeredInviteMatchIndex("invite", `invite${index}`, rematches),
-      expected,
-    );
-  }
-  for (const guestRematches of [null, false, [1], {}, "1xx", "1x "]) {
-    assert.equal(
-      registeredInviteMatchIndex("invite", "invite1", { guestRematches }),
-      null,
-    );
-  }
+test("canonical rematch boundaries reject obsolete token strings and malformed sequences", () => {
+  for (const value of [
+    null,
+    false,
+    [1],
+    {},
+    "1xx",
+    "1x ",
+    " 1;2;;bad;03;4x",
+    series([3, 1, 3]),
+    series([1, 1]),
+    series([0]),
+    series([1.5]),
+    series([Number.MAX_SAFE_INTEGER + 1]),
+  ])
+    assert.equal(isRematchSeries(value), false);
+  assert.equal(isRematchSeries(series([1, 3], "ended")), true);
 });

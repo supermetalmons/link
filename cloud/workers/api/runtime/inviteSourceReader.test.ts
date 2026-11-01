@@ -1,5 +1,7 @@
+import { applyCanonicalTestMigrations } from "./canonicalTestMigrations.ts";
+import { inviteDocumentFixture } from "../test/inviteDocumentFixture.ts";
 import { env } from "cloudflare:workers";
-import { applyD1Migrations, type D1Migration } from "cloudflare:test";
+import type { D1Migration } from "cloudflare:test";
 import {
   afterEach,
   beforeAll,
@@ -11,6 +13,7 @@ import {
 } from "vitest";
 import { createInviteSourceReader } from "../src/inviteSource.ts";
 import { applyRetiredProfileMigrations } from "./profileTestMigrations.ts";
+import { createEmptyWager, type WagerRecord } from "../src/wagerModel.ts";
 
 const testEnv = env as Env & {
   TEST_D1_MIGRATIONS: D1Migration[];
@@ -18,13 +21,12 @@ const testEnv = env as Env & {
 };
 const db = env.PROFILE_GAMES_DB;
 let inviteId: string;
-const source = {
+const source = inviteDocumentFixture({
   hostId: "host-login",
   guestId: "guest-login",
   hostColor: "white",
   password: "private",
-  custom: { future: [1, null, false] },
-};
+});
 
 type ReadInterceptor = (
   query: string,
@@ -119,13 +121,13 @@ function readOnlyDatabase(
             );
             for (let index = 0; index < results.length; index++) {
               const result = results[index];
-              expect(result.results.length).toBeLessThanOrEqual(1);
+              expect(result!.results.length).toBeLessThanOrEqual(1);
               const row = await intercept(
-                entries[index].query,
-                async () => result.results[0] ?? null,
+                entries[index]!.query,
+                async () => result!.results[0] ?? null,
               );
               results[index] = {
-                ...result,
+                ...result!,
                 results: row === null ? [] : [row],
               };
             }
@@ -163,7 +165,7 @@ function reader(
 async function seedSource(value: unknown = source) {
   await db
     .prepare(
-      `INSERT INTO invite_sources (invite_id, source_json, revision, updated_at_ms)
+      `INSERT INTO invite_sources_canonical (invite_id, source_json, revision, updated_at_ms)
        VALUES (?, ?, 1, 1) ON CONFLICT (invite_id)
        DO UPDATE SET source_json = excluded.source_json, revision = revision + 1`,
     )
@@ -173,11 +175,11 @@ async function seedSource(value: unknown = source) {
 
 async function seedWager(
   matchId: string,
-  wager: unknown,
+  wager: WagerRecord | null,
   marker: boolean | null,
 ) {
   await env.PROFILE_DB.prepare(
-    `INSERT INTO invite_wager_states
+    `INSERT INTO invite_wager_states_canonical
        (invite_id, match_id, wager_json, resolution_marker, revision, updated_at_ms)
        VALUES (?, ?, ?, ?, 1, 1)`,
   )
@@ -194,14 +196,29 @@ async function seedPendingTransition(status: "pending" | "completed") {
   await db.batch([
     db
       .prepare(
-        `INSERT INTO game_session_transitions
+        `INSERT INTO game_session_transitions_canonical
          (transition_id, invite_id, payload_json, status, created_at_ms, updated_at_ms)
-         VALUES ('reader-transition', ?, '{}', ?, 1, 1)`,
+         VALUES ('reader-transition', ?, ?, ?, 1, 1)`,
       )
-      .bind(inviteId, status),
+      .bind(
+        inviteId,
+        JSON.stringify({
+          version: 3,
+          inviteId,
+          inviteSourceEpoch: 1,
+          inviteMutations: [],
+          transitionId: "reader-transition",
+          operationDigest: "a".repeat(64),
+          resources: [inviteId],
+          mutations: [],
+          creations: [],
+          createdAtMs: 1,
+        }),
+        status,
+      ),
     db
       .prepare(
-        `INSERT INTO game_session_transition_resources (resource_key, transition_id)
+        `INSERT INTO game_session_transition_resources_canonical (resource_key, transition_id)
          VALUES (?, 'reader-transition')`,
       )
       .bind(inviteId),
@@ -210,7 +227,7 @@ async function seedPendingTransition(status: "pending" | "completed") {
 
 describe("D1-only invite source reader", () => {
   beforeAll(async () => {
-    await applyD1Migrations(db, testEnv.TEST_D1_MIGRATIONS);
+    await applyCanonicalTestMigrations(db, testEnv.TEST_D1_MIGRATIONS);
     await applyRetiredProfileMigrations(
       env.PROFILE_DB,
       testEnv.TEST_PROFILE_D1_MIGRATIONS,
@@ -221,9 +238,9 @@ describe("D1-only invite source reader", () => {
   beforeEach(async () => {
     inviteId = `reader-${crypto.randomUUID()}`;
     await db.batch([
-      db.prepare("DELETE FROM game_session_transition_resources"),
-      db.prepare("DELETE FROM game_session_transitions"),
-      db.prepare("DELETE FROM invite_sources"),
+      db.prepare("DELETE FROM game_session_transition_resources_canonical"),
+      db.prepare("DELETE FROM game_session_transitions_canonical"),
+      db.prepare("DELETE FROM invite_sources_canonical"),
       db.prepare(
         `UPDATE invite_source_control SET backend = 'd1', state = 'active',
          epoch = 1, freeze_generation = 0, verified_at_ms = 1,
@@ -256,32 +273,45 @@ describe("D1-only invite source reader", () => {
         source,
       );
       expect(executions.map(({ kind }) => kind)).toEqual(["batch", "single"]);
-      expect(executions[0].queries).toHaveLength(4);
-      expect(executions[0].queries[0]).toContain(
+      expect(executions[0]!.queries).toHaveLength(4);
+      expect(executions[0]!.queries[0]!).toContain(
         "FROM automatch_runtime_control ",
       );
-      expect(executions[0].queries[1]).toContain("FROM invite_source_control ");
-      expect(executions[0].queries[2]).toContain(
-        "FROM game_session_transition_resources ",
+      expect(executions[0]!.queries[1]!).toContain(
+        "FROM invite_source_control ",
       );
-      expect(executions[0].queries[3]).toContain("FROM invite_sources ");
-      expect(executions[1].queries[0]).toContain(
-        "FROM game_session_transition_resources ",
+      expect(executions[0]!.queries[2]!).toContain(
+        "FROM game_session_transition_resources_canonical ",
+      );
+      expect(executions[0]!.queries[3]!).toContain(
+        "FROM invite_sources_canonical ",
+      );
+      expect(executions[1]!.queries[0]!).toContain(
+        "FROM game_session_transition_resources_canonical ",
       );
       expect(globalThis.fetch).not.toHaveBeenCalled();
     },
   );
 
-  it("returns only metadata while preserving source and retained wager rows", async () => {
-    const wager = {
-      proposals: { "host-login": { material: "dust", count: 2 } },
+  it("returns only metadata while preserving source and canonical wager rows", async () => {
+    const wager: WagerRecord = {
+      ...createEmptyWager(),
+      proposals: {
+        "host-login": {
+          material: "dust",
+          count: 2,
+          createdAt: 1,
+          operationId: "a".repeat(64),
+          reservationOperationId: "b".repeat(64),
+        },
+      },
     };
     await seedWager("proposal", wager, null);
-    await seedWager("empty", {}, false);
+    await seedWager("empty", createEmptyWager(), false);
     await seedWager("resolved", null, true);
     await seedWager("unresolved", null, false);
     const storedWagers = await env.PROFILE_DB.prepare(
-      "SELECT * FROM invite_wager_states WHERE invite_id = ? ORDER BY match_id",
+      "SELECT * FROM invite_wager_states_canonical WHERE invite_id = ? ORDER BY match_id",
     )
       .bind(inviteId)
       .all();
@@ -290,7 +320,7 @@ describe("D1-only invite source reader", () => {
     expect(
       await db
         .prepare(
-          "SELECT source_json, revision FROM invite_sources WHERE invite_id = ?",
+          "SELECT source_json, revision FROM invite_sources_canonical WHERE invite_id = ?",
         )
         .bind(inviteId)
         .first(),
@@ -298,7 +328,7 @@ describe("D1-only invite source reader", () => {
     expect(
       (
         await env.PROFILE_DB.prepare(
-          "SELECT * FROM invite_wager_states WHERE invite_id = ? ORDER BY match_id",
+          "SELECT * FROM invite_wager_states_canonical WHERE invite_id = ? ORDER BY match_id",
         )
           .bind(inviteId)
           .all()
@@ -306,16 +336,18 @@ describe("D1-only invite source reader", () => {
     ).toEqual(storedWagers.results);
   });
 
-  it("returns null for missing invites even when retained wager rows exist", async () => {
-    await seedWager("retained", { proposals: {} }, true);
-    await db.prepare("DELETE FROM invite_sources").run();
+  it("returns null for missing invites even when canonical wager rows exist", async () => {
+    await seedWager("retained", createEmptyWager(), true);
+    await db.prepare("DELETE FROM invite_sources_canonical").run();
     const executions: ReadExecution[] = [];
     expect(await reader(undefined, undefined, executions)(inviteId)).toBeNull();
     expect(executions.map(({ kind }) => kind)).toEqual(["batch", "single"]);
-    expect(executions[0].queries).toHaveLength(4);
-    expect(executions[0].queries[3]).toContain("FROM invite_sources ");
-    expect(executions[1].queries[0]).toContain(
-      "FROM game_session_transition_resources ",
+    expect(executions[0]!.queries).toHaveLength(4);
+    expect(executions[0]!.queries[3]!).toContain(
+      "FROM invite_sources_canonical ",
+    );
+    expect(executions[1]!.queries[0]!).toContain(
+      "FROM game_session_transition_resources_canonical ",
     );
   });
 
@@ -326,13 +358,11 @@ describe("D1-only invite source reader", () => {
     ["invite_source_control", { epoch: 0 }],
     ["invite_source_control", { verified_at_ms: null }],
     ["invite_source_control", { activated_at_ms: 0 }],
-    ["invite_source_control", { metadata_json: "{" }],
     ["automatch_runtime_control", null],
     ["automatch_runtime_control", { backend: "rtdb" }],
     ["automatch_runtime_control", { state: "invalid" }],
     ["automatch_runtime_control", { epoch: 0 }],
     ["automatch_runtime_control", { freeze_generation: -1 }],
-    ["automatch_runtime_control", { metadata_json: "{" }],
   ])(
     "rejects unavailable or inactive %s control %j",
     async (table, replacement) => {
@@ -353,9 +383,24 @@ describe("D1-only invite source reader", () => {
         /invite-source|automatch-control/,
       );
       expect(executions.map(({ kind }) => kind)).toEqual(["batch"]);
-      expect(executions[0].queries).toHaveLength(4);
-      expect(executions[0].queries[3]).toContain("FROM invite_sources ");
+      expect(executions[0]!.queries).toHaveLength(4);
+      expect(executions[0]!.queries[3]!).toContain(
+        "FROM invite_sources_canonical ",
+      );
       expect(globalThis.fetch).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(["invite_source_control", "automatch_runtime_control"])(
+    "ignores retired audit metadata on %s while reading canonical records",
+    async (table) => {
+      const read = reader(async (query, execute) => {
+        const value = await execute();
+        return query.includes(`FROM ${table} `)
+          ? { ...(value as object), metadata_json: "{" }
+          : value;
+      });
+      expect(await read(inviteId)).toEqual(source);
     },
   );
 
@@ -367,19 +412,19 @@ describe("D1-only invite source reader", () => {
         error: "automatch-control-unavailable",
       },
       {
-        automatch: { metadata_json: "{" },
+        automatch: { epoch: 1.5 },
         invite: { state: "invalid" },
-        error: "automatch-control-corrupt",
+        error: "automatch-control-unavailable",
       },
       {
         automatch: { backend: "rtdb" },
         invite: { state: "invalid" },
-        error: "invite-source-control-unavailable",
+        error: "automatch-control-unavailable",
       },
       {
         automatch: { backend: "rtdb" },
         invite: {},
-        error: "invite-source-session-backend-conflict",
+        error: "automatch-control-unavailable",
       },
       {
         automatch: {},
@@ -405,7 +450,7 @@ describe("D1-only invite source reader", () => {
             return { ...(value as object), ...automatch };
           if (query.includes("FROM invite_source_control "))
             return { ...(value as object), ...invite };
-          if (query.includes("FROM invite_sources ")) {
+          if (query.includes("FROM invite_sources_canonical ")) {
             sourceReads++;
             if (sourceState === "malformed")
               return { ...(value as object), source_json: "{" };
@@ -429,7 +474,7 @@ describe("D1-only invite source reader", () => {
       });
       const read = reader(undefined, profileAccess);
       expect(await read(inviteId)).toEqual(source);
-      await db.prepare("DELETE FROM invite_sources").run();
+      await db.prepare("DELETE FROM invite_sources_canonical").run();
       expect(await read(inviteId)).toBeNull();
       expect(profileAccess).not.toHaveBeenCalled();
     },
@@ -449,7 +494,7 @@ describe("D1-only invite source reader", () => {
       const read = reader(
         async (query, execute) => {
           const value = await execute();
-          if (query.includes("FROM invite_sources ")) {
+          if (query.includes("FROM invite_sources_canonical ")) {
             sourceReads++;
             if (when === "during") await seedPendingTransition(status);
           }
@@ -467,7 +512,9 @@ describe("D1-only invite source reader", () => {
       );
       expect(
         await db
-          .prepare("SELECT status, attempt_count FROM game_session_transitions")
+          .prepare(
+            "SELECT status, attempt_count FROM game_session_transitions_canonical",
+          )
           .first(),
       ).toEqual({ status, attempt_count: 0 });
     },
@@ -482,7 +529,7 @@ describe("D1-only invite source reader", () => {
       const read = reader(
         async (query, execute) => {
           const value = await execute();
-          if (query.includes("FROM invite_sources ")) {
+          if (query.includes("FROM invite_sources_canonical ")) {
             sourceReads++;
             return { ...(value as object), source_json: "{" };
           }
@@ -498,7 +545,9 @@ describe("D1-only invite source reader", () => {
       expect(executions.map(({ kind }) => kind)).toEqual(["batch"]);
       expect(
         await db
-          .prepare("SELECT status, attempt_count FROM game_session_transitions")
+          .prepare(
+            "SELECT status, attempt_count FROM game_session_transitions_canonical",
+          )
           .first(),
       ).toEqual({ status, attempt_count: 0 });
     },
@@ -507,12 +556,12 @@ describe("D1-only invite source reader", () => {
   it.each(["pending", "completed"] as const)(
     "checks the final primary fence for missing sources when a %s resource appears during the read",
     async (status) => {
-      await db.prepare("DELETE FROM invite_sources").run();
+      await db.prepare("DELETE FROM invite_sources_canonical").run();
       const executions: ReadExecution[] = [];
       const read = reader(
         async (query, execute) => {
           const value = await execute();
-          if (query.includes("FROM invite_sources ")) {
+          if (query.includes("FROM invite_sources_canonical ")) {
             expect(value).toBeNull();
             await seedPendingTransition(status);
           }
@@ -527,7 +576,9 @@ describe("D1-only invite source reader", () => {
       expect(executions.map(({ kind }) => kind)).toEqual(["batch", "single"]);
       expect(
         await db
-          .prepare("SELECT status, attempt_count FROM game_session_transitions")
+          .prepare(
+            "SELECT status, attempt_count FROM game_session_transitions_canonical",
+          )
           .first(),
       ).toEqual({ status, attempt_count: 0 });
     },
@@ -543,7 +594,7 @@ describe("D1-only invite source reader", () => {
   ])("rejects corrupt invite rows %j", async (replacement) => {
     const read = reader(async (query, execute) => {
       const value = await execute();
-      return query.includes("FROM invite_sources ")
+      return query.includes("FROM invite_sources_canonical ")
         ? { ...(value as object), ...replacement }
         : value;
     });
@@ -553,19 +604,31 @@ describe("D1-only invite source reader", () => {
   it("reads fresh data after success and a transient D1 failure", async () => {
     let failNext = false;
     const read = reader(async (query, execute) => {
-      if (failNext && query.includes("FROM invite_sources ")) {
+      if (failNext && query.includes("FROM invite_sources_canonical ")) {
         failNext = false;
         throw new Error("transient-d1-read");
       }
       return execute();
     });
     expect(await read(inviteId)).toEqual(source);
-    await seedSource({ ...source, hostRematches: "1" });
+    await seedSource({
+      ...source,
+      hostRematches: { state: "open", indices: [1] },
+    });
     failNext = true;
     await expect(read(inviteId)).rejects.toThrow("transient-d1-read");
-    expect(await read(inviteId)).toEqual({ ...source, hostRematches: "1" });
-    await seedSource({ ...source, hostRematches: "1;2" });
-    expect(await read(inviteId)).toEqual({ ...source, hostRematches: "1;2" });
+    expect(await read(inviteId)).toEqual({
+      ...source,
+      hostRematches: { state: "open", indices: [1] },
+    });
+    await seedSource({
+      ...source,
+      hostRematches: { state: "open", indices: [1, 2] },
+    });
+    expect(await read(inviteId)).toEqual({
+      ...source,
+      hostRematches: { state: "open", indices: [1, 2] },
+    });
   });
 
   it("reads fresh controls after a successful source read", async () => {

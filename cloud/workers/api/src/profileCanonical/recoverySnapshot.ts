@@ -34,24 +34,24 @@ function aggregateStatements(
 ): D1PreparedStatement[] {
   const queries: CanonicalProfileAggregateParts<string> = {
     profile: `SELECT requested.request_index AS recovery_request_index, value.*
-     FROM requested JOIN profile_records value USING (profile_id)
+     FROM requested JOIN profile_records_canonical value USING (profile_id)
      ORDER BY requested.request_index`,
     loginOwners: `SELECT requested.request_index AS recovery_request_index, value.*
-     FROM requested JOIN profile_login_owners value USING (profile_id)
+     FROM requested JOIN profile_login_owners_canonical value USING (profile_id)
      ORDER BY requested.request_index, value.login_uid ASC`,
     authMethods: `SELECT requested.request_index AS recovery_request_index, value.*
-     FROM requested JOIN profile_auth_methods value USING (profile_id)
+     FROM requested JOIN profile_auth_methods_canonical value USING (profile_id)
      ORDER BY requested.request_index, value.method ASC`,
     februaryOpponentProfileIds: `SELECT requested.request_index AS recovery_request_index, value.opponent_profile_id
-     FROM requested JOIN profile_february_opponents value USING (profile_id)
+     FROM requested JOIN profile_february_opponents_canonical value USING (profile_id)
      ORDER BY requested.request_index, value.opponent_profile_id ASC`,
     mergeTarget: `SELECT requested.request_index AS recovery_request_index,
             value.source_profile_id, value.target_profile_id, value.merged_at_ms, value.op_id
-     FROM requested JOIN profile_merge_targets value
+     FROM requested JOIN profile_merge_targets_canonical value
        ON value.source_profile_id = requested.profile_id
      ORDER BY requested.request_index`,
     recovery: `SELECT requested.request_index AS recovery_request_index, value.*
-     FROM requested JOIN profile_auth_recovery_jobs value USING (profile_id)
+     FROM requested JOIN profile_auth_recovery_jobs_canonical value USING (profile_id)
      ORDER BY requested.request_index`,
   };
   return canonicalProfileAggregateValues(queries).map((query) =>
@@ -70,11 +70,11 @@ function mergePathStatement(
     .prepare(
       `WITH RECURSIVE chain(depth, source_profile_id, target_profile_id, merged_at_ms, op_id) AS (
          SELECT 0, source_profile_id, target_profile_id, merged_at_ms, op_id
-         FROM profile_merge_targets WHERE source_profile_id = ?
+         FROM profile_merge_targets_canonical WHERE source_profile_id = ?
          UNION ALL
          SELECT chain.depth + 1, target.source_profile_id, target.target_profile_id,
                 target.merged_at_ms, target.op_id
-         FROM chain JOIN profile_merge_targets target
+         FROM chain JOIN profile_merge_targets_canonical target
            ON target.source_profile_id = chain.target_profile_id
          WHERE chain.depth < ? AND chain.target_profile_id != ?
        )
@@ -179,12 +179,13 @@ export async function readCanonicalRecoveryFinalizationSnapshot(
     for (const row of result.results) {
       const requestIndex = safeInteger(row.recovery_request_index);
       if (requestIndex > 1) throw new CanonicalProfileCorruption();
-      canonicalProfileAggregatePart(groups[requestIndex], part).results.push(
+      canonicalProfileAggregatePart(groups[requestIndex]!, part).results.push(
         row,
       );
     }
   }
-  const [target, source] = groups.map(parseCanonicalProfileAggregateResults);
+  const target = parseCanonicalProfileAggregateResults(groups[0]!);
+  const source = parseCanonicalProfileAggregateResults(groups[1]!);
   if (!target.profile || !target.recovery) {
     return { target, source, mergePath: null };
   }

@@ -3,6 +3,13 @@ import { readFileSync } from "node:fs";
 import { registerHooks } from "node:module";
 import test from "node:test";
 import ts from "typescript";
+import { required } from "./fixtures/canonicalData.mjs";
+
+/**
+ * @typedef {import("../src/session/sessionAuth.ts").SessionAuthDependencies} SessionAuthDependencies
+ * @typedef {import("../src/session/sessionStore.ts").StoredSession} StoredSession
+ * @typedef {StoredSession & { uid: string }} PersistedSession
+ */
 
 registerHooks({
   resolve(specifier, context, nextResolve) {
@@ -32,17 +39,16 @@ const { isLogoutRecoveryRequired, setLogoutRecoveryRequired } =
 
 test.afterEach(() => setLogoutRecoveryRequired(false));
 
+/**
+ * @template [T=void]
+ * @returns {PromiseWithResolvers<T>}
+ */
 const deferred = () => {
-  let resolve;
-  let reject;
-  const promise = new Promise((yes, no) => {
-    resolve = yes;
-    reject = no;
-  });
-  return { promise, resolve, reject };
+  return Promise.withResolvers();
 };
 
 const flush = () => new Promise((resolve) => setImmediate(resolve));
+/** @returns {StoredSession} */
 const createSession = () => ({
   sessionId: crypto.randomUUID(),
   refreshSecret: Buffer.from(
@@ -54,6 +60,7 @@ const createSession = () => ({
   uid: null,
 });
 
+/** @returns {import("../src/session/sessionStore.ts").SessionStore & { read(): import("../src/session/sessionStore.ts").SessionState }} */
 function memoryStore(initial = createEmptySessionState()) {
   let state = structuredClone(initial);
   let queue = Promise.resolve();
@@ -64,7 +71,10 @@ function memoryStore(initial = createEmptySessionState()) {
         state = structuredClone(change(structuredClone(state)));
         return structuredClone(state);
       });
-      queue = operation.catch(() => undefined);
+      queue = operation.then(
+        () => undefined,
+        () => undefined,
+      );
       return operation;
     },
   };
@@ -73,13 +83,20 @@ function memoryStore(initial = createEmptySessionState()) {
 function harness() {
   let now = 1_000_000;
   let tokenNumber = 0;
+  /** @type {Map<string, PersistedSession>} */
   const sessions = new Map();
+  /** @type {Set<string>} */
   const revoked = new Set();
+  /** @type {StoredSession[]} */
   const creates = [];
+  /** @type {string[]} */
   const refreshes = [];
+  /** @type {import("../src/session/sessionStore.ts").SessionRevocation[]} */
   const revokes = [];
   const store = memoryStore();
+  /** @type {Set<string>} */
   const pendingLogouts = new Set();
+  /** @type {NonNullable<SessionAuthDependencies["logoutIntents"]>} */
   const logoutIntents = {
     has: (generation) => pendingLogouts.has(generation),
     add: (generation) => {
@@ -88,6 +105,7 @@ function harness() {
     },
     remove: (generation) => pendingLogouts.delete(generation),
   };
+  /** @param {PersistedSession} session @returns {import("../src/services/sessionApi.ts").SessionTokenResult} */
   const token = (session) => ({
     ok: true,
     uid: session.uid,
@@ -96,6 +114,7 @@ function harness() {
     accessExpiresAtMs: now + 300_000,
     accessDeadlineMs: now + 300_000,
   });
+  /** @type {SessionAuthDependencies["api"]} */
   const api = {
     async create(session) {
       creates.push(structuredClone(session));
@@ -117,13 +136,14 @@ function harness() {
       refreshes.push(session.sessionId);
       if (revoked.has(session.sessionId))
         throw new SessionApiError("session-revoked", "revoked");
-      return token(sessions.get(session.sessionId));
+      return token(required(sessions.get(session.sessionId)));
     },
     async revoke(session) {
       revokes.push(structuredClone(session));
       revoked.add(session.sessionId);
     },
   };
+  /** @param {Partial<SessionAuthDependencies>} [overrides] */
   const make = (overrides = {}) =>
     new SessionAuth({
       store,
@@ -145,12 +165,21 @@ function harness() {
     revoked,
     sessions,
     token,
-    advance: (ms) => {
+    advance: (/** @type {number} */ ms) => {
       now += ms;
     },
   };
 }
 
+/**
+ * @param {string} name
+ * @param {{ sessionAuth: InstanceType<typeof SessionAuth>; reloadAfterLogout: () => unknown;
+ *   clearClientPersistenceForLogout?: (mode: "fast" | "thorough", generation: string) => Promise<unknown>;
+ *   createSignalId?: () => string; armPendingLogoutWipe?: () => void;
+ *   broadcastLogoutSignal?: () => void; setLogoutRecoveryRequired?: typeof setLogoutRecoveryRequired;
+ * }} dependencies
+ * @returns {(signal?: {id: string; generation: string}) => Promise<void> | void}
+ */
 function logoutFunction(name, dependencies) {
   dependencies = { setLogoutRecoveryRequired, ...dependencies };
   const source = ts.createSourceFile(
@@ -171,10 +200,23 @@ function logoutFunction(name, dependencies) {
     `let lastHandledSignalId = ""; let isHandlingSignal = false; const run = ${declaration.initializer.getText(source)};`,
     { compilerOptions: { target: ts.ScriptTarget.ES2022 } },
   );
-  return new Function(
-    ...Object.keys(dependencies),
-    `${outputText}\nreturn run;`,
-  )(...Object.values(dependencies));
+  const load =
+    /** @type {(...values: unknown[]) => (signal?: {id: string; generation: string}) => Promise<void> | void} */ (
+      new Function(...Object.keys(dependencies), `${outputText}\nreturn run;`)
+    );
+  return load(...Object.values(dependencies));
+}
+
+/** @param {InstanceType<typeof SessionAuth>} auth @param {string} key @returns {unknown} */
+function privateState(auth, key) {
+  return Reflect.get(auth, key);
+}
+
+/** @param {InstanceType<typeof SessionAuth>} auth @returns {Record<string, unknown>} */
+function accessState(auth) {
+  const access = privateState(auth, "access");
+  assert.ok(access !== null && typeof access === "object");
+  return Object.fromEntries(Object.entries(access));
 }
 
 test("two tabs atomically share anonymous credentials and one server identity", async () => {
@@ -182,13 +224,24 @@ test("two tabs atomically share anonymous credentials and one server identity", 
   const first = h.make();
   const second = h.make();
   await Promise.all([first.signInAnonymously(), second.signInAnonymously()]);
-  assert.equal(first.currentUser.uid, second.currentUser.uid);
-  assert.equal(first.currentUser.sessionId, second.currentUser.sessionId);
+  assert.equal(
+    required(readCurrentUser(first)).uid,
+    required(readCurrentUser(second)).uid,
+  );
+  assert.equal(
+    required(readCurrentUser(first)).sessionId,
+    required(readCurrentUser(second)).sessionId,
+  );
   assert.equal(h.sessions.size, 1);
   assert.ok(
-    h.creates.every((entry) => entry.sessionId === h.creates[0].sessionId),
+    h.creates.every(
+      (entry) => entry.sessionId === required(h.creates[0]).sessionId,
+    ),
   );
-  assert.notEqual(h.creates[0].refreshSecret, h.creates[0].revokeSecret);
+  assert.notEqual(
+    required(h.creates[0]).refreshSecret,
+    required(h.creates[0]).revokeSecret,
+  );
 });
 
 test("a lost create response replays the exact persisted credentials after reload", async () => {
@@ -205,18 +258,22 @@ test("a lost create response replays the exact persisted credentials after reloa
   };
   const first = h.make();
   await assert.rejects(first.signInAnonymously(), /offline/);
-  assert.equal(first.currentUser, null);
+  assert.equal(readCurrentUser(first), null);
   const pending = h.store.read().session;
-  assert.equal(pending.uid, null);
+  assert.equal(required(pending).uid, null);
   const restored = h.make();
   await restored.signInAnonymously();
-  assert.equal(restored.currentUser.sessionId, pending.sessionId);
+  assert.equal(
+    required(readCurrentUser(restored)).sessionId,
+    required(pending).sessionId,
+  );
   assert.equal(h.sessions.size, 1);
   assert.deepEqual(h.creates[1], h.creates[0]);
 });
 
 test("bootstrap waits for storage and never creates a replacement on storage failure", async () => {
   const h = harness();
+  /** @type {PromiseWithResolvers<import("../src/session/sessionStore.ts").SessionState>} */
   const pending = deferred();
   const auth = h.make({ store: { update: () => pending.promise } });
   const attempt = auth.signInAnonymously();
@@ -225,7 +282,7 @@ test("bootstrap waits for storage and never creates a replacement on storage fai
   pending.reject(new SessionStorageError());
   await assert.rejects(attempt, /Session storage is unavailable/);
   assert.equal(h.creates.length, 0);
-  assert.equal(auth.currentUser, null);
+  assert.equal(readCurrentUser(auth), null);
   await assert.rejects(
     createIndexedDbSessionStore(() => {
       throw new Error("blocked");
@@ -238,17 +295,17 @@ test("persistent sessions refresh after months inactive and preserve user identi
   const h = harness();
   const first = h.make();
   await first.signInAnonymously();
-  const uid = first.currentUser.uid;
+  const uid = required(readCurrentUser(first)).uid;
   assert.equal(first.restoredSessionId, null);
   h.advance(400 * 24 * 60 * 60 * 1000);
   const restored = h.make();
   await restored.authStateReady();
-  const user = restored.currentUser;
-  assert.equal(restored.restoredSessionId, user.sessionId);
-  assert.equal(user.uid, uid);
-  const token = await user.getIdToken();
+  const user = readCurrentUser(restored);
+  assert.equal(restored.restoredSessionId, required(user).sessionId);
+  assert.equal(required(user).uid, uid);
+  const token = await required(user).getIdToken();
   assert.match(token, /^token-/);
-  assert.equal(restored.currentUser, user);
+  assert.equal(readCurrentUser(restored), user);
   assert.equal(h.sessions.size, 1);
   assert.equal(h.refreshes.length, 1);
 });
@@ -257,13 +314,13 @@ test("503 and offline refresh preserve durable credentials and current user", as
   const h = harness();
   const auth = h.make();
   await auth.signInAnonymously();
-  const user = auth.currentUser;
+  const user = readCurrentUser(auth);
   const state = h.store.read();
   h.api.refresh = async () => {
     throw new SessionApiError("unavailable", "offline");
   };
-  await assert.rejects(user.getIdToken(true), /offline/);
-  assert.equal(auth.currentUser, user);
+  await assert.rejects(required(user).getIdToken(true), /offline/);
+  assert.equal(readCurrentUser(auth), user);
   assert.deepEqual(h.store.read().session, state.session);
   await auth.signInAnonymously();
   assert.equal(h.creates.length, 1);
@@ -276,19 +333,19 @@ test("cached token and socket lifetime age monotonically across wall-clock chang
   try {
     Date.now = () => originalNow() + 600_000;
     await auth.signInAnonymously();
-    const user = auth.currentUser;
-    const token = await user.getIdToken();
+    const user = readCurrentUser(auth);
+    const token = await required(user).getIdToken();
     assert.equal(auth.getTokenRemainingMs(token), 300_000);
     Date.now = () => originalNow() - 600_000;
     h.advance(120_000);
-    assert.equal(await user.getIdToken(), token);
+    assert.equal(await required(user).getIdToken(), token);
     assert.equal(auth.getTokenRemainingMs(token), 180_000);
     assert.equal(h.refreshes.length, 0);
     h.advance(150_001);
-    const fresh = await user.getIdToken();
+    const fresh = await required(user).getIdToken();
     assert.notEqual(fresh, token);
     assert.equal(h.refreshes.length, 1);
-    assert.equal(auth.currentUser, user);
+    assert.equal(readCurrentUser(auth), user);
     assert.equal(auth.getTokenRemainingMs(fresh), 300_000);
     assert.equal(auth.getTokenRemainingMs(token), 0);
     await auth.signOut();
@@ -311,9 +368,9 @@ test("refresh is single-flight within a tab and independent across tabs", async 
     return refresh(session);
   };
   const tokens = [
-    first.currentUser.getIdToken(true),
-    first.currentUser.getIdToken(true),
-    second.currentUser.getIdToken(true),
+    required(readCurrentUser(first)).getIdToken(true),
+    required(readCurrentUser(first)).getIdToken(true),
+    required(readCurrentUser(second)).getIdToken(true),
   ];
   await flush();
   wait.resolve();
@@ -323,27 +380,39 @@ test("refresh is single-flight within a tab and independent across tabs", async 
   assert.equal(h.revokes.length, 0);
 });
 
+/**
+ * @param {AbortController} [controller]
+ * @param {Parameters<InstanceType<typeof SessionAuth>["prepareInitialGame"]>[1]["selectionForUid"]} [selectionForUid]
+ * @param {Parameters<InstanceType<typeof SessionAuth>["prepareInitialGame"]>[1]["onSessionBound"]} [onSessionBound]
+ * @returns {Parameters<InstanceType<typeof SessionAuth>["prepareInitialGame"]>[1]}
+ */
 const initialGameOptions = (
   controller = new AbortController(),
   selectionForUid = () => "current",
-  onSessionBound,
+  onSessionBound = undefined,
 ) => ({
   signal: controller.signal,
   selectionForUid,
-  onSessionBound,
+  ...(onSessionBound === undefined ? {} : { onSessionBound }),
 });
-const attachInitialGame = (response, target) => ({
-  ...response,
-  ...(target
-    ? { gameBootstrap: { ...target, result: { ok: false, status: 404 } } }
-    : {}),
-});
+/** @param {import("../src/services/sessionApi.ts").SessionTokenReadResult} response @param {Parameters<SessionAuthDependencies["api"]["create"]>[1]} target @returns {import("../src/services/sessionApi.ts").SessionTokenReadResult} */
+const attachInitialGame = (response, target) => {
+  if (target) assert.ok("inviteId" in target);
+  return {
+    ...response,
+    ...(target
+      ? { gameBootstrap: { ...target, result: { ok: false, status: 404 } } }
+      : {}),
+  };
+};
 
 test("initial game intent joins anonymous creation without retaining game data in auth state", async () => {
   const h = harness();
   const auth = h.make();
   const create = h.api.create;
+  /** @type {Array<(import("@mons/shared/session-bootstrap").SessionBootstrapTarget | import("@mons/shared/session-bootstrap").SessionEventBootstrapTarget) | undefined>} */
   const targets = [];
+  /** @type {Array<import("../src/session/sessionAuth.ts").InitialGameSessionOwner>} */
   const owners = [];
   h.api.create = async (session, target) => {
     assert.deepEqual(owners, [
@@ -358,33 +427,47 @@ test("initial game intent joins anonymous creation without retaining game data i
   );
   await Promise.all([auth.signInAnonymously(), auth.signInAnonymously()]);
   const result = await prepared;
-  assert.equal(result.user, auth.currentUser);
+  assert.equal(result.user, readCurrentUser(auth));
   assert.deepEqual(result.bootstrap, { ok: false, status: 404 });
   assert.deepEqual(targets, [{ inviteId: "game-a", selection: "current" }]);
   assert.equal(h.creates.length, 1);
   assert.equal(h.refreshes.length, 0);
-  assert.equal("gameBootstrap" in auth.access, false);
+  assert.equal("gameBootstrap" in accessState(auth), false);
   assert.equal(JSON.stringify(h.store.read()).includes("gameBootstrap"), false);
-  assert.equal(auth.initialGameIntent, null);
+  assert.equal(privateState(auth, "initialGameIntent"), null);
   assert.equal(owners.length, 1);
 });
 
+/**
+ * @param {AbortController} [controller]
+ * @param {Parameters<InstanceType<typeof SessionAuth>["prepareInitialEvent"]>[1]["onSessionBound"]} [onSessionBound]
+ * @returns {Parameters<InstanceType<typeof SessionAuth>["prepareInitialEvent"]>[1]}
+ */
 const initialEventOptions = (
   controller = new AbortController(),
-  onSessionBound,
-) => ({ signal: controller.signal, onSessionBound });
-const attachInitialEvent = (response, target) => ({
-  ...response,
-  ...(target
-    ? { eventBootstrap: { ...target, result: { ok: false, status: 503 } } }
-    : {}),
+  onSessionBound = undefined,
+) => ({
+  signal: controller.signal,
+  ...(onSessionBound === undefined ? {} : { onSessionBound }),
 });
+/** @param {import("../src/services/sessionApi.ts").SessionTokenReadResult} response @param {Parameters<SessionAuthDependencies["api"]["create"]>[1]} target @returns {import("../src/services/sessionApi.ts").SessionTokenReadResult} */
+const attachInitialEvent = (response, target) => {
+  if (target) assert.ok("eventId" in target);
+  return {
+    ...response,
+    ...(target
+      ? { eventBootstrap: { ...target, result: { ok: false, status: 503 } } }
+      : {}),
+  };
+};
 
 test("initial event intent enriches one anonymous creation without persisting event data", async () => {
   const h = harness();
   const auth = h.make();
   const create = h.api.create;
+  /** @type {Array<(import("@mons/shared/session-bootstrap").SessionBootstrapTarget | import("@mons/shared/session-bootstrap").SessionEventBootstrapTarget) | undefined>} */
   const targets = [];
+  /** @type {Array<import("../src/session/sessionAuth.ts").InitialGameSessionOwner>} */
   const owners = [];
   h.api.create = async (session, target) => {
     targets.push(target);
@@ -399,17 +482,17 @@ test("initial event intent enriches one anonymous creation without persisting ev
   );
   await Promise.all([auth.signInAnonymously(), auth.signInAnonymously()]);
   const result = await prepared;
-  assert.equal(result.user, auth.currentUser);
+  assert.equal(result.user, readCurrentUser(auth));
   assert.deepEqual(result.bootstrap, { ok: false, status: 503 });
   assert.deepEqual(targets, [{ eventId: "event-a" }]);
   assert.equal(h.creates.length, 1);
   assert.equal(h.refreshes.length, 0);
-  assert.equal("eventBootstrap" in auth.access, false);
+  assert.equal("eventBootstrap" in accessState(auth), false);
   assert.equal(
     JSON.stringify(h.store.read()).includes("eventBootstrap"),
     false,
   );
-  assert.equal(auth.initialEventIntent, null);
+  assert.equal(privateState(auth, "initialEventIntent"), null);
 });
 
 test("initial event enriches a cold shared refresh even when another auth listener requests the token", async () => {
@@ -417,7 +500,9 @@ test("initial event enriches a cold shared refresh even when another auth listen
   await h.make().signInAnonymously();
   const auth = h.make();
   const refresh = h.api.refresh;
+  /** @type {Array<(import("@mons/shared/session-bootstrap").SessionBootstrapTarget | import("@mons/shared/session-bootstrap").SessionEventBootstrapTarget) | undefined>} */
   const targets = [];
+  /** @type {Array<Promise<string>>} */
   const tokens = [];
   h.api.refresh = async (session, target) => {
     targets.push(target);
@@ -434,7 +519,7 @@ test("initial event enriches a cold shared refresh even when another auth listen
   assert.deepEqual(targets, [{ eventId: "event-a" }]);
   assert.deepEqual(result.bootstrap, { ok: false, status: 503 });
   assert.equal(h.refreshes.length, 1);
-  assert.equal("eventBootstrap" in auth.access, false);
+  assert.equal("eventBootstrap" in accessState(auth), false);
 });
 
 test("valid memory tokens and already-dispatched refreshes do not force an event refresh", async () => {
@@ -451,13 +536,14 @@ test("valid memory tokens and already-dispatched refreshes do not force an event
   await cold.authStateReady();
   const gate = deferred();
   const refresh = h.api.refresh;
+  /** @type {Array<(import("@mons/shared/session-bootstrap").SessionBootstrapTarget | import("@mons/shared/session-bootstrap").SessionEventBootstrapTarget) | undefined>} */
   const targets = [];
   h.api.refresh = async (session, target) => {
     targets.push(target);
     await gate.promise;
     return attachInitialEvent(await refresh(session), target);
   };
-  const token = cold.currentUser.getIdToken();
+  const token = required(readCurrentUser(cold)).getIdToken();
   await flush();
   const prepared = cold.prepareInitialEvent("event-a", initialEventOptions());
   await flush();
@@ -485,14 +571,14 @@ test("canceled event bootstrap drops its result while a shared session request s
   );
   const rejected = assert.rejects(prepared, /initial-event-bootstrap-canceled/);
   await flush();
-  const token = auth.currentUser.getIdToken();
+  const token = required(readCurrentUser(auth)).getIdToken();
   controller.abort();
   await rejected;
   gate.resolve();
-  assert.equal(await token, auth.access.accessToken);
+  assert.equal(await token, accessState(auth).accessToken);
   assert.equal(h.refreshes.length, 1);
-  assert.equal("eventBootstrap" in auth.access, false);
-  assert.equal(auth.initialEventIntent, null);
+  assert.equal("eventBootstrap" in accessState(auth), false);
+  assert.equal(privateState(auth, "initialEventIntent"), null);
 });
 
 test("same-UID generation replacement rejects pending combined event data", async () => {
@@ -509,25 +595,26 @@ test("same-UID generation replacement rejects pending combined event data", asyn
   const prepared = auth.prepareInitialEvent("event-a", initialEventOptions());
   const rejected = assert.rejects(prepared, /authentication-changed/);
   await flush();
-  const previous = auth.currentUser;
+  const previous = readCurrentUser(auth);
   await h.store.update((state) => ({
     ...state,
     generation: crypto.randomUUID(),
     revision: state.revision + 1,
   }));
   await auth.reconcile();
-  assert.equal(auth.currentUser.uid, previous.uid);
-  assert.notEqual(auth.currentUser, previous);
+  assert.equal(required(readCurrentUser(auth)).uid, required(previous).uid);
+  assert.notEqual(readCurrentUser(auth), previous);
   gate.resolve();
   await rejected;
-  assert.equal(auth.access, null);
-  assert.equal(auth.initialEventIntent, null);
+  assert.equal(privateState(auth, "access"), null);
+  assert.equal(privateState(auth, "initialEventIntent"), null);
 });
 
 test("a game intent wins over an event intent without mixing the session target", async () => {
   const h = harness();
   const auth = h.make();
   const create = h.api.create;
+  /** @type {Array<(import("@mons/shared/session-bootstrap").SessionBootstrapTarget | import("@mons/shared/session-bootstrap").SessionEventBootstrapTarget) | undefined>} */
   const targets = [];
   h.api.create = async (session, target) => {
     targets.push(target);
@@ -561,10 +648,13 @@ for (const phase of ["before allocation", "after dispatch"]) {
       },
     });
     await auth.authStateReady();
+    /** @type {PromiseWithResolvers<StoredSession>} */
     const requested = deferred();
     const responseGate = deferred();
     const create = h.api.create;
+    /** @type {Array<import("../src/session/sessionAuth.ts").InitialGameSessionOwner>} */
     const owners = [];
+    /** @type {Array<(import("@mons/shared/session-bootstrap").SessionBootstrapTarget | import("@mons/shared/session-bootstrap").SessionEventBootstrapTarget) | undefined>} */
     const targets = [];
     h.api.create = async (session, target) => {
       targets.push(target);
@@ -585,7 +675,7 @@ for (const phase of ["before allocation", "after dispatch"]) {
       allocationGate.resolve();
       const session = await requested.promise;
       await flush();
-      assert.equal(auth.currentUser, null);
+      assert.equal(readCurrentUser(auth), null);
       assert.deepEqual(owners, [
         { sessionId: session.sessionId, generation: auth.generation },
       ]);
@@ -597,7 +687,7 @@ for (const phase of ["before allocation", "after dispatch"]) {
       responseGate.resolve();
       await creation;
       const result = await prepared;
-      assert.equal(result.user, auth.currentUser);
+      assert.equal(result.user, readCurrentUser(auth));
       assert.deepEqual(
         result.bootstrap,
         phase === "before allocation" ? { ok: false, status: 404 } : null,
@@ -616,11 +706,14 @@ for (const phase of ["before allocation", "after dispatch"]) {
 test("ownership remains bound without a game target and cannot enrich a replacement token request", async () => {
   const h = harness();
   const auth = h.make();
+  /** @type {PromiseWithResolvers<StoredSession>} */
   const requested = deferred();
   const responseGate = deferred();
   const create = h.api.create;
   const refresh = h.api.refresh;
+  /** @type {Array<import("../src/session/sessionAuth.ts").InitialGameSessionOwner>} */
   const owners = [];
+  /** @type {Array<(import("@mons/shared/session-bootstrap").SessionBootstrapTarget | import("@mons/shared/session-bootstrap").SessionEventBootstrapTarget) | undefined>} */
   const refreshTargets = [];
   h.api.create = async (session, target) => {
     assert.equal(target, undefined);
@@ -649,16 +742,16 @@ test("ownership remains bound without a game target and cannot enrich a replacem
       revision: state.revision + 1,
     }));
     await auth.reconcile();
-    const replacementUser = auth.currentUser;
-    assert.ok(await replacementUser.getIdToken());
+    const replacementUser = readCurrentUser(auth);
+    assert.ok(await required(replacementUser).getIdToken());
     assert.deepEqual(refreshTargets, [undefined]);
     assert.deepEqual(owners, [
       { sessionId: original.sessionId, generation: originalGeneration },
     ]);
     responseGate.resolve();
     await rejected;
-    assert.equal(auth.currentUser, replacementUser);
-    assert.equal(auth.access.sessionId, replacement.sessionId);
+    assert.equal(readCurrentUser(auth), replacementUser);
+    assert.equal(accessState(auth).sessionId, replacement.sessionId);
   } finally {
     responseGate.resolve();
     await rejected;
@@ -670,7 +763,9 @@ test("a cold session refresh attaches the initial intent even when an auth liste
   await h.make().signInAnonymously();
   const auth = h.make();
   const refresh = h.api.refresh;
+  /** @type {Array<(import("@mons/shared/session-bootstrap").SessionBootstrapTarget | import("@mons/shared/session-bootstrap").SessionEventBootstrapTarget) | undefined>} */
   const targets = [];
+  /** @type {Array<Promise<string>>} */
   const tokens = [];
   h.api.refresh = async (session, target) => {
     targets.push(target);
@@ -684,17 +779,18 @@ test("a cold session refresh attaches the initial intent even when an auth liste
     initialGameOptions(undefined, () => "approved"),
   );
   await Promise.all(tokens);
-  assert.equal(result.user, auth.currentUser);
+  assert.equal(result.user, readCurrentUser(auth));
   assert.equal(result.selection, "approved");
   assert.deepEqual(result.bootstrap, { ok: false, status: 404 });
   assert.deepEqual(targets, [{ inviteId: "game-a", selection: "approved" }]);
   assert.equal(h.refreshes.length, 1);
-  assert.equal("gameBootstrap" in auth.access, false);
+  assert.equal("gameBootstrap" in accessState(auth), false);
 });
 
 test("valid memory tokens skip combined refresh and already-dispatched refreshes are reused", async () => {
   const h = harness();
   const first = h.make();
+  /** @type {Array<import("../src/session/sessionAuth.ts").InitialGameSessionOwner>} */
   const warmOwners = [];
   await first.signInAnonymously();
   assert.equal(
@@ -710,8 +806,8 @@ test("valid memory tokens skip combined refresh and already-dispatched refreshes
   );
   assert.deepEqual(warmOwners, [
     {
-      sessionId: first.currentUser.sessionId,
-      generation: first.currentUser.generation,
+      sessionId: required(readCurrentUser(first)).sessionId,
+      generation: required(readCurrentUser(first)).generation,
     },
   ]);
   assert.equal(h.refreshes.length, 0);
@@ -719,13 +815,14 @@ test("valid memory tokens skip combined refresh and already-dispatched refreshes
   await auth.authStateReady();
   const wait = deferred();
   const refresh = h.api.refresh;
+  /** @type {Array<(import("@mons/shared/session-bootstrap").SessionBootstrapTarget | import("@mons/shared/session-bootstrap").SessionEventBootstrapTarget) | undefined>} */
   const targets = [];
   h.api.refresh = async (session, target) => {
     targets.push(target);
     await wait.promise;
     return attachInitialGame(await refresh(session), target);
   };
-  const token = auth.currentUser.getIdToken();
+  const token = required(readCurrentUser(auth)).getIdToken();
   await flush();
   const prepared = auth.prepareInitialGame("game-a", initialGameOptions());
   await flush();
@@ -741,13 +838,14 @@ test("a concurrent forced refresh with a valid memory token does not claim the i
   const auth = h.make();
   await auth.signInAnonymously();
   const refresh = h.api.refresh;
+  /** @type {Array<(import("@mons/shared/session-bootstrap").SessionBootstrapTarget | import("@mons/shared/session-bootstrap").SessionEventBootstrapTarget) | undefined>} */
   const targets = [];
   h.api.refresh = async (session, target) => {
     targets.push(target);
     return attachInitialGame(await refresh(session), target);
   };
   const prepared = auth.prepareInitialGame("game-a", initialGameOptions());
-  await auth.currentUser.getIdToken(true);
+  await required(readCurrentUser(auth)).getIdToken(true);
   assert.equal((await prepared).bootstrap, null);
   assert.deepEqual(targets, [undefined]);
 });
@@ -769,21 +867,23 @@ test("route cancellation drops its game while a shared refresh still serves toke
   );
   const rejected = assert.rejects(prepared, /initial-game-bootstrap-canceled/);
   await flush();
-  const token = auth.currentUser.getIdToken(true);
+  const token = required(readCurrentUser(auth)).getIdToken(true);
   controller.abort();
   await rejected;
   wait.resolve();
-  assert.equal(await token, auth.access.accessToken);
+  assert.equal(await token, accessState(auth).accessToken);
   assert.equal(h.refreshes.length, 1);
-  assert.equal("gameBootstrap" in auth.access, false);
-  assert.equal(auth.initialGameIntent, null);
+  assert.equal("gameBootstrap" in accessState(auth), false);
+  assert.equal(privateState(auth, "initialGameIntent"), null);
 });
 
 test("canceling before dispatch omits game input without aborting ordinary session creation", async () => {
   const h = harness();
   const auth = h.make();
   const create = h.api.create;
+  /** @type {Array<(import("@mons/shared/session-bootstrap").SessionBootstrapTarget | import("@mons/shared/session-bootstrap").SessionEventBootstrapTarget) | undefined>} */
   const targets = [];
+  /** @type {Array<import("../src/session/sessionAuth.ts").InitialGameSessionOwner>} */
   const owners = [];
   h.api.create = async (session, target) => {
     targets.push(target);
@@ -799,16 +899,19 @@ test("canceling before dispatch omits game input without aborting ordinary sessi
   await auth.signInAnonymously();
   assert.deepEqual(targets, [undefined]);
   assert.deepEqual(owners, []);
-  assert.ok(auth.currentUser);
+  assert.ok(readCurrentUser(auth));
 });
 
 test("canceling a bound anonymous preparation preserves the shared creation", async () => {
   const h = harness();
   const auth = h.make();
+  /** @type {PromiseWithResolvers<StoredSession>} */
   const requested = deferred();
   const responseGate = deferred();
   const create = h.api.create;
+  /** @type {Array<import("../src/session/sessionAuth.ts").InitialGameSessionOwner>} */
   const owners = [];
+  /** @type {Array<(import("@mons/shared/session-bootstrap").SessionBootstrapTarget | import("@mons/shared/session-bootstrap").SessionEventBootstrapTarget) | undefined>} */
   const targets = [];
   h.api.create = async (session, target) => {
     targets.push(target);
@@ -832,13 +935,16 @@ test("canceling a bound anonymous preparation preserves the shared creation", as
     await rejected;
     responseGate.resolve();
     await creation;
-    assert.equal(auth.currentUser.sessionId, session.sessionId);
-    assert.equal(await auth.currentUser.getIdToken(), auth.access.accessToken);
+    assert.equal(required(readCurrentUser(auth)).sessionId, session.sessionId);
+    assert.equal(
+      await required(readCurrentUser(auth)).getIdToken(),
+      accessState(auth).accessToken,
+    );
     assert.deepEqual(targets, [{ inviteId: "game-a", selection: "current" }]);
     assert.equal(owners.length, 1);
     assert.equal(h.creates.length, 1);
     assert.equal(h.refreshes.length, 0);
-    assert.equal(auth.initialGameIntent, null);
+    assert.equal(privateState(auth, "initialGameIntent"), null);
   } finally {
     responseGate.resolve();
     await creation.catch(() => undefined);
@@ -851,7 +957,9 @@ test("a pending rematch-end appearing during session refresh discards the curren
   const auth = h.make();
   const wait = deferred();
   const refresh = h.api.refresh;
+  /** @type {import("@mons/shared/session-bootstrap").SessionBootstrapTarget["selection"]} */
   let selection = "current";
+  /** @type {Parameters<SessionAuthDependencies["api"]["refresh"]>[1]} */
   let requested;
   h.api.refresh = async (session, target) => {
     requested = target;
@@ -866,7 +974,9 @@ test("a pending rematch-end appearing during session refresh discards the curren
   selection = "approved";
   wait.resolve();
   const result = await prepared;
-  assert.equal(requested.selection, "current");
+  const selectedTarget = required(requested);
+  assert.ok("selection" in selectedTarget);
+  assert.equal(selectedTarget.selection, "current");
   assert.equal(result.selection, "approved");
   assert.equal(result.bootstrap, null);
   assert.equal(h.refreshes.length, 1);
@@ -887,7 +997,7 @@ test("logout and same-UID generation replacement reject in-flight combined game 
     const prepared = auth.prepareInitialGame("game-a", initialGameOptions());
     const rejected = assert.rejects(prepared, /authentication-changed/);
     await flush();
-    const original = auth.currentUser;
+    const original = readCurrentUser(auth);
     if (replacement) {
       await h.store.update((state) => ({
         ...state,
@@ -895,15 +1005,15 @@ test("logout and same-UID generation replacement reject in-flight combined game 
         revision: state.revision + 1,
       }));
       await auth.reconcile();
-      assert.equal(auth.currentUser.uid, original.uid);
-      assert.notEqual(auth.currentUser, original);
+      assert.equal(required(readCurrentUser(auth)).uid, required(original).uid);
+      assert.notEqual(readCurrentUser(auth), original);
     } else {
       await auth.signOut();
     }
     wait.resolve();
     await rejected;
-    assert.equal(auth.access, null);
-    assert.equal(auth.initialGameIntent, null);
+    assert.equal(privateState(auth, "access"), null);
+    assert.equal(privateState(auth, "initialGameIntent"), null);
   }
 });
 
@@ -921,12 +1031,12 @@ test("logout revokes an in-flight create before it can publish a user", async ()
   const pending = h.store.read().session;
   await auth.signOut();
   await auth.flushRevocations();
-  assert.equal(auth.currentUser, null);
+  assert.equal(readCurrentUser(auth), null);
   assert.equal(h.store.read().session, null);
-  assert.equal(h.revoked.has(pending.sessionId), true);
+  assert.equal(h.revoked.has(required(pending).sessionId), true);
   wait.resolve();
   await assert.rejects(attempt, /revoked/);
-  assert.equal(auth.currentUser, null);
+  assert.equal(readCurrentUser(auth), null);
   assert.equal(h.store.read().session, null);
 });
 
@@ -952,20 +1062,20 @@ test("logout during refresh invalidates bound token providers and cannot resurre
   const h = harness();
   const auth = h.make();
   await auth.signInAnonymously();
-  const user = auth.currentUser;
-  const provider = createUserBoundAuthTokenProvider(
-    user,
-    () => auth.currentUser,
+  const user = readCurrentUser(auth);
+  const provider = createUserBoundAuthTokenProvider(required(user), () =>
+    readCurrentUser(auth),
   );
+  /** @type {PromiseWithResolvers<import("../src/services/sessionApi.ts").SessionTokenReadResult>} */
   const wait = deferred();
-  const response = h.token(h.sessions.get(user.sessionId));
+  const response = h.token(required(h.sessions.get(required(user).sessionId)));
   h.api.refresh = () => wait.promise;
   const token = provider(true);
   await flush();
   await auth.signOut();
   wait.resolve(response);
   await assert.rejects(token, /authentication-changed/);
-  assert.equal(auth.currentUser, null);
+  assert.equal(readCurrentUser(auth), null);
   assert.equal(h.store.read().session, null);
   assert.throws(provider.assertCurrentUser, /authentication-changed/);
 });
@@ -984,15 +1094,21 @@ test("offline logout retains only a revoke capability and retries it after reloa
   const state = h.store.read();
   assert.equal(state.session, null);
   assert.deepEqual(state.revocations, [
-    { sessionId: oldSession.sessionId, revokeSecret: oldSession.revokeSecret },
+    {
+      sessionId: required(oldSession).sessionId,
+      revokeSecret: required(oldSession).revokeSecret,
+    },
   ]);
-  assert.equal(JSON.stringify(state).includes(oldSession.refreshSecret), false);
+  assert.equal(
+    JSON.stringify(state).includes(required(oldSession).refreshSecret),
+    false,
+  );
   h.api.revoke = revoke;
   const restored = h.make();
   await restored.authStateReady();
   await restored.flushRevocations();
   assert.deepEqual(h.store.read().revocations, []);
-  assert.equal(h.revoked.has(oldSession.sessionId), true);
+  assert.equal(h.revoked.has(required(oldSession).sessionId), true);
 });
 
 test("a missed logout broadcast is discovered before cached-token reuse", async () => {
@@ -1001,11 +1117,11 @@ test("a missed logout broadcast is discovered before cached-token reuse", async 
   await first.signInAnonymously();
   const second = h.make();
   await second.authStateReady();
-  const user = second.currentUser;
-  await user.getIdToken();
+  const user = readCurrentUser(second);
+  await required(user).getIdToken();
   await first.signOut();
-  await assert.rejects(user.getIdToken(), /authentication-changed/);
-  assert.equal(second.currentUser, null);
+  await assert.rejects(required(user).getIdToken(), /authentication-changed/);
+  assert.equal(readCurrentUser(second), null);
 });
 
 test("cleared storage retires old handles and explicit sign-in initializes a reloadable replacement", async () => {
@@ -1016,27 +1132,36 @@ test("cleared storage retires old handles and explicit sign-in initializes a rel
   };
   const auth = h.make({ initializeIdentity });
   await auth.signInAnonymously();
-  const oldUser = auth.currentUser;
+  const oldUser = readCurrentUser(auth);
   await auth.flushRevocations();
   await h.store.update(() => createEmptySessionState());
 
-  await assert.rejects(oldUser.getIdToken(), /authentication-changed/);
-  assert.equal(auth.currentUser, null);
+  await assert.rejects(
+    required(oldUser).getIdToken(),
+    /authentication-changed/,
+  );
+  assert.equal(readCurrentUser(auth), null);
   assert.equal(auth.restoredSessionId, null);
   h.advance(24 * 60 * 60 * 1000);
-  await assert.rejects(oldUser.getIdToken(true), /authentication-changed/);
+  await assert.rejects(
+    required(oldUser).getIdToken(true),
+    /authentication-changed/,
+  );
   assert.equal(h.refreshes.length, 0);
   assert.equal(h.creates.length, 1);
   assert.equal(h.store.read().session, null);
 
   await auth.signInAnonymously();
-  const replacement = auth.currentUser;
-  assert.notEqual(replacement.uid, oldUser.uid);
+  const replacement = readCurrentUser(auth);
+  assert.notEqual(required(replacement).uid, required(oldUser).uid);
   assert.equal(h.store.read().initialized, true);
   assert.equal(initializations, 2);
   const reloaded = h.make({ initializeIdentity });
   await reloaded.authStateReady();
-  assert.equal(reloaded.currentUser.uid, replacement.uid);
+  assert.equal(
+    required(readCurrentUser(reloaded)).uid,
+    required(replacement).uid,
+  );
   assert.equal(initializations, 2);
 });
 
@@ -1046,15 +1171,23 @@ test("a recreated database from another tab supersedes a higher old revision", a
   await first.signInAnonymously();
   await h.store.update((state) => ({ ...state, revision: 100 }));
   await first.reconcile();
-  const oldUser = first.currentUser;
+  const oldUser = readCurrentUser(first);
   await h.store.update(() => createEmptySessionState());
   const replacement = h.make();
   await replacement.signInAnonymously();
   assert.ok(h.store.read().revision < 100);
-  await assert.rejects(oldUser.getIdToken(), /authentication-changed/);
-  assert.equal(first.currentUser.uid, replacement.currentUser.uid);
-  await first.currentUser.getIdToken();
-  assert.deepEqual(h.refreshes, [replacement.currentUser.sessionId]);
+  await assert.rejects(
+    required(oldUser).getIdToken(),
+    /authentication-changed/,
+  );
+  assert.equal(
+    required(readCurrentUser(first)).uid,
+    required(readCurrentUser(replacement)).uid,
+  );
+  await required(readCurrentUser(first)).getIdToken();
+  assert.deepEqual(h.refreshes, [
+    required(readCurrentUser(replacement)).sessionId,
+  ]);
 });
 
 test("a tab invalidated by storage clearing can adopt a later replacement notification", async () => {
@@ -1065,14 +1198,20 @@ test("a tab invalidated by storage clearing can adopt a later replacement notifi
   };
   const first = h.make({ initializeIdentity });
   await first.signInAnonymously();
-  const oldUser = first.currentUser;
+  const oldUser = readCurrentUser(first);
   await first.flushRevocations();
   await h.store.update(() => createEmptySessionState());
-  await assert.rejects(oldUser.getIdToken(), /authentication-changed/);
+  await assert.rejects(
+    required(oldUser).getIdToken(),
+    /authentication-changed/,
+  );
   const replacement = h.make({ initializeIdentity });
   await replacement.signInAnonymously();
   await first.reconcile();
-  assert.equal(first.currentUser.uid, replacement.currentUser.uid);
+  assert.equal(
+    required(readCurrentUser(first)).uid,
+    required(readCurrentUser(replacement)).uid,
+  );
   assert.equal(initializations, 2);
   assert.equal(h.creates.length, 2);
 });
@@ -1118,9 +1257,17 @@ test("delayed storage completion cannot overwrite a subsequently observed sessio
   assert.equal(reconciled, false);
   release.resolve();
   await Promise.all([creation, reconciliation]);
-  assert.equal(first.currentUser.uid, replacement.currentUser.uid);
-  assert.notEqual(await first.currentUser.getIdToken(), "token-1");
-  assert.deepEqual(h.refreshes, [replacement.currentUser.sessionId]);
+  assert.equal(
+    required(readCurrentUser(first)).uid,
+    required(readCurrentUser(replacement)).uid,
+  );
+  assert.notEqual(
+    await required(readCurrentUser(first)).getIdToken(),
+    "token-1",
+  );
+  assert.deepEqual(h.refreshes, [
+    required(readCurrentUser(replacement)).sessionId,
+  ]);
 });
 
 test("a superseded local logout finalizer reloads a stopped tab without clearing the replacement", async () => {
@@ -1148,7 +1295,10 @@ test("a superseded local logout finalizer reloads a stopped tab without clearing
   assert.deepEqual(h.store.read().session, session);
   const reloaded = h.make();
   await reloaded.authStateReady();
-  assert.equal(reloaded.currentUser.uid, replacement.currentUser.uid);
+  assert.equal(
+    required(readCurrentUser(reloaded)).uid,
+    required(readCurrentUser(replacement)).uid,
+  );
 });
 
 for (const name of ["performLogoutCleanupAndReload", "handleLogoutSignal"]) {
@@ -1157,7 +1307,7 @@ for (const name of ["performLogoutCleanupAndReload", "handleLogoutSignal"]) {
       const h = harness();
       const auth = h.make();
       await auth.signInAnonymously();
-      const generation = auth.generation;
+      const generation = required(auth.generation);
       const other = h.make();
       await other.authStateReady();
       const replacement = h.make();
@@ -1188,12 +1338,18 @@ for (const name of ["performLogoutCleanupAndReload", "handleLogoutSignal"]) {
       assert.equal(reloads, 1);
       assert.equal(cleanups, 0);
       assert.equal(auth.canReloadAfterLogout, false);
-      assert.equal(auth.currentUser.uid, replacement.currentUser.uid);
       assert.equal(
-        h.store.read().session.sessionId,
-        replacement.currentUser.sessionId,
+        required(readCurrentUser(auth)).uid,
+        required(readCurrentUser(replacement)).uid,
       );
-      assert.equal(h.revoked.has(replacement.currentUser.sessionId), false);
+      assert.equal(
+        required(h.store.read().session).sessionId,
+        required(readCurrentUser(replacement)).sessionId,
+      );
+      assert.equal(
+        h.revoked.has(required(readCurrentUser(replacement)).sessionId),
+        false,
+      );
     });
   }
 
@@ -1204,7 +1360,7 @@ for (const name of ["performLogoutCleanupAndReload", "handleLogoutSignal"]) {
       const h = harness();
       const auth = h.make();
       await auth.signInAnonymously();
-      const generation = auth.generation;
+      const generation = required(auth.generation);
       const replacement = h.make();
       const reloaded = deferred();
       let cleaned = false;
@@ -1228,7 +1384,10 @@ for (const name of ["performLogoutCleanupAndReload", "handleLogoutSignal"]) {
       );
       await reloaded.promise;
       assert.equal(cleaned, false);
-      assert.equal(h.store.read().session.uid, replacement.currentUser.uid);
+      assert.equal(
+        required(h.store.read().session).uid,
+        required(readCurrentUser(replacement)).uid,
+      );
     },
   );
 }
@@ -1237,7 +1396,7 @@ test("a delayed logout or cleanup for an older generation preserves a new sign-i
   const h = harness();
   const first = h.make();
   await first.signInAnonymously();
-  const generation = first.generation;
+  const generation = required(first.generation);
   await first.signOut();
   const second = h.make();
   await second.signInAnonymously();
@@ -1262,7 +1421,7 @@ for (const name of ["performLogoutCleanupAndReload", "handleLogoutSignal"]) {
       const auth = h.make();
       await auth.signInAnonymously();
       await auth.flushRevocations();
-      const user = auth.currentUser;
+      const user = readCurrentUser(auth);
       const update = h.store.update.bind(h.store);
       h.store.update = (change) => {
         if (failureAt === "commit") change(h.store.read());
@@ -1275,27 +1434,36 @@ for (const name of ["performLogoutCleanupAndReload", "handleLogoutSignal"]) {
         reloadAfterLogout: () => reloads++,
       });
       if (name === "handleLogoutSignal") {
-        run({ id: "failed-logout", generation: user.generation });
+        run({ id: "failed-logout", generation: required(user).generation });
         await flush();
       } else {
-        await assert.rejects(run(), SessionStorageError);
+        await assert.rejects(async () => {
+          await run();
+        }, SessionStorageError);
       }
       assert.equal(reloads, 1);
-      assert.equal(h.store.read().session.sessionId, user.sessionId);
-      assert.equal(h.logoutIntents.has(user.generation), true);
+      assert.equal(
+        required(h.store.read().session).sessionId,
+        required(user).sessionId,
+      );
+      assert.equal(h.logoutIntents.has(required(user).generation), true);
       h.store.update = update;
       const reloaded = h.make();
+      /** @type {Array<import("../src/session/sessionAuth.ts").SessionUser | null>} */
       const observed = [];
       reloaded.onAuthStateChanged((value) => observed.push(value));
       await reloaded.authStateReady();
       assert.deepEqual(observed, [null]);
       assert.equal(reloaded.restoredSessionId, null);
       assert.equal(h.store.read().session, null);
-      assert.equal(h.logoutIntents.has(user.generation), false);
+      assert.equal(h.logoutIntents.has(required(user).generation), false);
       await reloaded.flushRevocations();
-      assert.equal(h.revoked.has(user.sessionId), true);
+      assert.equal(h.revoked.has(required(user).sessionId), true);
       await reloaded.signInAnonymously();
-      assert.notEqual(reloaded.currentUser.uid, user.uid);
+      assert.notEqual(
+        required(readCurrentUser(reloaded)).uid,
+        required(user).uid,
+      );
     });
   }
 
@@ -1305,7 +1473,7 @@ for (const name of ["performLogoutCleanupAndReload", "handleLogoutSignal"]) {
     const auth = h.make();
     await auth.signInAnonymously();
     await auth.flushRevocations();
-    const generation = auth.generation;
+    const generation = required(auth.generation);
     h.store.update = () => Promise.reject(new SessionStorageError());
     await assert.rejects(auth.signOut(), SessionStorageError);
     let reloads = 0;
@@ -1317,7 +1485,9 @@ for (const name of ["performLogoutCleanupAndReload", "handleLogoutSignal"]) {
       run({ id: "failed-logout", generation });
       await flush();
     } else {
-      await assert.rejects(run(), SessionStorageError);
+      await assert.rejects(async () => {
+        await run();
+      }, SessionStorageError);
     }
     assert.equal(reloads, 0);
     assert.equal(isLogoutRecoveryRequired(), true);
@@ -1328,7 +1498,7 @@ for (const name of ["performLogoutCleanupAndReload", "handleLogoutSignal"]) {
       const h = harness();
       const auth = h.make();
       await auth.signInAnonymously();
-      const generation = auth.generation;
+      const generation = required(auth.generation);
       await auth.signOut();
       await auth.flushRevocations();
       const update = h.store.update.bind(h.store);
@@ -1349,13 +1519,15 @@ for (const name of ["performLogoutCleanupAndReload", "handleLogoutSignal"]) {
         run({ id: "logout-failed-storage", generation });
         await flush();
       } else {
-        await assert.rejects(run(), /Session storage is unavailable/);
+        await assert.rejects(async () => {
+          await run();
+        }, /Session storage is unavailable/);
       }
       assert.equal(reloads, 1);
       assert.equal(cleanups, 0);
       const reloaded = h.make();
       await reloaded.signInAnonymously();
-      assert.ok(reloaded.currentUser);
+      assert.ok(readCurrentUser(reloaded));
     });
   }
 
@@ -1363,7 +1535,7 @@ for (const name of ["performLogoutCleanupAndReload", "handleLogoutSignal"]) {
     const h = harness();
     const auth = h.make();
     await auth.signInAnonymously();
-    const user = auth.currentUser;
+    const user = readCurrentUser(auth);
     h.store.update = () => Promise.reject(new SessionStorageError());
     let reloads = 0;
     const run = logoutFunction(name, {
@@ -1374,10 +1546,12 @@ for (const name of ["performLogoutCleanupAndReload", "handleLogoutSignal"]) {
       run({ id: "old-logout", generation: crypto.randomUUID() });
       await flush();
     } else {
-      await assert.rejects(run(), /Session storage is unavailable/);
+      await assert.rejects(async () => {
+        await run();
+      }, /Session storage is unavailable/);
     }
     assert.equal(reloads, 0);
-    assert.equal(auth.currentUser, user);
+    assert.equal(readCurrentUser(auth), user);
   });
 }
 
@@ -1385,10 +1559,9 @@ test("same-UID replacement invalidates the old user object and bound provider", 
   const h = harness();
   const auth = h.make();
   await auth.signInAnonymously();
-  const firstUser = auth.currentUser;
-  const bound = createUserBoundAuthTokenProvider(
-    firstUser,
-    () => auth.currentUser,
+  const firstUser = readCurrentUser(auth);
+  const bound = createUserBoundAuthTokenProvider(required(firstUser), () =>
+    readCurrentUser(auth),
   );
   await h.store.update((state) => ({
     ...state,
@@ -1396,8 +1569,8 @@ test("same-UID replacement invalidates the old user object and bound provider", 
     revision: state.revision + 1,
   }));
   await auth.reconcile();
-  assert.equal(auth.currentUser.uid, firstUser.uid);
-  assert.notEqual(auth.currentUser, firstUser);
+  assert.equal(required(readCurrentUser(auth)).uid, required(firstUser).uid);
+  assert.notEqual(readCurrentUser(auth), firstUser);
   await assert.rejects(bound(false), /authentication-changed/);
 });
 
@@ -1405,31 +1578,31 @@ test("a stale logout intent cannot overwrite a newer generation's pending logout
   const h = harness();
   const first = h.make();
   await first.signInAnonymously();
-  const oldGeneration = first.generation;
+  const oldGeneration = required(first.generation);
   await first.signOut();
   const second = h.make();
   await second.signInAnonymously();
-  const user = second.currentUser;
+  const user = readCurrentUser(second);
   await second.flushRevocations();
   const update = h.store.update.bind(h.store);
   h.store.update = () => Promise.reject(new SessionStorageError());
   await assert.rejects(second.signOut(), SessionStorageError);
   h.logoutIntents.add(oldGeneration);
-  assert.equal(h.logoutIntents.has(user.generation), true);
+  assert.equal(h.logoutIntents.has(required(user).generation), true);
   h.store.update = update;
   const reloaded = h.make();
   await reloaded.authStateReady();
-  assert.equal(reloaded.currentUser, null);
+  assert.equal(readCurrentUser(reloaded), null);
   await reloaded.flushRevocations();
-  assert.equal(h.revoked.has(user.sessionId), true);
+  assert.equal(h.revoked.has(required(user).sessionId), true);
 });
 
 test("deferred logout retries failed identity cleanup before publishing a replacement", async () => {
   const h = harness();
   const original = h.make();
   await original.signInAnonymously();
-  const user = original.currentUser;
-  h.logoutIntents.add(user.generation);
+  const user = readCurrentUser(original);
+  h.logoutIntents.add(required(user).generation);
   let cleanupFails = true;
   let profileId = "old-profile";
   const reloaded = h.make({
@@ -1442,23 +1615,26 @@ test("deferred logout retries failed identity cleanup before publishing a replac
     reloaded.authStateReady(),
     /identity-cleanup-unavailable/,
   );
-  assert.equal(reloaded.currentUser, null);
-  assert.equal(h.store.read().session.sessionId, user.sessionId);
-  assert.equal(h.logoutIntents.has(user.generation), true);
+  assert.equal(readCurrentUser(reloaded), null);
+  assert.equal(
+    required(h.store.read().session).sessionId,
+    required(user).sessionId,
+  );
+  assert.equal(h.logoutIntents.has(required(user).generation), true);
   cleanupFails = false;
   await reloaded.authStateReady();
   assert.equal(profileId, "");
-  assert.equal(reloaded.currentUser, null);
-  assert.equal(h.logoutIntents.has(user.generation), false);
+  assert.equal(readCurrentUser(reloaded), null);
+  assert.equal(h.logoutIntents.has(required(user).generation), false);
   await reloaded.signInAnonymously();
-  assert.notEqual(reloaded.currentUser.uid, user.uid);
+  assert.notEqual(required(readCurrentUser(reloaded)).uid, required(user).uid);
 });
 
 test("a stale logout intent does not clear a replacement profile", async () => {
   const h = harness();
   const original = h.make();
   await original.signInAnonymously();
-  const generation = original.generation;
+  const generation = required(original.generation);
   await original.signOut();
   const replacement = h.make();
   await replacement.signInAnonymously();
@@ -1470,7 +1646,10 @@ test("a stale logout intent does not clear a replacement profile", async () => {
     },
   });
   await reloaded.authStateReady();
-  assert.equal(reloaded.currentUser.uid, replacement.currentUser.uid);
+  assert.equal(
+    required(readCurrentUser(reloaded)).uid,
+    required(readCurrentUser(replacement)).uid,
+  );
   assert.equal(profileId, "replacement-profile");
 });
 
@@ -1479,7 +1658,7 @@ test("logout can retire IndexedDB credentials when localStorage is unavailable",
   const auth = h.make();
   await auth.signInAnonymously();
   await auth.flushRevocations();
-  const sessionId = auth.currentUser.sessionId;
+  const sessionId = required(readCurrentUser(auth)).sessionId;
   const has = h.logoutIntents.has;
   h.logoutIntents.add = () => false;
   h.logoutIntents.has = () => {
@@ -1488,7 +1667,7 @@ test("logout can retire IndexedDB credentials when localStorage is unavailable",
   assert.equal(await auth.signOut(), true);
   assert.equal(auth.canReloadAfterLogout, true);
   assert.equal(h.store.read().session, null);
-  assert.equal(h.store.read().revocations[0].sessionId, sessionId);
+  assert.equal(required(h.store.read().revocations[0]).sessionId, sessionId);
   h.logoutIntents.has = has;
   const reloaded = h.make();
   await reloaded.authStateReady();
@@ -1500,43 +1679,48 @@ test("a live tab that adopted a new generation ignores an old logout without det
   const h = harness();
   const first = h.make();
   await first.signInAnonymously();
-  const generation = first.generation;
+  const generation = required(first.generation);
   const live = h.make();
   await live.authStateReady();
   await first.signOut();
   const replacement = h.make();
   await replacement.signInAnonymously();
   await live.reconcile();
-  const user = live.currentUser;
+  const user = readCurrentUser(live);
+  /** @type {Array<import("../src/session/sessionAuth.ts").SessionUser | null>} */
   const observed = [];
   live.onAuthStateChanged((value) => observed.push(value));
   await flush();
   assert.equal(await live.signOut(generation), false);
-  assert.equal(live.currentUser, user);
+  assert.equal(readCurrentUser(live), user);
   assert.deepEqual(observed, [user]);
-  assert.match(await user.getIdToken(), /^token-/);
+  assert.match(await required(user).getIdToken(), /^token-/);
 });
 
 test("a late logout that finds a new durable generation restores the current user", async () => {
   const h = harness();
   const first = h.make();
   await first.signInAnonymously();
-  const generation = first.generation;
+  const generation = required(first.generation);
   const live = h.make();
   await live.authStateReady();
   await first.signOut();
   const replacement = h.make();
   await replacement.signInAnonymously();
   assert.equal(await live.signOut(generation), false);
-  assert.equal(live.currentUser.uid, replacement.currentUser.uid);
-  assert.match(await live.currentUser.getIdToken(), /^token-/);
+  assert.equal(
+    required(readCurrentUser(live)).uid,
+    required(readCurrentUser(replacement)).uid,
+  );
+  assert.match(await required(readCurrentUser(live)).getIdToken(), /^token-/);
 });
 
 test("a replacement session refresh does not join an older user's pending refresh", async () => {
   const h = harness();
   const auth = h.make();
   await auth.signInAnonymously();
-  const oldUser = auth.currentUser;
+  const oldUser = readCurrentUser(auth);
+  /** @type {PromiseWithResolvers<import("../src/services/sessionApi.ts").SessionTokenReadResult>} */
   const wait = deferred();
   const refresh = h.api.refresh;
   let first = true;
@@ -1547,7 +1731,7 @@ test("a replacement session refresh does not join an older user's pending refres
     }
     return refresh(session);
   };
-  const oldToken = oldUser.getIdToken(true);
+  const oldToken = required(oldUser).getIdToken(true);
   await flush();
   await h.store.update((state) => ({
     ...state,
@@ -1555,21 +1739,21 @@ test("a replacement session refresh does not join an older user's pending refres
     revision: state.revision + 1,
   }));
   await auth.reconcile();
-  const newUser = auth.currentUser;
-  assert.match(await newUser.getIdToken(true), /^token-/);
-  wait.resolve(h.token(h.sessions.get(oldUser.sessionId)));
+  const newUser = readCurrentUser(auth);
+  assert.match(await required(newUser).getIdToken(true), /^token-/);
+  wait.resolve(h.token(required(h.sessions.get(required(oldUser).sessionId))));
   await assert.rejects(oldToken, /authentication-changed/);
-  assert.equal(auth.currentUser, newUser);
+  assert.equal(readCurrentUser(auth), newUser);
 });
 
 test("confirmed revocation clears the session without anonymous creation", async () => {
   const h = harness();
   const auth = h.make();
   await auth.signInAnonymously();
-  const user = auth.currentUser;
-  h.revoked.add(user.sessionId);
-  await assert.rejects(user.getIdToken(true), /revoked/);
-  assert.equal(auth.currentUser, null);
+  const user = readCurrentUser(auth);
+  h.revoked.add(required(user).sessionId);
+  await assert.rejects(required(user).getIdToken(true), /revoked/);
+  assert.equal(readCurrentUser(auth), null);
   assert.equal(h.store.read().session, null);
   assert.equal(h.creates.length, 1);
 });
@@ -1577,6 +1761,7 @@ test("confirmed revocation clears the session without anonymous creation", async
 test("revoked pending creation is retired and the next explicit attempt uses a new identity", async () => {
   const h = harness();
   const create = h.api.create;
+  /** @type {string | undefined} */
   let blockedId;
   h.api.create = async (session) => {
     if (!blockedId) {
@@ -1587,34 +1772,38 @@ test("revoked pending creation is retired and the next explicit attempt uses a n
   };
   const auth = h.make();
   await assert.rejects(auth.signInAnonymously(), /revoked/);
-  assert.equal(auth.currentUser, null);
+  assert.equal(readCurrentUser(auth), null);
   assert.equal(h.store.read().session, null);
   assert.equal(h.creates.length, 1);
   await auth.signInAnonymously();
-  assert.notEqual(auth.currentUser.sessionId, blockedId);
+  assert.notEqual(required(readCurrentUser(auth)).sessionId, blockedId);
   assert.equal(h.creates.length, 2);
 });
 
 test("listeners receive a resolved initial state, unsubscribe, and ignore ordinary refresh", async () => {
   const h = harness();
   const auth = h.make();
+  /**
+   * @type {(import("../src/session/sessionAuth.ts").SessionUser | null)[]}
+   */
   const observed = [];
   const unsubscribe = auth.onAuthStateChanged((user) => observed.push(user));
   await auth.signInAnonymously();
   assert.deepEqual(
     observed.map((user) => user?.uid ?? null),
-    [null, auth.currentUser.uid],
+    [null, required(readCurrentUser(auth)).uid],
   );
-  await auth.currentUser.getIdToken(true);
+  await required(readCurrentUser(auth)).getIdToken(true);
   assert.equal(observed.length, 2);
   unsubscribe();
   await auth.signOut();
   assert.equal(observed.length, 2);
 });
 
-test("legacy retirement clears identity and old pending actions and preserves preferences", () => {
+test("session initialization clears retired identity, actions and preferences", () => {
   const originalLocal = globalThis.localStorage;
   const originalSession = globalThis.sessionStorage;
+  /** @param {Record<string, string>} initial @returns {Storage} */
   const browserStorage = (initial) => {
     const values = new Map(Object.entries(initial));
     return {
@@ -1622,26 +1811,35 @@ test("legacy retirement clears identity and old pending actions and preserves pr
         return values.size;
       },
       key: (index) => [...values.keys()][index] ?? null,
-      getItem: (key) => values.get(key) ?? null,
+      getItem: (/** @type {string} */ key) => values.get(key) ?? null,
       setItem: (key, value) => values.set(key, String(value)),
       removeItem: (key) => values.delete(key),
+      clear: () => values.clear(),
     };
   };
-  globalThis.localStorage = browserStorage({
-    loginId: '"legacy"',
-    profileId: '"profile"',
-    username: '"Old name"',
-    isMuted: "true",
-    boardStyleSet: '"wood"',
-    preferredAssetsSet: '"original"',
-    "pendingAutomatchOperation:legacy": "pending",
-    "firebase:authUser:old": "credential",
-    appleIntentByStateV1: "intent",
+  Object.defineProperty(globalThis, "localStorage", {
+    configurable: true,
+    writable: true,
+    value: browserStorage({
+      loginId: '"legacy"',
+      profileId: '"profile"',
+      username: '"Old name"',
+      isMuted: "true",
+      boardStyleSet: '"wood"',
+      preferredAssetsSet: '"original"',
+      "pendingAutomatchOperation:legacy": "pending",
+      "firebase:authUser:old": "credential",
+      appleIntentByStateV1: "intent",
+    }),
   });
-  globalThis.sessionStorage = browserStorage({
-    "mons:pending-moves:v1:old": "move",
-    "mons:pending-rematch-ends:v1:old": "end",
-    appleIntentByStateV1: "intent",
+  Object.defineProperty(globalThis, "sessionStorage", {
+    configurable: true,
+    writable: true,
+    value: browserStorage({
+      "mons:pending-moves:v1:old": "move",
+      "mons:pending-rematch-ends:v1:old": "end",
+      appleIntentByStateV1: "intent",
+    }),
   });
   try {
     retireLegacySessionIdentity();
@@ -1655,15 +1853,27 @@ test("legacy retirement clears identity and old pending actions and preserves pr
     ])
       assert.equal(localStorage.getItem(key), null);
     assert.equal(sessionStorage.length, 0);
-    assert.equal(localStorage.getItem("isMuted"), "true");
-    assert.equal(localStorage.getItem("boardStyleSet"), '"wood"');
-    assert.equal(localStorage.getItem("preferredAssetsSet"), '"original"');
-    assert.equal(localStorage.length, 3);
+    assert.equal(localStorage.getItem("isMuted"), null);
+    assert.equal(localStorage.getItem("boardStyleSet"), null);
+    assert.equal(localStorage.getItem("preferredAssetsSet"), null);
+    assert.equal(localStorage.length, 0);
   } finally {
-    if (originalLocal === undefined) delete globalThis.localStorage;
-    else globalThis.localStorage = originalLocal;
-    if (originalSession === undefined) delete globalThis.sessionStorage;
-    else globalThis.sessionStorage = originalSession;
+    if (originalLocal === undefined)
+      Reflect.deleteProperty(globalThis, "localStorage");
+    else
+      Object.defineProperty(globalThis, "localStorage", {
+        configurable: true,
+        writable: true,
+        value: originalLocal,
+      });
+    if (originalSession === undefined)
+      Reflect.deleteProperty(globalThis, "sessionStorage");
+    else
+      Object.defineProperty(globalThis, "sessionStorage", {
+        configurable: true,
+        writable: true,
+        value: originalSession,
+      });
   }
 });
 
@@ -1685,6 +1895,7 @@ test("identity bootstrap shares anonymous creation with each route and is never 
     const h = harness();
     const auth = h.make();
     const create = h.api.create;
+    /** @type {Array<{ target: (import("@mons/shared/session-bootstrap").SessionBootstrapTarget | import("@mons/shared/session-bootstrap").SessionEventBootstrapTarget) | undefined; includeIdentity: boolean | undefined; }>} */
     const calls = [];
     h.api.create = async (session, target, includeIdentity) => {
       calls.push({ target, includeIdentity });
@@ -1708,16 +1919,16 @@ test("identity bootstrap shares anonymous creation with each route and is never 
     const identity = auth.prepareInitialIdentity();
     await Promise.all([routePreparation, auth.signInAnonymously()]);
     const result = await identity;
-    assert.equal(result.user, auth.currentUser);
+    assert.equal(result.user, readCurrentUser(auth));
     assert.deepEqual(result.bootstrap, { ok: true, profile: null });
 
     assert.equal(calls.length, 1);
-    assert.equal(calls[0].includeIdentity, true);
+    assert.equal(required(calls[0]).includeIdentity, true);
     assert.equal(h.creates.length, 1);
     assert.equal(h.refreshes.length, 0);
-    assert.equal("identityBootstrap" in auth.access, false);
+    assert.equal("identityBootstrap" in accessState(auth), false);
     assert.equal(JSON.stringify(h.store.read()).includes("identity"), false);
-    assert.equal(auth.initialIdentityIntent, null);
+    assert.equal(privateState(auth, "initialIdentityIntent"), null);
     const second = await auth.prepareInitialIdentity();
     assert.equal(second.bootstrap, undefined);
 
@@ -1730,14 +1941,15 @@ test("identity joins the cold token refresh and does not force another request w
   await h.make().signInAnonymously();
   const auth = h.make();
   const refresh = h.api.refresh;
+  /** @type {Array<boolean | undefined>} */
   const flags = [];
-  h.api.refresh = async (session, target, includeIdentity) => {
+  h.api.refresh = async (session, _target, includeIdentity) => {
     flags.push(includeIdentity);
     return refresh(session);
   };
   const identity = auth.prepareInitialIdentity();
   await auth.authStateReady();
-  await Promise.all([auth.currentUser.getIdToken(), identity]);
+  await Promise.all([required(readCurrentUser(auth)).getIdToken(), identity]);
   assert.deepEqual(flags, [true]);
   assert.equal((await identity).bootstrap, undefined);
   assert.equal((await auth.prepareInitialIdentity()).bootstrap, undefined);
@@ -1765,6 +1977,11 @@ test("logout fences an identity seed from an already dispatched token response",
   await auth.signOut();
   gate.resolve();
   await rejected;
-  assert.equal(auth.currentUser, null);
-  assert.equal(auth.initialIdentityIntent, null);
+  assert.equal(readCurrentUser(auth), null);
+  assert.equal(privateState(auth, "initialIdentityIntent"), null);
 });
+
+/** @param {InstanceType<typeof SessionAuth>} auth @returns {import("../src/session/sessionAuth.ts").SessionUser | null} */
+function readCurrentUser(auth) {
+  return auth.currentUser;
+}

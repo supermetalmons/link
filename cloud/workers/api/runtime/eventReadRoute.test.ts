@@ -1,3 +1,4 @@
+import { eventDocumentFixture } from "../test/eventCompatibilityFixture.ts";
 import { patchEventOwnedPaths } from "./eventD1Fixture.ts";
 import { beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { env } from "cloudflare:workers";
@@ -60,7 +61,9 @@ function snapshotDependencies() {
   };
 }
 
-function prizeDependencies(canonicalProfileId: string | null = profileId) {
+function prizeDependencies(
+  canonicalProfileId: string | null = profileId,
+): Parameters<typeof handleEventReadRoute>[3] {
   return {
     ...snapshotDependencies(),
     repository: {
@@ -88,7 +91,7 @@ function prizeDependencies(canonicalProfileId: string | null = profileId) {
                       revision: 1,
                       profile: {
                         profileId: canonicalProfileId,
-                        aura: "",
+                        aura: "none",
                         emoji: 1,
                         eth: "",
                         rating: 1_500,
@@ -133,8 +136,8 @@ async function updateEventState(updates: Record<string, unknown>) {
 }
 
 function eventRecord() {
-  return {
-    schemaVersion: 2,
+  return eventDocumentFixture({
+    schemaVersion: 3,
     eventId,
     status: "scheduled",
     createdAtMs: 100,
@@ -144,8 +147,7 @@ function eventRecord() {
     createdByLoginUid: "login-one",
     createdByUsername: "ivan",
     participants: {},
-    rounds: {},
-  };
+  });
 }
 
 describe("event read route", () => {
@@ -162,10 +164,12 @@ describe("event read route", () => {
 
   beforeEach(async () => {
     await testEnv.EVENT_DB.batch([
-      testEnv.EVENT_DB.prepare("DELETE FROM profile_event_prizes"),
-      testEnv.EVENT_DB.prepare("DELETE FROM profile_event_prize_revisions"),
-      testEnv.EVENT_DB.prepare("DELETE FROM event_prize_selections"),
-      testEnv.EVENT_DB.prepare("DELETE FROM event_records"),
+      testEnv.EVENT_DB.prepare("DELETE FROM profile_event_prizes_canonical"),
+      testEnv.EVENT_DB.prepare(
+        "DELETE FROM profile_event_prize_revisions_canonical",
+      ),
+      testEnv.EVENT_DB.prepare("DELETE FROM event_prize_selections_canonical"),
+      testEnv.EVENT_DB.prepare("DELETE FROM event_records_canonical"),
     ]);
     const admission = await acquireEventWriteAdmission(testEnv.EVENT_DB);
     try {
@@ -180,7 +184,6 @@ describe("event read route", () => {
             place: 1,
             prizeId: "1092",
             assignedAtMs: 2_000,
-            futureMetadata: { edition: 2 },
           },
         },
         { admission },
@@ -346,7 +349,6 @@ describe("event read route", () => {
             place: 1,
             prizeId: "1092",
             assignedAtMs: 3_000,
-            futureMetadata: { edition: 2 },
           },
         },
         { prizes: { [eventId]: { assignedAtMs: 3_000 } }, revision: 2 },
@@ -661,7 +663,7 @@ describe("event read route", () => {
                   revision: 1,
                   profile: {
                     profileId,
-                    aura: "",
+                    aura: "none",
                     emoji: 1,
                     eth: "",
                     rating: 1_500,
@@ -697,7 +699,6 @@ describe("event read route", () => {
           place: 1,
           prizeId: "1092",
           assignedAtMs: 2_000,
-          futureMetadata: { edition: 2 },
         },
       },
     });

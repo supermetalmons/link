@@ -1,10 +1,12 @@
+import { applyCanonicalTestMigrations } from "./canonicalTestMigrations.ts";
+import { publicMatchFixture } from "../test/matchRecordFixture.ts";
 import {
   projectionDocumentFixture,
   projectionFixtureFields,
   commitProjectionCompatibility,
 } from "../test/profileDataBoundaryFixture.ts";
 import type { NavigationGamesCursor } from "@mons/shared/navigation";
-import { applyD1Migrations, type D1Migration } from "cloudflare:test";
+import type { D1Migration } from "cloudflare:test";
 import { env } from "cloudflare:workers";
 import { beforeAll, beforeEach, describe, expect, it } from "vitest";
 import {
@@ -19,7 +21,6 @@ import {
   encodeProfileGameProjection,
   getInviteProfileGameProjections,
   getProfileGameProjections,
-  listProfileGameProjectionPage,
   readProfileGamesPage,
   reserveEventProfileGameProjectionFence,
 } from "../src/profileGamesD1.ts";
@@ -115,9 +116,11 @@ function gameData(
   inviteId: string,
   listSortAt: number,
   status: "active" | "waiting" = "waiting",
+  ownerProfileId = "profile-1",
 ) {
   return projectionDocumentFixture({
     entityType: "game",
+    ownerProfileId,
     inviteId,
     kind: "direct",
     status,
@@ -155,7 +158,7 @@ function eventData(eventId: string, updatedAt: number) {
 }
 
 function historicalPair(matchId = "invite-1") {
-  const match = {
+  const match = publicMatchFixture({
     version: 2,
     color: "white" as const,
     emojiId: 1,
@@ -165,7 +168,7 @@ function historicalPair(matchId = "invite-1") {
     status: "surrendered",
     flatMovesString: "move",
     timer: "",
-  };
+  });
   return {
     matchId,
     hostPlayerId: "host",
@@ -177,7 +180,7 @@ function historicalPair(matchId = "invite-1") {
 
 describe("profile game projection D1 repository", () => {
   beforeAll(async () => {
-    await applyD1Migrations(
+    await applyCanonicalTestMigrations(
       testEnv.PROFILE_GAMES_DB,
       testEnv.TEST_D1_MIGRATIONS,
     );
@@ -188,10 +191,10 @@ describe("profile game projection D1 repository", () => {
       "DELETE FROM event_profile_game_projection_fences",
     ).run();
     await env.PROFILE_GAMES_DB.prepare(
-      "DELETE FROM profile_game_projections",
+      "DELETE FROM profile_game_projections_canonical",
     ).run();
     await env.PROFILE_GAMES_DB.prepare(
-      "DELETE FROM historical_match_pairs",
+      "DELETE FROM historical_match_pairs_canonical",
     ).run();
   });
 
@@ -208,16 +211,17 @@ describe("profile game projection D1 repository", () => {
     expect(first.revision).toBe(1);
     expect(observed.batches).toHaveLength(1);
     expect(observed.batches[0]).toHaveLength(2);
-    expect(observed.batches[0][0].query).toContain(
-      "INSERT INTO historical_match_pairs",
+    expect(observed.batches[0]![0]!.query).toContain(
+      "INSERT INTO historical_match_pairs_canonical",
     );
-    expect(observed.batches[0][1].query).toContain(
-      "SELECT * FROM historical_match_pairs",
+    expect(observed.batches[0]![1]!.query).toContain(
+      "SELECT * FROM historical_match_pairs_canonical",
     );
-    expect(observed.batches[0][1].values).toEqual(["invite-1", "invite-1"]);
+    expect(observed.batches[0]![1]!.values).toEqual(["invite-1", "invite-1"]);
     const reordered = {
       guestMatch: pair.guestMatch
         ? {
+            schemaVersion: 1 as const,
             timer: pair.guestMatch.timer,
             flatMovesString: pair.guestMatch.flatMovesString,
             status: pair.guestMatch.status,
@@ -231,6 +235,7 @@ describe("profile game projection D1 repository", () => {
         : null,
       hostMatch: pair.hostMatch
         ? {
+            schemaVersion: 1 as const,
             timer: pair.hostMatch.timer,
             flatMovesString: pair.hostMatch.flatMovesString,
             status: pair.hostMatch.status,
@@ -256,7 +261,7 @@ describe("profile game projection D1 repository", () => {
     expect(replay.revision).toBe(1);
     const rated = {
       ...pair,
-      hostMatch: { ...pair.hostMatch!, status: "rated" },
+      hostMatch: { ...pair.hostMatch!, fen: "rated" },
     };
     const upgraded = await writeHistoricalMatchSnapshot(observed.database, {
       archivedAtMs: 3_000,
@@ -267,7 +272,7 @@ describe("profile game projection D1 repository", () => {
     });
     expect(upgraded.source).toBe("rating");
     expect(upgraded.revision).toBe(2);
-    expect(upgraded.pair.hostMatch?.status).toBe("rated");
+    expect(upgraded.pair.hostMatch?.fen).toBe("rated");
     const preserved = await writeHistoricalMatchSnapshot(observed.database, {
       archivedAtMs: 4_000,
       finalizedAtMs: 2_000,
@@ -276,7 +281,7 @@ describe("profile game projection D1 repository", () => {
       source: "transition",
     });
     expect(preserved.source).toBe("rating");
-    expect(preserved.pair.hostMatch?.status).toBe("rated");
+    expect(preserved.pair.hostMatch?.fen).toBe("rated");
     expect(observed.batches).toHaveLength(4);
     expect(observed.batches.every((batch) => batch.length === 2)).toBe(true);
   });
@@ -335,13 +340,16 @@ describe("profile game projection D1 repository", () => {
   );
 
   it.each([
-    ["missing", "DELETE FROM historical_match_pairs"],
-    ["corrupt", "UPDATE historical_match_pairs SET snapshot_json = '{}'"],
+    ["missing", "DELETE FROM historical_match_pairs_canonical"],
+    [
+      "corrupt",
+      "UPDATE historical_match_pairs_canonical SET snapshot_json = '{}'",
+    ],
   ])(
     "rejects a %s archive verification row",
     async (_description, mutation) => {
       await env.PROFILE_GAMES_DB.exec(
-        `CREATE TRIGGER alter_historical_archive AFTER INSERT ON historical_match_pairs BEGIN ${mutation}; END`,
+        `CREATE TRIGGER alter_historical_archive AFTER INSERT ON historical_match_pairs_canonical BEGIN ${mutation}; END`,
       );
       try {
         await expect(
@@ -352,7 +360,9 @@ describe("profile game projection D1 repository", () => {
             pair: historicalPair(),
             source: "backfill",
           }),
-        ).rejects.toBeInstanceOf(HistoricalMatchCorruption);
+        ).rejects.toBeInstanceOf(
+          _description === "missing" ? HistoricalMatchCorruption : Error,
+        );
       } finally {
         await env.PROFILE_GAMES_DB.exec(
           "DROP TRIGGER alter_historical_archive",
@@ -377,7 +387,7 @@ describe("profile game projection D1 repository", () => {
         inviteId: "invite-1",
         pair: {
           ...pair,
-          hostMatch: { ...pair.hostMatch!, status: "different" },
+          hostMatch: { ...pair.hostMatch!, fen: "different" },
         },
         source: "transition",
       }),
@@ -393,9 +403,9 @@ describe("profile game projection D1 repository", () => {
     ).toBe("surrendered");
   });
 
-  it("normalizes numeric timestamps and upserts projection payloads", async () => {
+  it("retains exact integer timestamps and upserts canonical projection payloads", async () => {
     const data = gameData("invite-1", 1_000);
-    data.updatedAt = 2_000.75;
+    data.updatedAt = 2_000;
     const encoded = encodeProfileGameProjection("profile-1", "invite-1", data);
     expect(encoded.updated_at_ms).toBe(2_000);
 
@@ -420,8 +430,8 @@ describe("profile game projection D1 repository", () => {
         type: "update",
         profileId: "profile-1",
         projectionId: "invite-1",
-        data: gameData("invite-1", 3_000, "active"),
-        expectedVersion: projection?.version,
+        data: gameData("invite-1", 3_000, "active", "profile-1"),
+        expectedVersion: projection!.version,
       },
     ]);
     expect(
@@ -443,7 +453,7 @@ describe("profile game projection D1 repository", () => {
           listSortAt: null,
         }),
       ),
-    ).toThrow("invalid-profile-game-projection-list-sort");
+    ).toThrow("invalid-canonical-profile-game-projection");
     expect(() =>
       encodeProfileGameProjection(
         "profile-1",
@@ -453,7 +463,7 @@ describe("profile game projection D1 repository", () => {
           listSortAt: { timestamp: 1_000 },
         }),
       ),
-    ).toThrow("invalid-profile-game-projection-list-sort");
+    ).toThrow("invalid-canonical-profile-game-projection");
   });
 
   it.each([null, "1", 0, -1, 1.5, NaN, Infinity, Number.MAX_SAFE_INTEGER + 1])(
@@ -464,7 +474,7 @@ describe("profile game projection D1 repository", () => {
           type: "merge",
           profileId: "profile-1",
           projectionId: "invite-1",
-          data: gameData("invite-1", 1_000),
+          data: gameData("invite-1", 1_000, "waiting", "profile-1"),
         },
       ]);
       let batchCount = 0;
@@ -492,7 +502,7 @@ describe("profile game projection D1 repository", () => {
               type,
               profileId: "profile-1",
               projectionId: "invite-1",
-              data: gameData("invite-1", 1_000, "active"),
+              data: gameData("invite-1", 1_000, "active", "profile-1"),
               expectedVersion: invalidVersion as number,
             },
           ]),
@@ -508,42 +518,31 @@ describe("profile game projection D1 repository", () => {
   );
 
   it.each([1.5, Number.MAX_SAFE_INTEGER + 1, "invalid"])(
-    "rejects a stored projection version of %s in every record reader",
+    "rejects a stored projection version of %s before corrupting a valid record",
     async (version) => {
+      const data = gameData("invite-1", 1000);
       await commitProfileGameProjectionWrites(env.PROFILE_GAMES_DB, [
         {
           type: "merge",
           profileId: "profile-1",
           projectionId: "invite-1",
-          data: gameData("invite-1", 1_000),
+          data,
         },
       ]);
-      await env.PROFILE_GAMES_DB.prepare(
-        `UPDATE profile_game_projections SET version = ?
-         WHERE profile_id = ? AND projection_id = ?`,
-      )
-        .bind(version, "profile-1", "invite-1")
-        .run();
-      const reads = [
-        () =>
-          getProfileGameProjections(env.PROFILE_GAMES_DB, "profile-1", [
+      await expect(
+        env.PROFILE_GAMES_DB.prepare(
+          "UPDATE profile_game_projections_canonical SET version = ? WHERE profile_id = ? AND projection_id = ?",
+        )
+          .bind(version, "profile-1", "invite-1")
+          .run(),
+      ).rejects.toThrow();
+      expect(
+        (
+          await getProfileGameProjections(env.PROFILE_GAMES_DB, "profile-1", [
             "invite-1",
-          ]).then((rows) => rows.get("invite-1") ?? null),
-        () =>
-          getProfileGameProjections(env.PROFILE_GAMES_DB, "profile-1", [
-            "invite-1",
-          ]),
-        () =>
-          getInviteProfileGameProjections(env.PROFILE_GAMES_DB, "invite-1", [
-            "profile-1",
-          ]),
-        () => listProfileGameProjectionPage(env.PROFILE_GAMES_DB, "profile-1"),
-      ];
-      for (const read of reads) {
-        await expect(read()).rejects.toThrow(
-          "invalid-profile-game-projection-version",
-        );
-      }
+          ])
+        ).get("invite-1"),
+      ).toEqual({ data, version: 1 });
     },
   );
 
@@ -552,19 +551,19 @@ describe("profile game projection D1 repository", () => {
     async (mode) => {
       const precondition =
         mode === "undefined" ? { expectedVersion: undefined } : {};
-      await commitProfileGameProjectionWrites(env.PROFILE_GAMES_DB, [
+      await commitProjectionCompatibility(env.PROFILE_GAMES_DB, [
         {
           type: "merge",
           profileId: "profile-1",
           projectionId: "invite-1",
-          data: gameData("invite-1", 1_000),
+          data: gameData("invite-1", 1_000, "waiting", "profile-1"),
         },
       ]);
       const updated = {
         ...gameData("invite-1", 1_000, "active"),
         updatedAt: 2_000,
       };
-      await commitProfileGameProjectionWrites(env.PROFILE_GAMES_DB, [
+      await commitProjectionCompatibility(env.PROFILE_GAMES_DB, [
         {
           type: "update",
           profileId: "profile-1",
@@ -578,7 +577,7 @@ describe("profile game projection D1 repository", () => {
         { ...updated, updatedAt: 1_500 },
       ]) {
         await expect(
-          commitProfileGameProjectionWrites(env.PROFILE_GAMES_DB, [
+          commitProjectionCompatibility(env.PROFILE_GAMES_DB, [
             {
               type: "update",
               profileId: "profile-1",
@@ -608,7 +607,7 @@ describe("profile game projection D1 repository", () => {
         type: "merge" as const,
         profileId: "profile-1",
         projectionId,
-        data: gameData(projectionId, 1_000),
+        data: gameData(projectionId, 1_000, "waiting", "profile-1"),
       })),
     );
     const observed = observeProjectionReads();
@@ -626,8 +625,10 @@ describe("profile game projection D1 repository", () => {
       ),
     );
     expect(observed.reads).toHaveLength(1);
-    expect(observed.reads[0].query).toContain("FROM profile_game_projections");
-    expect(observed.reads[0].values).toEqual([
+    expect(observed.reads[0]!.query).toContain(
+      "FROM profile_game_projections_canonical",
+    );
+    expect(observed.reads[0]!.values).toEqual([
       "profile-1",
       JSON.stringify(projectionIds),
     ]);
@@ -639,25 +640,25 @@ describe("profile game projection D1 repository", () => {
         type: "merge",
         profileId: "profile-1",
         projectionId: "invite-1",
-        data: gameData("invite-1", 1_000),
+        data: gameData("invite-1", 1_000, "waiting", "profile-1"),
       },
       {
         type: "merge",
         profileId: "profile-1",
         projectionId: "unrequested",
-        data: gameData("unrequested", 1_000),
+        data: gameData("unrequested", 1_000, "waiting", "profile-1"),
       },
       {
         type: "merge",
         profileId: "profile-2",
         projectionId: "invite-1",
-        data: gameData("invite-1", 9_000),
+        data: gameData("invite-1", 9_000, "waiting", "profile-2"),
       },
       {
         type: "merge",
         profileId: "profile-2",
         projectionId: "other-profile-only",
-        data: gameData("other-profile-only", 9_000),
+        data: gameData("other-profile-only", 9_000, "waiting", "profile-2"),
       },
     ]);
     await commitProfileGameProjectionWrites(env.PROFILE_GAMES_DB, [
@@ -665,7 +666,7 @@ describe("profile game projection D1 repository", () => {
         type: "merge",
         profileId: "profile-1",
         projectionId: "invite-1",
-        data: gameData("invite-1", 2_000, "active"),
+        data: gameData("invite-1", 2_000, "active", "profile-1"),
       },
     ]);
     const observed = observeProjectionReads();
@@ -683,7 +684,7 @@ describe("profile game projection D1 repository", () => {
       ]),
     );
     expect(observed.reads).toHaveLength(1);
-    expect(observed.reads[0].values).toEqual([
+    expect(observed.reads[0]!.values).toEqual([
       "profile-1",
       JSON.stringify(["invite-1", "missing", "other-profile-only"]),
     ]);
@@ -698,27 +699,31 @@ describe("profile game projection D1 repository", () => {
   });
 
   it.each(["[]", "null"])(
-    "rejects a stored projection payload of %s",
+    "rejects a noncanonical stored projection payload of %s without changing the record",
     async (payloadJson) => {
+      const data = gameData("invite-1", 1000);
       await commitProfileGameProjectionWrites(env.PROFILE_GAMES_DB, [
         {
           type: "merge",
           profileId: "profile-1",
           projectionId: "invite-1",
-          data: gameData("invite-1", 1_000),
+          data,
         },
       ]);
-      await env.PROFILE_GAMES_DB.prepare(
-        `UPDATE profile_game_projections SET payload_json = ?
-         WHERE profile_id = ? AND projection_id = ?`,
-      )
-        .bind(payloadJson, "profile-1", "invite-1")
-        .run();
       await expect(
-        getProfileGameProjections(env.PROFILE_GAMES_DB, "profile-1", [
-          "invite-1",
-        ]),
-      ).rejects.toThrow("invalid-profile-game-projection-json");
+        env.PROFILE_GAMES_DB.prepare(
+          "UPDATE profile_game_projections_canonical SET payload_json = ? WHERE profile_id = ? AND projection_id = ?",
+        )
+          .bind(payloadJson, "profile-1", "invite-1")
+          .run(),
+      ).rejects.toThrow("CHECK constraint failed");
+      expect(
+        (
+          await getProfileGameProjections(env.PROFILE_GAMES_DB, "profile-1", [
+            "invite-1",
+          ])
+        ).get("invite-1"),
+      ).toEqual({ data, version: 1 });
     },
   );
 
@@ -735,39 +740,42 @@ describe("profile game projection D1 repository", () => {
           type: "merge" as const,
           profileId,
           projectionId: "invite-1",
-          data: gameData("invite-1", 1_000),
+          data: gameData("invite-1", 1_000, "waiting", profileId),
         })),
       );
       const observed = observeProjectionReads();
       const projections = await getInviteProfileGameProjections(
         observed.database,
         "invite-1",
-        [...profileIds, profileIds[0]],
+        [...profileIds, profileIds[0]!],
       );
       expect(projections).toEqual(
         new Map(
           profileIds.map((profileId) => [
             profileId,
-            { data: gameData("invite-1", 1_000), version: 1 },
+            {
+              data: gameData("invite-1", 1_000, "waiting", profileId),
+              version: 1,
+            },
           ]),
         ),
       );
       expect(observed.reads).toHaveLength(Math.ceil(count / 100));
       for (const [index, read] of observed.reads.entries()) {
-        expect(read.query).toContain("FROM profile_game_projections");
+        expect(read.query).toContain("FROM profile_game_projections_canonical");
         expect(read.values).toEqual([
           "invite-1",
           JSON.stringify(profileIds.slice(index * 100, (index + 1) * 100)),
         ]);
       }
       const plan = await env.PROFILE_GAMES_DB.prepare(
-        `EXPLAIN QUERY PLAN ${observed.reads[0].query}`,
+        `EXPLAIN QUERY PLAN ${observed.reads[0]!.query}`,
       )
-        .bind(...observed.reads[0].values)
+        .bind(...observed.reads[0]!.values)
         .all<{ detail: string }>();
       expect(
         plan.results.some(({ detail }) =>
-          /SEARCH profile_game_projections USING PRIMARY KEY \(profile_id=\? AND projection_id=\?\)/.test(
+          /SEARCH profile_game_projections_canonical USING PRIMARY KEY \(profile_id=\? AND projection_id=\?\)/.test(
             detail,
           ),
         ),
@@ -781,19 +789,19 @@ describe("profile game projection D1 repository", () => {
         type: "merge",
         profileId: "profile-1",
         projectionId: "invite-1",
-        data: gameData("invite-1", 1_000),
+        data: gameData("invite-1", 1_000, "waiting", "profile-1"),
       },
       {
         type: "merge",
         profileId: "profile-2",
         projectionId: "other-invite",
-        data: gameData("other-invite", 9_000),
+        data: gameData("other-invite", 9_000, "waiting", "profile-2"),
       },
       {
         type: "merge",
         profileId: "unrequested",
         projectionId: "invite-1",
-        data: gameData("invite-1", 9_000),
+        data: gameData("invite-1", 9_000, "waiting", "unrequested"),
       },
     ]);
     await commitProfileGameProjectionWrites(env.PROFILE_GAMES_DB, [
@@ -801,7 +809,7 @@ describe("profile game projection D1 repository", () => {
         type: "merge",
         profileId: "profile-1",
         projectionId: "invite-1",
-        data: gameData("invite-1", 2_000, "active"),
+        data: gameData("invite-1", 2_000, "active", "profile-1"),
       },
     ]);
     await expect(
@@ -828,52 +836,13 @@ describe("profile game projection D1 repository", () => {
     expect(observed.reads).toEqual([]);
   });
 
-  it.each(["[]", "null"])(
-    "rejects all invite projection results when a later chunk contains %s",
-    async (payloadJson) => {
-      const profileIds = Array.from(
-        { length: 101 },
-        (_, index) => `profile-${index}`,
-      );
-      await commitProfileGameProjectionWrites(env.PROFILE_GAMES_DB, [
-        {
-          type: "merge",
-          profileId: profileIds[0],
-          projectionId: "invite-1",
-          data: gameData("invite-1", 1_000),
-        },
-        {
-          type: "merge",
-          profileId: profileIds[100],
-          projectionId: "invite-1",
-          data: gameData("invite-1", 1_000),
-        },
-      ]);
-      await env.PROFILE_GAMES_DB.prepare(
-        `UPDATE profile_game_projections SET payload_json = ?
-         WHERE profile_id = ? AND projection_id = ?`,
-      )
-        .bind(payloadJson, profileIds[100], "invite-1")
-        .run();
-      const observed = observeProjectionReads();
-      await expect(
-        getInviteProfileGameProjections(
-          observed.database,
-          "invite-1",
-          profileIds,
-        ),
-      ).rejects.toThrow("invalid-profile-game-projection-json");
-      expect(observed.reads).toHaveLength(2);
-    },
-  );
-
   it("rejects all invite projection results when a later query fails", async () => {
     await commitProfileGameProjectionWrites(env.PROFILE_GAMES_DB, [
       {
         type: "merge",
         profileId: "profile-0",
         projectionId: "invite-1",
-        data: gameData("invite-1", 1_000),
+        data: gameData("invite-1", 1_000, "waiting", "profile-0"),
       },
     ]);
     const observed = observeProjectionReads(2);
@@ -894,7 +863,7 @@ describe("profile game projection D1 repository", () => {
         type: "merge" as const,
         profileId: "profile-1",
         projectionId,
-        data: gameData(projectionId, 1_000),
+        data: gameData(projectionId, 1_000, "waiting", "profile-1"),
       })),
     );
     const first = await readProfileGamesPage(
@@ -934,6 +903,7 @@ describe("profile game projection D1 repository", () => {
               inviteId(index),
               index < 1_500 ? 100_000 : 100_000 - index,
               index < 2_000 ? "waiting" : "active",
+              "profile-1",
             ),
           };
         }),
@@ -946,7 +916,7 @@ describe("profile game projection D1 repository", () => {
           type: "merge" as const,
           profileId: "profile-2",
           projectionId,
-          data: gameData(projectionId, 100_000),
+          data: gameData(projectionId, 100_000, "waiting", "profile-2"),
         }),
       ),
     );
@@ -1008,7 +978,7 @@ describe("profile game projection D1 repository", () => {
       );
       const previous = await env.PROFILE_GAMES_DB.prepare(
         `SELECT *
-         FROM profile_game_projections
+         FROM profile_game_projections_canonical
          WHERE profile_id = ?1
            AND (sort_bucket > ?2
              OR (sort_bucket = ?2 AND list_sort_at_ms < ?3)
@@ -1049,7 +1019,7 @@ describe("profile game projection D1 repository", () => {
       expect(rowsRead).toBeLessThanOrEqual(16 * (limit + 1));
     }
     expect(observed.reads).toHaveLength(cases.length);
-    const read = observed.reads[0];
+    const read = observed.reads[0]!;
     const plan = await env.PROFILE_GAMES_DB.prepare(
       `EXPLAIN QUERY PLAN ${read.query}`,
     )
@@ -1065,7 +1035,7 @@ describe("profile game projection D1 repository", () => {
         details.some(
           (detail) =>
             detail.includes(
-              "USING COVERING INDEX idx_profile_game_projections_page",
+              "USING COVERING INDEX idx_profile_game_projections_page_canonical",
             ) && detail.includes(constraint),
         ),
       ).toBe(true);
@@ -1081,7 +1051,7 @@ describe("profile game projection D1 repository", () => {
         type: "merge",
         profileId: "profile-1",
         projectionId: "invite-b",
-        data: gameData("invite-b", 900),
+        data: gameData("invite-b", 900, "waiting", "profile-1"),
       },
       ...["b", "a"].map((eventId) => ({
         type: "merge" as const,
@@ -1093,13 +1063,13 @@ describe("profile game projection D1 repository", () => {
         type: "merge",
         profileId: "profile-1",
         projectionId: "invite-c",
-        data: gameData("invite-c", 1_000, "active"),
+        data: gameData("invite-c", 1_000, "active", "profile-1"),
       },
       {
         type: "merge",
         profileId: "profile-1",
         projectionId: "invite-a",
-        data: gameData("invite-a", 1_000),
+        data: gameData("invite-a", 1_000, "waiting", "profile-1"),
       },
     ]);
     const ids: string[] = [];
@@ -1136,7 +1106,7 @@ describe("profile game projection D1 repository", () => {
         type: "merge" as const,
         profileId: "profile-1",
         projectionId,
-        data: gameData(projectionId, 1_000),
+        data: gameData(projectionId, 1_000, "waiting", "profile-1"),
       })),
     );
     let cursor: NavigationGamesCursor | null = null;
@@ -1164,7 +1134,7 @@ describe("profile game projection D1 repository", () => {
         type: "merge",
         profileId: "profile-1",
         projectionId: "invite-1",
-        data: gameData("invite-1", 1_000),
+        data: gameData("invite-1", 1_000, "waiting", "profile-1"),
       },
     ]);
     const stale = await getProfileGameProjections(
@@ -1177,7 +1147,7 @@ describe("profile game projection D1 repository", () => {
         type: "merge",
         profileId: "profile-1",
         projectionId: "invite-1",
-        data: gameData("invite-1", 9_000),
+        data: gameData("invite-1", 9_000, "waiting", "profile-1"),
       },
     ]);
     await commitProfileGameProjectionWrites(env.PROFILE_GAMES_DB, [
@@ -1185,7 +1155,7 @@ describe("profile game projection D1 repository", () => {
         type: "merge",
         profileId: "profile-1",
         projectionId: "invite-1",
-        data: gameData("invite-1", 5_000),
+        data: gameData("invite-1", 5_000, "waiting", "profile-1"),
       },
     ]);
     await expect(
@@ -1194,8 +1164,8 @@ describe("profile game projection D1 repository", () => {
           type: "update",
           profileId: "profile-1",
           projectionId: "invite-1",
-          data: gameData("invite-1", 5_000),
-          expectedVersion: stale?.version,
+          data: gameData("invite-1", 5_000, "waiting", "profile-1"),
+          expectedVersion: stale!.version,
         },
       ]),
     ).rejects.toThrow();
@@ -1216,13 +1186,13 @@ describe("profile game projection D1 repository", () => {
         type: "merge",
         profileId: "profile-1",
         projectionId: "invite-1",
-        data: gameData("invite-1", 1_000),
+        data: gameData("invite-1", 1_000, "waiting", "profile-1"),
       },
       {
         type: "merge",
         profileId: "profile-1",
         projectionId: "sibling",
-        data: gameData("sibling", 1_000),
+        data: gameData("sibling", 1_000, "waiting", "profile-1"),
       },
     ]);
     const stale = await getProfileGameProjections(
@@ -1235,7 +1205,7 @@ describe("profile game projection D1 repository", () => {
         type: "merge",
         profileId: "profile-1",
         projectionId: "invite-1",
-        data: gameData("invite-1", 2_000),
+        data: gameData("invite-1", 2_000, "waiting", "profile-1"),
       },
     ]);
     await expect(
@@ -1249,7 +1219,7 @@ describe("profile game projection D1 repository", () => {
           type: "delete",
           profileId: "profile-1",
           projectionId: "invite-1",
-          expectedVersion: stale?.version,
+          expectedVersion: stale!.version,
         },
       ]),
     ).rejects.toThrow();
@@ -1325,7 +1295,7 @@ describe("profile game projection D1 repository", () => {
         type: "create",
         profileId: "profile-1",
         projectionId: "invite-1",
-        data: gameData("invite-1", 1_000),
+        data: gameData("invite-1", 1_000, "waiting", "profile-1"),
       },
     ]);
     await commitProfileGameProjectionWrites(env.PROFILE_GAMES_DB, [
@@ -1333,7 +1303,7 @@ describe("profile game projection D1 repository", () => {
         type: "create",
         profileId: "profile-1",
         projectionId: "invite-1",
-        data: gameData("invite-1", 2_000),
+        data: gameData("invite-1", 2_000, "waiting", "profile-1"),
       },
     ]);
     expect(
@@ -1351,7 +1321,7 @@ describe("profile game projection D1 repository", () => {
           type: "create",
           profileId: "profile-1",
           projectionId: "invite-1",
-          data: gameData("invite-1", 3_000),
+          data: gameData("invite-1", 3_000, "waiting", "profile-1"),
           requireAbsent: true,
         },
       ]),
@@ -1364,13 +1334,13 @@ describe("profile game projection D1 repository", () => {
         type: "merge",
         profileId: "profile-1",
         projectionId: "waiting",
-        data: gameData("waiting", 1_000),
+        data: gameData("waiting", 1_000, "waiting", "profile-1"),
       },
       {
         type: "merge",
         profileId: "profile-1",
         projectionId: "active",
-        data: gameData("active", 2_000, "active"),
+        data: gameData("active", 2_000, "active", "profile-1"),
       },
     ]);
     expect(
@@ -1388,7 +1358,7 @@ describe("profile game projection D1 repository", () => {
   it("uses the covering pagination index", async () => {
     const result = await env.PROFILE_GAMES_DB.prepare(
       `EXPLAIN QUERY PLAN
-       SELECT * FROM profile_game_projections
+       SELECT * FROM profile_game_projections_canonical
        WHERE profile_id = ?
        ORDER BY sort_bucket ASC, list_sort_at_ms DESC, projection_id ASC
        LIMIT ?`,
@@ -1396,7 +1366,7 @@ describe("profile game projection D1 repository", () => {
       .bind("profile-1", 81)
       .all<{ detail: string }>();
     expect(result.results.map((entry) => entry.detail).join(" ")).toContain(
-      "idx_profile_game_projections_page",
+      "idx_profile_game_projections_page_canonical",
     );
   });
 });

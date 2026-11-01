@@ -8,7 +8,6 @@ import {
   movesFromFlatString,
   parseGameFromMatchData,
 } from "@mons/shared/match-protocol";
-import { MATCH_TIMER_TERMINAL } from "@mons/shared/timers";
 import { Color, Game } from "mons-rules";
 import { isSafeRecordKey } from "./recordKeys.ts";
 
@@ -114,10 +113,10 @@ export function classifyTransitionHistoricalMatchPair(input: {
     let move: string;
     if (replay.activeColor === Color.White) {
       if (whiteIndex >= history.white.length) return { status: "unavailable" };
-      move = history.white[whiteIndex++];
+      move = history.white[whiteIndex++]!;
     } else if (replay.activeColor === Color.Black) {
       if (blackIndex >= history.black.length) return { status: "unavailable" };
-      move = history.black[blackIndex++];
+      move = history.black[blackIndex++]!;
     } else {
       return { status: "unavailable" };
     }
@@ -139,8 +138,8 @@ export function classifyTransitionHistoricalMatchPair(input: {
   const externallyFinal =
     hostMatch.status === "surrendered" ||
     guestMatch.status === "surrendered" ||
-    hostMatch.timer === MATCH_TIMER_TERMINAL ||
-    guestMatch.timer === MATCH_TIMER_TERMINAL;
+    hostMatch.timer.state === "finished" ||
+    guestMatch.timer.state === "finished";
   return externallyFinal || replay.winner !== undefined
     ? { status: "ready", pair: stablePair }
     : { status: "unready" };

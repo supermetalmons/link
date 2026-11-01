@@ -2,6 +2,7 @@
 
 const assert = require("node:assert/strict");
 const test = require("node:test");
+const { event: eventFixture } = require("./fixtures/canonicalEvents");
 const { createSeededRandom } = require("../runtime/shared/ids");
 const {
   LEGACY_CORE_PRIZES_EVENT_ID,
@@ -12,47 +13,60 @@ const {
 
 const {
   encodeEventUpdates,
-} = require("../workers/api/src/eventCompatibilityCodec.ts");
+} = require("../workers/api/test/eventLegacyFixtureCodec.ts");
+/** @param {Parameters<typeof buildTypedScheduledEventDueUpdatesCore>[0]} input */
 const buildScheduledEventDueUpdatesCore = async (input) => {
   const result = await buildTypedScheduledEventDueUpdatesCore(input);
   return { ...result, updates: encodeEventUpdates(result.updates) };
 };
 
+/** @param {number} index @returns {import("../runtime/shared/events").EventParticipantRecord} */
 const createParticipant = (index) => ({
   profileId: `profile-${index}`,
   loginUid: `login-${index}`,
   username: `player-${index}`,
   displayName: `player-${index}`,
   emojiId: index + 1,
-  aura: "",
+  aura: "none",
   joinedAtMs: index,
   state: "active",
   eliminatedRoundIndex: null,
   eliminatedByProfileId: null,
 });
 
-const createEvent = (count) => ({
-  eventId: "event-1",
-  status: "scheduled",
-  startAtMs: 100,
-  supportsThirdPlaceMatch: true,
-  thirdPlaceMatch: null,
-  participants: Object.fromEntries(
-    Array.from({ length: count }, (_, index) => [
-      `profile-${index}`,
-      createParticipant(index),
-    ]),
-  ),
-});
+/** @param {number} count */
+const createEvent = (count) =>
+  eventFixture({
+    eventId: "event-1",
+    status: "scheduled",
+    startAtMs: 100,
+    supportsThirdPlaceMatch: true,
+    thirdPlaceMatch: null,
+    participants: Object.fromEntries(
+      Array.from({ length: count }, (_, index) => [
+        `profile-${index}`,
+        createParticipant(index),
+      ]),
+    ),
+  });
 
+/**
+ * @typedef {import("../runtime/events/ownership").EventOwnershipSnapshot} OwnershipSnapshot
+ * @typedef {{[Field in keyof OwnershipSnapshot]: OwnershipSnapshot[Field] extends ReadonlyMap<infer Key, infer Value> ? Map<Key, Value> : never}} MutableOwnership
+ */
+/** @param {import("../runtime/shared/events").EventRecord} event @param {{canonicalProfileIds?: Record<string, string | null>, loginOwners?: Record<string, string | null>}} [options] */
 const ownershipSnapshot = (
   event,
   { canonicalProfileIds = {}, loginOwners = {} } = {},
 ) => {
   const participants = Object.entries(event.participants || {});
+  /** @type {MutableOwnership["canonicalProfileIdByProfileId"]} */
   const canonicalProfileIdByProfileId = new Map();
+  /** @type {MutableOwnership["loginOwnerByUid"]} */
   const loginOwnerByUid = new Map();
+  /** @type {MutableOwnership["profileById"]} */
   const profileById = new Map();
+  /** @type {MutableOwnership["loginUidsByProfileId"]} */
   const loginUidsByProfileId = new Map();
   for (const [key, participant] of participants) {
     const storedProfileId = participant.profileId || key;
@@ -61,13 +75,13 @@ const ownershipSnapshot = (
         canonicalProfileIds,
         candidateProfileId,
       )
-        ? canonicalProfileIds[candidateProfileId]
+        ? (canonicalProfileIds[candidateProfileId] ?? null)
         : candidateProfileId;
       canonicalProfileIdByProfileId.set(candidateProfileId, canonicalProfileId);
       if (canonicalProfileId && !profileById.has(canonicalProfileId)) {
         profileById.set(canonicalProfileId, {
           profile: {
-            aura: "",
+            aura: "none",
             emoji: 0,
             eth: "",
             profileId: canonicalProfileId,
@@ -80,6 +94,7 @@ const ownershipSnapshot = (
         loginUidsByProfileId.set(canonicalProfileId, []);
       }
     }
+    if (participant.loginUid === null) continue;
     const ownerProfileId = Object.hasOwn(loginOwners, participant.loginUid)
       ? loginOwners[participant.loginUid]
       : canonicalProfileIdByProfileId.get(storedProfileId);
@@ -102,6 +117,7 @@ const ownershipSnapshot = (
   };
 };
 
+/** @param {number} count */
 const transition = (count) => {
   const event = createEvent(count);
   return buildScheduledEventDueUpdatesCore({
@@ -114,10 +130,11 @@ const transition = (count) => {
   });
 };
 
+/** @param {import("../runtime/shared/events").EventRecord} event @param {Record<string, string>} prizeSelections @param {OwnershipSnapshot | null} snapshot */
 const prizeTransition = (event, prizeSelections, snapshot) =>
   buildScheduledEventDueUpdatesCore({
     eventId: LEGACY_CORE_PRIZES_EVENT_ID,
-    event,
+    event: { ...event, eventId: LEGACY_CORE_PRIZES_EVENT_ID },
     nowMs: 100,
     random: createSeededRandom("prize-selections"),
     buildRandomGameSeed: () => ({ gameVariant: "Classic", fen: "start-fen" }),
@@ -139,12 +156,16 @@ test("dismisses overdue events with fewer than two participants", async () => {
 });
 
 test("builds complete overdue brackets for supported participant counts", async () => {
-  for (const [count, bracketSize, firstRoundInvites] of [
+  for (const [
+    count,
+    bracketSize,
+    firstRoundInvites,
+  ] of /** @type {[number, number, number][]} */ ([
     [2, 2, 1],
     [3, 4, 1],
     [4, 4, 2],
     [32, 32, 16],
-  ]) {
+  ])) {
     const result = await transition(count);
     assert.equal(result.didChange, true);
     assert.equal(result.updates["events/event-1/status"], "active");
@@ -163,6 +184,7 @@ test("builds complete overdue brackets for supported participant counts", async 
 
 test("rejects duplicate canonical participants before creating a bracket", async () => {
   const event = createEvent(3);
+  assert.ok(event.participants["profile-1"]);
   event.participants["profile-1"] = {
     ...event.participants["profile-1"],
     loginUid: "login-0",
@@ -180,6 +202,29 @@ test("rejects duplicate canonical participants before creating a bracket", async
     }),
     /profile-ownership-unavailable/,
   );
+});
+
+test("profile-only participants remain stored but cannot start a match without login ownership", async () => {
+  const event = createEvent(2);
+  assert.ok(event.participants["profile-1"]);
+  event.participants["profile-1"].loginUid = null;
+  const original = structuredClone(event);
+  const snapshot = ownershipSnapshot(event);
+  snapshot.loginUidsByProfileId.set("profile-1", []);
+  await assert.rejects(
+    buildScheduledEventDueUpdatesCore({
+      eventId: event.eventId,
+      event,
+      nowMs: 100,
+      random: createSeededRandom("profile-only"),
+      buildRandomGameSeed: () =>
+        assert.fail("unowned participant cannot create a game"),
+      ownershipSnapshot: snapshot,
+    }),
+    /profile-ownership-unavailable/,
+  );
+  assert.deepEqual(event, original);
+  assert.equal(event.participants["profile-1"].loginUid, null);
 });
 
 test("rejects contradictory participants with one canonical profile", async () => {
@@ -200,11 +245,13 @@ test("rejects contradictory participants with one canonical profile", async () =
       }),
     }),
     (error) =>
-      error?.code === "unavailable" &&
+      error instanceof Error &&
+      "code" in error &&
+      error.code === "unavailable" &&
       error.message === "profile-ownership-unavailable",
   );
   assert.equal(event.status, "scheduled");
-  assert.equal(event.rounds, undefined);
+  assert.deepEqual(event.rounds, {});
 });
 
 test("uses one ownership snapshot for the complete bracket decision", async () => {
@@ -225,13 +272,14 @@ test("uses one ownership snapshot for the complete bracket decision", async () =
 
 test("moves prize selections with canonical participant rekeying", async () => {
   const event = createEvent(2);
+  assert.ok(event.participants["profile-0"]);
   event.participants["source-key"] = {
     ...event.participants["profile-0"],
-    profileId: "embedded-profile",
+    profileId: "source-key",
   };
   delete event.participants["profile-0"];
   const snapshot = ownershipSnapshot(event, {
-    canonicalProfileIds: { "embedded-profile": "canonical-profile" },
+    canonicalProfileIds: { "source-key": "canonical-profile" },
   });
   const result = await prizeTransition(
     event,
@@ -243,23 +291,30 @@ test("moves prize selections with canonical participant rekeying", async () => {
     result.updates[`eventPrizeSelections/${LEGACY_CORE_PRIZES_EVENT_ID}`],
     { "canonical-profile": "1092" },
   );
+  const updatedParticipants =
+    result.updates[`events/${LEGACY_CORE_PRIZES_EVENT_ID}/participants`];
   assert.ok(
-    result.updates[`events/${LEGACY_CORE_PRIZES_EVENT_ID}/participants`][
-      "canonical-profile"
-    ],
+    updatedParticipants &&
+      typeof updatedParticipants === "object" &&
+      "canonical-profile" in updatedParticipants,
   );
 });
 
 test("collapses equal participant selection aliases", async () => {
   const event = createEvent(2);
+  assert.ok(event.participants["profile-0"]);
   event.participants["source-key"] = {
     ...event.participants["profile-0"],
-    profileId: "embedded-profile",
+    profileId: "source-key",
   };
   delete event.participants["profile-0"];
   const snapshot = ownershipSnapshot(event, {
-    canonicalProfileIds: { "embedded-profile": "canonical-profile" },
+    canonicalProfileIds: { "source-key": "canonical-profile" },
   });
+  snapshot.canonicalProfileIdByProfileId.set(
+    "embedded-profile",
+    "canonical-profile",
+  );
   const result = await prizeTransition(
     event,
     {
@@ -278,14 +333,15 @@ test("collapses equal participant selection aliases", async () => {
 
 test("rejects conflicting participant selection aliases without mutation", async () => {
   const event = createEvent(2);
+  assert.ok(event.participants["profile-0"]);
   event.participants["source-key"] = {
     ...event.participants["profile-0"],
-    profileId: "embedded-profile",
+    profileId: "source-key",
   };
   delete event.participants["profile-0"];
   const originalEvent = structuredClone(event);
   const snapshot = ownershipSnapshot(event, {
-    canonicalProfileIds: { "embedded-profile": "canonical-profile" },
+    canonicalProfileIds: { "source-key": "canonical-profile" },
   });
 
   await assert.rejects(
@@ -315,6 +371,7 @@ test("drops selections that do not belong to current participants", async () => 
 
 test("requires selections for configured prize events due to start", async () => {
   const event = createEvent(2);
+  event.eventId = LEGACY_CORE_PRIZES_EVENT_ID;
   const originalEvent = structuredClone(event);
 
   await assert.rejects(
@@ -335,10 +392,13 @@ test("requires selections for configured prize events due to start", async () =>
 });
 
 test("dismisses one-participant prize events without ownership canonicalization", async () => {
-  for (const [prizeSelections, snapshot] of [
+  for (const [
+    prizeSelections,
+    snapshot,
+  ] of /** @type {[Record<string, string>, null][]} */ ([
     [{ "legacy-selection": "1092" }, null],
-    ["malformed-selections", {}],
-  ]) {
+    [{}, null],
+  ])) {
     const event = createEvent(1);
     const result = await prizeTransition(event, prizeSelections, snapshot);
 
@@ -348,7 +408,7 @@ test("dismisses one-participant prize events without ownership canonicalization"
     );
     assert.equal(
       result.updates[`eventPrizeSelections/${LEGACY_CORE_PRIZES_EVENT_ID}`],
-      null,
+      Object.keys(prizeSelections).length ? null : undefined,
     );
   }
 });
@@ -360,18 +420,22 @@ test("leaves future and already-transitioned events unchanged", async () => {
     await buildScheduledEventDueUpdatesCore({
       eventId: "event-1",
       event: future,
+      ownershipSnapshot: null,
       nowMs: 100,
       random: createSeededRandom("future"),
       buildRandomGameSeed: () => ({ gameVariant: "Classic", fen: "start-fen" }),
     }),
     { didChange: false, updates: {} },
   );
-  const active = createEvent(2);
-  active.status = "active";
+  const active = eventFixture({
+    status: "active",
+    participants: createEvent(2).participants,
+  });
   assert.deepEqual(
     await buildScheduledEventDueUpdatesCore({
       eventId: "event-1",
       event: active,
+      ownershipSnapshot: null,
       nowMs: 100,
       random: createSeededRandom("active"),
       buildRandomGameSeed: () => ({ gameVariant: "Classic", fen: "start-fen" }),

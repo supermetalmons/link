@@ -39,7 +39,7 @@ function authMutationStatement(
     case "update-auth-method":
       return canonicalRowMutationStatement(
         db,
-        "profile_auth_methods",
+        "profile_auth_methods_canonical",
         ["method", "normalized_value"],
         authMethodWriteRow(mutation.value),
         mutation.kind === "insert-auth-method",
@@ -47,7 +47,7 @@ function authMutationStatement(
     case "delete-auth-method":
       return db
         .prepare(
-          `DELETE FROM profile_auth_methods
+          `DELETE FROM profile_auth_methods_canonical
            WHERE method = ? AND normalized_value = ?`,
         )
         .bind(mutation.method, mutation.normalizedValue);
@@ -55,14 +55,16 @@ function authMutationStatement(
     case "update-auth-operation":
       return canonicalRowMutationStatement(
         db,
-        "profile_auth_operations",
+        "profile_auth_operations_canonical",
         "operation_id",
         authOperationWriteRow(mutation.value),
         mutation.kind === "insert-auth-operation",
       );
     case "delete-auth-operation":
       return db
-        .prepare("DELETE FROM profile_auth_operations WHERE operation_id = ?")
+        .prepare(
+          "DELETE FROM profile_auth_operations_canonical WHERE operation_id = ?",
+        )
         .bind(mutation.operationId);
     case "insert-method-revocation":
     case "update-method-revocation":
@@ -100,14 +102,16 @@ function authMutationStatement(
     case "update-auth-recovery":
       return canonicalRowMutationStatement(
         db,
-        "profile_auth_recovery_jobs",
+        "profile_auth_recovery_jobs_canonical",
         "profile_id",
         recoveryWriteRow(mutation.value),
         mutation.kind === "insert-auth-recovery",
       );
     case "delete-auth-recovery":
       return db
-        .prepare("DELETE FROM profile_auth_recovery_jobs WHERE profile_id = ?")
+        .prepare(
+          "DELETE FROM profile_auth_recovery_jobs_canonical WHERE profile_id = ?",
+        )
         .bind(mutation.profileId);
   }
 }

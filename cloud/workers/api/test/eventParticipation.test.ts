@@ -74,7 +74,7 @@ const participant = (
   username: profileId,
   displayName: profileId,
   emojiId: 1,
-  aura: "",
+  aura: "none",
   joinedAtMs,
   state: "active",
   eliminatedRoundIndex: null,
@@ -112,7 +112,7 @@ function createRepository({
   pathValues = {},
   patchError,
 }: {
-  event?: Record<string, unknown> | null;
+  event?: EventDocument | Record<string, unknown> | null;
   profile?: GameplayProfile | null;
   profilesByUid?: Record<string, GameplayProfile | null>;
   canonicalProfileIds?: Record<string, string | null>;
@@ -232,7 +232,7 @@ function createRepository({
             ownership = {
               loginUids: [uid],
               profile: {
-                aura: "",
+                aura: "none",
                 emoji: 0,
                 eth: "",
                 profileId: ownerProfileId,
@@ -269,14 +269,14 @@ function createRepository({
         ...query.profileIds,
       ]);
       for (let index = 0; index < query.profileIds.length; index += 1) {
-        const sourceProfileId = query.profileIds[index];
+        const sourceProfileId = query.profileIds[index]!;
         const canonicalProfileId = resolved[index] || null;
         canonicalProfileIdByProfileId.set(sourceProfileId, canonicalProfileId);
         if (!canonicalProfileId) continue;
         if (!profileById.has(canonicalProfileId)) {
           profileById.set(canonicalProfileId, {
             profile: {
-              aura: "",
+              aura: "none",
               emoji: 0,
               eth: "",
               profileId: canonicalProfileId,
@@ -472,9 +472,9 @@ test("rejoins a retired participant without creating a canonical duplicate", asy
   assert.equal(response.participant.profileId, "retired-profile");
   assert.equal(response.participant.loginUid, "alternate-login");
   assert.equal(response.participant.joinedAtMs, 50);
-  assert.ok(patches[0]["events/event-1/participants/retired-profile"]);
+  assert.ok(patches[0]!["events/event-1/participants/retired-profile"]!);
   assert.equal(
-    patches[0]["events/event-1/participants/canonical-profile"],
+    patches[0]!["events/event-1/participants/canonical-profile"]!,
     undefined,
   );
 });
@@ -506,9 +506,9 @@ test("does not reuse a participant when its stored login now owns another profil
     },
   );
   assert.equal(response.participant.profileId, "canonical-profile");
-  assert.ok(patches[0]["events/event-1/participants/canonical-profile"]);
+  assert.ok(patches[0]!["events/event-1/participants/canonical-profile"]!);
   assert.equal(
-    patches[0]["events/event-1/participants/retired-profile"],
+    patches[0]!["events/event-1/participants/retired-profile"]!,
     undefined,
   );
 });
@@ -523,7 +523,7 @@ test("reads one join ownership snapshot under the event lock", async () => {
       participants: {
         "retired-profile": {
           ...participant("retired-profile", "", 50),
-          loginUid: "",
+          loginUid: null,
         },
       },
     }),
@@ -562,9 +562,9 @@ test("reads one join ownership snapshot under the event lock", async () => {
     },
   );
   assert.equal(response.participant.profileId, "retired-profile");
-  assert.ok(patches[0]["events/event-1/participants/retired-profile"]);
+  assert.ok(patches[0]!["events/event-1/participants/retired-profile"]!);
   assert.equal(
-    patches[0]["events/event-1/participants/canonical-profile"],
+    patches[0]!["events/event-1/participants/canonical-profile"]!,
     undefined,
   );
   assert.deepEqual(ownershipReadLockStates, [true, true]);
@@ -625,7 +625,7 @@ test("bulk-resolves ownership once for a full participant set", async () => {
     "This event is full (32 players max).",
   );
   assert.equal(batches.length, 1);
-  assert.equal(batches[0].length, 33);
+  assert.equal(batches[0]!.length, 33);
 });
 
 test("rejects duplicate retired and canonical participant ownership", async () => {
@@ -663,30 +663,25 @@ test("rejects duplicate retired and canonical participant ownership", async () =
   assert.deepEqual(patches, []);
 });
 
-test("normalizes non-finite emoji metadata before writing", async () => {
-  const { patches, repository } = createRepository({
-    event: scheduledEvent({ participants: {} }),
-    profile: { ...creatorProfile, emoji: "Infinity" },
-  });
-  const response = await joinEvent(
-    identity,
-    { eventId: "event-1" },
-    repository,
-    {
-      lockManager: createLockManager().manager,
-      now: () => 100,
-      buildDueUpdates: noDueTransition,
-    },
-  );
-  assert.equal(response.participant.emojiId, 0);
-  assert.equal(
-    (
-      patches[0]["events/event-1/participants/creator-profile"] as {
-        emojiId: number;
-      }
-    ).emojiId,
-    0,
-  );
+test("rejects legacy and non-finite emoji metadata before writing", async () => {
+  for (const emoji of ["Infinity", "7", Number.NaN]) {
+    const { patches, repository } = createRepository({
+      event: scheduledEvent({ participants: {} }),
+    });
+    repository.readProfileOwnershipSnapshot = async () => {
+      throw new TypeError(`invalid canonical emoji: ${String(emoji)}`);
+    };
+    await expectFailure(
+      joinEvent(identity, { eventId: "event-1" }, repository, {
+        lockManager: createLockManager().manager,
+        now: () => 100,
+        buildDueUpdates: noDueTransition,
+      }),
+      503,
+      "profile-ownership-unavailable",
+    );
+    assert.deepEqual(patches, []);
+  }
 });
 
 test("rejects oversized participant metadata before writing", async () => {
@@ -1083,21 +1078,21 @@ test("deadline-crossing join persists and reconciles its canonical participant",
 
   assert.deepEqual(response.participant, canonicalParticipant);
   assert.equal(state.patches.length, 1);
-  const update = state.patches[0];
+  const update = state.patches[0]!;
   assert.equal(
     Object.hasOwn(update, `events/event-1/participants/${retiredProfileId}`),
     false,
   );
   assert.deepEqual(
-    (update["events/event-1/participants"] as Record<string, unknown>)[
+    (update["events/event-1/participants"]! as Record<string, unknown>)[
       canonicalProfileId
-    ],
+    ]!,
     canonicalParticipant,
   );
   assert.equal(reconciliationSnapshots.length, 1);
   assert.deepEqual(
     (
-      eventRecordFixture(reconciliationSnapshots[0].event)
+      eventRecordFixture(reconciliationSnapshots[0]!.event)
         .participants as Record<string, unknown>
     )[canonicalProfileId],
     canonicalParticipant,
@@ -1417,10 +1412,16 @@ test("leaves through an alternate login using the stored participant key", async
     { lockManager: createLockManager().manager, now: () => 100 },
   );
   assert.equal(result.removedProfileId, "retired-target");
-  assert.equal(patches[0]["events/event-1/participants/retired-target"], null);
-  assert.equal(patches[0]["eventPrizeSelections/event-1/retired-target"], null);
   assert.equal(
-    Object.hasOwn(patches[0], "events/event-1/participants/canonical-target"),
+    patches[0]!["events/event-1/participants/retired-target"]!,
+    null,
+  );
+  assert.equal(
+    patches[0]!["eventPrizeSelections/event-1/retired-target"]!,
+    null,
+  );
+  assert.equal(
+    Object.hasOwn(patches[0]!, "events/event-1/participants/canonical-target"),
     false,
   );
 });
@@ -1461,13 +1462,11 @@ test("keeps the creator enrolled for direct, alternate, and merged identities", 
   }
 });
 
-test("rejects leaving events that are not upcoming or have an invalid deadline", async () => {
+test("rejects leaving events that are not upcoming", async () => {
   for (const overrides of [
     { status: "active" },
     { status: "ended" },
     { status: "dismissed" },
-    { startAtMs: null },
-    { startAtMs: NaN },
   ]) {
     const { patches, repository } = createRepository({
       event: scheduledEvent({
@@ -1484,9 +1483,7 @@ test("rejects leaving events that are not upcoming or have an invalid deadline",
         now: () => 100,
       }),
       409,
-      "status" in overrides
-        ? "This event can no longer be left."
-        : "This event cannot be updated right now.",
+      "This event can no longer be left.",
     );
     assert.deepEqual(patches, []);
   }
@@ -1751,7 +1748,9 @@ test("storage guard rejection honors an already started or newly postponed snaps
     let eventReads = 0;
     repository.readEvent = async () => {
       eventReads++;
-      return structuredClone(eventReads < 3 ? event : { ...event, ...latest });
+      return eventDocumentFixture(
+        eventReads < 3 ? event : { ...event, ...latest },
+      );
     };
     repository.commitEventPlan = async () => {
       throw new EventNotUpcoming();
@@ -2137,7 +2136,10 @@ test("authorizes an alternate login for a merged event creator through D1", asyn
     },
   );
   assert.equal(response.removedProfileId, "target-profile");
-  assert.equal(patches[0]["events/event-1/participants/target-profile"], null);
+  assert.equal(
+    patches[0]!["events/event-1/participants/target-profile"]!,
+    null,
+  );
 });
 
 test("checks alternate ownership before the final lock and write", async () => {
@@ -2452,7 +2454,7 @@ test("accepts prize choices inside the final hour and after the event starts", a
     scheduledEvent({ eventId, startAtMs: nowMs + 3_599_999 }),
     scheduledEvent({ eventId, startAtMs: nowMs }),
     scheduledEvent({ eventId, startAtMs: nowMs - 1 }),
-    scheduledEvent({ eventId, status: "active", startAtMs: null }),
+    scheduledEvent({ eventId, status: "active", startAtMs: nowMs - 1 }),
   ]) {
     const { repository } = createRepository({ event });
     let transactions = 0;
@@ -2504,28 +2506,13 @@ test("uses the postponed start from the locked event read for prize selection", 
   assert.equal(lock.released(), 1);
 });
 
-test("rejects invalid scheduled prize timestamps before saving", async () => {
+test("rejects invalid scheduled prize timestamps at the canonical storage boundary", () => {
   const eventId = LEGACY_CORE_PRIZES_EVENT_ID;
   for (const startAtMs of [null, undefined, "1000", NaN, Infinity, -1, 0.5]) {
-    const { repository } = createRepository({
-      event: scheduledEvent({ eventId, startAtMs }),
-    });
-    let transactions = 0;
-    repository.transactStatePath = async () => {
-      transactions++;
-      return { committed: true, value: "1092" };
-    };
-    await expectFailure(
-      toggleEventPrizeSelection(
-        identity,
-        { eventId, prizeId: "1092" },
-        repository,
-        { lockManager: createLockManager().manager, now: () => 0 },
-      ),
-      503,
-      "event-participation-service-unavailable",
+    assert.throws(
+      () => scheduledEvent({ eventId, startAtMs }),
+      /canonical event/,
     );
-    assert.equal(transactions, 0);
   }
 });
 
@@ -2632,7 +2619,7 @@ test("selects prizes through a canonical source ID without a stored login", asyn
       participants: {
         "retired-profile": {
           ...participant("retired-profile", "", 1),
-          loginUid: "",
+          loginUid: null,
         },
       },
     }),
@@ -2900,9 +2887,21 @@ for (const operation of participationLockCases) {
       signal?.throwIfAborted();
       const decision = updater(lease);
       if ("commit" in decision)
-        return { committed: false, value: lease, decision: decision.decision };
+        return {
+          committed: false,
+          value: lease,
+          ...(decision.decision !== undefined
+            ? { decision: decision.decision }
+            : {}),
+        };
       lease = decision.value;
-      return { committed: true, value: lease, decision: decision.decision };
+      return {
+        committed: true,
+        value: lease,
+        ...(decision.decision !== undefined
+          ? { decision: decision.decision }
+          : {}),
+      };
     };
     const read = repository.readEvent;
     repository.readEvent = async (...args) => {

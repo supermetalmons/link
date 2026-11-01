@@ -1,24 +1,30 @@
+import { applyCanonicalTestMigrations } from "./canonicalTestMigrations.ts";
+import { canonicalMatchEnvironment } from "./canonicalMatchTestFixture.ts";
+import { activateCanonicalApplicationFixture } from "./applicationRoomFixture.ts";
+import { canonicalMatchRpc as getMatchStateRpc } from "./canonicalMatchTestFixture.ts";
 import { inviteDocumentFixture } from "../test/inviteDocumentFixture.ts";
 import {
   matchCreationFixture,
   matchRecordFixture,
 } from "../test/matchRecordFixture.ts";
 import { unwrapMatchStateWireFixture } from "../test/matchRecordFixture.ts";
-import { applyD1Migrations, type D1Migration } from "cloudflare:test";
-import { env } from "cloudflare:workers";
+import type { D1Migration } from "cloudflare:test";
+import { env as baseEnv } from "cloudflare:workers";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { createGameplayRepository } from "../src/gameplayRepository.ts";
 import { canonicalMatchOperations } from "../src/matchStateClient.ts";
 import { readMatchStateRoutes } from "../src/matchStateD1.ts";
 import { readMatchStateRecord } from "../src/matchStateRouting.ts";
-import { getMatchStateRpc } from "../src/matchStateRpc.ts";
+
 import { createMatchStateSource } from "../src/matchStateSource.ts";
+const env = canonicalMatchEnvironment(baseEnv);
 
 const db = env.PROFILE_GAMES_DB;
 const testEnv = env as Env & { TEST_D1_MIGRATIONS: D1Migration[] };
 
 beforeAll(async () => {
-  await applyD1Migrations(db, testEnv.TEST_D1_MIGRATIONS);
+  await applyCanonicalTestMigrations(db, testEnv.TEST_D1_MIGRATIONS);
+  await activateCanonicalApplicationFixture();
   await db
     .prepare(
       `UPDATE match_state_control SET backend = 'durable', state = 'active', epoch = 2,
@@ -237,8 +243,7 @@ describe("strict match runtime", () => {
               flatMovesString: "",
               status: "",
               timer: "4;12345",
-              aura: "retained",
-              extra: { retained: true },
+              aura: "rainbow",
             }),
           },
         ],
@@ -416,6 +421,7 @@ describe("strict match runtime", () => {
               inviteDocumentFixture({
                 eventOwned: true,
                 eventId: "event-one",
+                guestId: "strict-opponent",
               }),
             ),
         ]) {

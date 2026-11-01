@@ -1,9 +1,12 @@
+import { applyCanonicalTestMigrations } from "./canonicalTestMigrations.ts";
+import { inviteDocumentFixture } from "../test/inviteDocumentFixture.ts";
 import { matchDocumentFixture } from "../test/matchRecordFixture.ts";
 import { env } from "cloudflare:workers";
-import { applyD1Migrations, type D1Migration } from "cloudflare:test";
+import type { D1Migration } from "cloudflare:test";
 import { beforeAll, describe, expect, it } from "vitest";
 import { createEmptyMaterials } from "@mons/shared/mining";
-import type { CompletePlayerProfile } from "@mons/shared/profiles";
+import { createDefaultProfileAppearance } from "@mons/shared/appearance";
+import type { StoredPlayerProfile } from "../src/profileCanonical/contracts.ts";
 import type { MatchStatePort } from "../src/repositoryContracts.ts";
 import { createGameplayRepository } from "../src/gameplayRepository.ts";
 import { createInviteSourceReader } from "../src/inviteSource.ts";
@@ -33,7 +36,10 @@ const testEnv = env as Env & {
 const now = () => 3_000_000;
 
 async function insertProfile(loginUid: string) {
-  const profile: CompletePlayerProfile = {
+  const profile: StoredPlayerProfile = {
+    ...createDefaultProfileAppearance(2),
+    completedProblemIds: [],
+    isTutorialCompleted: false,
     id: `profile-${loginUid}`,
     nonce: 1,
     rating: 1500,
@@ -153,7 +159,7 @@ async function fixture(failCompletedWrite = false) {
           if (failCompletedWrite && !failureInjected) {
             const row = await target
               .prepare(
-                "SELECT json_extract(wager_json, '$.settlement.state') AS state FROM invite_wager_states WHERE invite_id = ? AND match_id = ?",
+                "SELECT json_extract(wager_json, '$.settlement.state') AS state FROM invite_wager_states_canonical WHERE invite_id = ? AND match_id = ?",
               )
               .bind(inviteId, inviteId)
               .first<{ state: string }>();
@@ -170,12 +176,18 @@ async function fixture(failCompletedWrite = false) {
   });
   const runtimeEnv = { ...env, PROFILE_DB: profileDb };
   await env.PROFILE_GAMES_DB.prepare(
-    `INSERT INTO invite_sources (invite_id, source_json, revision, updated_at_ms)
+    `INSERT INTO invite_sources_canonical (invite_id, source_json, revision, updated_at_ms)
        VALUES (?, ?, 1, ?)`,
   )
     .bind(
       inviteId,
-      JSON.stringify({ hostId: host, guestId: guest, hostColor: "white" }),
+      JSON.stringify(
+        inviteDocumentFixture({
+          hostId: host,
+          guestId: guest,
+          hostColor: "white",
+        }),
+      ),
       now(),
     )
     .run();
@@ -230,7 +242,10 @@ async function fixture(failCompletedWrite = false) {
 
 describe("D1 wager gameplay integration", () => {
   beforeAll(async () => {
-    await applyD1Migrations(env.PROFILE_GAMES_DB, testEnv.TEST_D1_MIGRATIONS);
+    await applyCanonicalTestMigrations(
+      env.PROFILE_GAMES_DB,
+      testEnv.TEST_D1_MIGRATIONS,
+    );
     await applyRetiredProfileMigrations(
       env.PROFILE_DB,
       testEnv.TEST_PROFILE_D1_MIGRATIONS,
@@ -304,10 +319,10 @@ describe("D1 wager gameplay integration", () => {
     expect(state.failureInjected()).toBe(true);
     expect(queued).toHaveLength(1);
     expect(
-      await classifyWagerSettlementRetry(queued[0], state.repository),
+      await classifyWagerSettlementRetry(queued[0]!, state.repository),
     ).toBe("completed");
     await state.runtime.run("retry", (admitted, guard) =>
-      resumeWagerSettlement(queued[0], admitted, now, guard),
+      resumeWagerSettlement(queued[0]!, admitted, now, guard),
     );
     expect((await resolve()).ok).toBe(true);
     expect(
@@ -325,17 +340,18 @@ describe("D1 wager gameplay integration", () => {
     expect(stored).toMatchObject({
       resolutionMarker: true,
       wager: {
-        raw: {
-          resolved: { count: 2 },
-          settlement: { state: "completed" },
-        },
+        state: "settled",
+        resolved: { count: 2 },
+        settlement: { state: "completed" },
       },
     });
-    expect(await state.readSource(state.inviteId)).toEqual({
-      hostId: state.host,
-      guestId: state.guest,
-      hostColor: "white",
-    });
+    expect(await state.readSource(state.inviteId)).toEqual(
+      inviteDocumentFixture({
+        hostId: state.host,
+        guestId: state.guest,
+        hostColor: "white",
+      }),
+    );
     expect(state.sourceWrites()).toBe(0);
   });
 });

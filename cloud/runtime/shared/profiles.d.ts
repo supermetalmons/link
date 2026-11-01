@@ -1,4 +1,15 @@
 // Generated from src/shared/profiles.ts. Run npm run generate:runtime.
+import {
+  PROFILE_FALLBACK_EMOJI_COUNT,
+  PROFILE_STICKER_CATALOG,
+  getProfileFallbackEmojiId,
+  type ProfileAppearance,
+  type CardBackgroundId,
+  type CardSubtitleId,
+  type ProfileCounter,
+  type SelectedMons,
+  type StickerMap,
+} from "./appearance.js";
 import type { MiningMaterialName, MiningSnapshot } from "./mining.js";
 export type ProfileLookupKind = "login" | "profile";
 export type ProfileLookupRequest = {
@@ -13,19 +24,12 @@ export type ResolveProfileIdResponse = {
   profileId: string | null;
 };
 export type LeaderboardReadType = "rating" | "mp" | MiningMaterialName;
-export interface PlayerProfile {
+export interface PlayerProfile extends ProfileAppearance {
   id: string;
   nonce?: number;
   rating?: number;
   totalManaPoints?: number;
   win?: boolean;
-  emoji: number | string;
-  aura?: string;
-  cardBackgroundId?: number;
-  cardSubtitleId?: number;
-  profileCounter?: string;
-  profileMons?: string;
-  cardStickers?: string;
   username: string | null;
   eth: string | null;
   sol: string | null;
@@ -64,22 +68,27 @@ export type ProfileCustomizationField =
 export type ProfileCustomizationUpdateRequest =
   | {
       field: "emojiAndAura";
-      value: {
-        emoji: number;
-        aura: "" | "rainbow";
-      };
+      value: Pick<ProfileAppearance, "emoji" | "aura">;
     }
   | {
-      field: "cardBackgroundId" | "cardSubtitleId";
-      value: number;
+      field: "cardBackgroundId";
+      value: CardBackgroundId;
+    }
+  | {
+      field: "cardSubtitleId";
+      value: CardSubtitleId;
     }
   | {
       field: "profileCounter";
-      value: "gp" | "mp";
+      value: ProfileCounter;
     }
   | {
-      field: "profileMons" | "cardStickers";
-      value: string;
+      field: "profileMons";
+      value: SelectedMons | null;
+    }
+  | {
+      field: "cardStickers";
+      value: StickerMap;
     }
   | {
       field: "completedProblems";
@@ -92,11 +101,7 @@ export type ProfileCustomizationUpdateRequest =
 export type ProfileCustomizationUpdateResponse = {
   ok: true;
 };
-declare const PROFILE_FALLBACK_EMOJI_COUNT = 155;
 declare const LEADERBOARD_READ_TYPES: readonly LeaderboardReadType[];
-declare const PROFILE_STICKER_CATALOG: Readonly<
-  Record<string, readonly string[]>
->;
 declare const isPlayerProfile: (
   value: unknown,
 ) => value is CompletePlayerProfile;
@@ -127,18 +132,12 @@ declare const isProfileCustomizationUpdateRequest: (
 declare const isProfileCustomizationUpdateResponse: (
   value: unknown,
 ) => value is ProfileCustomizationUpdateResponse;
-declare const getProfileFallbackEmojiId: (profileId: string) => string;
-declare const normalizeProfileEmojiId: (
-  value: unknown,
-  fallback?: number,
-) => number;
 declare const cropAddress: (address: string) => string;
 export {
   LEADERBOARD_READ_TYPES,
   PROFILE_STICKER_CATALOG,
   PROFILE_FALLBACK_EMOJI_COUNT,
   getProfileFallbackEmojiId,
-  normalizeProfileEmojiId,
   isLeaderboardReadRequest,
   isLeaderboardReadResponse,
   isLeaderboardReadType,

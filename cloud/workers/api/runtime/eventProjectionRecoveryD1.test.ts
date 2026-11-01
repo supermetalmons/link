@@ -1,5 +1,6 @@
 import { claimRecoveryFixture } from "../test/eventProjectionRecoveryFixture.ts";
 import { env } from "cloudflare:workers";
+import { eventDocumentFixture } from "../test/eventCompatibilityFixture.ts";
 import type { D1Migration } from "cloudflare:test";
 import { beforeAll, beforeEach, describe, expect, it } from "vitest";
 import {
@@ -14,9 +15,9 @@ const db = testEnv.EVENT_DB;
 const families = [
   {
     kind: "profile-game",
-    table: "event_profile_game_projection_outboxes",
+    table: "event_profile_game_projection_outboxes_canonical",
   },
-  { kind: "telegram", table: "event_telegram_projection_outboxes" },
+  { kind: "telegram", table: "event_telegram_projection_outboxes_canonical" },
 ] as const;
 
 function outbox(kind: EventProjectionRecoveryKind, timestamp: number) {
@@ -38,24 +39,27 @@ async function seed(
 ) {
   await db
     .prepare(
-      `INSERT INTO event_records
+      `INSERT INTO event_records_canonical
        (event_id, status, start_at_ms, updated_at_ms, revision, record_json)
-       VALUES (?, 'active', 1, 1, 1, '{}')`,
+       VALUES (?, 'active', 1, 1, 1, ?)`,
     )
-    .bind(eventId)
+    .bind(
+      eventId,
+      JSON.stringify(eventDocumentFixture({ eventId, status: "active" })),
+    )
     .run();
   const statement =
     kind === "profile-game"
       ? db
           .prepare(
-            `INSERT INTO event_profile_game_projection_outboxes
+            `INSERT INTO event_profile_game_projection_outboxes_canonical
              (event_id, request_id, status, last_queued_at_ms, record_json)
              VALUES (?, 'request', 'pending', ?, ?)`,
           )
           .bind(eventId, timestamp, recordJson)
       : db
           .prepare(
-            `INSERT INTO event_telegram_projection_outboxes
+            `INSERT INTO event_telegram_projection_outboxes_canonical
              (event_id, request_id, status, first_queued_at_ms, updated_at_ms, record_json)
              VALUES (?, 'request', 'pending', ?, ?, ?)`,
           )
@@ -99,14 +103,14 @@ describe("event projection recovery scopes", () => {
   beforeEach(async () => {
     await db.batch([
       db.prepare("DELETE FROM event_write_admissions"),
-      db.prepare("DELETE FROM event_records"),
+      db.prepare("DELETE FROM event_records_canonical"),
       db.prepare(
         "UPDATE event_runtime_control SET storage_mode = 'd1' WHERE singleton = 1",
       ),
     ]);
   });
 
-  describe.each(families)("$kind", ({ kind, table }) => {
+  describe.each(families)("$kind", ({ kind }) => {
     it("excludes visited identities before the page limit without changing stored snapshots", async () => {
       for (let index = 0; index < 21; index++)
         await seed(kind, `event-${String(index).padStart(2, "0")}`);
@@ -136,17 +140,11 @@ describe("event projection recovery scopes", () => {
     });
 
     it("returns ordered due snapshots with exact stored JSON and the requested limit", async () => {
-      const noncanonical = JSON.stringify(outbox(kind, 100), null, 2).replace(
-        "100",
-        "1e2",
-      );
+      const noncanonical = JSON.stringify(outbox(kind, 100), null, 2);
       await seed(kind, "event-b");
       await seed(kind, "event-a", 100, noncanonical);
       await seed(kind, "future", 200);
-      await seed(kind, "dead", 50);
-      await db
-        .prepare(`UPDATE ${table} SET status = 'dead' WHERE event_id = 'dead'`)
-        .run();
+
       const store = createEventProjectionRecoveryStore(db, kind);
       expect(await store.listDue(100, 1)).toEqual([
         {
@@ -162,15 +160,9 @@ describe("event projection recovery scopes", () => {
       expect(await admissionCount()).toBe(0);
     });
 
-    it("shares one admission across claims and repair work until the callback settles", async () => {
+    it("shares one admission across canonical claims until the callback settles", async () => {
       await seed(kind, "event-a");
       await seed(kind, "event-b");
-      await seed(
-        kind,
-        "event-repair",
-        500,
-        JSON.stringify({ schemaVersion: 0, updatedAtMs: 100 }),
-      );
       const observed = observe();
       const store = createEventProjectionRecoveryStore(observed.database, kind);
       const snapshots = await store.listDue(100, 10);
@@ -182,18 +174,6 @@ describe("event projection recovery scopes", () => {
             await claimRecoveryFixture(writer, snapshot, "request", 100, 200),
           ).toBe(true);
         }
-        expect(
-          (
-            await ("repairInvalid" in writer
-              ? writer.repairInvalid("event-repair", {
-                  eventId: "event-repair",
-                  safeEventId: true,
-                  requestId: "repair-request",
-                  nowMs: 200,
-                })
-              : writer.markInvalid("event-repair", 200))
-          ).committed,
-        ).toBe(true);
         ready.resolve();
         await complete.promise;
         return snapshots.length;

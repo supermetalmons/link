@@ -1,3 +1,5 @@
+import { xFlowFixture } from "./authStateFixture.ts";
+import { parseXRedirectFlow } from "../src/authStateRecords.ts";
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
@@ -23,29 +25,7 @@ const env = {
 } as Env;
 
 function flow(overrides: Partial<XRedirectFlow> = {}): XRedirectFlow {
-  return {
-    callbackUri: "https://api.mons.link/auth/x/callback",
-    codeChallenge: "challenge",
-    codeVerifier: "verifier",
-    completedAtMs: 0,
-    consentSource: "settings",
-    createdAtMs: 900_000,
-    errorCode: "",
-    expiresAtMs: 1_500_000,
-    flowId: FLOW_ID,
-    intentId: "abcdefghijklmnopqrstuvwx",
-    method: "x",
-    processingStartedAtMs: 0,
-    result: null,
-    returnUrl: "https://mons.link/settings?tab=identity",
-    revision: REVISION,
-    status: "created",
-    uid: "login-uid",
-    updatedAtMs: 900_000,
-    xUserId: "",
-    xUsername: "",
-    ...overrides,
-  };
+  return xFlowFixture({ revision: REVISION, ...overrides });
 }
 
 function createRepository(
@@ -116,6 +96,37 @@ test("returns a bounded not-found response for an unknown flow", async () => {
   assert.equal(response.status, 400);
   assert.equal(await response.text(), "X auth session not found.");
   assertSecurityHeaders(response);
+});
+
+test("old-epoch and cancelled callbacks cannot exchange provider codes", async () => {
+  for (const value of [
+    { ...flow(), dataEpoch: 0 } as unknown as XRedirectFlow,
+    flow({ status: "cancelled", errorCode: "application-data-reset" }),
+  ]) {
+    const response = await handleXCallback(
+      new Request(`${CALLBACK_URL}&code=unused`),
+      env,
+      {
+        repository: {
+          getXFlow: async () => value,
+          updateXFlow: async () => {
+            throw new Error("must not write");
+          },
+        },
+        provider: createProvider({
+          exchangeCode: async () => {
+            throw new Error("must not exchange");
+          },
+        }),
+      },
+    );
+    assert.equal(response.status, value.dataEpoch === 1 ? 302 : 400);
+    if (response.status === 302)
+      assert.equal(
+        redirectParameters(response).searchParams.get("x_auth_error"),
+        "application-data-reset",
+      );
+  }
 });
 
 test("redirects verified and completed flows without calling X or auth-state writes", async () => {
@@ -275,20 +286,11 @@ test("claims a callback before exchanging its single-use code", async () => {
       if (revision !== current.revision) {
         throw new XFlowConflict();
       }
-      current = {
+      current = parseXRedirectFlow({
         ...current,
         ...update,
-        completedAtMs:
-          typeof update.completedAtMs === "number" ? update.completedAtMs : 0,
-        errorCode: typeof update.errorCode === "string" ? update.errorCode : "",
-        processingStartedAtMs:
-          typeof update.processingStartedAtMs === "number"
-            ? update.processingStartedAtMs
-            : 0,
         revision: current.revision + 1,
-        xUserId: typeof update.xUserId === "string" ? update.xUserId : "",
-        xUsername: typeof update.xUsername === "string" ? update.xUsername : "",
-      };
+      });
       return current.revision;
     },
   };
@@ -446,20 +448,11 @@ test("retries a transient final write without re-exchanging the code", async () 
       if (update.status === "verified" && verifiedWrites++ === 0) {
         throw new Error("transient-write-failure");
       }
-      current = {
+      current = parseXRedirectFlow({
         ...current,
         ...update,
-        completedAtMs:
-          typeof update.completedAtMs === "number" ? update.completedAtMs : 0,
-        errorCode: typeof update.errorCode === "string" ? update.errorCode : "",
-        processingStartedAtMs:
-          typeof update.processingStartedAtMs === "number"
-            ? update.processingStartedAtMs
-            : 0,
         revision: current.revision + 1,
-        xUserId: typeof update.xUserId === "string" ? update.xUserId : "",
-        xUsername: typeof update.xUsername === "string" ? update.xUsername : "",
-      };
+      });
       return current.revision;
     },
   };

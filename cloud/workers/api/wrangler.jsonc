@@ -27,7 +27,6 @@
   "vars": {
     "APPLE_AUDIENCES": "link.mons",
     "AUTH_MUTATIONS_DISABLED": "false",
-    "NEW_MATCH_TIMER_STORAGE": "local",
     "EVENT_DB_BOOKMARK_EPOCH": "446cba4b-31c0-4c5e-8daa-af7d235fbe0f",
   },
   "d1_databases": [
@@ -131,12 +130,12 @@
   "workflows": [
     {
       "binding": "EVENT_PROGRESS_WORKFLOW",
-      "name": "mons-link-event-progress",
+      "name": "mons-link-event-progress-data1",
       "class_name": "EventProgressWorkflow",
     },
     {
       "binding": "EVENT_PRIZE_WITHDRAWAL_WORKFLOW",
-      "name": "mons-link-event-prize-withdrawal",
+      "name": "mons-link-event-prize-withdrawal-data1",
       "class_name": "EventPrizeWithdrawalWorkflow",
     },
   ],
@@ -144,32 +143,32 @@
     "producers": [
       {
         "binding": "AUTH_RECOVERY_QUEUE",
-        "queue": "mons-link-auth-recovery",
+        "queue": "mons-link-auth-recovery-data1",
       },
       {
         "binding": "TELEGRAM_DELIVERY_QUEUE",
-        "queue": "mons-link-telegram-delivery",
+        "queue": "mons-link-telegram-delivery-data1",
       },
       {
         "binding": "WAGER_SETTLEMENT_QUEUE",
-        "queue": "mons-link-wager-settlement",
+        "queue": "mons-link-wager-settlement-data1",
       },
       {
         "binding": "TELEGRAM_PROJECTION_QUEUE",
-        "queue": "mons-link-telegram-projection",
+        "queue": "mons-link-telegram-projection-data1",
       },
       {
         "binding": "PROFILE_GAME_PROJECTION_QUEUE",
-        "queue": "mons-link-profile-game-projection",
+        "queue": "mons-link-profile-game-projection-data1",
       },
       {
         "binding": "EVENT_PROFILE_GAME_PROJECTION_QUEUE",
-        "queue": "mons-link-event-profile-game-projection",
+        "queue": "mons-link-event-profile-game-projection-data1",
       },
     ],
     "consumers": [
       {
-        "queue": "mons-link-auth-recovery",
+        "queue": "mons-link-auth-recovery-data1",
         "max_batch_size": 1,
         "max_batch_timeout": 1,
         "max_retries": 100,
@@ -177,38 +176,38 @@
         "max_concurrency": 1,
       },
       {
-        "queue": "mons-link-telegram-delivery",
+        "queue": "mons-link-telegram-delivery-data1",
         "max_batch_size": 1,
         "max_batch_timeout": 0,
         "max_retries": 100,
-        "dead_letter_queue": "mons-link-telegram-delivery-dlq",
+        "dead_letter_queue": "mons-link-telegram-delivery-data1-dlq",
         "max_concurrency": 1,
       },
       {
-        "queue": "mons-link-wager-settlement",
+        "queue": "mons-link-wager-settlement-data1",
         "max_batch_size": 1,
         "max_batch_timeout": 0,
         "max_retries": 100,
-        "dead_letter_queue": "mons-link-wager-settlement-dlq",
+        "dead_letter_queue": "mons-link-wager-settlement-data1-dlq",
         "max_concurrency": 1,
       },
       {
-        "queue": "mons-link-telegram-projection",
+        "queue": "mons-link-telegram-projection-data1",
         "max_batch_size": 5,
         "max_batch_timeout": 1,
         "max_retries": 20,
-        "dead_letter_queue": "mons-link-telegram-projection-dlq",
+        "dead_letter_queue": "mons-link-telegram-projection-data1-dlq",
         "max_concurrency": 5,
       },
       {
-        "queue": "mons-link-profile-game-projection",
+        "queue": "mons-link-profile-game-projection-data1",
         "max_batch_size": 1,
         "max_batch_timeout": 1,
         "max_retries": 100,
         "max_concurrency": 5,
       },
       {
-        "queue": "mons-link-event-profile-game-projection",
+        "queue": "mons-link-event-profile-game-projection-data1",
         "max_batch_size": 1,
         "max_batch_timeout": 1,
         "max_retries": 100,

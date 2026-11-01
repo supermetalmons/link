@@ -1,10 +1,12 @@
+import { applyCanonicalTestMigrations } from "./canonicalTestMigrations.ts";
+import { inviteDocumentFixture } from "../test/inviteDocumentFixture.ts";
 import {
   matchTestPort,
   legacySessionClient,
 } from "../test/gameSessionTestPorts.ts";
 import { createLegacyInviteSourceD1Store as createInviteSourceD1Store } from "../test/legacyInviteSourceFixture.ts";
 import { env } from "cloudflare:workers";
-import { applyD1Migrations, type D1Migration } from "cloudflare:test";
+import type { D1Migration } from "cloudflare:test";
 import {
   afterEach,
   beforeAll,
@@ -210,16 +212,16 @@ function observePreparationReads(
 }
 
 describe("canonical invite source", () => {
-  beforeAll(() => applyD1Migrations(db, testEnv.TEST_D1_MIGRATIONS));
+  beforeAll(() => applyCanonicalTestMigrations(db, testEnv.TEST_D1_MIGRATIONS));
   afterEach(() => vi.restoreAllMocks());
   beforeEach(async () => {
     await db.batch([
       db.prepare("DELETE FROM invite_source_write_admissions"),
-      db.prepare("DELETE FROM invite_sources"),
+      db.prepare("DELETE FROM invite_sources_canonical"),
       db.prepare("DELETE FROM automatch_write_admissions"),
-      db.prepare("DELETE FROM automatch_entries"),
-      db.prepare("DELETE FROM game_session_transition_resources"),
-      db.prepare("DELETE FROM game_session_transitions"),
+      db.prepare("DELETE FROM automatch_entries_canonical"),
+      db.prepare("DELETE FROM game_session_transition_resources_canonical"),
+      db.prepare("DELETE FROM game_session_transitions_canonical"),
       db.prepare(`UPDATE invite_source_control SET backend = 'rtdb', state = 'active',
         epoch = 0, freeze_generation = 0, verified_at_ms = NULL, activated_at_ms = NULL,
         metadata_json = NULL WHERE singleton = 1`),
@@ -231,46 +233,38 @@ describe("canonical invite source", () => {
 
   it("preloads control and unique invites in one primary batch while preserving change order", async () => {
     await activate();
-    const original = {
+    const original = inviteDocumentFixture({
       hostId: "host",
-      count: 5,
-      password: "",
-      removable: true,
-      sessionTransition: { sequence: 7 },
+      password: "private",
+      sessionTransition: {
+        transitionId: "prior-transition",
+        sequence: 7,
+        digest: "a".repeat(64),
+      },
       automatchOperationIds: { host: "first" },
-    };
+    });
     await db
-      .prepare("INSERT INTO invite_sources VALUES ('z-existing', ?, 4, 1)")
+      .prepare(
+        "INSERT INTO invite_sources_canonical VALUES ('z-existing', ?, 4, 1)",
+      )
       .bind(JSON.stringify(original))
       .run();
+    const created = inviteDocumentFixture({ hostId: "created" });
     const observed = observePreparationReads();
     const prepared = await observed.store.prepareChanges(
       [
         {
           inviteId: "z-existing",
-          value: {
-            count: { ".sv": { increment: 2 } },
-            touchedAt: { ".sv": "timestamp" },
-            removable: null,
-          },
+          value: { guestId: "guest" },
           operationIds: { host: "second" },
         },
-        {
-          inviteId: "a-missing",
-          value: {
-            count: { ".sv": { increment: 3 } },
-            touchedAt: { ".sv": "timestamp" },
-          },
-        },
+        { inviteId: "a-missing", value: created },
         {
           inviteId: "z-existing",
-          value: { count: { ".sv": { increment: 4 } } },
+          value: { hostRematches: { state: "open", indices: [1, 2] } },
           operationIds: { host: "third", guest: "joined" },
         },
-        {
-          inviteId: "a-missing",
-          value: { count: { ".sv": { increment: 1 } } },
-        },
+        { inviteId: "a-missing", value: { hostColor: "black" } },
       ],
       345,
     );
@@ -282,24 +276,22 @@ describe("canonical invite source", () => {
       observed.queries
         .slice(1)
         .every((query) =>
-          query.includes("FROM invite_sources WHERE invite_id = ?"),
+          query.includes("FROM invite_sources_canonical WHERE invite_id = ?"),
         ),
     ).toBe(true);
     expect(prepared).toEqual([
       {
         current: { inviteId: "z-existing", value: original, revision: 4 },
         value: {
-          hostId: "host",
-          count: 11,
-          password: "",
-          sessionTransition: { sequence: 7 },
+          ...original,
+          guestId: "guest",
+          hostRematches: { state: "open", indices: [1, 2] },
           automatchOperationIds: { host: "third", guest: "joined" },
-          touchedAt: 345,
         },
       },
       {
         current: { inviteId: "a-missing", value: null, revision: 0 },
-        value: { count: 4, touchedAt: 345 },
+        value: { ...created, hostColor: "black" },
       },
     ]);
   });
@@ -308,16 +300,12 @@ describe("canonical invite source", () => {
     "validates %s control before decoding preloaded records",
     async (control) => {
       await activate();
-      await db
-        .prepare("INSERT INTO invite_sources VALUES ('one', ?, 1, 1)")
-        .bind(JSON.stringify({ wagers: { retired: true } }))
-        .run();
       const observed = observePreparationReads((results) => {
-        if (control === "missing") results[0].results = [];
+        if (control === "missing") results[0]!.results = [];
         else if (control === "retired") {
-          results[0].results[0].backend = "rtdb";
-          results[0].results[0].epoch = 0;
-        } else results[0].results[0].verified_at_ms = null;
+          results[0]!.results[0]!.backend = "rtdb";
+          results[0]!.results[0]!.epoch = 0;
+        } else results[0]!.results[0]!.verified_at_ms = null;
       });
       await expect(
         observed.store.prepareChanges([{ inviteId: "one", value: {} }], 10),
@@ -337,35 +325,37 @@ describe("canonical invite source", () => {
       value: { settings: { "bad/key": true } },
       revision: 1,
     },
-    { name: "fractional revisions", value: { hostId: "host" }, revision: 1.5 },
+    {
+      name: "fractional revisions",
+      value: inviteDocumentFixture({ hostId: "host" }),
+      revision: 1.5,
+    },
   ])("rejects preloaded records with $name", async ({ value, revision }) => {
     await activate();
-    await db
-      .prepare("INSERT INTO invite_sources VALUES ('one', ?, ?, 1)")
-      .bind(JSON.stringify(value), revision)
-      .run();
-    const store = createProductionInviteSourceD1Store(db);
+    const observed = observePreparationReads((results) => {
+      results[1]!.results = [{ source_json: JSON.stringify(value), revision }];
+    });
     await expect(
-      store.prepareChanges([{ inviteId: "one", value: {} }], 10),
+      observed.store.prepareChanges([{ inviteId: "one", value: {} }], 10),
     ).rejects.toThrow("invite-source-corrupt");
-    await expect(store.read("one")).rejects.toThrow("invite-source-corrupt");
   });
 
-  it("retains invite source marker errors for malformed markers and overflow", async () => {
+  it("rejects server-value markers and unknown fields before persistence", async () => {
     await activate();
-    await db
-      .prepare("INSERT INTO invite_sources VALUES ('one', ?, 1, 1)")
-      .bind(JSON.stringify({ hostId: "host", count: Number.MAX_VALUE }))
-      .run();
-    const store = createProductionInviteSourceD1Store(db);
-    for (const count of [
-      { ".sv": { increment: "1" } },
-      { ".sv": "timestamp", extra: true },
-      { ".sv": { increment: Number.MAX_VALUE } },
+    const observed = observePreparationReads();
+    for (const value of [
+      { count: { ".sv": { increment: 1 } } },
+      { automatchCanceledAt: { ".sv": "timestamp" } },
+      { hostRematches: "1;2" },
     ]) {
       await expect(
-        store.prepareChanges([{ inviteId: "one", value: { count } }], 345),
-      ).rejects.toThrow("invalid-invite-source-server-value");
+        Reflect.apply(observed.store.prepareChanges, observed.store, [
+          [{ inviteId: "one", value }],
+          345,
+        ]),
+      ).rejects.toThrow(
+        /reserved-invite-source-field|invalid-invite-source-json|invalid-invite-rematches/,
+      );
     }
   });
 
@@ -405,13 +395,13 @@ describe("canonical invite source", () => {
     await activate();
     const store = createProductionInviteSourceD1Store(db);
     const first = await store.prepareChanges(
-      [{ inviteId: "one", value: { hostId: "first" } }],
+      [{ inviteId: "one", value: inviteDocumentFixture({ hostId: "first" }) }],
       1,
     );
     const stale = await store.prepareChanges(
       [
-        { inviteId: "two", value: { hostId: "two" } },
-        { inviteId: "one", value: { hostId: "loser" } },
+        { inviteId: "two", value: inviteDocumentFixture({ hostId: "two" }) },
+        { inviteId: "one", value: inviteDocumentFixture({ hostId: "loser" }) },
       ],
       1,
     );
@@ -427,7 +417,7 @@ describe("canonical invite source", () => {
     expect(isAutomatchRevisionConflict(failure)).toBe(false);
     expect(await store.read("one")).toEqual({
       inviteId: "one",
-      value: { hostId: "first" },
+      value: inviteDocumentFixture({ hostId: "first" }),
       revision: 1,
     });
     expect(await store.read("two")).toEqual({
@@ -446,7 +436,7 @@ describe("canonical invite source", () => {
       writeGuards: () => inviteSourceAdmissionGuardStatements(db, admission),
     });
     const prepared = await store.prepareChanges(
-      [{ inviteId: "one", value: { hostId: "host" } }],
+      [{ inviteId: "one", value: inviteDocumentFixture({ hostId: "host" }) }],
       10,
     );
     await db
@@ -456,7 +446,7 @@ describe("canonical invite source", () => {
       .run();
     expect(
       await store.prepareChanges(
-        [{ inviteId: "one", value: { hostId: "host" } }],
+        [{ inviteId: "one", value: inviteDocumentFixture({ hostId: "host" }) }],
         10,
       ),
     ).toEqual(prepared);
@@ -471,25 +461,27 @@ describe("canonical invite source", () => {
     await releaseInviteSourceAdmission(db, admission);
   });
 
-  it("preserves private and unknown metadata while excluding retired sources", () => {
-    const value = {
-      password: "",
+  it("preserves canonical private metadata and rejects retired fields", () => {
+    const value = inviteDocumentFixture({
       hostId: "anonymous",
-      hostRematches: "1x2",
-      custom: { future: [1, null, true] },
-      sessionTransition: { sequence: 4 },
-      wagers: { stale: true },
-      matchesWagerResolutions: { stale: true },
-      reactions: { stale: true },
-    };
-    expect(normalizeInviteSource(value)).toEqual({
-      password: "",
-      hostId: "anonymous",
-      hostRematches: "1x2",
-      custom: { future: [1, null, true] },
-      sessionTransition: { sequence: 4 },
+      password: "private",
+      hostRematches: { state: "open", indices: [1, 2] },
+      sessionTransition: {
+        transitionId: "transition",
+        sequence: 4,
+        digest: "a".repeat(64),
+      },
     });
-    expect(normalizeInviteSource({ reactions: { old: true } })).toEqual({});
+    expect(normalizeInviteSource(value)).toEqual(value);
+    for (const patch of [
+      { custom: { future: [1, null, true] } },
+      { wagers: {} },
+      { matchesWagerResolutions: {} },
+      { reactions: {} },
+    ])
+      expect(() => normalizeInviteSource({ ...value, ...patch })).toThrow(
+        "invalid-invite-source-json",
+      );
     expect(() => normalizeInviteSource(null)).toThrow(
       "invalid-invite-source-json",
     );
@@ -523,7 +515,6 @@ describe("canonical invite source", () => {
             "invites/one": {
               hostId: "canonical",
               password: "secret",
-              settings: { color: "white" },
             },
           },
           100,
@@ -536,13 +527,9 @@ describe("canonical invite source", () => {
         "invites/one/hostId",
       ),
     ).toBe("canonical");
-    expect(
-      Object.fromEntries(
-        Object.keys(
-          (await coordinator.client.readInviteMetadata("one")) || {},
-        ).map((key) => [key, true]),
-      ),
-    ).toEqual({ hostId: true, password: true, settings: true });
+    expect(await coordinator.client.readInviteMetadata("one")).toEqual(
+      inviteDocumentFixture({ hostId: "canonical", password: "secret" }),
+    );
     expect(
       await legacySessionClient(coordinator.rawClient).getPath(
         "invites/missing",
@@ -564,54 +551,53 @@ describe("canonical invite source", () => {
       .run();
   });
 
-  it("merges root fields, resolves server values once, and preserves provenance", async () => {
+  it("merges canonical fields and rematches while preserving transition provenance", async () => {
     await activate();
-    const store = createInviteSourceD1Store(db);
-    await db
-      .prepare(`INSERT INTO invite_sources VALUES ('one', ?, 4, 1)`)
-      .bind(
-        JSON.stringify({
-          hostId: "host",
-          password: "",
-          hostRematches: "1",
-          guestRematches: "",
-          sessionTransition: { sequence: 7 },
-          automatchOperationIds: { host: "first" },
-        }),
-      )
-      .run();
-    const mutations = await store.preparePatch(
-      {
-        "invites/one/guestId": "guest",
-        "invites/one/hostRematches": "1;2",
-        "invites/one/automatchCanceledAt": null,
-        "invites/one/lastTouched": { ".sv": "timestamp" },
+    const store = createProductionInviteSourceD1Store(db);
+    const original = inviteDocumentFixture({
+      hostId: "host",
+      password: "private",
+      hostRematches: { state: "open", indices: [1] },
+      sessionTransition: {
+        transitionId: "original",
+        sequence: 7,
+        digest: "a".repeat(64),
       },
+      automatchOperationIds: { host: "first" },
+    });
+    await db
+      .prepare("INSERT INTO invite_sources_canonical VALUES ('one', ?, 4, 1)")
+      .bind(JSON.stringify(original))
+      .run();
+    const mutations = await store.prepareChanges(
+      [
+        { inviteId: "one", value: { guestId: "guest" } },
+        {
+          inviteId: "one",
+          value: { hostRematches: { state: "open", indices: [1, 2] } },
+        },
+      ],
       345,
     );
     await db.batch(store.buildCommitStatements(mutations, 900));
-    const next = await store.preparePatch(
-      {
-        "invites/one": {
-          guestRematches: "1",
-          count: { ".sv": { increment: 2 } },
+    const next = await store.prepareChanges(
+      [
+        {
+          inviteId: "one",
+          value: { guestRematches: { state: "open", indices: [1] } },
         },
-      },
-      1000,
+      ],
+      1_000,
     );
-    await db.batch(store.buildCommitStatements(next, 1000));
-    expect(await store.read("one")).toMatchObject({
+    await db.batch(store.buildCommitStatements(next, 1_000));
+    expect(await store.read("one")).toEqual({
+      inviteId: "one",
       revision: 6,
       value: {
-        hostId: "host",
+        ...original,
         guestId: "guest",
-        password: "",
-        hostRematches: "1;2",
-        guestRematches: "1",
-        lastTouched: 345,
-        count: 2,
-        sessionTransition: { sequence: 7 },
-        automatchOperationIds: { host: "first" },
+        hostRematches: { state: "open", indices: [1, 2] },
+        guestRematches: { state: "open", indices: [1] },
       },
     });
   });
@@ -635,7 +621,9 @@ describe("canonical invite source", () => {
       failure = error;
     }
     expect(isInviteSourceRevisionConflict(failure)).toBe(true);
-    expect((await store.read("one")).value).toEqual({ hostId: "first" });
+    expect((await store.read("one")).value).toEqual(
+      inviteDocumentFixture({ hostId: "first" }),
+    );
     expect((await store.read("two")).value).toBeNull();
   });
 
@@ -774,7 +762,7 @@ describe("canonical invite source", () => {
             await legacySessionClient(coordinator.rawClient).getPath(
               "automatch/one",
             ),
-          ).toEqual({
+          ).toMatchObject({
             uid: "host",
           });
         } else {
@@ -927,7 +915,7 @@ describe("canonical invite source", () => {
     expect(deletes).toBe(3);
     expect(await admissionRows()).toEqual(before);
     expect(errorLog).toHaveBeenCalledTimes(1);
-    expect(JSON.parse(String(errorLog.mock.calls[0][0]))).toEqual({
+    expect(JSON.parse(String(errorLog.mock.calls[0]![0]!))).toEqual({
       event: "invite_source_admission_release_failed",
       ...admission,
     });
@@ -964,7 +952,7 @@ describe("canonical invite source", () => {
         { admission_id: insertedIds[0], kind: "uncertain" },
       ]);
       expect(errorLog).toHaveBeenCalledTimes(1);
-      expect(JSON.parse(String(errorLog.mock.calls[0][0]))).toEqual({
+      expect(JSON.parse(String(errorLog.mock.calls[0]![0]!))).toEqual({
         event: "invite_source_admission_acquire_unconfirmed",
         admissionId: insertedIds[0],
         backend: "d1",
@@ -1086,7 +1074,7 @@ describe("canonical invite source", () => {
       const rows = await admissionRows();
       expect(rows).toMatchObject([{ [column]: value }]);
       await releaseInviteSourceAdmission(db, {
-        admissionId: rows[0].admission_id as string,
+        admissionId: rows[0]!.admission_id as string,
         backend: "d1",
         epoch: 1,
         freezeGeneration: 0,

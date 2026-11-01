@@ -27,9 +27,9 @@ import {
   getTelegramEmojiTag,
 } from "../../../../runtime/telegramDisplay.js";
 import {
-  STATE_SERVER_TIMESTAMP,
-  stateIncrement,
-} from "../stateCompatibility.ts";
+  SESSION_TIMESTAMP,
+  sessionIncrement,
+} from "../sessionValueOperations.ts";
 import type { GameplayProfile } from "../gameplayRepository.ts";
 import { requestAutomatchProfileProjection } from "../gameSessionProjectionChanges.ts";
 import type { GameSessionChange } from "../gameSessionContracts.ts";
@@ -49,8 +49,8 @@ const gameVariantHelpers = createGameVariantHelpers(monsRules);
 
 export function emptyAutomatchProfile(): GameplayProfile {
   return {
-    aura: "",
-    emoji: "",
+    aura: "none",
+    emoji: 0,
     eth: "",
     profileId: "",
     rating: 0,
@@ -145,7 +145,7 @@ export function buildPendingAutomatchPlan(
   const password = randomAlphanumeric(AUTOMATCH_PASSWORD_LENGTH, random);
   const hostColor = pickHostColor(random);
   const matchSeed = gameVariantHelpers.buildRandomGameSeed(random);
-  const timestamp = STATE_SERVER_TIMESTAMP;
+  const timestamp = SESSION_TIMESTAMP;
   const match = buildFreshMatchRecord({
     color: hostColor,
     emojiId,
@@ -179,13 +179,14 @@ export function buildPendingAutomatchPlan(
       kind: "automatch-entry",
       inviteId,
       value: {
+        schemaVersion: 1,
         uid: requesterUid,
         rating: profile.rating,
         timestamp,
         username: profile.username,
         ethAddress: profile.eth,
         solAddress: profile.sol,
-        profileId: profile.profileId,
+        profileId: profile.profileId || null,
         hostColor,
         password,
         emojiId,
@@ -259,13 +260,13 @@ export function buildMatchedAutomatchPlan(
   const matchSeed = gameVariantHelpers.buildGameSeedForStoredVariant(
     queued.data.gameVariant,
   );
-  const hostColor = normalizeString(queued.data.hostColor);
+  const hostColor = queued.data.hostColor;
   const existingPlayerName = getDisplayNameFromAddress(
-    queued.data.display.username,
-    queued.data.display.ethAddress,
-    queued.data.display.solAddress,
+    queued.data.username,
+    queued.data.ethAddress,
+    queued.data.solAddress,
     finiteNumber(queued.data.rating),
-    queued.data.display.emojiId,
+    queued.data.emojiId,
   );
   const usesTelegramDeliveryV2 =
     queued.data.telegramDeliveryVersion === TELEGRAM_AUTOMATCH_VERSION;
@@ -321,7 +322,7 @@ export function buildMatchedAutomatchPlan(
     ...requestAutomatchProfileProjection({
       inviteId: queued.inviteId,
       requestId: profileGameProjectionTask.requestId,
-      timestamp: STATE_SERVER_TIMESTAMP,
+      timestamp: SESSION_TIMESTAMP,
     }),
   );
   if (usesTelegramDeliveryV2) {
@@ -329,15 +330,15 @@ export function buildMatchedAutomatchPlan(
       ...buildMatchedAutomatchTelegramChanges({
         inviteId: queued.inviteId,
         matchedText,
-        timestamp: STATE_SERVER_TIMESTAMP,
-        generation: stateIncrement(1),
+        timestamp: SESSION_TIMESTAMP,
+        generation: sessionIncrement(1),
       }),
     );
     changes.push(
       ...buildAutomatchTelegramProjectionChanges({
         inviteId: queued.inviteId,
         requestId: projectionTask?.requestId || "",
-        timestamp: STATE_SERVER_TIMESTAMP,
+        timestamp: SESSION_TIMESTAMP,
       }),
     );
   }

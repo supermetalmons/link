@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { formatMatchTimer, type ClaimedTimerWrite } from "@mons/shared/timers";
 import {
   createClaimedTimerDocument,
   pendingTimerClaim,
@@ -10,159 +11,100 @@ import {
   timerClaimWireValue,
 } from "../src/matchClaimCodec.ts";
 import { isCommittedMatchStateClaim } from "../src/matchStateLogic.ts";
-import {
-  decodeEventUpdates,
-  encodeEventUpdates,
-} from "../src/eventCompatibilityCodec.ts";
+import { parseEventEffect } from "../../../runtime/eventCommandCodec.js";
 
-const committed = {
-  status: "claimed" as const,
-  inviteId: "invite-one",
-  playerId: "host-login",
-  opponentId: "guest-login",
-  timer: "7;1000",
+const committed: ClaimedTimerWrite = {
+  schemaVersion: 1,
+  status: "claimed",
+  inviteId: "invite",
+  playerId: "host",
+  opponentId: "guest",
+  timer: formatMatchTimer(7, 1000),
   turnNumber: 7,
-  claimedAtMs: 1000,
+  claimedAtMs: 1001,
   expiresAtMs: null,
 };
 
-test("retained timer claims preserve every JSON root and wire identity", () => {
+test("claim codecs accept only complete status-specific records", () => {
+  assert.equal(readRetainedTimerClaim(null), null);
   for (const value of [
     undefined,
-    null,
     false,
     0,
     "",
-    true,
-    2,
-    "legacy",
     [],
     {},
-  ]) {
-    const retained = readRetainedTimerClaim(value);
-    assert.strictEqual(timerClaimWireValue(retained), value);
-    if (value !== undefined) {
-      assert.deepEqual(readStoredTimerClaim(JSON.stringify(value)), value);
-    }
-  }
-  const source = { ...committed, extension: { retained: [null, 1] } };
-  const claim = readRetainedTimerClaim(source);
-  assert.strictEqual(claim, source);
-  assert.deepEqual(Object.getOwnPropertySymbols(source), []);
-  assert.equal(readStoredTimerClaim("1e400"), Infinity);
-  assert.throws(() => readStoredTimerClaim("broken-json"), SyntaxError);
-});
-
-test("pending claim observations retain exact status and numeric expiry semantics", () => {
-  for (const expiresAtMs of [undefined, null, "999", false, {}, []]) {
-    const claim = readRetainedTimerClaim({ status: "pending", expiresAtMs });
-    assert.equal(timerClaimStatus(claim), "pending");
-    assert.equal(pendingTimerClaim(claim), null);
-  }
-  for (const expiresAtMs of [0, 999, 1000, 1001, NaN, Infinity, -Infinity]) {
-    assert.deepEqual(
-      pendingTimerClaim(
-        readRetainedTimerClaim({ status: "pending", expiresAtMs }),
-      ),
-      { expiresAtMs },
-    );
-  }
-  assert.equal(
-    pendingTimerClaim(
-      readRetainedTimerClaim({ status: " pending ", expiresAtMs: 999 }),
-    ),
-    null,
-  );
-  assert.equal(
-    timerClaimStatus(readRetainedTimerClaim({ status: ["claimed"] })),
-    null,
-  );
-});
-
-test("committed claim recognition retains absent expiry and original extensions", () => {
-  const source = { ...committed, extension: { retained: true } };
-  const claim = readRetainedTimerClaim(source);
-  const view = readCommittedTimerClaim(claim, committed.inviteId);
-  assert.ok(view);
-  assert.strictEqual(view.document, source);
-  assert.equal(view.timer, committed.timer);
-  assert.equal(view.claimedAtMs, committed.claimedAtMs);
-  assert.equal(isCommittedMatchStateClaim(claim, "other-invite"), false);
-  const { expiresAtMs: _expiry, ...withoutExpiry } = source;
-  assert.equal(
-    isCommittedMatchStateClaim(
-      readRetainedTimerClaim(withoutExpiry),
-      committed.inviteId,
-    ),
-    true,
-  );
-  assert.equal(Object.hasOwn(withoutExpiry, "expiresAtMs"), false);
-  for (const invalid of [
-    { expiresAtMs: 0 },
-    { turnNumber: "7" },
-    { claimedAtMs: "1000" },
-    { timer: "8;1000" },
-    { playerId: committed.opponentId },
-  ]) {
-    assert.equal(
-      isCommittedMatchStateClaim(
-        readRetainedTimerClaim({ ...source, ...invalid }),
-        committed.inviteId,
-      ),
-      false,
-    );
-  }
-  assert.deepEqual(createClaimedTimerDocument(committed), committed);
-});
-
-test("committed claim checks read timer before status and retain direct null failures", () => {
-  for (const value of [undefined, null]) {
+    { status: "claimed" },
+    { ...committed, extra: true },
+    { ...committed, schemaVersion: 2 },
+  ])
     assert.throws(
-      () => isCommittedMatchStateClaim(value, committed.inviteId),
-      TypeError,
+      () => readRetainedTimerClaim(value),
+      /match-state-invalid-claim/,
     );
-  }
-  for (const value of [false, 0, "legacy", []]) {
-    assert.equal(
-      isCommittedMatchStateClaim(
-        readRetainedTimerClaim(value),
-        committed.inviteId,
-      ),
-      false,
-    );
-  }
-  const failure = new Error("timer-first");
-  const source = {
-    get timer(): never {
-      throw failure;
-    },
-    get status(): never {
-      throw new Error("status-must-follow-timer");
-    },
-  };
+  assert.deepEqual(readStoredTimerClaim(JSON.stringify(committed)), committed);
+  assert.equal(timerClaimWireValue(committed), committed);
   assert.throws(
-    () =>
-      isCommittedMatchStateClaim(
-        readRetainedTimerClaim(source),
-        committed.inviteId,
-      ),
-    (error) => error === failure,
+    () => readStoredTimerClaim("null"),
+    /match-state-invalid-claim/,
   );
 });
 
-test("retained terminal-timer commands preserve their original compatibility value", () => {
-  const path = "players/host-login/matches/invite-one/timer";
-  for (const value of ["gg", "legacy", null, 7, [], { retained: true }]) {
-    const updates = { [path]: value };
-    const plan = decodeEventUpdates(updates);
-    assert.deepEqual(plan, [
-      {
-        kind: "match-terminal-timer",
-        playerId: "host-login",
-        matchId: "invite-one",
-        value,
-      },
-    ]);
-    assert.deepEqual(encodeEventUpdates(plan), updates);
-  }
+test("pending claims preserve an explicit expiry and reject contradictory timestamps", () => {
+  const pending = readRetainedTimerClaim({
+    ...committed,
+    status: "pending",
+    claimedAtMs: null,
+    expiresAtMs: 1200,
+  });
+  assert.equal(timerClaimStatus(pending), "pending");
+  assert.equal(pendingTimerClaim(pending)?.expiresAtMs, 1200);
+  assert.equal(pendingTimerClaim(committed), null);
+  for (const expiresAtMs of [undefined, null, "1200", -1, Infinity])
+    assert.throws(
+      () =>
+        readRetainedTimerClaim({
+          ...committed,
+          status: "pending",
+          claimedAtMs: null,
+          expiresAtMs,
+        }),
+      /match-state-invalid-claim/,
+    );
+});
+
+test("committed claim recognition requires exact identity and matching turn metadata", () => {
+  const view = readCommittedTimerClaim(committed, "invite");
+  assert.ok(view);
+  assert.deepEqual(view.document, committed);
+  assert.equal(isCommittedMatchStateClaim(committed, "other"), false);
+  assert.equal(isCommittedMatchStateClaim(null, "invite"), false);
+  assert.deepEqual(createClaimedTimerDocument(committed), committed);
+  for (const patch of [
+    { expiresAtMs: 0 },
+    { turnNumber: 8 },
+    { claimedAtMs: "1000" },
+    { playerId: "guest" },
+  ])
+    assert.throws(
+      () => readRetainedTimerClaim({ ...committed, ...patch }),
+      /match-state-invalid-claim/,
+    );
+});
+
+test("event terminal effects require the explicit finished timer state", () => {
+  const target = {
+    kind: "match-terminal-timer",
+    playerId: "host",
+    matchId: "invite",
+  };
+  assert.deepEqual(
+    parseEventEffect({ ...target, value: { state: "finished" } }),
+    { ...target, value: { state: "finished" } },
+  );
+  for (const value of ["gg", "unknown", null, 7, [], { state: "idle" }])
+    assert.throws(
+      () => parseEventEffect({ ...target, value }),
+      /invalid-canonical-event-command/,
+    );
 });

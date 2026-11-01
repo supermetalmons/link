@@ -1,7 +1,11 @@
+import { applyCanonicalTestMigrations } from "./canonicalTestMigrations.ts";
+import { canonicalMatchEnvironment } from "./canonicalMatchTestFixture.ts";
+import { activateCanonicalApplicationFixture } from "./applicationRoomFixture.ts";
+import { publicMatchFixture } from "../test/matchRecordFixture.ts";
 import type { HistoricalMatchPair } from "@mons/shared/game-sessions";
 import type { MatchPresentationSnapshot } from "@mons/shared/match-presentation";
-import { applyD1Migrations, type D1Migration } from "cloudflare:test";
-import { env } from "cloudflare:workers";
+import type { D1Migration } from "cloudflare:test";
+import { env as rawEnv } from "cloudflare:workers";
 import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   archiveHistoricalMatchWithPresentation,
@@ -20,6 +24,7 @@ import { createProfileGameProjectionRuntime } from "../src/profileGameProjection
 import { activateDurableMatchPresentationTestState } from "./matchPresentationTestFixture.ts";
 import { readStoredPresentations } from "./presentationStorageFixture.ts";
 
+const env = canonicalMatchEnvironment(rawEnv);
 const testEnv = env as Env & { TEST_D1_MIGRATIONS: D1Migration[] };
 const inviteId = "presentation-history";
 
@@ -27,7 +32,7 @@ function pair(): HistoricalMatchPair {
   const match = {
     version: 2,
     emojiId: 1,
-    aura: "",
+    aura: "none" as const,
     gameVariant: "Classic",
     fen: "final-fen",
     status: "surrendered",
@@ -38,8 +43,8 @@ function pair(): HistoricalMatchPair {
     matchId: inviteId,
     hostPlayerId: "host",
     guestPlayerId: "guest",
-    hostMatch: { ...match, color: "white" },
-    guestMatch: { ...match, color: "black", emojiId: 2 },
+    hostMatch: publicMatchFixture({ ...match, color: "white" }),
+    guestMatch: publicMatchFixture({ ...match, color: "black", emojiId: 2 }),
   };
 }
 
@@ -64,7 +69,13 @@ function snapshot(matchId = inviteId): MatchPresentationSnapshot {
         aura: "rainbow",
         revision: 3,
       },
-      guest: { matchId, actorUid: "guest", emojiId: 14, aura: "", revision: 2 },
+      guest: {
+        matchId,
+        actorUid: "guest",
+        emojiId: 14,
+        aura: "none" as const,
+        revision: 2,
+      },
     },
   };
 }
@@ -82,7 +93,7 @@ async function stored() {
 
 describe("historical match presentation", () => {
   beforeAll(async () => {
-    await applyD1Migrations(
+    await applyCanonicalTestMigrations(
       testEnv.PROFILE_GAMES_DB,
       testEnv.TEST_D1_MIGRATIONS,
     );
@@ -91,7 +102,7 @@ describe("historical match presentation", () => {
 
   beforeEach(async () => {
     await env.PROFILE_GAMES_DB.prepare(
-      "DELETE FROM historical_match_pairs",
+      "DELETE FROM historical_match_pairs_canonical",
     ).run();
   });
 
@@ -289,7 +300,7 @@ describe("historical match presentation", () => {
         matchId: input.pair.matchId,
         actorUid,
         emojiId: actorUid === "host" ? 1 : 2,
-        aura: "",
+        aura: "none" as const,
         sourceId: "test:history-creation",
       })),
     );
@@ -319,7 +330,7 @@ describe("historical match presentation", () => {
     if (!runtime.archiveHistoricalMatch)
       throw new Error("missing-archive-runtime");
     await env.PROFILE_GAMES_DB.exec(
-      "CREATE TRIGGER fail_presentation_archive BEFORE INSERT ON historical_match_pairs BEGIN SELECT RAISE(ABORT, 'archive-write-failed'); END",
+      "CREATE TRIGGER fail_presentation_archive BEFORE INSERT ON historical_match_pairs_canonical BEGIN SELECT RAISE(ABORT, 'archive-write-failed'); END",
     );
     try {
       await expect(runtime.archiveHistoricalMatch(input)).rejects.toThrow(
@@ -332,7 +343,7 @@ describe("historical match presentation", () => {
       operationId: crypto.randomUUID(),
       expectedRevision: 1,
       emojiId: 21,
-      aura: "",
+      aura: "none" as const,
     });
     expect(changed.status).toBe("updated");
     await runtime.archiveHistoricalMatch(input);
@@ -344,7 +355,7 @@ describe("historical match presentation", () => {
     expect(archived?.pair.hostMatch?.emojiId).toBe(1012);
     expect(archived?.pair.hostMatch?.aura).toBe("rainbow");
     expect(
-      (await readStoredPresentations(room, input.pair.matchId)).players.host
+      (await readStoredPresentations(room, input.pair.matchId)).players.host!
         .emojiId,
     ).toBe(21);
   });
@@ -421,7 +432,7 @@ describe("historical match presentation", () => {
       freeze,
     );
     expect(freeze).toHaveBeenCalledExactlyOnceWith(inviteId, inviteId, {
-      guest: { emojiId: 2, aura: "" },
+      guest: { emojiId: 2, aura: "none" as const },
     });
     expect((await stored()).pair.hostMatch?.emojiId).toBe(1);
     expect((await stored()).pair.guestMatch?.emojiId).toBe(14);
@@ -486,3 +497,5 @@ describe("historical match presentation", () => {
     ).toBeNull();
   });
 });
+
+beforeAll(activateCanonicalApplicationFixture);

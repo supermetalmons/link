@@ -22,6 +22,7 @@ test("does not retry a client-update-required response", async () => {
 
 test("retains transient request and proposal retries", async () => {
   let calls = 0;
+  /** @type {Array<number>} */
   const delays = [];
   const result = await retryWagerApi(
     async () => {
@@ -30,7 +31,11 @@ test("retains transient request and proposal retries", async () => {
       if (calls === 2) return { ok: false, reason: "proposal-unavailable" };
       return { ok: true, count: 3 };
     },
-    { delay: async (milliseconds) => delays.push(milliseconds) },
+    {
+      delay: async (milliseconds) => {
+        delays.push(milliseconds);
+      },
+    },
   );
   assert.equal(calls, 3);
   assert.deepEqual(delays, [180, 320]);

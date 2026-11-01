@@ -27,13 +27,16 @@ test("maps protected customizations to their inventory requirements", () => {
     { collection: "specials", id: 1, count: 1 },
   );
   assert.deepEqual(
-    inventoryRequirement({ field: "profileMons", value: "0,0,5,0,0" }),
+    inventoryRequirement({
+      field: "profileMons",
+      value: { demon: 0, angel: 0, drainer: 5, spirit: 0, mystic: 0 },
+    }),
     { collection: "specials", id: 0, count: 1 },
   );
   assert.deepEqual(
     inventoryRequirement({
       field: "cardStickers",
-      value: '{"big-mon-top-right":"gate"}',
+      value: { "big-mon-top-right": "gate" },
     }),
     { collection: "specials", id: 2, count: 1 },
   );
@@ -100,7 +103,7 @@ test("passes the operation signal to inventory authorization", async () => {
   await authorizeProfileCustomization(
     {
       field: "emojiAndAura",
-      value: { emoji: 1009, aura: "" },
+      value: { emoji: 1009, aura: "none" },
     },
     profile,
     TELEGRAM_TEST_ENV as Env,

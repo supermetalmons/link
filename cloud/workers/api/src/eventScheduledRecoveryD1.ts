@@ -75,19 +75,20 @@ function announcementCoverage(kind: EventAnnouncementKind): string {
   const supportedLeads = kind === "reminder" ? [leadMs, 10_800_000] : [leadMs];
   // A positive checkpoint follows dispatch validation; payload changes reset it.
   return `EXISTS (
-    SELECT 1 FROM event_progress_outboxes AS outbox
-    INDEXED BY idx_event_progress_outboxes_event
-    WHERE outbox.event_id = event_records.event_id
+    SELECT 1 FROM event_progress_outboxes_canonical AS outbox
+    INDEXED BY idx_event_progress_outboxes_canonical_event
+    WHERE outbox.event_id = event_records_canonical.event_id
       AND outbox.status = 'pending'
       AND outbox.next_reconcile_at_ms > 0
-      AND event_records.start_at_ms - outbox.run_at_ms IN (${supportedLeads.join(", ")})
-      AND json_extract(outbox.record_json, '$.eventId') = event_records.event_id
-      AND json_type(outbox.record_json, '$.schemaVersion') IN ('integer', 'real')
-      AND json_extract(outbox.record_json, '$.schemaVersion') = 1
+      AND event_records_canonical.start_at_ms - outbox.run_at_ms IN (${supportedLeads.join(", ")})
+      AND json_extract(outbox.record_json, '$.eventId') = event_records_canonical.event_id
+      AND json_type(outbox.record_json, '$.schemaVersion') = 'integer'
+      AND json_extract(outbox.record_json, '$.schemaVersion') = 2
+      AND json_extract(outbox.record_json, '$.dataEpoch') = 1
       AND json_extract(outbox.record_json, '$.reason') = '${reason}'
       AND json_extract(outbox.record_json, '$.runAtMs') = outbox.run_at_ms
       AND json_extract(outbox.record_json, '$.sourceKey') =
-        '${kind}:' || event_records.event_id || ':' || event_records.start_at_ms
+        '${kind}:' || event_records_canonical.event_id || ':' || event_records_canonical.start_at_ms
   )`;
 }
 
@@ -169,7 +170,7 @@ export function createEventScheduledRecoveryStore(
       const queries = [
         db
           .prepare(
-            `SELECT ${CANDIDATE_COLUMNS} FROM event_records
+            `SELECT ${CANDIDATE_COLUMNS} FROM event_records_canonical
            WHERE status = 'scheduled' AND ${CANDIDATE_ORDERING}
              AND start_at_ms >= 0 AND start_at_ms <= ?
            ORDER BY start_at_ms, event_id LIMIT ?`,
@@ -192,7 +193,7 @@ export function createEventScheduledRecoveryStore(
               .prepare(
                 `SELECT ${CANDIDATE_COLUMNS},
                    ${announcementCoverage(kind)} AS announcement_covered
-                 FROM event_records
+                 FROM event_records_canonical
                  WHERE event_id IN (SELECT value FROM json_each(?))`,
               )
               .bind(JSON.stringify(PRIZE_EVENT_IDS))
@@ -217,8 +218,8 @@ export function createEventScheduledRecoveryStore(
           queries.push(
             db
               .prepare(
-                `SELECT ${CANDIDATE_COLUMNS} FROM event_records
-                 INDEXED BY idx_event_records_scheduled_sunday_start
+                `SELECT ${CANDIDATE_COLUMNS} FROM event_records_canonical
+                 INDEXED BY idx_event_records_canonical_scheduled_sunday_start
                  WHERE status = 'scheduled' AND ${CANDIDATE_ORDERING}
                    AND json_type(record_json, '$.isSundayMons') = 'true'
                    AND start_at_ms >= ? AND start_at_ms <= ?
@@ -236,8 +237,8 @@ export function createEventScheduledRecoveryStore(
           queries.push(
             db
               .prepare(
-                `SELECT ${CANDIDATE_COLUMNS} FROM event_records
-                 INDEXED BY idx_event_records_scheduled_sunday_start
+                `SELECT ${CANDIDATE_COLUMNS} FROM event_records_canonical
+                 INDEXED BY idx_event_records_canonical_scheduled_sunday_start
                  WHERE status = 'scheduled' AND ${CANDIDATE_ORDERING}
                    AND json_type(record_json, '$.isSundayMons') = 'true'
                    AND start_at_ms >= ? AND start_at_ms <= ?
@@ -300,7 +301,7 @@ export function createEventScheduledRecoveryStore(
     async listPage(after) {
       const rows = await db
         .prepare(
-          `SELECT ${CANDIDATE_COLUMNS} FROM event_records
+          `SELECT ${CANDIDATE_COLUMNS} FROM event_records_canonical
            WHERE status = 'scheduled' AND ${CANDIDATE_ORDERING}
              AND start_at_ms <= 9007199254740991${after ? " AND (start_at_ms, event_id) > (?, ?)" : " AND start_at_ms >= 0"}
            ORDER BY start_at_ms, event_id LIMIT ?`,
@@ -329,7 +330,7 @@ export function createEventScheduledRecoveryStore(
             expectedRevision,
           ),
       ]);
-      return results[1].meta.changes === 1;
+      return results[1]!.meta.changes === 1;
     },
   };
 }

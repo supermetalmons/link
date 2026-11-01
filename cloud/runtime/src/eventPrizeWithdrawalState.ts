@@ -1,12 +1,9 @@
 import type { WithdrawalCompletionInput } from "./eventPrizes/types.js";
 import {
-  readWithdrawalDocument,
   withdrawalOwnership,
   withdrawalRecipientAddress,
   withdrawalLeaseId,
   withdrawalLeaseExpiresAtMs,
-  withdrawalStatus,
-  withdrawalPlace,
   withdrawalStartedAtForClaim,
   withdrawalStartedAtForCompletion,
   withdrawalSubmittedAtForCompletion,
@@ -27,6 +24,7 @@ import {
   isWithdrawalRecordForPrize,
 } from "./eventPrizeProjectionState.js";
 import { isValidSolanaAddress } from "@mons/shared/solana";
+import { isEventPrizeStandard } from "@mons/shared/event-prizes";
 
 const EVENT_PRIZE_ADMIN_WALLET = "Ay1mgqJr6WmihsSYdMZ1dkHL5r25N7VhCGk7NpCJcPGi";
 const WITHDRAWAL_LEASE_MS = 5 * 60 * 1000;
@@ -46,7 +44,7 @@ const decodeBase58Bytes = (value: unknown): Uint8Array | null => {
     if (digit < 0) return null;
     let carry = digit;
     for (let index = 0; index < bytes.length; index += 1) {
-      carry += bytes[index] * 58;
+      carry += bytes[index]! * 58;
       bytes[index] = carry & 0xff;
       carry >>= 8;
     }
@@ -138,18 +136,24 @@ const buildWithdrawalCompletion = ({
     withdrawalOwnership(withdrawal).entitledProfileId ||
     withdrawalOwnership(withdrawal).profileId ||
     profileId;
+  const assetStandard = getEventPrizeAssetStandard(eventId, prizeId);
+  if (!isEventPrizeStandard(assetStandard))
+    throw new TypeError("unsupported-withdrawal-standard");
   const completed = writeCompletedWithdrawal({
     eventId,
     prizeId,
     assetAddress,
-    assetStandard: getEventPrizeAssetStandard(eventId, prizeId),
+    assetStandard,
     profileId,
     entitledProfileId,
-    place: withdrawalPlace(withdrawal),
+    place: withdrawal.place,
     recipientAddress,
     requesterUid: withdrawalOwnership(withdrawal).requesterUid,
     status: "completed" as const,
     transactionSignature,
+    signedTransactionBase64: withdrawal.signedTransactionBase64,
+    blockhash: withdrawal.blockhash,
+    lastValidBlockHeight: withdrawal.lastValidBlockHeight,
     startedAtMs: withdrawalStartedAtForCompletion(withdrawal, completedAtMs),
     submittedAtMs: withdrawalSubmittedAtForCompletion(
       withdrawal,
@@ -201,8 +205,7 @@ const decideWithdrawalClaim = ({
   leaseId,
   nowMs,
 }: WithdrawalClaimInput): WithdrawalClaimDecision => {
-  const existing =
-    readWithdrawalDocument(current) || readWithdrawalDocument({})!;
+  const existing = current;
   const existingProfileId = withdrawalOwnership(existing).profileId;
   const existingRecipientAddress = withdrawalRecipientAddress(existing);
   const existingLeaseId = withdrawalLeaseId(existing);
@@ -221,17 +224,17 @@ const decideWithdrawalClaim = ({
     canonicalRecordSourceProfileId,
   );
 
-  if (withdrawalStatus(existing) === "completed") {
+  if (existing?.status === "completed") {
     return recordMatchesPrize && recordOwnedByRequest
       ? { kind: "completed", value: existing }
       : { kind: "forbidden", value: existing };
   }
-  if (withdrawalStatus(existing) === "blocked") {
+  if (existing?.status === "blocked") {
     return recordMatchesPrize && recordOwnedByRequest
       ? { kind: "blocked", value: existing }
       : { kind: "forbidden", value: existing };
   }
-  if (withdrawalStatus(existing) === "submitted") {
+  if (existing?.status === "submitted") {
     if (!recordMatchesPrize || !recordOwnedByRequest) {
       return { kind: "forbidden", value: existing };
     }
@@ -239,7 +242,7 @@ const decideWithdrawalClaim = ({
       return { kind: "destination-mismatch", value: existing };
     }
   } else if (
-    withdrawalStatus(existing) === "processing" &&
+    existing?.status === "processing" &&
     leaseExpiresAtMs > nowMs &&
     existingLeaseId &&
     existingLeaseId !== leaseId
@@ -253,8 +256,13 @@ const decideWithdrawalClaim = ({
     }
   }
 
-  const preserveSubmitted = withdrawalStatus(existing) === "submitted";
+  const preserveSubmitted = existing?.status === "submitted";
   const assetStandard = getEventPrizeAssetStandard(eventId, prizeId);
+  if (
+    !isEventPrizeStandard(assetStandard) ||
+    (place !== 1 && place !== 2 && place !== 3)
+  )
+    throw new TypeError("invalid-withdrawal-claim");
   const claimed: WithdrawalClaimFields = {
     eventId,
     prizeId,

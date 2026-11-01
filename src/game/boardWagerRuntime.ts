@@ -448,11 +448,12 @@ export function createBoardWagerRuntime(
       const drift = drifts[i] || { x: 0, y: 0 };
       const x = start.x + (target.x - start.x) * eased + drift.x * driftScale;
       const y = start.y + (target.y - start.y) * eased + drift.y * driftScale;
-      if (!winnerWagerPile.frames[i]) {
+      const frame = winnerWagerPile.frames[i];
+      if (!frame) {
         winnerWagerPile.frames[i] = { x, y };
       } else {
-        winnerWagerPile.frames[i].x = x;
-        winnerWagerPile.frames[i].y = y;
+        frame.x = x;
+        frame.y = y;
       }
     }
     winnerWagerPile.iconSize = iconSize;
@@ -728,11 +729,12 @@ export function createBoardWagerRuntime(
         for (let i = 0; i < winnerWagerPile.count; i += 1) {
           const target = finalTargets[i];
           if (!target) continue;
-          if (!winnerWagerPile.frames[i]) {
+          const frame = winnerWagerPile.frames[i];
+          if (!frame) {
             winnerWagerPile.frames[i] = { x: target.x, y: target.y };
           } else {
-            winnerWagerPile.frames[i].x = target.x;
-            winnerWagerPile.frames[i].y = target.y;
+            frame.x = target.x;
+            frame.y = target.y;
           }
         }
         wagerWinAnimActive = false;

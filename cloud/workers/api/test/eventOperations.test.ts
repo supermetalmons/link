@@ -214,14 +214,14 @@ function createRepository(initial: Record<string, unknown> = {}) {
       ]);
       const canonicalProfileIdByProfileId = new Map<string, string | null>();
       for (let index = 0; index < query.profileIds.length; index += 1) {
-        const sourceProfileId = query.profileIds[index];
+        const sourceProfileId = query.profileIds[index]!;
         const canonicalProfileId = resolved[index] || null;
         canonicalProfileIdByProfileId.set(sourceProfileId, canonicalProfileId);
         if (!canonicalProfileId) continue;
         if (!profileById.has(canonicalProfileId)) {
           profileById.set(canonicalProfileId, {
             profile: {
-              aura: "",
+              aura: "none",
               emoji: 0,
               eth: "",
               profileId: canonicalProfileId,
@@ -266,10 +266,9 @@ function createRepository(initial: Record<string, unknown> = {}) {
       ) {
         return {
           committed: false,
-          decision:
-            "decision" in output && typeof output.decision === "string"
-              ? output.decision
-              : undefined,
+          ...("decision" in output && typeof output.decision === "string"
+            ? { decision: output.decision }
+            : {}),
           value: current,
         };
       }
@@ -280,13 +279,12 @@ function createRepository(initial: Record<string, unknown> = {}) {
       setPath(values, path, value);
       return {
         committed: true,
-        decision:
-          output &&
-          typeof output === "object" &&
-          "decision" in output &&
-          typeof output.decision === "string"
-            ? output.decision
-            : undefined,
+        ...(output &&
+        typeof output === "object" &&
+        "decision" in output &&
+        typeof output.decision === "string"
+          ? { decision: output.decision }
+          : {}),
         value,
       };
     },
@@ -304,7 +302,7 @@ function participant(candidateProfileId: string, joinedAtMs: number) {
     username: candidateProfileId,
     displayName: candidateProfileId.toUpperCase(),
     emojiId: joinedAtMs,
-    aura: null,
+    aura: "none",
     joinedAtMs,
     state: "active",
     eliminatedRoundIndex: null,
@@ -330,7 +328,7 @@ function match(
     hostLoginUid: hostProfileId ? participant(hostProfileId, 1).loginUid : null,
     hostDisplayName: hostProfileId?.toUpperCase() || null,
     hostEmojiId: hostProfileId ? 1 : null,
-    hostAura: null,
+    hostAura: hostProfileId ? "none" : null,
     guestSlotBlocked: false,
     guestProfileId,
     guestLoginUid: guestProfileId
@@ -338,7 +336,7 @@ function match(
       : null,
     guestDisplayName: guestProfileId?.toUpperCase() || null,
     guestEmojiId: guestProfileId ? 1 : null,
-    guestAura: null,
+    guestAura: guestProfileId ? "none" : null,
   };
 }
 
@@ -401,8 +399,8 @@ test("creates a scheduled event only after its Workflow exists", async () => {
     results: true,
   });
   assert.equal(eventRecordFixture(response.event).telegramDeliveryVersion, 2);
-  const update = repository.patches[0];
-  assert.deepEqual(update["events/aaaaaaaaaaa"], response.event);
+  const update = repository.patches[0]!;
+  assert.deepEqual(update["events/aaaaaaaaaaa"]!, response.event);
   const outboxEntry = Object.entries(update).find(([path]) =>
     path.startsWith("eventProgressOutbox/ep_"),
   );
@@ -471,7 +469,7 @@ test("direct relative event creation clamps to 50 days", async () => {
 });
 
 test("creation and fresh joining persist identical participant snapshots", async () => {
-  for (const emoji of [7.9, "7.9", "Infinity"]) {
+  for (const emoji of [7, 0, 1000]) {
     const creator = createRepository();
     const joiner = createRepository({
       "events/join-event": {
@@ -487,7 +485,7 @@ test("creation and fresh joining persist identical participant snapshots", async
         ...(await readProfile(uid, signal))!,
         username: " ivan ",
         emoji,
-        aura: " rainbow ",
+        aura: "rainbow",
       });
     }
     const created = await createEvent(
@@ -514,7 +512,7 @@ test("creation and fresh joining persist identical participant snapshots", async
       loginUid: identity.uid,
       username: "ivan",
       displayName: " ivan ",
-      emojiId: emoji === "Infinity" ? 0 : 7,
+      emojiId: emoji,
       aura: "rainbow",
       joinedAtMs: 1_000,
       state: "active",
@@ -532,7 +530,7 @@ test("creation and fresh joining persist identical participant snapshots", async
     );
     assert.deepEqual(joined.participant, expected);
     assert.deepEqual(
-      joiner.patches[0][`events/join-event/participants/${profileId}`],
+      joiner.patches[0]![`events/join-event/participants/${profileId}`]!,
       expected,
     );
   }
@@ -561,7 +559,7 @@ test("rejects invalid creator metadata before scheduling or persisting an event"
       error instanceof AuthApiFailure &&
       error.status === 503 &&
       error.code === "unavailable" &&
-      error.message === "event-service-unavailable",
+      error.message === "profile-ownership-unavailable",
   );
   assert.equal(workflowCreates, 0);
   assert.deepEqual(state.patches, []);
@@ -610,7 +608,7 @@ test("persists independent Telegram preferences including all-off and omitted de
     assert.equal(eventRecordFixture(response.event).telegramDeliveryVersion, 2);
     assert.equal(Object.hasOwn(response.event, "announceOnTelegram"), false);
     assert.deepEqual(
-      state.patches[0][`events/${response.eventId}`],
+      state.patches[0]![`events/${response.eventId}`]!,
       response.event,
     );
   }
@@ -701,7 +699,10 @@ test("rejects explicitly undefined Sunday Mons flags before creating a Workflow"
       createEvent(
         workflowEnvironment(() => workflowCreates++),
         identity,
-        { ...schedule, isSundayMons: undefined },
+        Object.assign(
+          { ...schedule },
+          { isSundayMons: undefined },
+        ) as unknown as Parameters<typeof createEvent>[2],
         {
           repository: state.repository,
           now: () => Date.parse("2026-09-06T12:00:00Z"),
@@ -1327,7 +1328,7 @@ test("synchronizes a future scheduled event through the portable runtime", async
     ok: true,
     eventId: "event-1",
     didChange: false,
-    event,
+    event: eventRecordFixture(event),
   });
 });
 
@@ -1545,7 +1546,7 @@ test("uses a canonical stored source ID without a participant login", async () =
     participants: {
       "retired-profile": {
         ...participant("retired-profile", 1),
-        loginUid: "",
+        loginUid: null,
       },
     },
   };
@@ -1603,7 +1604,7 @@ test("bulk-resolves a maximum event participant set", async () => {
       return {
         loginUids: ["alternate-login"],
         profile: {
-          aura: "",
+          aura: "none",
           emoji: 0,
           eth: "",
           profileId: "alternate-profile",
@@ -1618,7 +1619,7 @@ test("bulk-resolves a maximum event participant set", async () => {
       return {
         loginUids: [uid],
         profile: {
-          aura: "",
+          aura: "none",
           emoji: 0,
           eth: "",
           profileId: ownerProfileId,
@@ -1656,7 +1657,7 @@ test("bulk-resolves a maximum event participant set", async () => {
     reason: "not-participant",
   });
   assert.equal(batches.length, 1);
-  assert.equal(batches[0].length, 33);
+  assert.equal(batches[0]!.length, 33);
 });
 
 test("reads alternate ownership once after acquiring the event lock", async () => {
@@ -1670,7 +1671,7 @@ test("reads alternate ownership once after acquiring the event lock", async () =
     participants: {
       "retired-profile": {
         ...participant("retired-profile", 1),
-        loginUid: "",
+        loginUid: null,
       },
     },
   };
@@ -1954,6 +1955,8 @@ test("uses one ownership snapshot for every later-round invite", async () => {
     createdByLoginUid: identity.uid,
     createdByProfileId: profileId,
     currentRoundIndex: 1,
+    bracketSize: 8,
+    roundCount: 3,
     supportsThirdPlaceMatch: false,
     participants,
     rounds: {
@@ -2313,7 +2316,7 @@ test("uses canonical prize ownership with an injected repository", async () => {
   state.repository.getGameplayProfileOwnership = async () => ({
     loginUids: [identity.uid],
     profile: {
-      aura: "",
+      aura: "none",
       emoji: 0,
       eth: "",
       profileId: "canonical-profile",

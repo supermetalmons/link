@@ -1,4 +1,9 @@
-import { retainEventProgressRecord } from "../../../runtime/eventProgressRecords.js";
+import { requiredFixture } from "./requiredFixture.ts";
+import { createHash } from "node:crypto";
+import {
+  retainEventProgressRecord,
+  type EventProgressPendingRecord,
+} from "../../../runtime/eventProgressRecords.js";
 import { eventDocumentFixture } from "./eventCompatibilityFixture.ts";
 import type {
   WorkflowEvent,
@@ -7,7 +12,6 @@ import type {
 } from "cloudflare:workers";
 import assert from "node:assert/strict";
 import test from "node:test";
-import type { EventJsonRecord } from "../../../runtime/eventReads.js";
 import { buildEventAnnouncementPlan } from "../src/eventPrizeAnnouncementSchedule.ts";
 import {
   buildEventProgressPlan,
@@ -42,6 +46,17 @@ import {
   EVENT_ANNOUNCEMENT_KINDS,
   eventAnnouncementRunAtMs,
 } from "../src/eventAnnouncementKinds.ts";
+type OutboxFixtureRecord = Record<string, unknown>;
+const invalidProgressIdentity: EventProgressPendingRecord = {
+  schemaVersion: 2,
+  dataEpoch: 1,
+  eventId: "invalid-event",
+  sourceKey: "invalid-source",
+  reason: "invalid-identity",
+  runAtMs: null,
+  firstQueuedAtMs: 0,
+  lastQueuedAtMs: 0,
+};
 
 const outboxRecoveryStores = new WeakMap<
   EventProgressSweepRepository,
@@ -266,7 +281,7 @@ for (const scenario of ["outbox-read", "outbox-dispatch"] as const) {
       environment.EVENT_PROGRESS_WORKFLOW.createBatch = async (items) => {
         if (
           scenario === "outbox-dispatch" &&
-          items[0].id === outbox.plan.workflowId
+          requiredFixture(items[0]).id === outbox.plan.workflowId
         ) {
           await healthyDispatched.promise;
           throw failure;
@@ -386,7 +401,8 @@ test(
     };
     const outboxes = await Promise.all(
       Array.from({ length: 10 }, async (_, index) => {
-        if (index % 2) return [`bad-${index}`, { schemaVersion: 2 }] as const;
+        if (index % 2)
+          return [`bad-${index}`, { ...invalidProgressIdentity }] as const;
         const plan = await buildEventProgressPlan(
           {
             eventId: `outbox-${index}`,
@@ -401,7 +417,7 @@ test(
     const environment = workflowEnvironment();
     const create = environment.EVENT_PROGRESS_WORKFLOW.createBatch;
     environment.EVENT_PROGRESS_WORKFLOW.createBatch = async (items) => {
-      const reason = items[0].params!.reason;
+      const reason = requiredFixture(items[0]).params!.reason;
       if (reason === "outbox") await wait("outbox");
       if (reason === "scheduled-start-reconciliation") await wait("scheduled");
       return create(items);
@@ -450,7 +466,8 @@ test("failed records cannot exhaust outbox or rating runners before the rest of 
   const logs: Record<string, unknown>[] = [];
   const outboxes = await Promise.all(
     Array.from({ length: 10 }, async (_, index) => {
-      if (index < 5) return [`bad-${index}`, { schemaVersion: 2 }] as const;
+      if (index < 5)
+        return [`bad-${index}`, { ...invalidProgressIdentity }] as const;
       const plan = await buildEventProgressPlan(
         {
           eventId: `outbox-${index}`,
@@ -554,8 +571,8 @@ for (const kind of ["start", "reminder"] as const) {
       };
       let recreating = false;
       let creates = 0;
-      let current: EventJsonRecord | null = plan.outbox;
-      const otherOutboxes = new Map<string, EventJsonRecord | null>();
+      let current: OutboxFixtureRecord | null = plan.outbox;
+      const otherOutboxes = new Map<string, OutboxFixtureRecord | null>();
       const operations: string[] = [];
       const repository: EventProgressSweepRepository = {
         readEvent: async () => null,
@@ -567,13 +584,14 @@ for (const kind of ["start", "reminder"] as const) {
         ],
         readEventProgressOutbox: async (id) => {
           if (id !== plan.outboxId)
-            return retainEventProgressRecord(
-              "pending",
-              otherOutboxes.get(id) ?? null,
-            );
+            return otherOutboxes.get(id) == null
+              ? null
+              : retainEventProgressRecord("pending", otherOutboxes.get(id));
           assert.equal(recreating, false);
           operations.push("read");
-          return retainEventProgressRecord("pending", current);
+          return current === null
+            ? null
+            : retainEventProgressRecord("pending", current);
         },
         commitEventPlan: async (commands) => {
           for (const command of commands) {
@@ -595,7 +613,7 @@ for (const kind of ["start", "reminder"] as const) {
       const get = environment.EVENT_PROGRESS_WORKFLOW.get;
       const original = await get(plan.workflowId);
       environment.EVENT_PROGRESS_WORKFLOW.createBatch = async (items) => {
-        if (items[0].id === plan.workflowId) {
+        if (requiredFixture(items[0]).id === plan.workflowId) {
           creates++;
           operations.push(`create-${creates}`);
           recreating = false;
@@ -660,9 +678,9 @@ test(
     );
     assert.ok(plan);
     const published = Promise.withResolvers<void>();
-    const malformed = { schemaVersion: 2 };
-    let current: EventJsonRecord | null = malformed;
-    const otherOutboxes = new Map<string, EventJsonRecord | null>();
+    const malformed = { ...invalidProgressIdentity };
+    let current: OutboxFixtureRecord | null = malformed;
+    const otherOutboxes = new Map<string, OutboxFixtureRecord | null>();
     const repository: EventProgressSweepRepository = {
       readEvent: async () => null,
       listDueEventProgressOutboxes: async () => {
@@ -674,11 +692,12 @@ test(
           },
         ];
       },
-      readEventProgressOutbox: async (id) =>
-        retainEventProgressRecord(
-          "pending",
-          id === plan.outboxId ? current : (otherOutboxes.get(id) ?? null),
-        ),
+      readEventProgressOutbox: async (id) => {
+        const value = id === plan.outboxId ? current : otherOutboxes.get(id);
+        return value == null
+          ? null
+          : retainEventProgressRecord("pending", value);
+      },
       commitEventPlan: async (commands) => {
         for (const command of commands) {
           assert.notEqual(command.kind, "progress-dead");
@@ -710,7 +729,7 @@ test(
 
 test("an outbox repaired after reread survives quarantine without a failure log", async () => {
   const outbox = await validOutbox();
-  const malformed = { schemaVersion: 2 };
+  const malformed = { ...invalidProgressIdentity };
   let current: Record<string, unknown> = malformed;
   let reads = 0;
   const logs: string[] = [];
@@ -724,7 +743,9 @@ test("an outbox repaired after reread survives quarantine without a failure log"
     ],
     readEventProgressOutbox: async () => {
       reads++;
-      return retainEventProgressRecord("pending", current);
+      return current === null
+        ? null
+        : retainEventProgressRecord("pending", current);
     },
     commitEventPlan: async () => assert.fail("must not archive repaired work"),
   };
@@ -967,7 +988,7 @@ test("recovery deduplicates urgent and background rows and bounds event concurre
   let running = 0;
   let maximum = 0;
   environment.EVENT_PROGRESS_WORKFLOW.createBatch = async (items) => {
-    created.push(items[0].params!.eventId);
+    created.push(requiredFixture(items[0]).params!.eventId);
     running += 1;
     maximum = Math.max(maximum, running);
     await new Promise<void>((resolve) => setImmediate(resolve));
@@ -1052,7 +1073,10 @@ test("a failed or malformed event cannot block later recovery rows or cursor pro
   assert(attempted.has("event-0100"));
   assert.deepEqual(await recovery.readCursor(), { cursor: null, revision: 2 });
   assert(events["event-0000"]);
-  assert.equal((await recovery.listPage(null))[0].cursor.eventId, "event-0000");
+  assert.equal(
+    requiredFixture((await recovery.listPage(null))[0]).cursor.eventId,
+    "event-0000",
+  );
 });
 
 for (const method of ["readCursor", "listPage"] as const) {
@@ -1148,7 +1172,7 @@ test("failed recovery queries and checkpoints preserve the cursor for replay", a
   const create = environment.EVENT_PROGRESS_WORKFLOW.createBatch;
   const created: string[] = [];
   environment.EVENT_PROGRESS_WORKFLOW.createBatch = async (items) => {
-    created.push(items[0].id!);
+    created.push(requiredFixture(items[0]).id!);
     return create(items);
   };
   for (const failing of [
@@ -1205,7 +1229,7 @@ test("a failed concurrent dispatch keeps its sweep admitted until every other pr
   const originalGet = environment.EVENT_PROGRESS_WORKFLOW.get;
   const originalCreate = environment.EVENT_PROGRESS_WORKFLOW.createBatch;
   environment.EVENT_PROGRESS_WORKFLOW.createBatch = async (items) => {
-    if (items[0].id === first.workflowId)
+    if (requiredFixture(items[0]).id === first.workflowId)
       throw new Error("first-dispatch-failed");
     started.resolve();
     await delayed.promise;
@@ -1427,7 +1451,7 @@ test("removes outbox records for completed Workflow instances", async () => {
 });
 
 test("atomically dead-letters malformed outbox records", async () => {
-  const originalRecord = { schemaVersion: 2 };
+  const originalRecord = { ...invalidProgressIdentity };
   const repository = sweepRepository({ "bad-record": originalRecord });
   await sweepEventProgress(workflowEnvironment(), {
     now: () => 2_000,
@@ -1437,6 +1461,11 @@ test("atomically dead-letters malformed outbox records", async () => {
   assert.deepEqual(repository.patches, [
     {
       [`${EVENT_PROGRESS_OUTBOX_DEAD_ROOT}/bad-record`]: {
+        schemaVersion: 1,
+        dataEpoch: 1,
+        sourceDigest: createHash("sha256")
+          .update(JSON.stringify(originalRecord))
+          .digest("hex"),
         deadAtMs: 2_000,
         originalRecord,
         reason: "invalid-event-progress-outbox",
@@ -1467,6 +1496,11 @@ test("dead-letters outbox records whose key mismatches their source", async () =
   assert.deepEqual(repository.patches, [
     {
       [`${EVENT_PROGRESS_OUTBOX_DEAD_ROOT}/${mismatchedOutboxId}`]: {
+        schemaVersion: 1,
+        dataEpoch: 1,
+        sourceDigest: createHash("sha256")
+          .update(JSON.stringify(outbox.plan.outbox))
+          .digest("hex"),
         deadAtMs: 2_000,
         originalRecord: outbox.plan.outbox,
         reason: "invalid-event-progress-outbox",
@@ -1480,7 +1514,7 @@ test("dispatches valid outbox records before reporting dead-letter failure", asy
   const outbox = await validOutbox();
   let workflowCreates = 0;
   const repository = sweepRepository(
-    { ...outbox.value, "bad-record": { schemaVersion: 2 } },
+    { ...outbox.value, "bad-record": { ...invalidProgressIdentity } },
     (updates) => {
       if (
         Object.keys(updates).some((path) =>
@@ -1578,7 +1612,7 @@ for (const scenario of [
   for (const loggerThrows of [false, true]) {
     test(`rating scan ${scenario} preserves healthy recovery with throwing logger: ${loggerThrows}`, async () => {
       const invalid = invalidRatingRecoveryEntry("event-progress");
-      const record = ratingRecoveryRecords()[0];
+      const record = requiredFixture(ratingRecoveryRecords()[0]);
       const failure = new Error(scenario);
       const logs: Record<string, unknown>[] = [];
       const claimed: string[] = [];
@@ -1710,7 +1744,7 @@ for (const phase of ["claim", "quarantine", "enqueue", "cleanup"] as const) {
       const failure = new Error(`rating-${phase}-failed`, {
         cause: new Error("provider-failed"),
       });
-      const record = ratingRecoveryRecords()[0];
+      const record = requiredFixture(ratingRecoveryRecords()[0]);
       if (phase === "quarantine") record.version = 2;
       const repository = sweepRepository({}, () => {
         if (phase === "enqueue") throw failure;
@@ -1776,7 +1810,7 @@ for (const phase of ["inspect", "enqueue", "quarantine"] as const) {
       const { plan } = await validOutbox();
       const repository = sweepRepository({
         [plan.outboxId]:
-          phase === "enqueue" ? plan.outbox : { schemaVersion: 2 },
+          phase === "enqueue" ? plan.outbox : { ...invalidProgressIdentity },
       });
       const recovery = createEventProgressRecoveryTestStore(repository.value);
       if (phase === "quarantine") {
@@ -1832,14 +1866,14 @@ test("malformed recovery identities and payloads are omitted from record failure
   const logs: Record<string, unknown>[] = [];
   const failure = { privatePayload: "private" };
   const repository = sweepRepository({
-    " bad#outbox ": { privatePayload: "private" },
+    " bad#outbox ": { ...invalidProgressIdentity },
   });
   const recovery = createEventProgressRecoveryTestStore(repository.value);
   recovery.deadLetter = async () => {
     throw failure;
   };
   const record = {
-    ...ratingRecoveryRecords()[0],
+    ...requiredFixture(ratingRecoveryRecords()[0]),
     eventId: " bad#event ",
     operationId: "bad#operation",
   };
@@ -1920,7 +1954,7 @@ function workflowEvent(
   params: EventProgressWorkflowParams,
 ): Readonly<WorkflowEvent<EventProgressWorkflowParams>> {
   return {
-    instanceId: "instance-1",
+    instanceId: `data1_event-progress-${params.outboxId.slice(3)}`,
     payload: params,
     timestamp: new Date(1_000),
     workflowName: "mons-link-event-progress",
@@ -1947,7 +1981,7 @@ test("sleeps for future progress, configures capped retries, and acknowledges", 
   ]);
   assert.deepEqual(result, { status: "applied", didChange: true });
   assert.deepEqual(acknowledgements, [params.outboxId]);
-  const synchronizeCall = step.calls[0];
+  const synchronizeCall = requiredFixture(step.calls[0]);
   assert.equal(synchronizeCall.name, "synchronize event");
   const config = synchronizeCall.config as {
     retries: {

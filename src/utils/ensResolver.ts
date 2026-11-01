@@ -34,14 +34,14 @@ export const decodeEnsProfile = (value: unknown): EnsProfile | null => {
   const avatar = fields.avatar;
   return {
     name,
-    avatar: typeof avatar === "string" || avatar === null ? avatar : undefined,
+    ...(typeof avatar === "string" || avatar === null ? { avatar } : {}),
   };
 };
 
 export async function resolveENS(address: string): Promise<string | null> {
   const requestGeneration = cacheGeneration;
   if (address in ensCache) {
-    return ensCache[address];
+    return ensCache[address] ?? null;
   }
 
   try {

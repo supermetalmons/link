@@ -1,3 +1,4 @@
+import type { Aura } from "@mons/shared/appearance";
 import {
   isHistoricalMatchPair,
   type HistoricalMatchPair,
@@ -12,7 +13,7 @@ import {
   writeHistoricalMatchSnapshot,
 } from "./historicalMatchesD1.ts";
 
-type PresentationSeed = { emojiId: number; aura: string };
+type PresentationSeed = { emojiId: number; aura: Aura };
 
 export type FreezeHistoricalMatchPresentations = (
   inviteId: string,

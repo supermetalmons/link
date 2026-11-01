@@ -108,7 +108,7 @@ test("applies authenticated CORS and rejects methods before authentication", asy
   );
   assert.equal(
     preflight.headers.get("Access-Control-Allow-Headers"),
-    "Authorization, Content-Type",
+    "Authorization, Content-Type, X-Mons-Data-Epoch",
   );
   assert.equal(preflight.headers.get("Cache-Control"), "no-store");
 
@@ -257,10 +257,10 @@ test("validates bounded request bodies before repository access", async () => {
   assert.equal(repositoryCalls, 0);
 });
 
-test("preserves numeric material normalization", async () => {
+test("preserves canonical numeric material writes", async () => {
   let written: MiningSnapshot | null = null;
   const response = await handleMiningRoute(
-    request({ date: "2026-08-18", materials: { dust: "1" } }),
+    request({ date: "2026-08-18", materials: materials(1) }),
     envWithRateLimit(),
     ctx,
     {
@@ -280,6 +280,43 @@ test("preserves numeric material normalization", async () => {
     lastRockDate: "2026-08-18",
     materials: materials(1),
   });
+});
+
+test("rejects malformed material maps without reads or writes", async () => {
+  let profileReads = 0;
+  for (const value of [
+    { dust: "1" },
+    { dust: 1 },
+    { ...materials(1), dust: "1" },
+    { ...materials(1), slime: -1 },
+    { ...materials(1), dust: 1.4 },
+    { ...materials(1), extra: 1 },
+    null,
+    [],
+  ]) {
+    const response = await handleMiningRoute(
+      request({ date: "2026-08-18", materials: value }),
+      envWithRateLimit(),
+      ctx,
+      {
+        now: () => NOW_MS,
+        repository: repository({
+          getOwnedProfileSnapshot: async () => {
+            profileReads++;
+            return profile();
+          },
+        }),
+        verifyIdentity,
+      },
+    );
+    assert.equal(response.status, 400);
+    assert.deepEqual(await responseJson(response), {
+      ok: false,
+      error: "invalid-argument",
+      message: "invalid-request",
+    });
+  }
+  assert.equal(profileReads, 0);
 });
 
 test("preserves every business failure response", async () => {

@@ -1,12 +1,24 @@
 export const eventId = "NN3eRzoZo80";
 
+/**
+ * @typedef {import("@mons/shared/events").EventParticipantFields} LegacyParticipant
+ * @typedef {import("@mons/shared/events").EventMatchFields} LegacyMatch
+ * @typedef {Omit<import("@mons/shared/events").EventRoundFields, "matches"> & { matches: Record<string, LegacyMatch> }} LegacyRound
+ * @typedef {Omit<import("@mons/shared/events").EventRecordFields, "schemaVersion" | "bracketFormat" | "roundByes" | "telegramAnnouncements" | "telegramDeliveryVersion" | "supportsThirdPlaceMatch" | "participants" | "rounds" | "thirdPlaceMatch"> & { schemaVersion: number, participants: Record<string, LegacyParticipant>, rounds: Record<string, LegacyRound>, thirdPlaceMatch: LegacyMatch | null }} LegacyEvent
+ */
+
+/**
+ * @param {string} profileId
+ * @param {Partial<LegacyParticipant>} [fields]
+ * @returns {LegacyParticipant}
+ */
 const participant = (profileId, fields = {}) => ({
   profileId,
   loginUid: "",
   username: "",
   displayName: "",
   emojiId: 0,
-  aura: "",
+  aura: "none",
   joinedAtMs: 0,
   state: "active",
   eliminatedRoundIndex: null,
@@ -14,6 +26,11 @@ const participant = (profileId, fields = {}) => ({
   ...fields,
 });
 
+/**
+ * @param {string} matchKey
+ * @param {Partial<LegacyMatch>} [fields]
+ * @returns {LegacyMatch}
+ */
 const match = (matchKey, fields = {}) => ({
   matchKey,
   inviteId: null,
@@ -37,6 +54,10 @@ const match = (matchKey, fields = {}) => ({
   ...fields,
 });
 
+/**
+ * @param {Partial<LegacyEvent>} [fields]
+ * @returns {LegacyEvent}
+ */
 const event = (fields = {}) => ({
   schemaVersion: 1,
   eventId,

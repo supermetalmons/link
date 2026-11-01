@@ -22,10 +22,10 @@ const CANONICAL_OWNER_COLUMNS = `owner.login_uid AS canonical_owner_login_uid,
 export const CANONICAL_OWNED_PROFILE_COLUMNS = `profile.*,
   ${CANONICAL_OWNER_COLUMNS}`;
 
-export const CANONICAL_OWNED_PROFILE_FROM = `FROM profile_login_owners AS owner
-  LEFT JOIN profile_records AS profile
+export const CANONICAL_OWNED_PROFILE_FROM = `FROM profile_login_owners_canonical AS owner
+  LEFT JOIN profile_records_canonical AS profile
     ON profile.profile_id = owner.profile_id
-  LEFT JOIN profile_merge_targets AS mapping
+  LEFT JOIN profile_merge_targets_canonical AS mapping
     ON mapping.source_profile_id = owner.profile_id`;
 
 export function prepareCanonicalOwnedProfileRead(

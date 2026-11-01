@@ -1,3 +1,5 @@
+import { required } from "./fixtures/canonicalData.mjs";
+import { applicationStorageKey } from "../src/session/applicationDataStorage.ts";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
@@ -8,6 +10,16 @@ import {
   resolveNavigationGamesCacheScope,
 } from "../src/services/navigationGamesCache.ts";
 
+/**
+ * @typedef {{parseLogoutSignal(value: unknown): {id: string; generation: string; cleanupMode?: "fast" | "thorough"} | null;
+ * parseSignInSignal(value: unknown): {id: string; tabId: string; profileId: string; loginId: string; generation: string} | null;
+ * parsePendingLogoutWipeMarker(value: unknown): {id: string; generation: string; createdAtMs: number; cleanupMode: "fast" | "thorough"} | null}} LogoutParsers
+ * @typedef {{APPLE_PENDING_INTENTS_STORAGE_KEY: string; APPLE_PENDING_INTENT_MAX_AGE_MS: number;
+ * parsePendingAppleIntentRecordsFromStorage(store: Pick<Storage, "getItem">): Array<{state: string; intentId: string; consentSource: string; createdAtMs: number; expiresAtMs: number}>}} AppleParsers
+ */
+/** @overload @param {"src/session/logoutOrchestrator.ts"} file @param {Array<keyof LogoutParsers>} names @returns {LogoutParsers} */
+/** @overload @param {"src/connection/appleConnection.ts"} file @param {Array<keyof AppleParsers>} names @returns {AppleParsers} */
+/** @param {string} file @param {string[]} names @returns {LogoutParsers | AppleParsers} */
 function declarations(file, names) {
   const source = ts.createSourceFile(
     file,
@@ -26,22 +38,31 @@ function declarations(file, names) {
   const compiled = ts.transpileModule(selected.join("\n"), {
     compilerOptions: { target: ts.ScriptTarget.ES2022 },
   }).outputText;
-  return new Function(`${compiled}\nreturn { ${names.join(", ")} };`)();
+  const load =
+    /** @type {(key: typeof applicationStorageKey) => LogoutParsers | AppleParsers} */ (
+      new Function(
+        "applicationStorageKey",
+        `${compiled}\nreturn { ${names.join(", ")} };`,
+      )
+    );
+  return load(applicationStorageKey);
 }
 
-test("navigation persistence keeps future and exact-TTL rows, legacy item decoding, and existing invalid-row cleanup", (t) => {
+test("navigation persistence keeps canonical rows at TTL boundaries and rejects legacy item shapes", (t) => {
   const previous = Object.getOwnPropertyDescriptor(globalThis, "localStorage");
+  /** @type {Map<string, string>} */
   const values = new Map();
+  /** @type {Array<["set", string, string] | ["remove", string]>} */
   const mutations = [];
   Object.defineProperty(globalThis, "localStorage", {
     configurable: true,
     value: {
-      getItem: (key) => values.get(key) ?? null,
-      setItem: (key, value) => {
+      getItem: (/** @type {string} */ key) => values.get(key) ?? null,
+      setItem: (/** @type {string} */ key, /** @type {string} */ value) => {
         mutations.push(["set", key, value]);
         values.set(key, value);
       },
-      removeItem: (key) => {
+      removeItem: (/** @type {string} */ key) => {
         mutations.push(["remove", key]);
         values.delete(key);
       },
@@ -50,7 +71,9 @@ test("navigation persistence keeps future and exact-TTL rows, legacy item decodi
   const now = 1_800_000_000_000;
   t.mock.method(Date, "now", () => now);
   const scope = resolveNavigationGamesCacheScope("persistence-boundary");
-  const key = `navigationGamesTopCache:v3:${scope.scopeKey}`;
+  const key = applicationStorageKey(
+    `navigationGamesTopCache:${required(scope).scopeKey}`,
+  );
   const ttl = 365 * 24 * 60 * 60 * 1000;
   const game = {
     id: "game",
@@ -58,8 +81,15 @@ test("navigation persistence keeps future and exact-TTL rows, legacy item decodi
     inviteId: "invite",
     kind: "direct",
     status: "waiting",
-    opponentEmoji: "7",
+    opponentEmoji: 7,
     opponentName: " First ",
+    sortBucket: 30,
+    listSortAtMs: 1,
+    hostLoginId: null,
+    guestLoginId: null,
+    opponentProfileId: null,
+    automatchStateHint: null,
+    isPendingAutomatch: false,
   };
   try {
     for (const updatedAtMs of [now + 1_000, now - ttl]) {
@@ -70,14 +100,17 @@ test("navigation persistence keeps future and exact-TTL rows, legacy item decodi
           game,
           { ...game, opponentName: "second" },
           { ...game, id: "optimistic", isOptimistic: true },
+          { ...game, id: "old-shape", opponentEmoji: "7" },
           null,
         ],
       });
       values.set(key, raw);
       const result = readNavigationGamesCacheSnapshot(scope);
       assert.equal(result.topGames.length, 1);
-      assert.equal(result.topGames[0].opponentName, " First ");
-      assert.equal(result.topGames[0].opponentEmoji, 7);
+      const retained = required(result.topGames[0]);
+      assert.ok(retained.entityType === "game");
+      assert.equal(retained.opponentName, " First ");
+      assert.equal(retained.opponentEmoji, 7);
       assert.equal(values.get(key), raw);
       assert.deepEqual(mutations, []);
     }
@@ -101,9 +134,9 @@ test("navigation persistence keeps future and exact-TTL rows, legacy item decodi
       assert.equal(values.has(key), false);
     }
   } finally {
-    clearNavigationGamesRuntimeCacheScope(scope.scopeKey);
+    clearNavigationGamesRuntimeCacheScope(required(scope).scopeKey);
     if (previous) Object.defineProperty(globalThis, "localStorage", previous);
-    else delete globalThis.localStorage;
+    else Reflect.deleteProperty(globalThis, "localStorage");
   }
 });
 
@@ -134,7 +167,7 @@ test("logout readers retain legacy timestamp coercion, field spelling, and their
         cleanupMode: "unsupported",
       }),
     ),
-    { id: " id ", generation: " generation ", cleanupMode: undefined },
+    { id: " id ", generation: " generation " },
   );
   assert.deepEqual(
     api.parseSignInSignal(
@@ -190,7 +223,7 @@ test("logout readers retain legacy timestamp coercion, field spelling, and their
   );
 });
 
-test("Apple pending-intent parsing preserves numeric-string times, age boundaries and the whole-read fallback", (t) => {
+test("Apple pending-intent parsing accepts exact timestamps and rejects numeric strings and missing fields", (t) => {
   const api = declarations("src/connection/appleConnection.ts", [
     "APPLE_PENDING_INTENTS_STORAGE_KEY",
     "APPLE_PENDING_INTENT_MAX_AGE_MS",
@@ -202,11 +235,14 @@ test("Apple pending-intent parsing preserves numeric-string times, age boundarie
   const record = {
     state: " state ",
     intentId: " intent ",
-    createdAtMs: String(now - age),
-    expiresAtMs: String(now + 1000.9),
+    consentSource: "signin",
+    createdAtMs: now - age,
+    expiresAtMs: now + 1000,
   };
   const raw = JSON.stringify([
     record,
+    { ...record, state: "numeric-string", createdAtMs: String(now - age) },
+    { ...record, state: "extra", extra: true },
     { ...record, state: "expired", expiresAtMs: now },
     { ...record, state: "old", createdAtMs: now - age - 1 },
     null,
@@ -214,9 +250,9 @@ test("Apple pending-intent parsing preserves numeric-string times, age boundarie
   ]);
   let reads = 0;
   const storage = {
-    getItem(key) {
+    getItem(/** @type {string} */ key) {
       reads++;
-      assert.equal(key, "appleIntentByStateV1");
+      assert.equal(key, applicationStorageKey("appleIntentByStateV1"));
       return raw;
     },
   };

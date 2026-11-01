@@ -9,7 +9,6 @@ import {
   inviteOpponent,
   inviteProjectionState,
   inviteRatingEvent,
-  inviteRatingWager,
   inviteRematchState,
   inviteTelegramFingerprint,
   inviteTimerEventId,
@@ -26,269 +25,230 @@ import {
   decodeInviteSourceSnapshot,
   normalizeInviteSource,
 } from "../src/inviteSourceD1.ts";
-import {
-  inviteDocumentFixture,
-  retainedInviteSourceFixture,
-} from "./inviteDocumentFixture.ts";
+import { inviteDocumentFixture } from "./inviteDocumentFixture.ts";
+import { agreedWagerFixture } from "./wagerRecordFixture.ts";
 
 const inviteId = "invite-document";
+const paired = inviteDocumentFixture({ hostId: "host", guestId: "guest" });
 
-test("invite document observation preserves source identity and extensions", () => {
-  const source = {
-    hostId: "host",
-    guestId: "guest",
-    extension: { retained: true },
-  };
-  const keys = Reflect.ownKeys(source);
-  const encoded = JSON.stringify(source);
-  assert.equal(readInviteDocument(source), source);
-  assert.deepEqual(Reflect.ownKeys(source), keys);
-  assert.equal(JSON.stringify(source), encoded);
-  assert.ok(readInviteDocument({}));
-  for (const value of [undefined, null, false, 0, "", [], [source]]) {
+test("invite document reads preserve canonical source identity and reject extensions", () => {
+  const encoded = JSON.stringify(paired);
+  assert.equal(readInviteDocument(paired), paired);
+  assert.equal(JSON.stringify(paired), encoded);
+  for (const value of [
+    undefined,
+    null,
+    false,
+    0,
+    "",
+    [],
+    {},
+    { hostId: "host" },
+    { ...paired, extension: { retained: true } },
+  ]) {
     assert.equal(readInviteDocument(value), null);
   }
-  const prototype = { inherited: true };
-  const unusualRoot = Object.assign(Object.create(prototype), source);
-  assert.equal(readInviteDocument(unusualRoot), unusualRoot);
 });
 
-test("canonical participants do not depend on full public metadata validity", () => {
-  const source = inviteDocumentFixture({
-    hostId: "host",
-    guestId: "guest",
-    hostColor: 19,
-    hostRematches: false,
-    guestRematches: [],
-    eventId: { retained: true },
-  });
-  assert.equal(normalizeInviteMetadata(inviteId, source).status, "invalid");
-  const participants = readCanonicalInviteParticipants(source);
-  assert.equal(participants.status, "ok");
-  assert.ok(participants.status === "ok");
-  assert.equal(participants.source, source);
-  assert.equal(inviteMatchesParticipants(source, "guest", "host"), true);
-  assert.equal(inviteOpponent(source, "host"), "guest");
-});
-
-test("participant observations preserve each operation's whitespace and malformed-seat rules", () => {
-  for (const guestId of [false, 0, {}, []]) {
-    const source = inviteDocumentFixture({ hostId: " host ", guestId });
-    assert.deepEqual(inviteMutationParticipants(source), {
-      hostId: " host ",
-      guestId: "",
-    });
-    assert.deepEqual(inviteTrimmedParticipants(source), {
-      hostId: "host",
-      guestId: "",
-    });
+test("participant reads require complete valid metadata", () => {
+  for (const patch of [
+    { hostColor: 19 },
+    { hostRematches: false },
+    { guestRematches: [] },
+    { eventId: { retained: true } },
+  ]) {
+    const source = { ...paired, ...patch };
+    assert.equal(normalizeInviteMetadata(inviteId, source).status, "invalid");
     assert.equal(readCanonicalInviteParticipants(source).status, "invalid");
-    assert.equal(inviteMatchesParticipants(source, "host", "guest"), false);
   }
-  for (const guestId of [undefined, null]) {
-    const source = inviteDocumentFixture({ hostId: "host", guestId });
-    const result = readCanonicalInviteParticipants(source);
-    assert.ok(result.status === "ok");
-    assert.equal(result.guestId, null);
+  const participants = readCanonicalInviteParticipants(paired);
+  assert.ok(participants.status === "ok");
+  assert.equal(participants.source, paired);
+  assert.equal(inviteMatchesParticipants(paired, "guest", "host"), true);
+  assert.equal(inviteOpponent(paired, "host"), "guest");
+});
+
+test("participant reads reject malformed seats without normalizing IDs", () => {
+  for (const guestId of [undefined, false, 0, {}, [], " guest ", "host"]) {
+    assert.equal(
+      readCanonicalInviteParticipants({ ...paired, guestId }).status,
+      "invalid",
+    );
   }
   for (const hostId of [" host ", "a/b", "a".repeat(129), "\ud800"]) {
-    assert.equal(readCanonicalInviteParticipants({ hostId }).status, "invalid");
+    assert.equal(
+      readCanonicalInviteParticipants({ ...paired, hostId }).status,
+      "invalid",
+    );
   }
-  assert.deepEqual(inviteHistoricalParticipants(inviteDocumentFixture({})), {
-    hostId: "undefined",
-    guestId: "undefined",
-  });
-});
-
-test("password protection retains own-property presence rather than truthiness", () => {
-  for (const password of [undefined, null, false, 0, ""]) {
-    const result = readCanonicalInviteParticipants({
-      hostId: "host",
-      password,
-    });
-    assert.ok(result.status === "ok");
-    assert.equal(result.passwordProtected, true);
-  }
-  const inherited = Object.assign(Object.create({ password: "inherited" }), {
+  const pending = inviteDocumentFixture({ hostId: "host" });
+  assert.deepEqual(inviteMutationParticipants(pending), {
     hostId: "host",
+    guestId: "",
   });
-  const result = readCanonicalInviteParticipants(inherited);
-  assert.ok(result.status === "ok");
-  assert.equal(result.passwordProtected, false);
+  assert.deepEqual(inviteTrimmedParticipants(pending), {
+    hostId: "host",
+    guestId: "",
+  });
+  assert.deepEqual(inviteHistoricalParticipants(pending), {
+    hostId: "host",
+    guestId: null,
+  });
 });
 
-test("presentation rematches retain bytes and spread extensions without gating on metadata", () => {
+test("password protection follows the canonical invite kind", () => {
+  const manual = readCanonicalInviteParticipants(paired);
+  const automatch = readCanonicalInviteParticipants(
+    inviteDocumentFixture({ hostId: "host", password: "private" }),
+  );
+  assert.ok(manual.status === "ok" && automatch.status === "ok");
+  assert.equal(manual.passwordProtected, false);
+  assert.equal(automatch.passwordProtected, true);
+  for (const password of [undefined, false, 0, ""]) {
+    assert.equal(readInviteDocument({ ...paired, password }), null);
+  }
+});
+
+test("presentation and mutation views retain canonical rematch series", () => {
   const source = inviteDocumentFixture({
-    hostId: "host",
-    guestId: "guest",
-    hostRematches: "2;1;2;x",
-    guestRematches: false,
-    extra: 7,
+    ...paired,
+    hostRematches: { state: "ended", indices: [1, 2] },
+    guestRematches: { state: "open", indices: [1] },
   });
   const read = readCanonicalInviteParticipants(source);
   assert.ok(read.status === "ok");
   assert.deepEqual(presentationInviteView(read), {
     hostId: "host",
     guestId: "guest",
-    hostRematches: "2;1;2;x",
-    guestRematches: undefined,
-    extra: 7,
+    hostRematches: source.hostRematches,
+    guestRematches: source.guestRematches,
   });
   assert.deepEqual(inviteRematchState(source), {
-    hostRematches: "2;1;2;x",
-    guestRematches: undefined,
+    hostRematches: source.hostRematches,
+    guestRematches: source.guestRematches,
     hostColor: "white",
   });
+  for (const hostRematches of [
+    "1;2x",
+    "2;1",
+    { state: "open", indices: [2, 1] },
+  ])
+    assert.equal(readInviteDocument({ ...source, hostRematches }), null);
 });
 
-test("event observations retain distinct timer and rating policies", () => {
-  for (const eventId of ["", "   ", " event-one "]) {
-    const source = inviteDocumentFixture({ eventOwned: true, eventId });
-    assert.equal(inviteTimerEventId(source), eventId);
-    assert.equal(inviteIsEventOwned(source), true);
-    assert.deepEqual(inviteRatingEvent(source), {
-      eventOwned: true,
-      isEventMatch: true,
-      eventId: eventId.trim() || null,
-    });
-  }
+test("event observations agree on canonical ownership and event identity", () => {
   const source = inviteDocumentFixture({
-    eventOwned: false,
-    eventId: " event-one ",
+    ...paired,
+    kind: "event",
+    eventOwned: true,
+    eventId: "event-one",
+    eventRoundIndex: 0,
+    eventMatchKey: "0_0",
   });
+  assert.equal(inviteTimerEventId(source), "event-one");
   assert.equal(inviteIsEventOwned(source), true);
-  assert.equal(inviteTimerEventId(source), null);
   assert.deepEqual(inviteRatingEvent(source), {
-    eventOwned: false,
+    eventOwned: true,
     isEventMatch: true,
     eventId: "event-one",
   });
+  assert.equal(inviteTimerEventId(paired), null);
+  assert.deepEqual(inviteRatingEvent(paired), {
+    eventOwned: false,
+    isEventMatch: false,
+    eventId: null,
+  });
+  for (const eventId of ["", "   ", " event-one "])
+    assert.equal(readInviteDocument({ ...source, eventId }), null);
 });
 
-test("projection observations keep non-finite stored numbers and strict delivery versions", () => {
-  for (const automatchCanceledAt of [NaN, Infinity, -1]) {
-    assert.ok(
-      Object.is(
-        inviteProjectionState(inviteDocumentFixture({ automatchCanceledAt }))
-          .automatchCanceledAt,
-        automatchCanceledAt,
-      ),
+test("projection observations accept only canonical timestamps and delivery versions", () => {
+  const source = inviteDocumentFixture({
+    hostId: "host",
+    kind: "automatch",
+    automatchStateHint: "canceled",
+    automatchCanceledAt: 10,
+    telegramDeliveryVersion: 2,
+  });
+  assert.deepEqual(inviteProjectionState(source), {
+    hostId: "host",
+    guestId: "",
+    automatchStateHint: "canceled",
+    automatchCanceledAt: 10,
+    telegramDeliveryVersion: 2,
+  });
+  for (const automatchCanceledAt of [NaN, Infinity, -1, "1"])
+    assert.equal(readInviteDocument({ ...source, automatchCanceledAt }), null);
+  for (const telegramDeliveryVersion of [1, "2"])
+    assert.equal(
+      readInviteDocument({ ...source, telegramDeliveryVersion }),
+      null,
     );
-  }
-  assert.equal(
-    inviteProjectionState(
-      inviteDocumentFixture({
-        automatchCanceledAt: "1",
-        telegramDeliveryVersion: "2",
-      }),
-    ).automatchCanceledAt,
-    null,
-  );
-  assert.equal(
-    inviteProjectionState(
-      inviteDocumentFixture({ telegramDeliveryVersion: "2" }),
-    ).telegramDeliveryVersion,
-    null,
-  );
 });
 
-test("Telegram fingerprint uses raw guest truthiness and preserves source extension ordering", () => {
+test("Telegram fingerprints preserve source bytes with canonical guest identity", () => {
   const source = { lifecycle: "pending", extra: { second: 2, first: 1 } };
-  for (const guestId of [
-    undefined,
-    null,
-    false,
-    0,
-    "",
-    " guest ",
-    { legacy: true },
-    [],
-  ]) {
-    const invite = inviteDocumentFixture({ guestId });
+  for (const guestId of [null, "guest"]) {
+    const invite = inviteDocumentFixture({ hostId: "host", guestId });
     assert.equal(
       inviteTelegramFingerprint(source, invite),
-      JSON.stringify({ source, guestId: guestId || null }),
+      JSON.stringify({ source, guestId }),
     );
   }
 });
 
-test("rating wagers retain numeric coercion and exception behavior", () => {
-  const source = inviteDocumentFixture({
-    wagers: { match: { agreed: { material: " dust ", count: "2.4" } } },
-  });
-  assert.deepEqual(inviteRatingWager(source, "match"), {
-    material: "dust",
-    count: 2.4,
-  });
-  assert.ok(Number.isNaN(inviteRatingWager(source, "missing").count));
-  assert.throws(
-    () =>
-      inviteRatingWager(
-        inviteDocumentFixture({
-          wagers: { match: { agreed: { count: Symbol("invalid") } } },
-        }),
-        "match",
-      ),
-    TypeError,
-  );
+test("rating wager data cannot be retained inside invite documents", () => {
+  for (const wagers of [
+    {},
+    { match: { agreed: { material: " dust ", count: "2.4" } } },
+  ]) {
+    assert.equal(readInviteDocument({ ...paired, wagers }), null);
+    assert.throws(
+      () => normalizeInviteSource({ ...paired, wagers }),
+      /invalid-invite-source-json/,
+    );
+  }
 });
 
-test("manual construction and automatch operation merge preserve wire field ordering", () => {
+test("constructors produce canonical records and operation merges preserve existing owners", () => {
   const manual = createManualInviteDocument({
     version: 2,
     hostId: "host",
     hostColor: "white",
     guestId: null,
   });
-  assert.equal(
-    JSON.stringify(manual),
-    '{"version":2,"hostId":"host","hostColor":"white","guestId":null}',
-  );
+  assert.equal(readInviteDocument(manual), manual);
   const current = inviteDocumentFixture({
-    automatchOperationIds: {
-      host: "old",
-      "invalid/key": "skip",
-      guest: "bad/key",
-      retained: "keep",
-    },
+    hostId: "host",
+    password: "private",
+    automatchOperationIds: { host: "old", guest: "retained" },
   });
-  const merged = mergeInviteAutomatchOperation(manual, current, "host", "new");
-  assert.equal(
-    JSON.stringify(merged),
-    '{"version":2,"hostId":"host","hostColor":"white","guestId":null,"automatchOperationIds":{"host":"new","retained":"keep"}}',
+  const before = structuredClone(current);
+  const merged = mergeInviteAutomatchOperation(current, current, "host", "new");
+  assert.deepEqual(merged.automatchOperationIds, {
+    host: "new",
+    guest: "retained",
+  });
+  assert.deepEqual(current, before);
+  assert.throws(
+    () => mergeInviteAutomatchOperation(manual, current, "host", "new"),
+    /invalid-invite-operation/,
   );
-  assert.deepEqual(current, {
-    automatchOperationIds: {
-      host: "old",
-      "invalid/key": "skip",
-      guest: "bad/key",
-      retained: "keep",
-    },
-  });
 });
 
-test("storage removes retired root fields before validating their children", () => {
+test("storage rejects retired roots and malformed children before persistence", () => {
   const cyclic: { child?: unknown } = {};
   cyclic.child = cyclic;
-  const source = {
-    hostId: "host",
-    wagers: cyclic,
-    reactions: undefined,
-    matchesWagerResolutions: Symbol("retired"),
-    extra: { retained: true },
-  };
-  assert.deepEqual(normalizeInviteSource(source), {
-    hostId: "host",
-    extra: { retained: true },
-  });
-  assert.throws(
-    () => normalizeInviteSource({ extra: cyclic }),
-    /invalid-invite-source-json/,
-  );
-  assert.throws(
-    () => normalizeInviteSource({ extra: { value: undefined } }),
-    /invalid-invite-source-json/,
-  );
+  for (const patch of [
+    { wagers: cyclic },
+    { reactions: undefined },
+    { matchesWagerResolutions: Symbol("retired") },
+    { extra: cyclic },
+  ])
+    assert.throws(
+      () => normalizeInviteSource({ ...paired, ...patch }),
+      /invalid-invite-source-json/,
+    );
   assert.throws(
     () =>
       decodeInviteSourceSnapshot(inviteId, {
@@ -297,90 +257,49 @@ test("storage removes retired root fields before validating their children", () 
       }),
     /invite-source-corrupt/,
   );
+  assert.deepEqual(normalizeInviteSource(paired), paired);
 });
 
-test("storage retains sparse arrays and root prototype behavior", () => {
+test("storage rejects sparse rematch arrays and unknown root fields", () => {
   const sparse = new Array(2);
-  sparse[1] = null;
-  const source = Object.assign(Object.create({ inherited: "not-copied" }), {
-    sparse,
-  });
-  const normalized = normalizeInviteSource(source);
-  assert.deepEqual(normalized, { sparse });
-  assert.equal(JSON.stringify(normalized), '{"sparse":[null,null]}');
-  assert.throws(
-    () => normalizeInviteSource({ sparse: [undefined, null] }),
-    /invalid-invite-source-json/,
-  );
-  assert.throws(
-    () => normalizeInviteSource({ nested: new Date() }),
-    /invalid-invite-source-json/,
-  );
+  sparse[1] = 2;
+  for (const source of [
+    { ...paired, hostRematches: { state: "open", indices: sparse } },
+    { ...paired, sparse },
+    { ...paired, nested: new Date() },
+  ])
+    assert.throws(
+      () => normalizeInviteSource(source),
+      /invalid-invite-source-json/,
+    );
 });
 
-test("wager composition replaces retained wager fields and keeps metadata private", async () => {
+test("wager composition keeps metadata separate and public output excludes private fields", async () => {
   const source = inviteDocumentFixture({
     hostId: "host",
     guestId: "guest",
-    hostColor: "white",
     password: "private",
-    wagers: { stale: true },
-    matchesWagerResolutions: { stale: true },
-    extension: { retained: true },
   });
+  const before = structuredClone(source);
+  const wager = agreedWagerFixture();
   const states = [
-    {
-      inviteId,
-      matchId: inviteId,
-      revision: 1,
-      wager: {
-        agreed: {
-          material: "dust",
-          count: 2,
-          proposerId: "host",
-          accepterId: "guest",
-        },
-      },
-      resolutionMarker: true,
-    },
+    { inviteId, matchId: inviteId, revision: 1, wager, resolutionMarker: true },
   ];
   const composed = composeInviteWagerSource(source, states);
-  assert.notEqual(composed, source);
-  assert.equal(
-    JSON.stringify(composed),
-    JSON.stringify({
-      hostId: "host",
-      guestId: "guest",
-      hostColor: "white",
-      password: "private",
-      extension: { retained: true },
-      wagers: { [inviteId]: states[0].wager },
-      matchesWagerResolutions: { [inviteId]: true },
-    }),
-  );
+  assert.deepEqual(composed, {
+    invite: source,
+    wagers: { [inviteId]: wager },
+    resolutionMarkers: { [inviteId]: true },
+  });
   const publicWagers = await normalizeInviteWagers(inviteId, composed);
   assert.equal(publicWagers.status, "ok");
   assert.equal(JSON.stringify(publicWagers).includes("private"), false);
-  assert.equal(JSON.stringify(publicWagers).includes("extension"), false);
-  assert.deepEqual(composeInviteWagerSource(source, states, true), {
-    hostId: "host",
-    guestId: "guest",
-    hostColor: "white",
-    password: "private",
-    extension: { retained: true },
-    wagers: true,
-    matchesWagerResolutions: true,
-  });
-  assert.deepEqual(source.wagers, { stale: true });
+  assert.deepEqual(source, before);
 });
 
-test("retained malformed source fixtures keep invalid distinct from missing", () => {
-  for (const source of [undefined, null, false, 0, "legacy", []]) {
-    const retained = retainedInviteSourceFixture(source);
-    assert.equal(composeInviteWagerSource(retained, []), source);
-    assert.equal(
-      normalizeInviteMetadata(inviteId, retained).status,
-      source === null || source === undefined ? "missing" : "invalid",
-    );
-  }
+test("missing invite metadata remains distinct from malformed raw records", () => {
+  assert.equal(composeInviteWagerSource(null, []), null);
+  assert.equal(normalizeInviteMetadata(inviteId, null).status, "missing");
+  for (const source of [false, 0, "legacy", [], {}])
+    assert.equal(normalizeInviteMetadata(inviteId, source).status, "invalid");
 });

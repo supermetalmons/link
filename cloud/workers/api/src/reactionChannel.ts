@@ -65,7 +65,7 @@ type StoredReaction = {
 
 function isReactionSocket(socket: WebSocket): boolean {
   const channel = socketAttachmentChannel(readSocketAttachment(socket));
-  return channel === undefined || channel === "reaction";
+  return channel === "reaction";
 }
 
 export type InviteReactionPublishResult =
@@ -237,7 +237,7 @@ export class ReactionChannel {
     const reactions = Object.fromEntries<StoredReactionDocument>(
       this.ctx.storage.sql
         .exec<StoredReaction>(
-          "SELECT sender_uid, reaction_json FROM latest_reactions ORDER BY sender_uid",
+          "SELECT sender_uid, reaction_json FROM latest_reactions_canonical ORDER BY sender_uid",
         )
         .toArray()
         .map((row) => [
@@ -289,7 +289,7 @@ export class ReactionChannel {
     const serialized = JSON.stringify(normalized);
     const [stored] = this.ctx.storage.sql
       .exec<StoredReaction>(
-        "SELECT sender_uid, reaction_json FROM latest_reactions WHERE sender_uid = ?",
+        "SELECT sender_uid, reaction_json FROM latest_reactions_canonical WHERE sender_uid = ?",
         senderUid,
       )
       .toArray();
@@ -301,14 +301,14 @@ export class ReactionChannel {
     } else if (
       this.ctx.storage.sql
         .exec<{ count: number }>(
-          "SELECT COUNT(*) AS count FROM latest_reactions",
+          "SELECT COUNT(*) AS count FROM latest_reactions_canonical",
         )
         .one().count >= 2
     ) {
       return "participant-limit";
     }
     this.ctx.storage.sql.exec(
-      "INSERT INTO latest_reactions (sender_uid, reaction_json) VALUES (?, ?) ON CONFLICT(sender_uid) DO UPDATE SET reaction_json = excluded.reaction_json",
+      "INSERT INTO latest_reactions_canonical (sender_uid, reaction_json) VALUES (?, ?) ON CONFLICT(sender_uid) DO UPDATE SET reaction_json = excluded.reaction_json",
       senderUid,
       serialized,
     );

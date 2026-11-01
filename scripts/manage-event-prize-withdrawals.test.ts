@@ -5,6 +5,8 @@ import {
   manageEventPrizeWithdrawals,
   normalizeSnapshot,
   parseArgs,
+  parseManagementArgs,
+  withdrawalManagementTable,
   snapshotDigest,
   summarize,
   type ManagementDependencies,
@@ -61,7 +63,7 @@ test("normalizes withdrawals and hashes canonical key order", () => {
   assert.equal(
     snapshotDigest(snapshot),
     snapshotDigest({
-      event1: Object.fromEntries(Object.entries(snapshot.event1).reverse()),
+      event1: Object.fromEntries(Object.entries(snapshot.event1!).reverse()),
     }),
   );
   assert.deepEqual(canonicalize({ b: 2, a: { d: 4, c: 3 } }), {
@@ -86,6 +88,21 @@ test("management operations are explicit", () => {
   assert.throws(() => parseArgs([]));
   assert.throws(() => parseArgs(["--freeze", "--resume"]));
   assert.throws(() => parseArgs(["--rollback"]));
+  assert.deepEqual(parseManagementArgs(["--status"]), {
+    operation: "status",
+    dataEpoch: 1,
+  });
+  assert.throws(() => parseManagementArgs(["--status", "--data-epoch", "0"]));
+  assert.deepEqual(parseManagementArgs(["--status", "--data-epoch", "1"]), {
+    operation: "status",
+    dataEpoch: 1,
+  });
+  assert.throws(() => withdrawalManagementTable(0 as never));
+  assert.equal(
+    withdrawalManagementTable(1),
+    "event_prize_withdrawals_canonical",
+  );
+  assert.throws(() => parseManagementArgs(["--freeze", "--data-epoch", "2"]));
 });
 
 test("freezes and resumes D1 storage idempotently", () => {
@@ -112,7 +129,7 @@ test("status is read-only", () => {
   const state = dependencies({ storageMode: "d1", previousStorageMode: null });
   manageEventPrizeWithdrawals("status", state.value);
   assert.equal(state.updates, 0);
-  assert.match(state.logs[0], /"storageMode":"d1"/);
+  assert.match(state.logs[0]!, /"storageMode":"d1"/);
 });
 
 test("rejects malformed identities and statuses", () => {

@@ -79,7 +79,7 @@ export const useReactionActions = ({
           const responseStickerId =
             STICKER_ID_WHITELIST[
               Math.floor(Math.random() * STICKER_ID_WHITELIST.length)
-            ];
+            ]!;
           return () => {
             showVideoReaction(
               isMetadataSideDisplayedAtOpponentSlot(true),
