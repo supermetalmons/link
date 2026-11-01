@@ -1,7 +1,6 @@
 import { required } from "./fixtures/canonicalData.mjs";
 import { applicationStorageKey } from "../src/session/applicationDataStorage.ts";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
 import test from "node:test";
 
 const previousLocalStorage = Object.getOwnPropertyDescriptor(
@@ -27,11 +26,6 @@ Object.defineProperty(globalThis, "localStorage", {
 const { storage } = await import("../src/utils/storage.ts");
 const { withAutomatchOperationLock } =
   await import("../src/connection/automatchOperationLock.ts");
-const connectionSource = readFileSync(
-  new URL("../src/connection/connection.ts", import.meta.url),
-  "utf8",
-);
-
 const OPERATION_KEY = applicationStorageKey(
   "pendingAutomatchOperation:login-uid",
 );
@@ -43,15 +37,6 @@ const VALID_OPERATION = {
   request: { emojiId: 7, aura: "rainbow" },
   resolvedInviteId: null,
   uid: "login-uid",
-};
-
-/** @param {string} start @param {string} end */
-const methodSource = (start, end) => {
-  const startIndex = connectionSource.indexOf(start);
-  const endIndex = connectionSource.indexOf(end, startIndex + start.length);
-  assert.notEqual(startIndex, -1, `missing source marker: ${start}`);
-  assert.notEqual(endIndex, -1, `missing source marker: ${end}`);
-  return connectionSource.slice(startIndex, endIndex);
 };
 
 test.beforeEach(() => values.clear());
@@ -131,39 +116,6 @@ test("rejects malformed pending automatch operations", () => {
   }
 });
 
-test("keeps persisted operations through auth initialization and changes", () => {
-  const source = methodSource(
-    "public subscribeToAuthChanges(",
-    "public getSameProfilePlayerUid(",
-  );
-
-  assert.doesNotMatch(source, /PendingAutomatchOperation/);
-  assert.doesNotMatch(source, /clearPendingAutomatchRequest/);
-});
-
-test("serializes automatch start and cancel through the same user lock", () => {
-  const startSource = methodSource(
-    "public async automatch(",
-    "public async cancelAutomatch(",
-  );
-  const cancelSource = methodSource(
-    "public async cancelAutomatch(",
-    "public async removeWaitingNavigationGame(",
-  );
-
-  for (const [source, apiCall] of /** @type {const} */ ([
-    [startSource, "startAutomatchViaApi("],
-    [cancelSource, "cancelAutomatchViaApi("],
-  ])) {
-    const lockIndex = required(source).indexOf(
-      "withAutomatchOperationLock(user.uid",
-    );
-    const apiIndex = required(source).indexOf(apiCall);
-    assert.notEqual(lockIndex, -1);
-    assert.ok(apiIndex > lockIndex);
-  }
-});
-
 test("executes same-user operations serially through the Web-Lock wrapper", async () => {
   /** @type {Map<string, Promise<void>>} */
   const tails = new Map();
@@ -229,126 +181,4 @@ test("fails closed in browsers without Web Locks", async () => {
     /automatch-coordination-unavailable/,
   );
   assert.equal(didRun, false);
-});
-
-test("retains every successful start until its resolved invite is observed", () => {
-  const startSource = methodSource(
-    "public async automatch(",
-    "public async cancelAutomatch(",
-  );
-  const reconcileSource = methodSource(
-    "private reconcilePendingAutomatchRequest(",
-    "private beginConnectAttempt(",
-  );
-  const clearSource = methodSource(
-    "private clearPendingAutomatchRequest(",
-    "private getPendingAutomatchRequest(",
-  );
-  const connectSource = methodSource(
-    "public connectToGame(",
-    "public tryNavigateWatchOnlyToLatestApprovedMatch(",
-  );
-
-  assert.match(
-    startSource,
-    /if \(!response\.ok\) \{\s*this\.clearPendingAutomatchRequest\(\s*user\.uid,\s*pendingRequest\.operationId,?\s*\);\s*\} else \{\s*storage\.setPendingAutomatchOperation\(user\.uid, \{\s*\.\.\.pendingRequest,\s*resolvedInviteId: response\.inviteId,\s*\}\);\s*\}/,
-  );
-  assert.match(
-    reconcileSource,
-    /const pending = storage\.getPendingAutomatchOperation\(uid\)/,
-  );
-  assert.match(reconcileSource, /withAutomatchOperationLock\(uid/);
-  assert.match(
-    reconcileSource,
-    /pending\.resolvedInviteId === inviteId \|\|\s*pending\.operationId === observedOperationId/,
-  );
-  assert.match(
-    reconcileSource,
-    /this\.clearPendingAutomatchRequest\(uid, pending\.operationId\)/,
-  );
-  assert.match(
-    clearSource,
-    /const stored = storage\.getPendingAutomatchOperation\(uid\);\s*if \(operationId && stored\?\.operationId !== operationId\) return/,
-  );
-  assert.match(
-    connectSource,
-    /this\.reconcilePendingAutomatchRequest\(\s*uid,\s*inviteId,\s*viewer\.automatchOperationId,?\s*\)/,
-  );
-});
-
-test("keeps queued retries on one operation until resolved-invite cleanup", () => {
-  const pendingSource = methodSource(
-    "private getPendingAutomatchRequest(",
-    "private reconcilePendingAutomatchRequest(",
-  );
-  const startSource = methodSource(
-    "public async automatch(",
-    "public async cancelAutomatch(",
-  );
-
-  assert.ok(
-    pendingSource.indexOf("return stored") <
-      pendingSource.indexOf("crypto.randomUUID()"),
-  );
-  assert.match(
-    startSource,
-    /storage\.setPendingAutomatchOperation\(user\.uid, \{\s*\.\.\.pendingRequest,\s*resolvedInviteId: response\.inviteId,\s*\}\)/,
-  );
-
-  storage.setPendingAutomatchOperation(VALID_OPERATION.uid, VALID_OPERATION);
-  /** @type {string[]} */
-  const seenOperationIds = [];
-  for (let index = 0; index < 8; index += 1) {
-    const pending = storage.getPendingAutomatchOperation(VALID_OPERATION.uid);
-    seenOperationIds.push(required(pending).operationId);
-    storage.setPendingAutomatchOperation(VALID_OPERATION.uid, {
-      ...required(pending),
-      resolvedInviteId: "auto_resolved",
-    });
-  }
-  assert.deepEqual(new Set(seenOperationIds), new Set([OPERATION_ID]));
-});
-
-test("clears only the captured operation after a successful cancel", () => {
-  const source = methodSource(
-    "public async cancelAutomatch(",
-    "public async removeWaitingNavigationGame(",
-  );
-
-  assert.match(source, /storage\.getPendingAutomatchOperation\(user\.uid\)/);
-  assert.match(source, /const operationId = pending\?\.operationId \?\? null/);
-  assert.match(
-    source,
-    /if \(response\.ok && operationId\) \{\s*this\.clearPendingAutomatchRequest\(user\.uid, operationId\);\s*\}/,
-  );
-});
-
-test("persists a new operation before starting the API request", () => {
-  const pendingSource = methodSource(
-    "private getPendingAutomatchRequest(",
-    "private reconcilePendingAutomatchRequest(",
-  );
-  const startSource = methodSource(
-    "public async automatch(",
-    "public async cancelAutomatch(",
-  );
-
-  const persistIndex = pendingSource.indexOf(
-    "storage.setPendingAutomatchOperation(uid, operation)",
-  );
-  const unresolvedIndex = pendingSource.indexOf("resolvedInviteId: null");
-  const pendingReturnIndex = pendingSource.indexOf("return operation");
-  const pendingReadIndex = startSource.indexOf(
-    "this.getPendingAutomatchRequest(user.uid)",
-  );
-  const apiIndex = startSource.indexOf("startAutomatchViaApi(");
-
-  assert.notEqual(unresolvedIndex, -1);
-  assert.notEqual(persistIndex, -1);
-  assert.notEqual(pendingReturnIndex, -1);
-  assert.ok(unresolvedIndex < persistIndex);
-  assert.ok(persistIndex < pendingReturnIndex);
-  assert.notEqual(pendingReadIndex, -1);
-  assert.notEqual(apiIndex, -1);
-  assert.ok(pendingReadIndex < apiIndex);
 });

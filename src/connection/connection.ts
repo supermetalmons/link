@@ -54,7 +54,7 @@ import {
   ProfileEventPrizes,
   RemoveWaitingNavigationGameResult,
 } from "./connectionModels";
-import { storage, type PendingAutomatchOperation } from "../utils/storage";
+import { storage } from "../utils/storage";
 import { withAutomatchOperationLock } from "./automatchOperationLock";
 import {
   MoveDelivery,
@@ -251,6 +251,7 @@ import { startNavigationGamesPolling } from "./navigationGamesPoller";
 import { EventClient, type EventSyncResponse } from "./eventClient";
 import { WagerClient, type WagerOwner } from "./wagerClient";
 import { ProfileClient } from "./profileClient";
+import { AutomatchClient } from "./automatchClient";
 import type { MatchRuntimeContext, InviteRole } from "./matchRuntimeContext";
 import { showNotificationBanner } from "../ui/identity/profileUiPort";
 import { createPollingAuthTokenProvider } from "./pollingAuthTokenProvider";
@@ -267,7 +268,6 @@ const getStoredAuthPresentation = (): {
 
 const NAVIGATION_GAMES_POLL_INTERVAL_MS = 5_000;
 const NAVIGATION_GAMES_MAX_CONSECUTIVE_FAILURES = 3;
-const AUTOMATCH_OPERATION_RETENTION_MS = 7 * 24 * 60 * 60 * 1_000;
 
 export type EventScheduleTimezone = SharedEventScheduleTimezone;
 export type { EventCreateDateTimePayload } from "@mons/shared/events";
@@ -287,6 +287,7 @@ class Connection {
   private readonly eventClient: EventClient;
   private readonly wagerClient: WagerClient;
   private readonly profileClient: ProfileClient;
+  private readonly automatchClient: AutomatchClient;
 
   private inviteMetadataState: InviteMetadataState | null = null;
   private inviteMetadataViewer: InviteMetadataViewer | null = null;
@@ -368,59 +369,6 @@ class Connection {
       return;
     }
     console.log(event, payload);
-  }
-
-  private clearPendingAutomatchRequest(
-    uid: string,
-    operationId?: string,
-  ): void {
-    const stored = storage.getPendingAutomatchOperation(uid);
-    if (operationId && stored?.operationId !== operationId) return;
-    storage.setPendingAutomatchOperation(uid, null);
-  }
-
-  private getPendingAutomatchRequest(uid: string): PendingAutomatchOperation {
-    const nowMs = Date.now();
-    const stored = storage.getPendingAutomatchOperation(uid);
-    if (
-      stored &&
-      nowMs >= stored.createdAtMs &&
-      nowMs - stored.createdAtMs <= AUTOMATCH_OPERATION_RETENTION_MS
-    ) {
-      return stored;
-    }
-    this.clearPendingAutomatchRequest(uid);
-    const operation: PendingAutomatchOperation = {
-      createdAtMs: nowMs,
-      operationId: crypto.randomUUID(),
-      request: {
-        emojiId: getPlayersEmojiId(),
-        aura: storage.getPlayerEmojiAura("none"),
-      },
-      resolvedInviteId: null,
-      uid,
-    };
-    storage.setPendingAutomatchOperation(uid, operation);
-    return operation;
-  }
-
-  private reconcilePendingAutomatchRequest(
-    uid: string,
-    inviteId: string,
-    observedOperationId: string | null,
-  ): void {
-    void withAutomatchOperationLock(uid, async () => {
-      const pending = storage.getPendingAutomatchOperation(uid);
-      if (
-        pending &&
-        (pending.resolvedInviteId === inviteId ||
-          pending.operationId === observedOperationId)
-      ) {
-        this.clearPendingAutomatchRequest(uid, pending.operationId);
-      }
-    }).catch((error) => {
-      console.error("Failed to clear completed automatch operation", error);
-    });
   }
 
   private beginConnectAttempt(): number {
@@ -824,6 +772,23 @@ class Connection {
   }
 
   constructor() {
+    this.automatchClient = new AutomatchClient({
+      ensureAuthenticated: () => this.ensureAuthenticated(),
+      getCurrentUser: () => this.auth.currentUser,
+      getUserBoundAuthTokenProvider: (uid) =>
+        this.getUserBoundAuthTokenProvider(uid),
+      storage,
+      getPlayerPresentation: () => ({
+        emojiId: getPlayersEmojiId(),
+        aura: storage.getPlayerEmojiAura("none"),
+      }),
+      withOperationLock: withAutomatchOperationLock,
+      api: { startAutomatchViaApi, cancelAutomatchViaApi },
+      seedGameBootstrap: seedAutomatchGameBootstrap,
+      notifyNavigationGamesChanged: () => this.notifyNavigationGamesChanged(),
+      now: () => Date.now(),
+      createOperationId: () => crypto.randomUUID(),
+    });
     this.profileClient = new ProfileClient({
       ensureAuthenticated: () => this.ensureAuthenticated(),
       getAuthApiToken: this.getAuthApiToken,
@@ -2209,77 +2174,12 @@ class Connection {
     }
   }
 
-  public async automatch(): Promise<StartAutomatchResponse> {
-    try {
-      await this.ensureAuthenticated();
-      const user = this.auth.currentUser;
-      if (!user) {
-        throw new Error("Failed to authenticate user");
-      }
-      return await withAutomatchOperationLock(user.uid, async () => {
-        const tokenProvider = this.getUserBoundAuthTokenProvider(user.uid);
-        const pendingRequest = this.getPendingAutomatchRequest(user.uid);
-        const response = await startAutomatchViaApi(
-          pendingRequest.request,
-          tokenProvider,
-          pendingRequest.operationId,
-        );
-        tokenProvider.assertCurrentUser();
-        if (!response.ok) {
-          this.clearPendingAutomatchRequest(
-            user.uid,
-            pendingRequest.operationId,
-          );
-        } else {
-          storage.setPendingAutomatchOperation(user.uid, {
-            ...pendingRequest,
-            resolvedInviteId: response.inviteId,
-          });
-        }
-        if (response.ok && response.mode === "matched" && response.bootstrap) {
-          seedAutomatchGameBootstrap({
-            inviteId: response.inviteId,
-            operationId: pendingRequest.operationId,
-            user,
-            bootstrap: response.bootstrap,
-          });
-        }
-        this.notifyNavigationGamesChanged();
-        if (response.ok && response.mode === "matched") {
-          const { bootstrap: _bootstrap, ...result } = response;
-          return result;
-        }
-        return response;
-      });
-    } catch (error) {
-      console.error("Error calling automatch:", error);
-      throw error;
-    }
+  public automatch(): Promise<StartAutomatchResponse> {
+    return this.automatchClient.automatch();
   }
 
-  public async cancelAutomatch(): Promise<CancelAutomatchResponse> {
-    try {
-      await this.ensureAuthenticated();
-      const user = this.auth.currentUser;
-      if (!user) {
-        throw new Error("Failed to authenticate user");
-      }
-      return await withAutomatchOperationLock(user.uid, async () => {
-        const pending = storage.getPendingAutomatchOperation(user.uid);
-        const operationId = pending?.operationId ?? null;
-        const tokenProvider = this.getUserBoundAuthTokenProvider(user.uid);
-        const response = await cancelAutomatchViaApi(tokenProvider);
-        tokenProvider.assertCurrentUser();
-        if (response.ok && operationId) {
-          this.clearPendingAutomatchRequest(user.uid, operationId);
-        }
-        this.notifyNavigationGamesChanged();
-        return response;
-      });
-    } catch (error) {
-      console.error("Error canceling automatch:", error);
-      throw error;
-    }
+  public cancelAutomatch(): Promise<CancelAutomatchResponse> {
+    return this.automatchClient.cancelAutomatch();
   }
 
   public async removeWaitingNavigationGame(
@@ -3267,7 +3167,7 @@ class Connection {
             inviteId,
             this.auth.currentUser!,
             selection,
-            storage.getPendingAutomatchOperation(uid)?.operationId,
+            this.automatchClient.getPendingOperationId(uid),
           )
         : null;
       firstRead = false;
@@ -3364,7 +3264,7 @@ class Connection {
         let workingInvite: InviteMetadataSnapshot = {
           ...metadataState.snapshot,
         };
-        this.reconcilePendingAutomatchRequest(
+        this.automatchClient.reconcilePendingRequest(
           uid,
           inviteId,
           viewer.automatchOperationId,
@@ -3413,7 +3313,7 @@ class Connection {
           workingInvite = {
             ...metadataState.snapshot,
           };
-          this.reconcilePendingAutomatchRequest(
+          this.automatchClient.reconcilePendingRequest(
             uid,
             inviteId,
             viewer.automatchOperationId,
@@ -3790,7 +3690,7 @@ class Connection {
     }
     const next = state.snapshot;
     this.latestInvite = { ...next };
-    this.reconcilePendingAutomatchRequest(
+    this.automatchClient.reconcilePendingRequest(
       context.loginUid,
       context.inviteId,
       this.inviteMetadataViewer?.automatchOperationId ?? null,

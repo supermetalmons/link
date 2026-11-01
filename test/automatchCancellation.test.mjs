@@ -1,5 +1,6 @@
 import { required, canonicalMatch } from "./fixtures/canonicalData.mjs";
 import { createConnectionWagerClientHarness } from "./wagerClientHarness.mjs";
+import { createAutomatchObservationClient } from "./automatchClientHarness.mjs";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
@@ -7,7 +8,6 @@ import ts from "typescript";
 import { moveDeliveryStorageKey } from "../src/connection/moveDelivery.ts";
 import { isAutoInviteId } from "../cloud/runtime/shared/ids.js";
 import { rematchSeriesEnded } from "../cloud/runtime/shared/rematches.js";
-import { withAutomatchOperationLock } from "../src/connection/automatchOperationLock.ts";
 import {
   InviteMetadataState,
   rematchSeriesEqual,
@@ -33,8 +33,6 @@ const readClass = (
 
 const connection = readClass("../src/connection/connection.ts", "Connection");
 const methods = [
-  "clearPendingAutomatchRequest",
-  "reconcilePendingAutomatchRequest",
   "beginConnectAttempt",
   "isConnectAttemptActive",
   "isContextActive",
@@ -98,7 +96,7 @@ const canceledInvite = { ...pendingInvite, automatchStateHint: "canceled" };
 
 /**
  * @typedef {typeof import("../src/connection/connection.ts").connection} Connection
- * @typedef {Parameters<typeof createConnectionWagerClientHarness>[0] & {connectToGame: Connection["connectToGame"], observerRegistry?: import("../src/connection/observerRegistry.ts").ObserverRegistry, wagerClient?: import("../src/connection/wagerClient.ts").WagerClient}} FixtureConnection
+ * @typedef {Parameters<typeof createConnectionWagerClientHarness>[0] & {connectToGame: Connection["connectToGame"], observerRegistry?: import("../src/connection/observerRegistry.ts").ObserverRegistry, wagerClient?: import("../src/connection/wagerClient.ts").WagerClient, automatchClient?: import("../src/connection/automatchClient.ts").AutomatchClient}} FixtureConnection
  * @param {InviteFixture} invite
  * @param {() => void} [onMatchRead]
  */
@@ -173,7 +171,6 @@ function harness(invite, onMatchRead = () => {}) {
         }
         stop() {}
       },
-      withAutomatchOperationLock,
       isAutoInviteId,
       rematchSeriesEnded,
       ref: (/** @type {unknown} */ _db, /** @type {string} */ path) => path,
@@ -297,6 +294,7 @@ function harness(invite, onMatchRead = () => {}) {
   });
   instance.observerRegistry = new Registry(noop);
   instance.wagerClient = createConnectionWagerClientHarness(instance).client;
+  instance.automatchClient = createAutomatchObservationClient(storage);
   const settle = async () => {
     await new Promise(setImmediate);
     assert.deepEqual(events.errors, []);

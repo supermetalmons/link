@@ -1,5 +1,6 @@
 import { required, canonicalMatch } from "./fixtures/canonicalData.mjs";
 import { createWagerClientHarness } from "./wagerClientHarness.mjs";
+import { createAutomatchObservationClient } from "./automatchClientHarness.mjs";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { registerTypeScriptTestHooks } from "./support/typescriptHooks.mjs";
@@ -9,7 +10,6 @@ import {
   InviteMetadataState,
   rematchSeriesEqual,
 } from "../src/connection/inviteMetadataState.ts";
-import { withAutomatchOperationLock } from "../src/connection/automatchOperationLock.ts";
 import {
   MoveDelivery,
   moveDeliveryStorageKey,
@@ -42,6 +42,7 @@ const { GameBootstrapApiError } =
  * @property {ConnectionContract["approvedRematchIndices"]} approvedRematchIndices
  * @property {ConnectionContract["auth"]} auth
  * @property {ConnectionContract["authUnsubscribers"]} authUnsubscribers
+ * @property {ConnectionContract["automatchClient"]} automatchClient
  * @property {ConnectionContract["beginConnectAttempt"]} beginConnectAttempt
  * @property {ConnectionContract["buildRuntimeContext"]} buildRuntimeContext
  * @property {ConnectionContract["bumpSessionEpoch"]} bumpSessionEpoch
@@ -50,7 +51,6 @@ const { GameBootstrapApiError } =
  * @property {ConnectionContract["cleanupObserverContext"]} cleanupObserverContext
  * @property {ConnectionContract["clearActiveContext"]} clearActiveContext
  * @property {ConnectionContract["clearAllObserverContexts"]} clearAllObserverContexts
- * @property {ConnectionContract["clearPendingAutomatchRequest"]} clearPendingAutomatchRequest
  * @property {ConnectionContract["confirmRematchEndFromMetadata"]} confirmRematchEndFromMetadata
  * @property {ConnectionContract["confirmedSurrenders"]} confirmedSurrenders
  * @property {ConnectionContract["connectAttemptId"]} connectAttemptId
@@ -99,7 +99,6 @@ const { GameBootstrapApiError } =
  * @property {ConnectionContract["observedMatchSnapshots"]} observedMatchSnapshots
  * @property {ConnectionContract["observerRegistry"]} observerRegistry
  * @property {ConnectionContract["pendingInviteCreation"]} pendingInviteCreation
- * @property {ConnectionContract["reconcilePendingAutomatchRequest"]} reconcilePendingAutomatchRequest
  * @property {ConnectionContract["reconcilingMoveKeys"]} reconcilingMoveKeys
  * @property {ConnectionContract["reconnectAfterMatchUpdateFailure"]} reconnectAfterMatchUpdateFailure
  * @property {ConnectionContract["recoverMoveBoard"]} recoverMoveBoard
@@ -219,8 +218,6 @@ const declaration = source.statements.find(
 );
 assert.ok(declaration && ts.isClassDeclaration(declaration));
 const names = [
-  "clearPendingAutomatchRequest",
-  "reconcilePendingAutomatchRequest",
   "beginConnectAttempt",
   "isConnectAttemptActive",
   "isContextActive",
@@ -510,7 +507,6 @@ function harness({
     selectInviteMatch,
     takeInitialGameBootstrap: takeBootstrap,
     GameBootstrapApiError,
-    withAutomatchOperationLock,
     isAutoInviteId,
     /** @type {(value: WagerState | null) => WagerState | null} */
     summarizeWagerState: (value) => value,
@@ -847,6 +843,9 @@ function harness({
         },
       },
     }),
+  );
+  instance.automatchClient = createAutomatchObservationClient(
+    dependencies.storage,
   );
   const wagerHarness = createWagerClientHarness({
     auth: instance.auth,
@@ -2110,6 +2109,26 @@ test("saved end metadata cannot discard the original move barrier after reload o
   await settle();
   assert.equal(records.size, 0);
   assert.equal(endRequests, 0);
+});
+
+test("auth initialization and replacement preserve pending automatch operations", () => {
+  const h = harness();
+  h.instance.auth.currentUser = null;
+  h.instance.currentUid = null;
+  h.operations.set("login", {
+    operationId: "00000000-0000-4000-8000-000000000001",
+    resolvedInviteId: "auto_pending",
+    uid: "login",
+    createdAtMs: 1,
+    request: { emojiId: 1, aura: "none" },
+  });
+  const expected = structuredClone(h.operations);
+  const unsubscribe = h.instance.subscribeToAuthChanges(() => {});
+  for (const user of [null, { uid: "login" }, { uid: "replacement" }, null]) {
+    h.authChange(user);
+    assert.deepEqual(h.operations, expected);
+  }
+  unsubscribe();
 });
 
 test("auth replacement tears down host and spectator metadata resources before callbacks", async () => {
