@@ -1,6 +1,8 @@
 # Canonical cleanup — 2026-11-01
 
-The online cleanup completed at 2026-10-31T23:39:38.118Z. All 5,007 approved Durable Objects passed physical cleanup and readback. The application remained active at generation 3, data epoch 1, with no global maintenance or canonical Queue pause.
+The final safeguard pass completed at 2026-11-01T10:28:20.594567+00:00. Both previously excluded rooms now have verified cleanup receipts, and the five HTTP admission records have been retired with their unknown outcomes preserved. The final API is `c522b04f-068e-4d30-be60-62469ed20358`.
+
+The original online cleanup completed at 2026-10-31T23:39:38.118Z. All 5,007 approved Durable Objects passed physical cleanup and readback. The application remained active at generation 3, data epoch 1, with no global maintenance or canonical Queue pause.
 
 | Release evidence                   | Version                                |
 | ---------------------------------- | -------------------------------------- |
@@ -9,19 +11,42 @@ The online cleanup completed at 2026-10-31T23:39:38.118Z. All 5,007 approved Dur
 | Original final API C               | `7cd39d3f-0262-4e56-8e90-e157b3d79d15` |
 | Temporary read-only inspector      | `8ce346fa-87a1-4283-839b-fbcc9627aa5f` |
 | Inspector secret-removal candidate | `440179d7-e84a-4461-a931-f0ca6fd0bc75` |
-| Restored API, serving 100%         | `32886da9-db7d-4b36-bca6-951c8069a38a` |
+| Initial inspection restoration     | `32886da9-db7d-4b36-bca6-951c8069a38a` |
+| Scoped cleanup candidate           | `2f2173db-7559-4ddc-a893-2c8884f02288` |
+| Cleanup secret-removal candidate   | `d68e7507-6d73-496c-85aa-6b4bc499d5bd` |
+| Final API, serving 100%            | `c522b04f-068e-4d30-be60-62469ed20358` |
 | Event progress Workflow            | `5dda8b1b-a6ee-4a30-a14f-163b03ad399c` |
 | Prize withdrawal Workflow          | `131f771f-f6b4-4c07-b739-ed9e39589ba0` |
 
-## Publication and two-room follow-up — 2026-11-01
+## Final safeguards and closure — 2026-11-01
+
+Nine additive migrations installed permanent safeguards across the six D1 databases. Thirty exact request-retirement markers reject subsequent writes by the five retired identities; the central database also rejects new child admissions and identity reuse. Central activation checked the five original rows and zero current-generation RPC admissions atomically. After all six database fences were verified, one native D1 batch preserved the original records in an immutable retirement receipt and removed precisely the five active rows. Their recorded outcome is **write authority retired; business outcome unknown; accepted independent work preserved**. Invocation termination and successful business completion are not claimed.
+
+Three immutable room registries and 42 INSERT/UPDATE guards cover 21 typed reference tables. Current code rejects either retired room before mutation-lock acquisition and retries generated automatch collisions. The writer review verified historical direct and opaque identity closure, exclusion from generation-3 activation, and subsequent write paths. It did not infer safety from substring searches or expand exclusions to shared player balances.
+
+The two rooms independently matched preserved source and discarded staging records. Each executed raw storage reads in the qualified new implementation, establishing local writer replacement under [Cloudflare's storage uniqueness guarantee](https://developers.cloudflare.com/durable-objects/platform/known-issues/#global-uniqueness). Every purge and receipt operation additionally verified the six live schemas and controls, exact retirement markers and receipt, and the three room registries. No caller-supplied exclusion assertion was accepted.
+
+The selective transactions removed **62 obsolete table instances and 29 payload rows** across the two rooms. Each transaction checked the exact original state, removed only its approved footprint and committed an immutable cleanup receipt. Seven existing protected control/receipt tables per room and their retained guards were preserved; one cleanup-receipt table was added per room. Closed generation-2 controls, protected state digests and namespaces were retained. No KV keys or namespace were deleted. Both subsequent receipt calls returned `already-purged` with the expected protected-state digests.
+
+The temporary endpoint, RPC capability and production secret were removed, and the local temporary secret was deleted. Final code matched the validated permanent bundle. Live room receipt readbacks occurred before capability removal; their protected response artifacts were verified afterward. The 5,007 earlier cleanup receipts were checked as historical archives, not represented as new live storage reads.
+
+All required validation lanes passed after correcting two historical test fixtures that applied later migrations to older schemas. The initial `check:all` invocation did not pass unchanged in one run. The final lanes cover 1,498 client tests, 2,221 API unit tests, 2,382 native tests, 443 tooling tests and 698 shared-runtime tests, plus type, lint, generated-binding and bundle checks. The temporary candidate passed 2,248 API unit cases after its private RPC contract fixture was updated, and 22 focused native cases covering its verifier, inspection and atomic cleanup.
+
+Final production verification passed public API and protected-admin authenticated reads, all 17 isolated gameplay lifecycle checks, six-database safeguard readback, and all 14 retired-endpoint probes. Both retired room IDs returned authenticated 404 responses without creating scoped locks, transitions, invites or mutation receipts. The application stayed active at generation 3, data epoch 1; all six canonical Queues remained unpaused, both Workflow versions remained unchanged, and workers.dev/version previews remained disabled. The persistent admin session and normal authentication policy were preserved.
+
+No global generation change, write freeze, Queue pause, financial adjustment or Firebase operation was performed. Firebase's eligible obsolete-data cleanup remains separately deferred pending account access.
+
+Final protected verification evidence SHA-256: `02e70d54d57906eaf694e1e8152e8cbc90b44839512f8c3f202e8a09abec65e3`.
+
+## Initial publication and inspection — 2026-11-01
 
 Commit `181e5152ae71b4d252183c30548e657f0343d165` published the migration and cleanup to `main` with 1,263 explicitly reviewed paths. The unused recovery inventory was removed from the active working tree after its protected archive was verified. Applied SQL migrations and private exports were preserved; credentials and logs were not committed.
 
-The scoped follow-up retained both excluded rooms and performed no additional room deletion. A temporary manifest-bound inspector read both rooms without initializing gameplay or changing controls. Their source exports matched the preserved evidence across 42 tables and 24 rows. Both retained closed generation-2 controls, no alarms or sockets, and stable before/after state. Initially unclassified trigger names were resolved against the historical fence generator.
+The initial scoped follow-up retained both excluded rooms and performed no additional room deletion. A temporary manifest-bound inspector read both rooms without initializing gameplay or changing controls. Their source exports matched the preserved evidence across 42 tables and 24 rows. Both retained closed generation-2 controls, no alarms or sockets, and stable before/after state. Initially unclassified trigger names were resolved against the historical fence generator.
 
-The dependency scan searched 15 specifically bound room identifiers across all 135 application tables and found only two historical import receipts, which remain protected evidence. The scan alone does not rule out unknown opaque relationships. Local fences reject business writes, but complete exclusion of latent privileged writers and new cross-database references was not established. Transition intents and resource records can precede the room mutation, so the local fence does not prove durable exclusion across stores. These unmet prerequisites blocked both purges; no purge capability or new deletion receipt was created. The five uncertain HTTP admissions remain intact, with no completion inferred from age.
+The dependency scan searched 15 specifically bound room identifiers across all 135 application tables and found only two historical import receipts, which remain protected evidence. The scan alone does not rule out unknown opaque relationships. At that stage, local fences rejected business writes, but complete exclusion of latent privileged writers and new cross-database references had not been established. Transition intents and resource records could precede the room mutation, so the local fence alone did not establish durable exclusion across stores. These unmet prerequisites blocked both purges; no purge capability or new deletion receipt was created. At that stage, the five uncertain HTTP admissions were left intact, with no completion inferred from age.
 
-The inspector and its secret were removed through candidate upload, qualification and promotion. The final API code is byte-identical to the previously validated baseline, and its configuration matches that baseline without the inspection secret. The local temporary secret was also deleted. The two canonical Workflow versions remained unchanged, all six canonical Queues remained unpaused, and the application remained active at generation 3, data epoch 1.
+The inspector and its secret were removed through candidate upload, qualification and promotion. That restored API (`32886da9-db7d-4b36-bca6-951c8069a38a`) was byte-identical to the previously validated baseline, and its configuration matched that baseline without the inspection secret. The local temporary secret was also deleted. The two canonical Workflow versions remained unchanged, all six canonical Queues remained unpaused, and the application remained active at generation 3, data epoch 1.
 
 Restoration verification passed the public API check, protected-admin authenticated history, event and frozen-wager reads, and all 17 isolated gameplay lifecycle checks covering moves, takebacks, replay, timers, rematches, reconnects and temporary-session cleanup. The persistent admin session was preserved. All 14 retired-endpoint probes returned 404, including the inspection endpoint and benign requests naming the old inspector version. Production workers.dev and version previews remain disabled. All 5,007 prior cleanup receipt/readback proofs were revalidated from protected evidence; this follow-up did not perform live bulk reads or repeat their deletion. An initial authenticated invocation mistakenly selected a maintenance-only check requiring frozen profile writes; the active-mode rerun passed without changing production controls.
 
@@ -44,7 +69,7 @@ Removed storage and resources:
 
 D1 foreign-key checks passed and applied migration history was retained. The 5,005 timer-handoff rows and 10,791 ownership rows were preserved byte-for-byte. Canonical business records, balances and holds, ownership, sessions/revocations, historical matches, replay receipts, retirement/reconciliation evidence and protected source exports remain retained. Durable Object namespace/class identity, canonical timers, alarms, deadlines, KV, socket attachments and permanent writer/admission safeguards were preserved.
 
-The two previously approved room exclusions remain unchanged; no new exclusion was introduced. Five previously captured uncertain HTTP admissions were left untouched, with no completion inferred from age. A retained old rating continuation may fail on obsolete timer cleanup after table retirement; its committed rating and recovery markers remain intact. Historical February recovery can require current request replay, and automatic completion is not claimed.
+The original pass kept the two approved room exclusions unchanged; no new exclusion was introduced. Five previously captured uncertain HTTP admissions were left untouched, with no completion inferred from age. A retained old rating continuation may fail on obsolete timer cleanup after table retirement; its committed rating and recovery markers remain intact. Historical February recovery can require current request replay, and automatic completion is not claimed.
 
 Public API contracts and authentication policy remain unchanged. The protected persistent admin session was preserved. This cleanup does not refund wagers, resolve withdrawals, resend Telegram operations or restart retired jobs. Google/Firebase project deletion remains outside this cleanup; eligible obsolete-data cleanup is deferred pending account access.
 
@@ -310,4 +335,4 @@ Retired resource names:
 
 Protected evidence index SHA-256: `d457b593e78c79d98fb7d293aeb831f8ff0a9779230f794ab0eff59327bf8582`. The index retains recomputed artifact references separately; this report contains no credentials, business rows or private filesystem paths.
 
-The initial report was included in migration commit `181e5152a`; the follow-up outcome is published as a separate report-only commit. No additional observation window was added after the required checks passed.
+The initial report was included in migration commit `181e5152a`, and the initial inspection outcome was published in report-only commit `22f454f45`. This final update accompanies the permanent safeguards. No additional observation window was added after the required checks passed.

@@ -27,6 +27,7 @@ import type {
   ProfileGameProjectionTask,
 } from "./profileGameProjectionTasks.ts";
 import { SESSION_TIMESTAMP } from "./sessionValueOperations.ts";
+import { assertInviteNotRetired } from "./retiredInvites.ts";
 
 const GAME_SESSION_MUTATION_RECEIPT_ROOT = "gameplayMutationReceipts";
 const GAME_SESSION_MUTATION_RECEIPT_EXPIRATION_ROOT =
@@ -123,6 +124,7 @@ export async function acquireGameSessionMutationLease(
   store: GameSessionMutationLockStore,
   nowMs: number,
 ): Promise<void> {
+  assertInviteNotRetired(lockId);
   try {
     await store.acquire({ lockId, operationId }, ownerId, nowMs);
   } catch (error) {

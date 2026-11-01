@@ -73,6 +73,14 @@ Supported maintenance writes preserve their original SQL predicates and use a na
 
 This write transport uses a private child process and an authenticated temporary [remote-binding session](https://developers.cloudflare.com/workers/local-development/#api). It requires an existing account `workers.dev` subdomain and fails closed if none exists. It creates no permanent Worker deployment or API route, but preview-session startup is a provider resource operation. Status reads do not open that session. Credentials pass through private IPC; command arguments, generated configuration, and returned diagnostics contain no credential values. The runner disposes the session and its child process after use. Atomicity relies on the [native D1 batch contract](https://developers.cloudflare.com/d1/worker-api/d1-database/#batch), not on a REST batch assumption or a successful read-only probe.
 
+## Retained request and invite safeguards
+
+`application_admission_retirements` permanently rejects the exact retired request identities at each D1 write-context boundary. The central database also rejects their new child admissions. Immutable retirement receipts preserve the original records and explicitly leave business outcomes unknown; they do not claim that an invocation terminated or that accepted background work completed. Keep these tables, triggers and receipts on rollback. The older `application_admission_reconciliations` records remain independent and immutable.
+
+The scoped `scripts/retire-application-admissions.ts` operator accepts only the five reviewed HTTP identities and a protected, hash-pinned manifest. Its stages are `--inspect`, `--arm-central`, `--arm-replicas` and `--finalize`, followed by `--manifest <absolute-path> --manifest-sha256 <sha256> --directory <new-private-directory>`. Central arming requires exact unchanged source records and no current-generation RPC admissions in the same native D1 batch. Finalization verifies all six database guards before committing its receipt and removing the five active rows. An uncertain response requires receipt/readback reconciliation; never remove an installed retirement marker to retry.
+
+`retired_invites` permanently excludes the two reviewed legacy rooms in the gameplay, profile and Telegram databases. Current code rejects their mutation locks and rerolls generated automatch collisions; database triggers also reject held or older writers. Preserve the exact identities, scoped guards, closed object controls and cleanup receipts. Removing an entire object or its controls can make it eligible for fresh initialization. Normal traffic and canonical Queue delivery remain active during these scoped operations.
+
 ## Validation
 
 Use Node.js 24 or newer. For broad dependency, contract, or stateful changes, install the pinned packages and run the complete gate:

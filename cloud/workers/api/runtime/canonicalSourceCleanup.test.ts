@@ -602,10 +602,11 @@ describe("physical canonical source cleanup", () => {
       const cleanup = fixture.migrations.filter((migration) =>
         migration.name.endsWith("_retire_canonical_source_tables.sql"),
       );
-      const historical = fixture.migrations.filter(
-        (migration) => !cleanup.includes(migration),
-      );
       expect(cleanup).toHaveLength(1);
+      const historical = fixture.migrations.slice(
+        0,
+        fixture.migrations.indexOf(cleanup[0]!),
+      );
       await (fixture.initialize ?? applyD1Migrations)(db, historical);
       await run(
         db,

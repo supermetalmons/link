@@ -4,7 +4,6 @@ import {
 } from "@mons/shared/invite-records";
 import { createGameVariantHelpers } from "@mons/shared/game-variants";
 import {
-  buildAutoInviteId,
   pickHostColor,
   randomAlphanumeric,
   type RandomSource,
@@ -36,6 +35,7 @@ import type { GameSessionChange } from "../gameSessionContracts.ts";
 import type { AutomatchProfileGameProjectionTask } from "../profileGameProjectionTasks.ts";
 import type { AutomatchTelegramProjectionTask } from "../telegramProjectionTasks.ts";
 import { buildAutomatchReceiptChanges } from "./receipts.ts";
+import { buildAvailableAutoInviteId } from "../retiredInvites.ts";
 import type {
   AutomatchPlan,
   AutomatchPlanInput,
@@ -141,7 +141,7 @@ export function buildPendingAutomatchPlan(
   },
   createProjectionRequestId: () => string,
 ): AutomatchPlan {
-  const inviteId = buildAutoInviteId(random);
+  const inviteId = buildAvailableAutoInviteId(random);
   const password = randomAlphanumeric(AUTOMATCH_PASSWORD_LENGTH, random);
   const hostColor = pickHostColor(random);
   const matchSeed = gameVariantHelpers.buildRandomGameSeed(random);

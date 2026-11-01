@@ -29,7 +29,7 @@ function fixture(queueSchema = true) {
   for (const name of readdirSync(directory)
     .filter((name) => name.endsWith(".sql"))
     .sort()) {
-    if (name === migrationName && !queueSchema) continue;
+    if (name === migrationName && !queueSchema) break;
     if (name.endsWith("_retire_canonical_source_tables.sql"))
       db.exec(
         "UPDATE application_data_control SET generation = 3, data_epoch = 1",
