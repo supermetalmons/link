@@ -1,29 +1,27 @@
+import {
+  readBoardAppearance,
+  displayBoardAppearance,
+  defaultBoardPalettes,
+  colorSets,
+  type ColorSetKey,
+} from "./boardAppearance";
 import { storage } from "../utils/storage";
 import { notifyBoardColorChange } from "./boardStyleRuntimePort";
 import { AssetsSet, BoardStyleSet } from "./boardStyleModels";
 
 export { AssetsSet, BoardStyleSet } from "./boardStyleModels";
 
-const isAssetsSet = (value: unknown): value is AssetsSet => {
-  return (
-    typeof value === "string" &&
-    Object.values(AssetsSet).includes(value as AssetsSet)
-  );
-};
+export { colorSets, type ColorSetKey } from "./boardAppearance";
 
-const isBoardStyleSet = (value: unknown): value is BoardStyleSet => {
-  return (
-    typeof value === "string" &&
-    Object.values(BoardStyleSet).includes(value as BoardStyleSet)
-  );
-};
+export function saveBoardPreference(write: () => void) {
+  try {
+    write();
+  } catch {}
+}
 
-const getStoredAssetsSet = (): AssetsSet => {
-  const storedAssetsSet = storage.getPreferredAssetsSet(AssetsSet.Pixel);
-  return isAssetsSet(storedAssetsSet) ? storedAssetsSet : AssetsSet.Pixel;
-};
-
-export let currentAssetsSet: AssetsSet = getStoredAssetsSet();
+const appearance = readBoardAppearance();
+displayBoardAppearance(appearance.style, appearance.preferences);
+export let currentAssetsSet: AssetsSet = appearance.assetsSet;
 const assetsSetListeners = new Set<() => void>();
 const notifyAssetsSetListeners = () => {
   assetsSetListeners.forEach((listener) => listener());
@@ -39,27 +37,17 @@ export const subscribeToAssetsSetChanges = (listener: () => void) => {
 export const getCurrentAssetsSet = () => currentAssetsSet;
 
 export function setCurrentAssetsSet(set: AssetsSet) {
+  saveBoardPreference(() => storage.setPreferredAssetsSet(set));
   if (currentAssetsSet === set) {
     return;
   }
   currentAssetsSet = set;
-  storage.setPreferredAssetsSet(set);
   notifyAssetsSetListeners();
 }
 
-const storedBoardStyleSet = storage.getBoardStyleSet(null);
-const resolveInitialBoardStyleSet = (): BoardStyleSet => {
-  if (isBoardStyleSet(storedBoardStyleSet)) {
-    return storedBoardStyleSet;
-  }
-  return currentAssetsSet === AssetsSet.Pangchiu
-    ? BoardStyleSet.Pangchiu
-    : BoardStyleSet.Grid;
-};
-
-let currentBoardStyleSet: BoardStyleSet = resolveInitialBoardStyleSet();
-if (!isBoardStyleSet(storedBoardStyleSet)) {
-  storage.setBoardStyleSet(currentBoardStyleSet);
+let currentBoardStyleSet: BoardStyleSet = appearance.style;
+if (appearance.shouldPersistInferredStyle) {
+  saveBoardPreference(() => storage.setBoardStyleSet(currentBoardStyleSet));
 }
 
 const boardStyleSetListeners = new Set<() => void>();
@@ -76,13 +64,15 @@ export const subscribeToBoardStyleSetChanges = (listener: () => void) => {
 
 export const getCurrentBoardStyleSet = () => currentBoardStyleSet;
 
-export function setCurrentBoardStyleSet(set: BoardStyleSet) {
+export function setCurrentBoardStyleSet(set: BoardStyleSet): boolean {
+  saveBoardPreference(() => storage.setBoardStyleSet(set));
   if (currentBoardStyleSet === set) {
-    return;
+    return false;
   }
   currentBoardStyleSet = set;
-  storage.setBoardStyleSet(set);
+  displayBoardAppearance(set, colorSetPreferencesByMode);
   notifyBoardStyleSetListeners();
+  return true;
 }
 
 export const isPangchiuBoard = () =>
@@ -158,52 +148,7 @@ export type ColorSet = {
   wave2: string;
 };
 
-export const colorSets = {
-  default: {
-    darkSquare: "#BEBEBE",
-    lightSquare: "#E8E8E8",
-    manaPool: "#030DF4",
-    pickupItemSquare: "#4F4F4F",
-    simpleManaSquare: "#88A8F8",
-    simpleManaSquareOnLightTile: "#D0E0FF",
-    wave1: "#6666FF",
-    wave2: "#00FCFF",
-  },
-  darkAndYellow: {
-    darkSquare: "#181818",
-    lightSquare: "#4A4A4A",
-    manaPool: "#FDF30B",
-    pickupItemSquare: "#BAB8B9",
-    simpleManaSquare: "#816306",
-    simpleManaSquareOnLightTile: "#A07907",
-    wave1: "#D39F00",
-    wave2: "#DBCF03",
-  },
-} as const;
-
-export type ColorSetKey = keyof typeof colorSets;
-
 type ColorMode = "light" | "dark";
-type ColorSetPreferencesByMode = Record<ColorMode, ColorSetKey | null>;
-
-const DEFAULT_COLOR_SET_PREFERENCES_BY_MODE: ColorSetPreferencesByMode = {
-  light: null,
-  dark: null,
-};
-
-const isColorSetKey = (value: unknown): value is ColorSetKey => {
-  return typeof value === "string" && value in colorSets;
-};
-
-const normalizeColorSetPreferencesByMode = (value: {
-  light: string | null;
-  dark: string | null;
-}): ColorSetPreferencesByMode => {
-  return {
-    light: isColorSetKey(value.light) ? value.light : null,
-    dark: isColorSetKey(value.dark) ? value.dark : null,
-  };
-};
 
 const getSystemColorMode = (): ColorMode => {
   if (
@@ -217,19 +162,11 @@ const getSystemColorMode = (): ColorMode => {
     : "light";
 };
 
-const getDefaultColorSetForMode = (mode: ColorMode): ColorSetKey => {
-  return mode === "dark" ? "darkAndYellow" : "default";
-};
-
-let colorSetPreferencesByMode: ColorSetPreferencesByMode =
-  normalizeColorSetPreferencesByMode(
-    storage.getBoardColorSetsByTheme({
-      ...DEFAULT_COLOR_SET_PREFERENCES_BY_MODE,
-    }),
-  );
+let colorSetPreferencesByMode = appearance.preferences;
+let pendingPaletteEdits: Partial<Record<ColorMode, ColorSetKey>> = {};
 
 const resolveColorSetKeyForMode = (mode: ColorMode): ColorSetKey => {
-  return colorSetPreferencesByMode[mode] ?? getDefaultColorSetForMode(mode);
+  return colorSetPreferencesByMode[mode] ?? defaultBoardPalettes[mode];
 };
 
 let currentColorMode: ColorMode = getSystemColorMode();
@@ -249,8 +186,6 @@ const applyColorMode = (mode: ColorMode) => {
   notifyBoardColorSetListeners();
 };
 
-export const getCurrentColorSet = () => colorSets[currentColorSetKey];
-
 export const getCurrentColorSetKey = () => currentColorSetKey;
 
 export const subscribeToBoardColorSetChanges = (listener: () => void) => {
@@ -261,11 +196,21 @@ export const subscribeToBoardColorSetChanges = (listener: () => void) => {
 };
 
 export const setBoardColorSet = (colorSetKey: ColorSetKey) => {
+  pendingPaletteEdits[currentColorMode] = colorSetKey;
+  const latest = readBoardAppearance();
   colorSetPreferencesByMode = {
-    ...colorSetPreferencesByMode,
-    [currentColorMode]: colorSetKey,
+    ...(latest.canReadPalettes
+      ? latest.preferences
+      : colorSetPreferencesByMode),
+    ...pendingPaletteEdits,
   };
-  storage.setBoardColorSetsByTheme(colorSetPreferencesByMode);
+  displayBoardAppearance(currentBoardStyleSet, colorSetPreferencesByMode);
+  if (latest.canReadPalettes) {
+    saveBoardPreference(() => {
+      storage.setBoardColorSetsByTheme(colorSetPreferencesByMode);
+      pendingPaletteEdits = {};
+    });
+  }
   applyColorMode(currentColorMode);
 };
 

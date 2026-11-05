@@ -37,10 +37,8 @@ export const createLegacyBoardSquareTypeGrid = (): BoardSquareTypeGrid =>
     ),
   );
 
-export const getLegacyBoardSquareType = (
-  row: number,
-  col: number,
-): BoardSquareType => LEGACY_BOARD_SQUARE_TYPES[`${row}-${col}`] ?? "regular";
+const getLegacyBoardSquareType = (row: number, col: number): BoardSquareType =>
+  LEGACY_BOARD_SQUARE_TYPES[`${row}-${col}`] ?? "regular";
 
 export const getDisplayedBoardSquareType = (
   squareType: BoardSquareType,
@@ -50,4 +48,41 @@ export const getDisplayedBoardSquareType = (
     return "regular";
   }
   return squareType;
+};
+
+export const getBoardPatternSquareColorKey = (
+  row: number,
+  col: number,
+  squareTypes?: BoardSquareTypeGrid | null,
+  useLightTileManaBaseShade: boolean = false,
+) => {
+  const isLightTile = (row + col) % 2 === 0;
+  const defaultFill = isLightTile ? "lightSquare" : "darkSquare";
+  let squareType: BoardSquareType;
+  if (squareTypes === undefined) {
+    squareType = getLegacyBoardSquareType(row, col);
+  } else if (squareTypes === null) {
+    squareType = getDisplayedBoardSquareType(
+      getLegacyBoardSquareType(row, col),
+      false,
+    );
+  } else {
+    squareType = squareTypes[row]?.[col] ?? "regular";
+  }
+
+  switch (squareType) {
+    case "manaBase":
+      return useLightTileManaBaseShade && isLightTile
+        ? "simpleManaSquareOnLightTile"
+        : "simpleManaSquare";
+    case "supermanaBase":
+    case "manaPool":
+      return "manaPool";
+    case "consumableBase":
+      return "pickupItemSquare";
+    case "monBase":
+    case "regular":
+    default:
+      return defaultFill;
+  }
 };

@@ -405,9 +405,6 @@ export function restoreBoardVariantAfterWaitingAnimation() {
   refreshDisplayedBoardSquareTypes();
 }
 
-export const getCurrentDisplayedBoardSquareTypes = () =>
-  displayedBoardSquareTypes;
-
 export const subscribeToDisplayedBoardSquareTypes = (
   listener: (squareTypes: BoardSquareTypeGrid | null) => void,
 ) => {

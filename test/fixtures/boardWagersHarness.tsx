@@ -1,4 +1,5 @@
 import { requireValue } from "./browserAssertions";
+import type { BoardSquareTypeGrid } from "../../src/game/boardSquareTypes";
 import type { MaterialName } from "../../src/services/rocksMiningService";
 import type { MatchWagerState } from "../../src/connection/connectionModels";
 import type { FrozenMaterialsStatus } from "../../src/services/wagerMaterialsService";
@@ -26,6 +27,7 @@ import {
 } from "../../src/game/boardWagerModels";
 import {
   environment as e,
+  getCurrentColorSet,
   materialImage,
   setWatchOnly,
   playerSideMetadata,
@@ -34,6 +36,15 @@ import {
 import "../../src/index.css";
 let root: ReturnType<typeof createRoot>;
 let revision = 0;
+const setFixtureStyle = (style: string) => {
+  e.style = style;
+  document.documentElement.dataset.boardStyle =
+    style === "pangchiu" ? "Pangchiu" : "Grid";
+};
+for (const [role, color] of Object.entries(getCurrentColorSet())) {
+  document.documentElement.style.setProperty(`--board-${role}`, color);
+}
+
 const empty = (): WagerRenderState => ({
   player: null,
   opponent: null,
@@ -158,6 +169,9 @@ export const harness = {
         </React.StrictMode>,
       ),
     );
+    if (document.querySelector("#root #boardBackgroundLayer")) {
+      document.getElementById("board-backdrop")?.remove();
+    }
     if (seedNames) names();
   },
   state(state: MatchWagerState | null) {
@@ -201,12 +215,15 @@ export const harness = {
   watch(value: boolean) {
     run(() => setWatchOnly(value));
   },
+  squareTypes(grid: BoardSquareTypeGrid | null) {
+    run(() => e.squareSubscribers.forEach((callback) => callback(grid)));
+  },
   style(value: string) {
-    e.style = value;
+    setFixtureStyle(value);
     run(() => e.styleSubscribers.forEach((callback) => callback()));
   },
   styleViaBoardPort(value: string) {
-    e.style = value;
+    setFixtureStyle(value);
     run(() => boardUi.updateBoardComponentForBoardStyleChange());
   },
   overlay(label: string | null) {

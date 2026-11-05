@@ -18,9 +18,9 @@ import {
   currentAssetsSet,
   AssetsSet,
   BoardStyleSet,
-  getCurrentBoardStyleSet,
   isCustomPictureBoardEnabled,
   isPangchiuBoard,
+  saveBoardPreference,
   setCurrentAssetsSet,
   setCurrentBoardStyleSet,
 } from "../content/boardStyles";
@@ -114,25 +114,26 @@ const refreshBoardAfterStyleChange = (reloadItems: boolean) => {
 };
 
 export function setBoardStyleSet(styleSet: BoardStyleSet) {
-  if (getCurrentBoardStyleSet() === styleSet) {
-    return;
+  if (setCurrentBoardStyleSet(styleSet)) {
+    refreshBoardAfterStyleChange(true);
   }
-  setCurrentBoardStyleSet(styleSet);
-  refreshBoardAfterStyleChange(true);
 }
 
 export function setItemsStyleSet(set: AssetsSet, doNotStore: boolean = false) {
   const didAssetsSetChange = currentAssetsSet !== set;
   const didAnimatedSpritesChange = isExperimentingWithSprites;
-  if (!didAssetsSetChange && !didAnimatedSpritesChange) {
-    return;
+  if (didAssetsSetChange || !doNotStore) {
+    setCurrentAssetsSet(set);
   }
-  setCurrentAssetsSet(set);
   isExperimentingWithSprites = false;
   if (!doNotStore) {
-    storage.setIsExperimentingWithSprites(isExperimentingWithSprites);
+    saveBoardPreference(() =>
+      storage.setIsExperimentingWithSprites(isExperimentingWithSprites),
+    );
   }
-  refreshBoardAfterStyleChange(true);
+  if (didAssetsSetChange || didAnimatedSpritesChange) {
+    refreshBoardAfterStyleChange(true);
+  }
 }
 
 export function setAnimatedMonsEnabled(
@@ -140,14 +141,15 @@ export function setAnimatedMonsEnabled(
   doNotStore: boolean = false,
 ) {
   const didAnimatedSpritesChange = isExperimentingWithSprites !== enabled;
-  if (!didAnimatedSpritesChange) {
-    return;
-  }
   isExperimentingWithSprites = enabled;
   if (!doNotStore) {
-    storage.setIsExperimentingWithSprites(isExperimentingWithSprites);
+    saveBoardPreference(() =>
+      storage.setIsExperimentingWithSprites(isExperimentingWithSprites),
+    );
   }
-  refreshBoardAfterStyleChange(true);
+  if (didAnimatedSpritesChange) {
+    refreshBoardAfterStyleChange(true);
+  }
 }
 
 export let playerSideMetadata = newEmptyPlayerMetadata();

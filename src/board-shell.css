@@ -1,0 +1,78 @@
+.board-svg {
+  display: block;
+  margin: auto;
+  cursor: pointer;
+  -webkit-user-select: none;
+  -moz-user-select: none;
+  -ms-user-select: none;
+  user-select: none;
+  transition: none !important;
+  animation: none !important;
+  -webkit-tap-highlight-color: transparent;
+  outline: none;
+  -webkit-touch-callout: none;
+  width: 100vw;
+  touch-action: none;
+  position: absolute;
+  left: 50%;
+  top: 52%;
+  max-height: min(83vh, calc(100dvh - 69pt));
+  transform: translate(-50%, -50%);
+}
+
+:root[data-board-style="Pangchiu"] .board-svg {
+  top: 50.9%;
+  max-height: min(90vh, calc(100dvh - 69pt));
+}
+
+@media (orientation: portrait) {
+  .board-svg {
+    max-height: min(83vh, calc(100dvh - 50pt));
+    top: 52.5%;
+  }
+
+  :root[data-board-style="Pangchiu"] .board-svg {
+    top: 51%;
+  }
+
+  @media (max-height: 547px) {
+    .board-svg {
+      top: 54.5%;
+    }
+
+    :root[data-board-style="Pangchiu"] .board-svg {
+      top: 52%;
+    }
+  }
+}
+
+#board-backdrop {
+  pointer-events: none;
+}
+
+#board-picture,
+:root[data-board-style="Pangchiu"] #board-grid {
+  display: none;
+}
+
+:root[data-board-style="Pangchiu"] #board-picture {
+  display: inline;
+}
+
+#board-picture > rect {
+  fill: #fefcf6;
+}
+
+@media (prefers-color-scheme: dark) {
+  #board-picture > rect {
+    fill: #232323;
+  }
+}
+
+#board-picture image:not([data-loaded]) {
+  visibility: hidden;
+}
+
+#board-picture:has(image[data-loaded]) > rect {
+  fill: transparent;
+}

@@ -9,6 +9,9 @@ import { gzipSync } from "node:zlib";
 import test from "node:test";
 import { createBrowserViteServer as createViteServer } from "./browserViteServer.mjs";
 import { Game } from "mons-rules";
+import { APPLICATION_DATA_EPOCH } from "@mons/shared/data-contract";
+import { BOARD_GRID_SIZE } from "../src/game/boardSquareTypes.ts";
+import { applicationStorageKey } from "../src/session/applicationDataStorage.ts";
 
 const require = createRequire(import.meta.url);
 /** @type {typeof import("playwright")} */
@@ -140,7 +143,9 @@ async function serve() {
     const pathname = new URL(request.url ?? "/", "http://localhost").pathname;
     const relative = pathname.startsWith("/assets/")
       ? pathname.slice(1)
-      : "index.html";
+      : pathname.startsWith("/event/")
+        ? "_social/event.html"
+        : "index.html";
     try {
       const content = await readFile(resolve(root, relative));
       const type =
@@ -177,12 +182,13 @@ async function serve() {
  * @typedef {import("@mons/shared/invite-wagers").InviteWagersSnapshot} WagersSnapshot
  * @typedef {{path: string, query: string, method: string, at: number}} LoadingRequest
  * @typedef {{page: import("playwright").Page, context: import("playwright").BrowserContext, sessions: Set<string>, registerSession(sessionId: string, uid: string): void, requests: LoadingRequest[], sockets: string[], coreSocketsReady: Promise<[void, void]>, publishMetadata(update: Partial<Metadata>): void, publishMatch(update: Partial<MatchSnapshot>): void, publishWagers(update: Partial<WagersSnapshot>): Promise<void>, resources: string[], assetsGate: PromiseWithResolvers<void>, bootstrapGate: PromiseWithResolvers<void>, sessionBootstrapGate: PromiseWithResolvers<void>, extrasGate: PromiseWithResolvers<void>, bootstrapRequested: PromiseWithResolvers<void>, selectedAssetsRequested: PromiseWithResolvers<void>, wagersRequested: PromiseWithResolvers<void>, profilesRequested: PromiseWithResolvers<void>}} LoadingFixtureContext
- * @typedef {{inviteId?: string, startFromHome?: boolean, inlineAutomatchBootstrap?: boolean, holdMatchSnapshots?: boolean, apiDelayMs?: number, holdAssets?: boolean, holdBootstrap?: boolean, holdExtras?: boolean, spectator?: boolean, paired?: boolean, pendingRematch?: boolean, healthyCoreSockets?: boolean, sessionMode?: "fresh" | "restored", sessionBootstrapResult?: unknown, holdSessionBootstrap?: boolean, initialSessionUid?: string, initialSessionStatus?: number, initialSessionGame?: unknown, initialMetadata?: Partial<Metadata>, initialMatch?: Partial<MatchSnapshot>, historicalPairs?: import("@mons/shared/game-sessions").HistoricalMatchPair[], initialWagers?: WagersSnapshot["wagers"] | null}} LoadingOptions
+ * @typedef {{beforeNavigate?: (page: import("playwright").Page) => Promise<void>, inviteId?: string, startFromHome?: boolean, inlineAutomatchBootstrap?: boolean, holdMatchSnapshots?: boolean, apiDelayMs?: number, holdAssets?: boolean, holdBootstrap?: boolean, holdExtras?: boolean, spectator?: boolean, paired?: boolean, pendingRematch?: boolean, healthyCoreSockets?: boolean, sessionMode?: "fresh" | "restored", sessionBootstrapResult?: unknown, holdSessionBootstrap?: boolean, initialSessionUid?: string, initialSessionStatus?: number, initialSessionGame?: unknown, initialMetadata?: Partial<Metadata>, initialMatch?: Partial<MatchSnapshot>, historicalPairs?: import("@mons/shared/game-sessions").HistoricalMatchPair[], initialWagers?: WagersSnapshot["wagers"] | null}} LoadingOptions
  */
 /** @param {(context: LoadingFixtureContext) => Promise<void>} run @param {LoadingOptions} [options] */
 async function fixture(
   run,
   {
+    beforeNavigate,
     inviteId = defaultInviteId,
     startFromHome = false,
     inlineAutomatchBootstrap = true,
@@ -480,27 +486,58 @@ async function fixture(
         },
       });
     });
-    await context.addInitScript(() => {
-      localStorage.setItem(
-        "mons:data:v1:preferredAssetsSet",
-        JSON.stringify("Pixel"),
-      );
-      /** @type {import("./fixtures/loadingGlobals.ts").LoadingProbe} */
-      const timing = { shell: null, populated: null };
-      window.loadingProbe = timing;
-      new MutationObserver(() => {
-        if (timing.shell === null && document.getElementById("monsboard"))
-          timing.shell = performance.now();
-        if (
-          timing.populated === null &&
-          document.querySelectorAll("#itemsLayer .item").length >= 20
-        ) {
-          requestAnimationFrame(() => {
-            timing.populated ??= performance.now();
-          });
+    await context.addInitScript(
+      ({ assetKey, gridSize }) => {
+        if (!Object.hasOwn(localStorage, assetKey)) {
+          localStorage.setItem(assetKey, JSON.stringify("Pixel"));
         }
-      }).observe(document, { childList: true, subtree: true });
-    });
+        /** @type {import("./fixtures/loadingGlobals.ts").LoadingProbe} */
+        const timing = { backdropFrame: null, shell: null, populated: null };
+        window.loadingProbe = timing;
+        const sampleBackdropFrame = () => {
+          const picture =
+            document.documentElement?.dataset.boardStyle === "Pangchiu";
+          const layer = document.getElementById(
+            picture ? "board-picture" : "board-grid",
+          );
+          if (
+            layer &&
+            (picture
+              ? layer.querySelector("rect")
+              : layer.childElementCount === gridSize * gridSize)
+          ) {
+            const { width, height } = layer.getBoundingClientRect();
+            if (
+              width > 0 &&
+              height > 0 &&
+              getComputedStyle(layer).visibility === "visible"
+            ) {
+              timing.backdropFrame = performance.now();
+              return;
+            }
+          }
+          if (layer || document.readyState === "loading")
+            requestAnimationFrame(sampleBackdropFrame);
+        };
+        requestAnimationFrame(sampleBackdropFrame);
+        new MutationObserver(() => {
+          if (timing.shell === null && document.getElementById("monsboard"))
+            timing.shell = performance.now();
+          if (
+            timing.populated === null &&
+            document.querySelectorAll("#itemsLayer .item").length >= 20
+          ) {
+            requestAnimationFrame(() => {
+              timing.populated ??= performance.now();
+            });
+          }
+        }).observe(document, { childList: true, subtree: true });
+      },
+      {
+        assetKey: applicationStorageKey("preferredAssetsSet"),
+        gridSize: BOARD_GRID_SIZE,
+      },
+    );
     const page = await context.newPage();
     page.setDefaultTimeout(process.env.MONS_LOADING_BUILD ? 10_000 : 30_000);
     page.on("pageerror", (error) => pageErrors.push(error.message));
@@ -551,6 +588,7 @@ async function fixture(
       const cdp = await context.newCDPSession(page);
       await cdp.send("Emulation.setCPUThrottlingRate", { rate: 4 });
     }
+    await beforeNavigate?.(page);
     await page.goto(`${server.origin}/${startFromHome ? "" : inviteId}`, {
       waitUntil: "commit",
     });
@@ -707,6 +745,344 @@ async function navigateWithinApp(page, path) {
   }, path);
   await page.waitForFunction(
     () => performance.getEntriesByName("main-game:route-prepared").length > 0,
+  );
+}
+
+test(
+  "the item style picker redraws the pieces when the sprite preference cannot be saved",
+  { skip: benchmark, timeout: 60_000 },
+  async () => {
+    await fixture(async ({ page }) => {
+      const drainer = '#itemsLayer [data-asset-type="drainer"] > div';
+      await page.locator(`${drainer}[style*="pixelated"]`).waitFor();
+      await page.getByRole("button", { name: "Appearance" }).click();
+      const spritePreferenceKey = applicationStorageKey(
+        "isExperimentingWithSprites",
+      );
+      await page.evaluate((spritePreferenceKey) => {
+        localStorage.setItem(spritePreferenceKey, "true");
+        const write = Storage.prototype.setItem;
+        Storage.prototype.setItem = function (
+          /** @type {string} */ key,
+          /** @type {string} */ value,
+        ) {
+          if (key === spritePreferenceKey) {
+            Storage.prototype.setItem = write;
+            throw new DOMException("full", "QuotaExceededError");
+          }
+          write.call(this, key, value);
+        };
+      }, spritePreferenceKey);
+      await page.getByRole("button", { name: "Original item style" }).click();
+      await page.locator(`${drainer}:not([style*="pixelated"])`).waitFor();
+      assert.equal(
+        await page.evaluate(
+          (key) => localStorage.getItem(key),
+          applicationStorageKey("preferredAssetsSet"),
+        ),
+        JSON.stringify("Original"),
+      );
+      assert.equal(
+        await page.evaluate(
+          (key) => localStorage.getItem(key),
+          spritePreferenceKey,
+        ),
+        "true",
+      );
+      await page.getByRole("button", { name: "Original item style" }).click();
+      assert.equal(
+        await page.evaluate(
+          (key) => localStorage.getItem(key),
+          spritePreferenceKey,
+        ),
+        "false",
+      );
+    });
+  },
+);
+
+for (const recoverAfterLightPick of [false, true]) {
+  test(
+    recoverAfterLightPick
+      ? "the picker saves both session palette edits when reads recover in dark mode"
+      : "the picker saves explicit fallback selections and preserves the other mode after read recovery",
+    { skip: benchmark, timeout: 60_000 },
+    async () => {
+      const keys = {
+        style: applicationStorageKey("boardStyleSet"),
+        assets: applicationStorageKey("preferredAssetsSet"),
+        palettes: applicationStorageKey("boardColorSetsByTheme"),
+      };
+      const initialPalettes = { light: "default", dark: "default" };
+      await fixture(
+        async ({ page }) => {
+          await page.getByRole("button", { name: "Appearance" }).click();
+          assert.equal(
+            await page.locator("html").getAttribute("data-board-style"),
+            "Grid",
+          );
+          if (recoverAfterLightPick) {
+            await page
+              .getByRole("button", { name: "Dark board theme" })
+              .click();
+            assert.equal(
+              await page
+                .locator("html")
+                .getAttribute("data-board-palette-light"),
+              "darkAndYellow",
+            );
+          }
+          await page.evaluate(() =>
+            sessionStorage.setItem("paletteReadRecovered", "true"),
+          );
+          assert.deepEqual(
+            await page.evaluate(
+              (key) => JSON.parse(localStorage.getItem(key) ?? "null"),
+              keys.palettes,
+            ),
+            initialPalettes,
+          );
+          if (recoverAfterLightPick) {
+            await page.emulateMedia({ colorScheme: "dark" });
+          }
+          await page.getByRole("button", { name: "Dark board theme" }).click();
+          assert.equal(
+            await page.evaluate(
+              (key) => localStorage.getItem(key),
+              keys.assets,
+            ),
+            '"Original"',
+          );
+          await page.getByRole("button", { name: "Pixel item style" }).click();
+          const expectedDark = recoverAfterLightPick
+            ? "darkAndYellow"
+            : "default";
+          assert.equal(
+            await page.locator("html").getAttribute("data-board-palette-dark"),
+            expectedDark,
+          );
+          const stored = await page.evaluate(
+            ({ style, assets, palettes }) => ({
+              style: localStorage.getItem(style),
+              assets: localStorage.getItem(assets),
+              palettes: JSON.parse(localStorage.getItem(palettes) ?? "null"),
+            }),
+            keys,
+          );
+          assert.deepEqual(stored, {
+            style: '"Grid"',
+            assets: '"Pixel"',
+            palettes: { light: "darkAndYellow", dark: expectedDark },
+          });
+        },
+        {
+          beforeNavigate: async (page) => {
+            await page.emulateMedia({ colorScheme: "light" });
+            await page.addInitScript(
+              ({ keys, initialPalettes }) => {
+                localStorage.setItem(keys.style, '"Pangchiu"');
+                localStorage.setItem(keys.assets, '"Original"');
+                localStorage.setItem(
+                  keys.palettes,
+                  JSON.stringify(initialPalettes),
+                );
+                const read = Storage.prototype.getItem;
+                Storage.prototype.getItem = function (
+                  /** @type {string} */ key,
+                ) {
+                  if (
+                    this === localStorage &&
+                    Object.values(keys).includes(key) &&
+                    !sessionStorage.getItem("paletteReadRecovered")
+                  )
+                    throw new DOMException("unavailable", "SecurityError");
+                  return read.call(this, key);
+                };
+              },
+              { keys, initialPalettes },
+            );
+          },
+        },
+      );
+    },
+  );
+}
+
+for (const destination of ["invite", "home", "event"]) {
+  test(
+    `the saved board paints before the app module on the ${destination} page`,
+    { skip: benchmark, timeout: 60_000 },
+    async () => {
+      const picture = destination === "home";
+      const blocked = destination === "event";
+      const entryGate = deferred();
+      const artGate = deferred();
+      let artRequests = 0;
+      await fixture(
+        async ({ page }) => {
+          try {
+            const board = page.locator("#board-backdrop");
+            const visibleLayer = page.locator(
+              picture ? "#board-picture" : "#board-grid",
+            );
+            await visibleLayer.waitFor({ state: "visible" });
+            await page.waitForFunction(
+              () => window.loadingProbe.backdropFrame !== null,
+            );
+            assert.equal(await page.locator("#root > *").count(), 0);
+            assert.equal(await page.locator("#monsboard").count(), 0);
+            assert.equal(
+              await page.locator("#board-picture image[href]").count(),
+              0,
+            );
+            assert.equal(artRequests, 0);
+            const earlyNode = await board.elementHandle();
+            assert.ok(earlyNode);
+            const earlyBounds = await board.boundingBox();
+            const tile = page.locator('#board-grid > rect[x="100"][y="100"]');
+            const paintColor = () =>
+              tile.evaluate((el) => getComputedStyle(el).fill);
+            if (picture) {
+              assert.equal(
+                await page.locator("#board-grid").isVisible(),
+                false,
+              );
+              assert.equal(
+                await page
+                  .locator("#board-picture rect")
+                  .evaluate((el) => getComputedStyle(el).fill),
+                "rgb(35, 35, 35)",
+              );
+            } else {
+              assert.equal(
+                await paintColor(),
+                blocked ? "rgb(190, 190, 190)" : "rgb(24, 24, 24)",
+              );
+              assert.equal(await page.locator("#board-grid rect").count(), 121);
+            }
+
+            entryGate.resolve();
+            if (blocked) {
+              await page
+                .getByRole("heading", {
+                  name: "Mons is being updated",
+                  exact: true,
+                })
+                .waitFor();
+              assert.equal(await board.isVisible(), false);
+              return;
+            }
+            await page.locator("#monsboard").waitFor({ state: "attached" });
+            assert.equal(
+              await earlyNode.evaluate(
+                (el) => el === document.getElementById("board-backdrop"),
+              ),
+              true,
+            );
+            assert.deepEqual(await board.boundingBox(), earlyBounds);
+            assert.deepEqual(
+              await page.locator("svg:has(> #itemsLayer)").boundingBox(),
+              earlyBounds,
+            );
+            if (picture) {
+              await page
+                .locator("#board-picture image[href]")
+                .waitFor({ state: "attached" });
+              const placeholder = page.locator("#board-picture rect");
+              assert.equal(await placeholder.isVisible(), true);
+              artGate.resolve();
+              await page
+                .locator("#board-picture image:not([href])")
+                .waitFor({ state: "attached" });
+              assert.equal(
+                await placeholder.evaluate((el) => getComputedStyle(el).fill),
+                "rgb(35, 35, 35)",
+              );
+              assert.equal(artRequests, 1);
+              await page.getByRole("button", { name: "Appearance" }).click();
+              await page
+                .getByRole("button", { name: "Dark board theme" })
+                .click();
+              await page.locator("#board-grid").waitFor({ state: "visible" });
+              assert.equal(await paintColor(), "rgb(24, 24, 24)");
+              await page
+                .getByRole("button", { name: "Pangchiu board theme" })
+                .click();
+              await page.locator("#board-picture image[data-loaded]").waitFor();
+              assert.equal(artRequests, 2);
+            } else {
+              await page.emulateMedia({ colorScheme: "dark" });
+              assert.equal(await paintColor(), "rgb(190, 190, 190)");
+              await assertBoardAcceptsInput(page);
+              assert.equal(artRequests, 0);
+            }
+          } finally {
+            entryGate.resolve();
+            artGate.resolve();
+          }
+        },
+        {
+          startFromHome: picture,
+          inviteId: blocked ? "event/test-id" : defaultInviteId,
+          beforeNavigate: async (page) => {
+            await page.emulateMedia({
+              colorScheme: picture ? "dark" : "light",
+            });
+            if (picture)
+              await page.setViewportSize({ width: 390, height: 844 });
+            await page.addInitScript(
+              ({ styleKey, paletteKey, style, palettes }) => {
+                localStorage.setItem(styleKey, style);
+                localStorage.setItem(paletteKey, palettes);
+              },
+              {
+                styleKey: applicationStorageKey("boardStyleSet"),
+                paletteKey: applicationStorageKey("boardColorSetsByTheme"),
+                style: blocked
+                  ? "invalid JSON"
+                  : JSON.stringify(picture ? "Pangchiu" : "Grid"),
+                palettes: blocked
+                  ? "{}"
+                  : JSON.stringify({ light: "darkAndYellow", dark: "default" }),
+              },
+            );
+            await page.route(
+              /\/(?:src\/bootstrap\.ts|assets\/index-[^/]+\.js)$/,
+              async (route) => {
+                await entryGate.promise;
+                await route.continue();
+              },
+            );
+            await page.route(
+              "**/boards/backgrounds/pangchiu.jpg",
+              async (route) => {
+                artRequests++;
+                await artGate.promise;
+                if (artRequests === 1) await route.abort();
+                else
+                  await route.fulfill({
+                    contentType: "image/svg+xml",
+                    body: '<svg xmlns="http://www.w3.org/2000/svg" width="1524" height="1612"><rect width="100%" height="100%" fill="tan"/></svg>',
+                  });
+              },
+            );
+            if (blocked) {
+              await page.route("https://api.mons.link/release", (route) =>
+                route.fulfill({
+                  headers: { "Access-Control-Allow-Origin": "*" },
+                  json: {
+                    state: "maintenance",
+                    dataEpoch: APPLICATION_DATA_EPOCH,
+                    generation: 1,
+                    retryAfterSeconds: 30,
+                  },
+                }),
+              );
+            }
+          },
+        },
+      );
+    },
   );
 }
 
@@ -1614,7 +1990,7 @@ test(
   { skip: !benchmark, timeout: 180_000 },
   async (t) => {
     /** @typedef {import("./fixtures/loadingGlobals.ts").LoadingProbe & {interactionReady: number, routePrepared: number, requests: Pick<LoadingRequest, "path" | "query" | "method">[]}} BenchmarkSample */
-    /** @type {Record<string, {runs: BenchmarkSample[], medianShellMs: number, medianPopulatedMs: number, medianInteractionReadyMs: number, medianFirstInputMs: number}>} */
+    /** @type {Record<string, {runs: BenchmarkSample[], medianBackdropFrameMs: number | null, medianShellMs: number, medianPopulatedMs: number, medianInteractionReadyMs: number, medianFirstInputMs: number}>} */
     const scenarios = {};
     for (const sessionMode of /** @type {const} */ (["fresh", "restored"])) {
       /** @type {BenchmarkSample[]} */
@@ -1623,6 +1999,11 @@ test(
         await fixture(
           async ({ page, requests }) => {
             await assertBoardAcceptsInput(page);
+            if (await page.locator("#board-backdrop").count()) {
+              await page.waitForFunction(
+                () => window.loadingProbe.backdropFrame !== null,
+              );
+            }
             samples.push({
               ...(await page.evaluate(() => {
                 const interaction = performance.getEntriesByName(
@@ -1649,6 +2030,7 @@ test(
               JSON.stringify({
                 sessionMode,
                 sample: index + 1,
+                backdropFrame: present(samples.at(-1)).backdropFrame,
                 populated: present(samples.at(-1)).populated,
                 interactionReady: present(samples.at(-1)).interactionReady,
               }),
@@ -1657,7 +2039,7 @@ test(
           { apiDelayMs: 200, holdExtras: false, sessionMode },
         );
       }
-      /** @param {"shell" | "populated" | "interactionReady" | "firstInput"} key */
+      /** @param {"backdropFrame" | "shell" | "populated" | "interactionReady" | "firstInput"} key */
       const median = (key) =>
         present(
           samples
@@ -1670,6 +2052,11 @@ test(
         );
       scenarios[sessionMode] = {
         runs: samples,
+        medianBackdropFrameMs: samples.every(
+          (sample) => sample.backdropFrame === null,
+        )
+          ? null
+          : median("backdropFrame"),
         medianShellMs: median("shell"),
         medianPopulatedMs: median("populated"),
         medianInteractionReadyMs: median("interactionReady"),
@@ -1678,6 +2065,8 @@ test(
     }
     const report = {
       build: process.env.MONS_LOADING_BUILD,
+      backdropFrameMetric:
+        "Milliseconds from navigation to the first animation-frame callback with the selected HTML board background visible at its rendered size.",
       cpuSlowdown: 4,
       apiDelayMs: 200,
       staticAssets: "gzip",

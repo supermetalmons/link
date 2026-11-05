@@ -1,3 +1,10 @@
+import {
+  boardAppearanceStorageKeys,
+  discardEarlyBoardAppearance,
+  isAssetsSet,
+  isBoardStyleSet,
+  isBoardColorSetsByTheme,
+} from "../content/boardAppearance.ts";
 import type { AssetsSet, BoardStyleSet } from "../content/boardStyleModels";
 import {
   isAura,
@@ -51,10 +58,8 @@ const PENDING_AUTOMATCH_OPERATION_PREFIX = "pendingAutomatchOperation:";
 const STORAGE_KEYS = {
   IS_MUTED: "isMuted",
 
-  PREFERRED_ASSETS_SET: "preferredAssetsSet",
-  BOARD_STYLE_SET: "boardStyleSet",
+  ...boardAppearanceStorageKeys,
   BOARD_COLOR_SET: "boardColorSet",
-  BOARD_COLOR_SETS_BY_THEME: "boardColorSetsByTheme",
   IS_EXPERIMENTING_WITH_SPRITES: "isExperimentingWithSprites",
 
   PLAYER_EMOJI_ID: "playerEmojiId",
@@ -226,25 +231,6 @@ const numberValue = (value: unknown): number | undefined =>
   typeof value === "number" && Number.isFinite(value) ? value : undefined;
 const booleanValue = (value: unknown): boolean | undefined =>
   typeof value === "boolean" ? value : undefined;
-const isAssetsSet = (value: unknown): value is AssetsSet =>
-  value === "Pixel" || value === "Original" || value === "Pangchiu";
-const isBoardStyleSet = (value: unknown): value is BoardStyleSet =>
-  value === "Grid" || value === "Pangchiu";
-const isNullableString = (value: unknown): value is string | null =>
-  value === null || typeof value === "string";
-const isBoardColorSetsByTheme = (
-  value: unknown,
-): value is BoardColorSetsByTheme => {
-  if (
-    !value ||
-    typeof value !== "object" ||
-    Array.isArray(value) ||
-    Object.keys(value).length !== 2
-  )
-    return false;
-  const fields = value as { light?: unknown; dark?: unknown };
-  return isNullableString(fields.light) && isNullableString(fields.dark);
-};
 const isStringArray = (value: unknown): value is string[] =>
   Array.isArray(value) &&
   value.every((entry: unknown) => typeof entry === "string");
@@ -701,6 +687,7 @@ export const storage = {
   },
 
   signOut: (): void => {
+    discardEarlyBoardAppearance();
     Object.values(STORAGE_KEYS).forEach((key) => {
       if (!LOGOUT_PRESERVED_STORAGE_KEYS.has(key)) {
         localStorage.removeItem(applicationStorageKey(key));

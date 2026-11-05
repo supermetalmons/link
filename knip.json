@@ -40,6 +40,7 @@
         "test/fixtures/eventModalEnvironment.ts",
         "test/fixtures/eventPrizeSelectionEnvironment.ts",
         "test/fixtures/leaderboardEnvironment.ts",
+        "scripts/board-shell-html.ts!",
         "scripts/event-social-metadata.ts!"
       ],
       "project": [

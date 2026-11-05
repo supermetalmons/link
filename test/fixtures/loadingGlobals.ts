@@ -2,6 +2,7 @@ import type { SessionAuth } from "../../src/session/sessionAuth.ts";
 import type { SessionStore } from "../../src/session/sessionStore.ts";
 
 export type LoadingProbe = {
+  backdropFrame: number | null;
   shell: number | null;
   populated: number | null;
   trustedInput?: boolean;

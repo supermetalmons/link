@@ -12,6 +12,10 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
 import { createServer } from "vite";
+import {
+  renderBoardShell,
+  renderBoardShellHead,
+} from "../scripts/board-shell-renderer.ts";
 import { requireValue } from "./fixtures/browserAssertions.ts";
 
 /** @typedef {import("playwright").Page} Page */
@@ -41,7 +45,7 @@ const fixturePath = path.join(
   repository,
   "test/fixtures/boardWagersEnvironment.tsx",
 );
-const boardPatternWrapperId = "\0board-pattern-fixture";
+const boardSquaresWrapperId = "\0board-squares-fixture";
 const stubbedModules = new Set(
   [
     "game/gameController",
@@ -84,7 +88,7 @@ async function fixture(sourcePath, run) {
             if (!request.url?.startsWith("/__wagers?")) return next();
             response.setHeader("Content-Type", "text/html");
             response.end(
-              '<meta name="viewport" content="width=device-width,initial-scale=1"><div id="root"></div><script type="module" src="/test/fixtures/boardWagersHarness.tsx"></script>',
+              `<!doctype html><head><meta name="viewport" content="width=device-width,initial-scale=1">${renderBoardShellHead()}</head><body>${renderBoardShell()}<script type="module" src="/test/fixtures/boardWagersHarness.tsx"></script></body>`,
             );
           });
         },
@@ -94,21 +98,19 @@ async function fixture(sourcePath, run) {
               .resolve(path.dirname(importer), id)
               .replace(/\.(ts|tsx)$/, "");
             if (stubbedModules.has(resolved)) return fixturePath;
-            if (
-              resolved ===
-              path.join(repository, "src/utils/boardPatternGenerator")
-            )
-              return boardPatternWrapperId;
+            if (resolved === path.join(repository, "src/game/boardSquareTypes"))
+              return boardSquaresWrapperId;
           }
         },
         load(id) {
-          if (id === boardPatternWrapperId)
+          if (id === boardSquaresWrapperId)
             return `
-              import { generateBoardPattern as generate } from "/src/utils/boardPatternGenerator.tsx?original";
+              export * from "/src/game/boardSquareTypes.ts?original";
+              import { getBoardPatternSquareColorKey as getColor } from "/src/game/boardSquareTypes.ts?original";
               import { environment } from "/test/fixtures/boardWagersEnvironment.tsx";
-              export function generateBoardPattern(props) {
-                environment.boardPatternRenders++;
-                return generate(props);
+              export function getBoardPatternSquareColorKey(...args) {
+                environment.boardSquareColorReads++;
+                return getColor(...args);
               }
             `;
           if (
@@ -170,9 +172,8 @@ async function openPage(browser, origin, mobile, dark, input = {}) {
       });
     return route.abort();
   });
-  const start = new Date("2026-01-01T00:00:00Z");
-  await page.clock.install({ time: start });
-  await page.clock.pauseAt(start);
+  await page.clock.install({ time: new Date("2025-12-31T00:00:00Z") });
+  await page.clock.pauseAt(new Date("2026-01-01T00:00:00Z"));
   await page.addInitScript(({ finePointer }) => {
     if (finePointer !== undefined) {
       const matchMedia = window.matchMedia.bind(window);
@@ -822,6 +823,168 @@ async function scenarios(browser, origin, mode, snapshots) {
 }
 
 test(
+  "Pangchiu move highlights preserve the board artwork's light and dark detail",
+  { timeout: 60_000 },
+  async () => {
+    await fixture(null, async ({ browser, origin }) => {
+      const { context, page } = await openPage(browser, origin, false, false);
+      try {
+        await page.route("**/boards/backgrounds/pangchiu.jpg", (route) =>
+          route.fulfill({
+            contentType: "image/svg+xml",
+            body: '<svg xmlns="http://www.w3.org/2000/svg" width="1100" height="1161"><rect width="1100" height="1161" fill="#303030"/><rect x="125" width="975" height="1161" fill="#c0c0c0"/></svg>',
+          }),
+        );
+        await invoke(page, "styleViaBoardPort", "pangchiu");
+        await page.locator("#board-picture image[data-loaded]").waitFor();
+        const samples = await page
+          .locator("#highlightsLayer")
+          .evaluate((layer) => {
+            if (!(layer instanceof SVGGElement))
+              throw new Error("Missing highlights layer");
+            const highlight = document.createElementNS(
+              "http://www.w3.org/2000/svg",
+              "rect",
+            );
+            highlight.setAttribute("width", "100");
+            highlight.setAttribute("height", "100");
+            highlight.setAttribute("fill", "#00bc00");
+            highlight.style.mixBlendMode = "color";
+            layer.append(highlight);
+            const matrix = layer.getScreenCTM();
+            if (!matrix) throw new Error("Unmeasurable highlights layer");
+            return [15, 75].map((x) => {
+              const point = new DOMPoint(x, 40).matrixTransform(matrix);
+              return { x: Math.round(point.x), y: Math.round(point.y) };
+            });
+          });
+        const png = (await page.screenshot()).toString("base64");
+        const colors = await page.evaluate(
+          async ({ samples, png }) => {
+            const image = new Image();
+            image.src = "data:image/png;base64," + png;
+            await image.decode();
+            const canvas = document.createElement("canvas");
+            canvas.width = image.width;
+            canvas.height = image.height;
+            const context = canvas.getContext("2d");
+            if (!context) throw new Error("Could not sample board pixels");
+            context.drawImage(image, 0, 0);
+            return samples.map(({ x, y }) =>
+              Array.from(context.getImageData(x, y, 1, 1).data.slice(0, 3)),
+            );
+          },
+          { samples, png },
+        );
+        const [dark, light] = colors.map(([red, green, blue]) => {
+          assert.ok(
+            requireValue(green) >
+              Math.max(requireValue(red), requireValue(blue)) + 30,
+            `Expected the Pangchiu highlight to tint the artwork, sampled ${JSON.stringify(colors)}`,
+          );
+          return requireValue(green);
+        });
+        assert.ok(
+          requireValue(light) - requireValue(dark) > 100,
+          `Expected texture beneath the green highlight, sampled ${JSON.stringify(colors)}`,
+        );
+      } finally {
+        await context.close();
+      }
+    });
+  },
+);
+
+test(
+  "board SVGs preserve their original responsive bounds",
+  { timeout: 60_000 },
+  async () => {
+    const viewports = [
+      {
+        width: 1200,
+        height: 900,
+        grid: [308.62, 94.5, 582.77, 747],
+        pangchiu: [284.82, 54.09, 630.35, 808],
+      },
+      {
+        width: 900,
+        height: 380,
+        grid: [337.66, 53.59, 224.68, 288],
+        pangchiu: [337.66, 49.41, 224.68, 288],
+      },
+      {
+        width: 390,
+        height: 844,
+        grid: [0, 193.14, 390, 499.91],
+        pangchiu: [0, 180.48, 390, 499.91],
+      },
+      {
+        width: 380,
+        height: 547,
+        grid: [12.91, 71.11, 354.18, 454],
+        pangchiu: [12.52, 56.94, 354.96, 455],
+      },
+      {
+        width: 300,
+        height: 340,
+        grid: [43.38, 48.63, 213.23, 273.33],
+        pangchiu: [53.26, 52.8, 193.48, 248],
+      },
+      {
+        width: 375,
+        height: 548,
+        grid: [10.08, 60.27, 354.83, 454.83],
+        pangchiu: [9.63, 51.47, 355.74, 456],
+      },
+    ];
+    await fixture(null, async ({ browser, origin }) => {
+      const { page, context } = await openPage(browser, origin, false, false);
+      try {
+        for (const viewport of viewports) {
+          await page.setViewportSize({
+            width: viewport.width,
+            height: viewport.height,
+          });
+          for (const style of /** @type {const} */ (["grid", "pangchiu"])) {
+            await invoke(page, "styleViaBoardPort", style);
+            const bounds = await page
+              .locator(".board-svg")
+              .evaluateAll((elements) =>
+                elements.map((svg) => {
+                  if (!(svg instanceof SVGSVGElement))
+                    throw new Error("Expected an SVG viewport");
+                  const matrix = svg.getScreenCTM();
+                  if (!matrix) throw new Error("Unmeasurable board");
+                  const viewBox = svg.viewBox.baseVal;
+                  return [
+                    matrix.e,
+                    matrix.f,
+                    viewBox.width * matrix.a,
+                    viewBox.height * matrix.d,
+                  ];
+                }),
+              );
+            const expected = viewport[style];
+            assert.equal(bounds.length, 3);
+            for (const actual of bounds) {
+              assert.ok(
+                expected.every(
+                  (value, index) =>
+                    Math.abs(value - requireValue(actual[index])) < 0.125,
+                ),
+                `${style} board at ${viewport.width}×${viewport.height}: expected ${expected}, measured ${actual}`,
+              );
+            }
+          }
+        }
+      } finally {
+        await context.close();
+      }
+    });
+  },
+);
+
+test(
   "board commands survive StrictMode and remount while preserving only cached player info",
   { timeout: 60_000 },
   async () => {
@@ -878,10 +1041,45 @@ test(
         );
         await invoke(page, "overlay", null);
 
+        const backdrop = await page.locator("#board-backdrop").elementHandle();
+        const firstTile = page.locator("#board-grid > rect").first();
+        await invoke(page, "squareTypes", [["manaBase"]]);
+        assert.equal(
+          await firstTile.getAttribute("fill"),
+          "var(--board-simpleManaSquareOnLightTile)",
+        );
+        await invoke(page, "squareTypes", null);
+        assert.equal(
+          await firstTile.getAttribute("fill"),
+          "var(--board-manaPool)",
+        );
         await invoke(page, "styleViaBoardPort", "pangchiu");
-        assert.equal(await page.locator(".board-svg.grid-hidden").count(), 2);
+        assert.equal(await page.locator("#board-picture").isVisible(), true);
+        assert.equal(await page.locator("#board-grid").isVisible(), false);
+        const art = await page.waitForSelector(
+          "#board-picture image[data-loaded]",
+        );
         await invoke(page, "styleViaBoardPort", "grid");
-        assert.equal(await page.locator(".board-svg.grid-visible").count(), 2);
+        assert.equal(await page.locator("#board-grid").isVisible(), true);
+        assert.equal(await page.locator("#board-picture").isVisible(), false);
+        await invoke(page, "styleViaBoardPort", "pangchiu");
+        assert.equal(
+          await art.evaluate(
+            (node) =>
+              node ===
+              document.querySelector("#board-picture image[data-loaded]"),
+          ),
+          true,
+        );
+        await art.dispose();
+        await invoke(page, "styleViaBoardPort", "grid");
+        assert.equal(
+          await backdrop?.evaluate(
+            (node) => node === document.getElementById("board-backdrop"),
+          ),
+          true,
+        );
+        await backdrop?.dispose();
         for (const opponent of [true, false]) {
           const expected = await invoke(page, "aura", opponent, true);
           const aura = page
@@ -1206,7 +1404,7 @@ async function botStrengthDesktopLifecycle(browser, origin, mode) {
     await invoke(page, "botStrength", { mode: "normal" });
     await page.clock.runFor(80);
     const renders = await page.evaluate(
-      () => window.boardWagersHarness.e.boardPatternRenders,
+      () => window.boardWagersHarness.e.boardSquareColorReads,
     );
     await botInput(page, "mouseover");
     assert.equal(await botFill(page), hovered);
@@ -1219,7 +1417,7 @@ async function botStrengthDesktopLifecycle(browser, origin, mode) {
       assert.deepEqual(await botListenerCounts(page), expectedBotListeners(0));
     }
     const nextRenders = await page.evaluate(
-      () => window.boardWagersHarness.e.boardPatternRenders,
+      () => window.boardWagersHarness.e.boardSquareColorReads,
     );
     if (mode === "current")
       assert.equal(

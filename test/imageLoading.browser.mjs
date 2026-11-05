@@ -7,6 +7,8 @@ import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
 import { createServer } from "vite";
+import { getBoardAppearanceScript } from "../src/content/boardAppearance.ts";
+import { applicationStorageKey } from "../src/session/applicationDataStorage.ts";
 
 const require = createRequire(import.meta.url);
 /** @type {typeof import("playwright")} */
@@ -391,3 +393,173 @@ test(
     });
   },
 );
+
+test("the live board retains early preferences only for failed reads", async (t) => {
+  await fixture(t, async ({ page }) => {
+    await page.emulateMedia({ colorScheme: "light" });
+    const keys = {
+      assets: applicationStorageKey("preferredAssetsSet"),
+      style: applicationStorageKey("boardStyleSet"),
+      palette: applicationStorageKey("boardColorSetsByTheme"),
+    };
+    await page.route("**/__handoff", (route) =>
+      route.fulfill({
+        contentType: "text/html",
+        body: `<!doctype html><script>${getBoardAppearanceScript()}</script>`,
+      }),
+    );
+    for (const change of ["unreadable", "removed", "logout"]) {
+      await page.evaluate((keys) => {
+        localStorage.setItem(keys.assets, '"Original"');
+        localStorage.setItem(keys.style, '"Pangchiu"');
+        localStorage.setItem(
+          keys.palette,
+          '{"light":"darkAndYellow","dark":"default"}',
+        );
+      }, keys);
+      await page.goto(new URL("/__handoff", page.url()).href);
+      assert.equal(
+        await page.locator("html").getAttribute("data-board-style"),
+        "Pangchiu",
+      );
+      const result = await page.evaluate(
+        async ({ change, keys }) => {
+          if (change === "logout") {
+            const { storage } = await import("/src/utils/storage.ts");
+            storage.signOut();
+          } else if (change === "removed") {
+            localStorage.removeItem(keys.style);
+            localStorage.removeItem(keys.palette);
+          }
+          const read = Storage.prototype.getItem;
+          Storage.prototype.getItem = function (/** @type {string} */ key) {
+            if (change !== "removed" || key === keys.assets)
+              throw new DOMException("unavailable", "SecurityError");
+            return read.call(this, key);
+          };
+          try {
+            const board = await import("/src/content/boardStyles.ts");
+            return [
+              board.getCurrentBoardStyleSet(),
+              board.getCurrentAssetsSet(),
+              board.getCurrentColorSetKey(),
+            ];
+          } finally {
+            Storage.prototype.getItem = read;
+          }
+        },
+        { change, keys },
+      );
+      assert.deepEqual(
+        result,
+        change === "unreadable"
+          ? ["Pangchiu", "Original", "darkAndYellow"]
+          : ["Grid", change === "logout" ? "Pixel" : "Original", "default"],
+      );
+    }
+  });
+});
+
+test("board initialization migrates only after reading both style preferences", async (t) => {
+  await fixture(t, async ({ page }) => {
+    const styleKey = applicationStorageKey("boardStyleSet");
+    const assetKey = applicationStorageKey("preferredAssetsSet");
+    await page.addInitScript(() => {
+      const blocked = sessionStorage.getItem("blockedPreference");
+      const read = Storage.prototype.getItem;
+      Storage.prototype.getItem = function (/** @type {string} */ key) {
+        if (this === localStorage && key === blocked) {
+          Storage.prototype.getItem = read;
+          throw new DOMException("unavailable", "SecurityError");
+        }
+        return read.call(this, key);
+      };
+    });
+    for (const { stored, blocked, rendered, retained } of [
+      {
+        stored: '"Grid"',
+        blocked: styleKey,
+        rendered: "Pangchiu",
+        retained: '"Grid"',
+      },
+      { stored: null, blocked: assetKey, rendered: "Grid", retained: null },
+      {
+        stored: null,
+        blocked: applicationStorageKey("boardColorSetsByTheme"),
+        rendered: "Pangchiu",
+        retained: '"Pangchiu"',
+      },
+      {
+        stored: "invalid JSON",
+        blocked: "",
+        rendered: "Pangchiu",
+        retained: '"Pangchiu"',
+      },
+    ]) {
+      await page.evaluate(
+        ({ styleKey, assetKey, stored, blocked }) => {
+          localStorage.setItem(assetKey, JSON.stringify("Pangchiu"));
+          if (stored === null) localStorage.removeItem(styleKey);
+          else localStorage.setItem(styleKey, stored);
+          sessionStorage.setItem("blockedPreference", blocked);
+        },
+        { styleKey, assetKey, stored, blocked },
+      );
+      await page.reload();
+      await page.waitForFunction(() => !!window.imageLoadingHarness);
+      assert.equal(
+        await page.locator("html").getAttribute("data-board-style"),
+        rendered,
+      );
+      assert.equal(
+        await page.evaluate((key) => localStorage.getItem(key), styleKey),
+        retained,
+      );
+    }
+  });
+});
+
+test("board style and palette changes survive a storage write failure for the session", async (t) => {
+  await fixture(t, async ({ page }) => {
+    await page.emulateMedia({ colorScheme: "light" });
+    const state = await page.evaluate(async () => {
+      const board = await import("/src/content/boardStyles.ts");
+      let styleUpdates = 0;
+      let paletteUpdates = 0;
+      const unsubscribeStyle = board.subscribeToBoardStyleSetChanges(
+        () => styleUpdates++,
+      );
+      const unsubscribePalette = board.subscribeToBoardColorSetChanges(
+        () => paletteUpdates++,
+      );
+      const write = Storage.prototype.setItem;
+      Storage.prototype.setItem = () => {
+        throw new DOMException("full", "QuotaExceededError");
+      };
+      try {
+        board.setCurrentBoardStyleSet(board.BoardStyleSet.Pangchiu);
+        board.setBoardColorSet("darkAndYellow");
+        return {
+          style: board.getCurrentBoardStyleSet(),
+          palette: board.getCurrentColorSetKey(),
+          renderedStyle: document.documentElement.dataset.boardStyle,
+          renderedPalette: document.documentElement.dataset.boardPaletteLight,
+          styleUpdates,
+          paletteUpdates,
+        };
+      } finally {
+        Storage.prototype.setItem = write;
+        unsubscribeStyle();
+        unsubscribePalette();
+      }
+    });
+    assert.deepEqual(state, {
+      style: "Pangchiu",
+      palette: "darkAndYellow",
+      renderedStyle: "Pangchiu",
+      renderedPalette: "darkAndYellow",
+      styleUpdates: 1,
+      paletteUpdates: 1,
+    });
+  });
+});

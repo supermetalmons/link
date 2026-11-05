@@ -6,24 +6,23 @@ import React, {
   useRef,
   useState,
 } from "react";
+import { createPortal } from "react-dom";
 import styled from "styled-components";
 import { FaTimes, FaCheck } from "react-icons/fa";
 import {
   didClickBotStrengthControlButton,
-  getCurrentDisplayedBoardSquareTypes,
   subscribeToDisplayedBoardSquareTypes,
 } from "../game/gameController";
-import type { BoardSquareTypeGrid } from "../game/boardSquareTypes";
 import {
-  ColorSet,
+  BOARD_GRID_SIZE,
+  getBoardPatternSquareColorKey,
+} from "../game/boardSquareTypes";
+import {
   colors,
-  getCurrentColorSet,
-  isCustomPictureBoardEnabled,
   isPangchiuBoard,
-  subscribeToBoardColorSetChanges,
+  subscribeToBoardStyleSetChanges,
 } from "../content/boardStyles";
 import { isMobile } from "../utils/misc";
-import { generateBoardPattern } from "../utils/boardPatternGenerator";
 import {
   attachRainbowAura,
   hideRainbowAura as hideAuraDom,
@@ -363,8 +362,6 @@ const seeIfShouldOffsetFromBorders = () =>
 const BoardComponent: React.FC = () => {
   const reactionsLayerRef = useRef<BoardReactionsLayerHandle>(null);
   const transitionTimeoutIdsRef = useRef<Set<number>>(new Set());
-  const [currentColorSet, setCurrentColorSet] =
-    useState<ColorSet>(getCurrentColorSet());
   const [playerInfoOverlayState, setPlayerInfoOverlayState] =
     useState<BoardPlayerInfoOverlayState>(getBoardPlayerInfoOverlayState);
   const [endOfGameIconHrefs, setEndOfGameIconHrefs] =
@@ -372,20 +369,8 @@ const BoardComponent: React.FC = () => {
   const [prefersDarkMode, setPrefersDarkMode] = useState(
     window.matchMedia("(prefers-color-scheme: dark)").matches,
   );
-  const [isGridVisible, setIsGridVisible] = useState(
-    !isCustomPictureBoardEnabled(),
-  );
   const [isPangchiuBoardLayout, setIsPangchiuBoardLayout] =
     useState(isPangchiuBoard());
-  const [shouldIncludePictureBoardImage, setShouldIncludePictureBoardImage] =
-    useState(isCustomPictureBoardEnabled());
-  const [loadedPictureBoardUrls, setLoadedPictureBoardUrls] = useState<
-    Record<string, true>
-  >({});
-  const [displayedBoardSquareTypes, setDisplayedBoardSquareTypes] =
-    useState<BoardSquareTypeGrid | null>(() =>
-      getCurrentDisplayedBoardSquareTypes(),
-    );
   const [overlayState, setOverlayState] = useState<{
     blurry: boolean;
     svgElement: SVGElement | null;
@@ -409,6 +394,7 @@ const BoardComponent: React.FC = () => {
     seeIfShouldOffsetFromBorders(),
   );
   const boardSvgRef = useRef<SVGSVGElement | null>(null);
+  const pictureBoardImageRef = useRef<SVGImageElement | null>(null);
   const opponentAuraContainerRef = useRef<HTMLDivElement | null>(null);
   const playerAuraContainerRef = useRef<HTMLDivElement | null>(null);
   const opponentAuraRefs = useRef<{
@@ -575,28 +561,46 @@ const BoardComponent: React.FC = () => {
     }
   };
 
-  useEffect(() => {
-    const unsubscribe = subscribeToDisplayedBoardSquareTypes(
-      setDisplayedBoardSquareTypes,
-    );
-    return () => {
-      unsubscribe();
-    };
+  useLayoutEffect(() => {
+    const tiles = document.querySelectorAll("#board-grid > rect");
+    return subscribeToDisplayedBoardSquareTypes((squareTypes) => {
+      tiles.forEach((tile, index) => {
+        const colorKey = getBoardPatternSquareColorKey(
+          Math.floor(index / BOARD_GRID_SIZE),
+          index % BOARD_GRID_SIZE,
+          squareTypes,
+          true,
+        );
+        const fill = `var(--board-${colorKey})`;
+        if (tile.getAttribute("fill") !== fill) tile.setAttribute("fill", fill);
+      });
+    });
   }, []);
 
-  const updateColorSetAndGrid = useCallback(() => {
-    setCurrentColorSet(getCurrentColorSet());
-    const newIsGridVisible = !isCustomPictureBoardEnabled();
-    setIsGridVisible(newIsGridVisible);
-    setIsPangchiuBoardLayout(isPangchiuBoard());
-    if (!newIsGridVisible) {
-      setShouldIncludePictureBoardImage(true);
+  useLayoutEffect(() => {
+    const image = pictureBoardImageRef.current!;
+    const clearFailedImage = () => {
+      image.removeAttribute("data-loaded");
+      image.removeAttribute("href");
+    };
+    image.addEventListener("error", clearFailedImage);
+    return () => image.removeEventListener("error", clearFailedImage);
+  }, []);
+
+  useLayoutEffect(() => {
+    const image = pictureBoardImageRef.current!;
+    if (isPangchiuBoardLayout && !image.hasAttribute("href")) {
+      image.setAttribute("href", PANGCHIU_BOARD_BACKGROUND_URL);
     }
+  }, [isPangchiuBoardLayout]);
+
+  const updateBoardLayoutStyle = useCallback(() => {
+    setIsPangchiuBoardLayout(isPangchiuBoard());
   }, []);
 
   useLayoutEffect(() => {
     const boundHandlers = bindBoardUiHandlers({
-      updateBoardComponentForBoardStyleChange: updateColorSetAndGrid,
+      updateBoardComponentForBoardStyleChange: updateBoardLayoutStyle,
       setTopBoardOverlayVisible: setTopBoardOverlayVisibleHandler,
       showRaibowAura: showRaibowAuraHandler,
       updateAuraForAvatarElement: updateAuraForAvatarElementHandler,
@@ -618,8 +622,8 @@ const BoardComponent: React.FC = () => {
   });
 
   useEffect(() => {
-    return subscribeToBoardColorSetChanges(updateColorSetAndGrid);
-  }, [updateColorSetAndGrid]);
+    return subscribeToBoardStyleSetChanges(updateBoardLayoutStyle);
+  }, [updateBoardLayoutStyle]);
 
   useEffect(() => {
     const mediaQuery = window.matchMedia("(prefers-color-scheme: dark)");
@@ -698,7 +702,7 @@ const BoardComponent: React.FC = () => {
       window.removeEventListener("resize", updateSize);
       visualViewport?.removeEventListener("resize", updateSize);
     };
-  }, [isGridVisible]);
+  }, [isPangchiuBoardLayout]);
 
   useEffect(() => {
     let cancelled = false;
@@ -742,7 +746,7 @@ const BoardComponent: React.FC = () => {
   }, [
     boardPixelSize,
     boardViewportRect,
-    isGridVisible,
+    isPangchiuBoardLayout,
     playerInfoOverlayState.opponent.scoreText,
     playerInfoOverlayState.opponent.timerText,
     playerInfoOverlayState.opponent.timerVisible,
@@ -771,7 +775,7 @@ const BoardComponent: React.FC = () => {
   }, [
     boardPixelSize,
     boardViewportRect,
-    isGridVisible,
+    isPangchiuBoardLayout,
     playerInfoOverlayState.opponent.nameText,
     playerInfoOverlayState.opponent.nameVisible,
     playerInfoTextLayoutVersion,
@@ -883,12 +887,6 @@ const BoardComponent: React.FC = () => {
   const activeBoardTransform = isPangchiuBoardLayout
     ? pangchiuBoardTransform
     : standardBoardTransform;
-  const pictureBoardBackgroundUrl = PANGCHIU_BOARD_BACKGROUND_URL;
-  const isPictureBoardImageLoaded =
-    !!loadedPictureBoardUrls[pictureBoardBackgroundUrl];
-  const boardClassName = `board-svg ${
-    isPangchiuBoardLayout ? "grid-hidden" : "grid-visible"
-  }`;
   const boardOverlayStyle = {
     top: isPangchiuBoardLayout ? "7.05%" : "7.02%",
     height: isPangchiuBoardLayout ? "82.6%" : "78.2%",
@@ -1042,124 +1040,97 @@ const BoardComponent: React.FC = () => {
   };
   return (
     <>
-      <div
-        ref={auraLayerRef}
-        style={{
-          position: "fixed",
-          inset: 0,
-          pointerEvents: "none",
-          zIndex: 0,
-          overflow: "visible",
-        }}
-      >
+      {createPortal(
         <div
-          ref={opponentWrapperRef}
+          ref={auraLayerRef}
           style={{
-            position: "absolute",
-            left: 0,
-            top: 0,
-            width: 0,
-            height: 0,
+            position: "fixed",
+            inset: 0,
             pointerEvents: "none",
-            zIndex: 10,
+            zIndex: 0,
             overflow: "visible",
           }}
         >
           <div
-            style={{ position: "absolute", inset: 0, pointerEvents: "none" }}
-            ref={(div) => {
-              opponentAuraContainerRef.current = div;
-              if (div && !opponentAuraRefs.current) {
-                opponentAuraRefs.current = attachRainbowAura(div);
-              }
+            ref={opponentWrapperRef}
+            style={{
+              position: "absolute",
+              left: 0,
+              top: 0,
+              width: 0,
+              height: 0,
+              pointerEvents: "none",
+              zIndex: 10,
+              overflow: "visible",
             }}
-          />
-        </div>
-        <div
-          ref={playerWrapperRef}
-          style={{
-            position: "absolute",
-            left: 0,
-            top: 0,
-            width: 0,
-            height: 0,
-            pointerEvents: "none",
-            zIndex: 10,
-            overflow: "visible",
-          }}
-        >
+          >
+            <div
+              style={{ position: "absolute", inset: 0, pointerEvents: "none" }}
+              ref={(div) => {
+                opponentAuraContainerRef.current = div;
+                if (div && !opponentAuraRefs.current) {
+                  opponentAuraRefs.current = attachRainbowAura(div);
+                }
+              }}
+            />
+          </div>
           <div
-            style={{ position: "absolute", inset: 0, pointerEvents: "none" }}
-            ref={(div) => {
-              playerAuraContainerRef.current = div;
-              if (div && !playerAuraRefs.current) {
-                playerAuraRefs.current = attachRainbowAura(div);
-              }
+            ref={playerWrapperRef}
+            style={{
+              position: "absolute",
+              left: 0,
+              top: 0,
+              width: 0,
+              height: 0,
+              pointerEvents: "none",
+              zIndex: 10,
+              overflow: "visible",
             }}
-          />
-        </div>
-      </div>
+          >
+            <div
+              style={{ position: "absolute", inset: 0, pointerEvents: "none" }}
+              ref={(div) => {
+                playerAuraContainerRef.current = div;
+                if (div && !playerAuraRefs.current) {
+                  playerAuraRefs.current = attachRainbowAura(div);
+                }
+              }}
+            />
+          </div>
+        </div>,
+        document.getElementById("board-aura-host")!,
+      )}
+      {createPortal(
+        <image
+          ref={pictureBoardImageRef}
+          x="0"
+          y="100"
+          width="1100"
+          onLoad={(event) => {
+            if (event.currentTarget.hasAttribute("href")) {
+              event.currentTarget.setAttribute("data-loaded", "");
+            }
+          }}
+        />,
+        document.getElementById("board-picture")!,
+      )}
+
+      {createPortal(
+        <>
+          <g id="monsboard" transform={activeBoardTransform}></g>
+          <g id="highlightsLayer" transform={activeBoardTransform}></g>
+        </>,
+        document.getElementById("board-backdrop")!,
+      )}
 
       <svg
         ref={boardSvgRef}
         xmlns="http://www.w3.org/2000/svg"
-        className={boardClassName}
+        className="board-svg"
         viewBox={`0 0 ${BOARD_VIEWBOX_WIDTH} ${BOARD_VIEWBOX_HEIGHT}`}
         shapeRendering="crispEdges"
         overflow="visible"
       >
-        {isGridVisible ? (
-          <g id="boardBackgroundLayer">
-            {generateBoardPattern({
-              colorSet: currentColorSet,
-              size: 1100,
-              cellSize: 100,
-              offsetY: 100,
-              keyPrefix: "board",
-              squareTypes: displayedBoardSquareTypes,
-              useLightTileManaBaseShade: true,
-            })}
-          </g>
-        ) : (
-          <g id="boardBackgroundLayer">
-            <rect
-              x="1"
-              y="101"
-              height="1161"
-              width="1098"
-              fill={
-                isPictureBoardImageLoaded
-                  ? "transparent"
-                  : prefersDarkMode
-                    ? "var(--color-gray-23)"
-                    : "var(--boardBackgroundLight)"
-              }
-            />
-            {shouldIncludePictureBoardImage && (
-              <image
-                href={pictureBoardBackgroundUrl}
-                x="0"
-                y="100"
-                width="1100"
-                onLoad={() => {
-                  setLoadedPictureBoardUrls((prevUrls) =>
-                    prevUrls[pictureBoardBackgroundUrl]
-                      ? prevUrls
-                      : { ...prevUrls, [pictureBoardBackgroundUrl]: true },
-                  );
-                }}
-                style={{
-                  backgroundColor: prefersDarkMode
-                    ? "var(--color-gray-23)"
-                    : "var(--boardBackgroundLight)",
-                  display: isGridVisible ? "none" : "block",
-                }}
-              />
-            )}
-          </g>
-        )}
-        <g id="monsboard" transform={activeBoardTransform}></g>
-        <g id="highlightsLayer" transform={activeBoardTransform}></g>
         <g id="itemsLayer" transform={activeBoardTransform}></g>
         <g id="playerInfoLayer">
           {renderPlayerInfoSlotIcon(playerInfoLayout.opponent)}
@@ -1197,7 +1168,7 @@ const BoardComponent: React.FC = () => {
 
       <svg
         xmlns="http://www.w3.org/2000/svg"
-        className={boardClassName}
+        className="board-svg"
         viewBox={`0 0 ${BOARD_VIEWBOX_WIDTH} ${BOARD_VIEWBOX_HEIGHT}`}
         shapeRendering="crispEdges"
         overflow="visible"

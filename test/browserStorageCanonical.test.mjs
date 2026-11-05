@@ -1,5 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { runInNewContext } from "node:vm";
+import {
+  getBoardAppearanceScript,
+  readBoardAppearance,
+} from "../src/content/boardAppearance.ts";
 import { storage } from "../src/utils/storage.ts";
 import { applicationStorageKey } from "../src/session/applicationDataStorage.ts";
 
@@ -38,6 +43,76 @@ test.after(() => {
   if (previousLocalStorage)
     Object.defineProperty(globalThis, "localStorage", previousLocalStorage);
   else Reflect.deleteProperty(globalThis, "localStorage");
+});
+
+const earlyBoardAttributes = () => {
+  const dataset = {};
+  runInNewContext(getBoardAppearanceScript(), {
+    document: { documentElement: { dataset } },
+    localStorage,
+  });
+  return dataset;
+};
+
+test("early and runtime boards honor versioned style, item-set fallback and per-mode palette", () => {
+  values.set("boardStyleSet", '"Pangchiu"');
+  assert.equal(readBoardAppearance().style, "Grid");
+  put("preferredAssetsSet", '"Pangchiu"');
+  put("boardStyleSet", "invalid JSON");
+  put("boardColorSetsByTheme", '{"light":"darkAndYellow","dark":"default"}');
+  assert.deepEqual(earlyBoardAttributes(), {
+    boardStyle: "Pangchiu",
+    boardPaletteLight: "darkAndYellow",
+    boardPaletteDark: "default",
+  });
+  const derived = readBoardAppearance();
+  assert.equal(derived.style, "Pangchiu");
+  assert.equal(derived.shouldPersistInferredStyle, true);
+  assert.deepEqual(derived.preferences, {
+    light: "darkAndYellow",
+    dark: "default",
+  });
+  put("boardStyleSet", '"Grid"');
+  put("boardColorSetsByTheme", '{"light":"constructor","dark":"default"}');
+  assert.deepEqual(earlyBoardAttributes(), {
+    boardStyle: "Grid",
+    boardPaletteLight: "default",
+    boardPaletteDark: "default",
+  });
+  assert.equal(readBoardAppearance().shouldPersistInferredStyle, false);
+  assert.equal(readBoardAppearance().preferences.light, null);
+  put(
+    "boardColorSetsByTheme",
+    '{"light":"darkAndYellow","dark":null,"extra":true}',
+  );
+  assert.deepEqual(readBoardAppearance().preferences, {
+    light: null,
+    dark: null,
+  });
+  assert.deepEqual(earlyBoardAttributes(), {
+    boardStyle: "Grid",
+    boardPaletteLight: "default",
+    boardPaletteDark: "darkAndYellow",
+  });
+  assert.deepEqual(writes, []);
+});
+
+test("early board falls back to the theme defaults when preference storage is inaccessible", () => {
+  const read = localStorage.getItem;
+  try {
+    localStorage.getItem = () => {
+      throw new Error("storage blocked");
+    };
+    assert.deepEqual(earlyBoardAttributes(), {
+      boardStyle: "Grid",
+      boardPaletteLight: "default",
+      boardPaletteDark: "darkAndYellow",
+    });
+    assert.equal(readBoardAppearance().shouldPersistInferredStyle, false);
+    assert.deepEqual(writes, []);
+  } finally {
+    localStorage.getItem = read;
+  }
 });
 
 test("canonical storage uses only versioned keys and JSON strings", () => {

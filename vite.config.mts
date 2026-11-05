@@ -3,6 +3,7 @@ import { isAbsolute, relative, resolve, sep } from "node:path";
 import react from "@vitejs/plugin-react";
 import { defineConfig, loadEnv, type Plugin } from "vite";
 import checker from "vite-plugin-checker";
+import { boardShellHtml } from "./scripts/board-shell-html";
 import { eventSocialMetadata } from "./scripts/event-social-metadata";
 
 const defaultAppTitle = "mons.link • Play Mons";
@@ -58,6 +59,7 @@ export default defineConfig(({ mode }) => {
         enableBuild: false,
       }),
       restartOnSharedPackageChange(),
+      boardShellHtml(),
       eventSocialMetadata(),
     ],
     optimizeDeps: {

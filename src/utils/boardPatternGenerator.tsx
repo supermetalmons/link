@@ -1,9 +1,7 @@
 import React from "react";
 import type { ColorSet } from "../content/boardStyles";
 import {
-  getDisplayedBoardSquareType,
-  getLegacyBoardSquareType,
-  type BoardSquareType,
+  getBoardPatternSquareColorKey,
   type BoardSquareTypeGrid,
 } from "../game/boardSquareTypes";
 
@@ -16,44 +14,6 @@ interface BoardPatternProps {
   squareTypes?: BoardSquareTypeGrid | null;
   useLightTileManaBaseShade?: boolean;
 }
-
-const getBoardPatternSquareFill = (
-  row: number,
-  col: number,
-  colorSet: ColorSet,
-  squareTypes?: BoardSquareTypeGrid | null,
-  useLightTileManaBaseShade: boolean = false,
-): string => {
-  const isLightTile = (row + col) % 2 === 0;
-  const defaultFill = isLightTile ? colorSet.lightSquare : colorSet.darkSquare;
-  let squareType: BoardSquareType;
-  if (squareTypes === undefined) {
-    squareType = getLegacyBoardSquareType(row, col);
-  } else if (squareTypes === null) {
-    squareType = getDisplayedBoardSquareType(
-      getLegacyBoardSquareType(row, col),
-      false,
-    );
-  } else {
-    squareType = squareTypes[row]?.[col] ?? "regular";
-  }
-
-  switch (squareType) {
-    case "manaBase":
-      return useLightTileManaBaseShade && isLightTile
-        ? colorSet.simpleManaSquareOnLightTile
-        : colorSet.simpleManaSquare;
-    case "supermanaBase":
-    case "manaPool":
-      return colorSet.manaPool;
-    case "consumableBase":
-      return colorSet.pickupItemSquare;
-    case "monBase":
-    case "regular":
-    default:
-      return defaultFill;
-  }
-};
 
 export const generateBoardPattern = ({
   colorSet,
@@ -78,13 +38,16 @@ export const generateBoardPattern = ({
           y={y}
           width={cellSize}
           height={cellSize}
-          fill={getBoardPatternSquareFill(
-            row,
-            col,
-            colorSet,
-            squareTypes,
-            useLightTileManaBaseShade,
-          )}
+          fill={
+            colorSet[
+              getBoardPatternSquareColorKey(
+                row,
+                col,
+                squareTypes,
+                useLightTileManaBaseShade,
+              )
+            ]
+          }
         />,
       );
     }

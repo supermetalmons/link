@@ -19,7 +19,7 @@ import { wagerSlotLayoutsEqual } from "../../src/game/boardWagerModels";
 export const environment = {
   calls: [] as string[],
   botStrengthActivations: 0,
-  boardPatternRenders: 0,
+  boardSquareColorReads: 0,
   subscribers: new Set<WagerSubscriber>(),
   watchSubscribers: new Set<(value: boolean) => void>(),
   styleSubscribers: new Set<() => void>(),
@@ -152,8 +152,9 @@ export const getCurrentColorSet = () => ({
 export const isCustomPictureBoardEnabled = () =>
   environment.style === "pangchiu";
 export const isPangchiuBoard = isCustomPictureBoardEnabled;
-export const subscribeToBoardColorSetChanges = (cb: () => void) =>
+export const subscribeToBoardStyleSetChanges = (cb: () => void) =>
   subscribe(environment.styleSubscribers, cb);
+export const subscribeToBoardColorSetChanges = subscribeToBoardStyleSetChanges;
 export const getImageResource = () => ({
   load: async () => materialImage(),
   getSnapshot: materialImage,

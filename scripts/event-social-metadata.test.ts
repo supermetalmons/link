@@ -10,6 +10,7 @@ import {
   type ViteDevServer,
   type PreviewServer,
 } from "vite";
+import { boardShellHtml } from "./board-shell-html.ts";
 import {
   eventSocialMetadata,
   withEventSocialImages,
@@ -91,7 +92,7 @@ test(
       root: directory,
       configFile: false as const,
       logLevel: "silent" as const,
-      plugins: [eventSocialMetadata()],
+      plugins: [boardShellHtml(), eventSocialMetadata()],
       build: { outDir: "build" },
     };
     await build(configuration);
@@ -104,6 +105,7 @@ test(
       "utf8",
     );
     assertEventImages(builtEvent);
+    assert.match(builtRoot, /<svg id="board-backdrop"/);
     assert.match(builtRoot, /https:\/\/mons\.link\/og-card\.png/);
     assert.match(builtEvent, /src="\/assets\/[^" ]+\.js"/);
     assert.equal(builtEvent, withEventSocialImages(builtRoot));
@@ -142,6 +144,7 @@ test(
         assert.equal(response.status, 200, path);
         assert.equal(response.headers.get("location"), null, path);
         const html = await response.text();
+        assert.match(html, /<svg id="board-backdrop"/);
         if (path.startsWith("event/")) {
           assertEventImages(html);
         } else {

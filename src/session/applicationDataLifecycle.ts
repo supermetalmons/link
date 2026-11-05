@@ -188,10 +188,10 @@ export function showApplicationUnavailable(
   reason: ApplicationBlockReason,
   retry: () => void,
 ): void {
-  const root = document.getElementById("root");
-  if (root) {
-    root.inert = true;
-    root.style.display = "none";
+  const application = document.getElementById("application");
+  if (application) {
+    application.inert = true;
+    application.style.display = "none";
   }
   const panel = document.createElement("main");
   panel.id = "application-status";
